@@ -1,25 +1,22 @@
-import functools
-import hashlib
 import json
 import logging
 import os
 from logging import getLogger
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import accelerate
-import threadpoolctl as tctl
+import numpy as np
 import torch
 import torch.nn as nn
 import transformers
 from tqdm import tqdm
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
-from ..nn_modules.qlinear import BaseQuantLinear
-from ..quantization import QuantizeConfig
-from .backend import Backend
-from .importer import select_quant_linear
+from ..utils.import_utils import dynamically_import_QuantLinear
+from ..utils.modeling_utils import recurse_setattr
+from ._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
+
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -29,51 +26,19 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-def recurse_getattr(obj, attr: str):
-    """
-    Recursive `getattr`.
-
-    Args:
-        obj:
-            A class instance holding the attribute.
-        attr (`str`):
-            The attribute that is to be retrieved, e.g. 'attribute1.attribute2'.
-    """
-
-    def _getattr(obj, attr):
-        return getattr(obj, attr)
-
-    return functools.reduce(_getattr, [obj] + attr.split("."))
-
-
-def recurse_setattr(module, name, value):
-    """A function to recursively set attributes to a module."""
-    if "." not in name:
-        setattr(module, name, value)
-    else:
-        name, rest = name.split(".", 1)
-        recurse_setattr(getattr(module, name), rest, value)
-
-
-def get_device(obj: torch.Tensor | nn.Module):
+def get_device(obj: Union[torch.Tensor, nn.Module]):
     if isinstance(obj, torch.Tensor):
         return obj.device
     return next(obj.parameters()).device
 
 
-def move_to(obj: torch.Tensor | nn.Module, device: torch.device):
-    if get_device(obj) != device:
-        obj = obj.to(device)
-    return obj
-
-
-def nested_move_to(v, device):
-    if isinstance(v, torch.Tensor):
-        return move_to(v, device)
-    elif isinstance(v, (list, tuple)):
-        return type(v)([nested_move_to(e, device) for e in v])
+def move_to_device(obj: Optional[Union[torch.Tensor, nn.Module]], device: torch.device):
+    if obj is None:
+        return obj
     else:
-        return v
+        if get_device(obj) != device:
+            obj = obj.to(device)
+        return obj
 
 
 def find_layers(module, layers=None, name=""):
@@ -103,23 +68,38 @@ def get_module_by_name_suffix(model, module_name: str):
 def make_quant(
     module,
     names,
-    bits: int,
-    group_size: int,
-    backend: Backend,
-    format: str,
-    desc_act: bool = False,
-    sym: bool = True,
+    bits,
+    group_size,
+    name="",
+    use_triton: bool = False,
+    use_marlin: bool = False,
+    disable_exllama: Optional[bool] = None,
+    disable_exllamav2: bool = False,
+    use_qigen: bool = False,
     use_cuda_fp16: bool = True,
-    pack: bool = False,
+    desc_act: bool = False,
+    trainable: bool = False,
+    use_tritonv2: bool = False,
+    use_qbits: bool = False,
 ):
-    QuantLinear = select_quant_linear_with_pack(
-        bits=bits,
-        group_size=group_size,
+    # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
+    if disable_exllama is None:
+        if disable_exllamav2:
+            disable_exllama = False
+        else:
+            disable_exllama = True
+
+    QuantLinear = dynamically_import_QuantLinear(
+        use_triton=use_triton,
         desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=pack,
+        group_size=group_size,
+        bits=bits,
+        use_marlin=use_marlin,
+        disable_exllama=disable_exllama,
+        disable_exllamav2=disable_exllamav2,
+        use_qigen=use_qigen,
+        use_tritonv2=use_tritonv2,
+        use_qbits=use_qbits,
     )
 
     if isinstance(module, QuantLinear):
@@ -138,144 +118,165 @@ def make_quant(
             elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
                 in_features = submodule.weight.shape[0]
                 out_features = submodule.weight.shape[1]
-            else:
-                raise NotImplementedError(f"Unsupported module {submodule}")
-
             bias = submodule.bias is not None
-            if (not (desc_act) or group_size == -1) and backend != Backend.TRITON:
+            if (
+                (not (desc_act) or group_size == -1)
+                and not use_triton
+                and not use_qigen
+                and not use_tritonv2
+                and not use_qbits
+            ):
                 new_layer = QuantLinear(
-                    bits=bits,
-                    group_size=group_size,
-                    desc_act=desc_act,
-                    sym=sym,
-                    infeatures=in_features,
-                    outfeatures=out_features,
-                    bias=bias,
+                    bits,
+                    group_size,
+                    in_features,
+                    out_features,
+                    bias,
                     use_cuda_fp16=use_cuda_fp16,
+                    trainable=trainable,
                     weight_dtype=submodule.weight.dtype,
                 )
             else:
                 new_layer = QuantLinear(
-                    bits=bits,
-                    group_size=group_size,
-                    desc_act=desc_act,
-                    sym=sym,
-                    infeatures=in_features,
-                    outfeatures=out_features,
-                    bias=bias,
+                    bits,
+                    group_size,
+                    in_features,
+                    out_features,
+                    bias,
+                    trainable=trainable,
                     weight_dtype=submodule.weight.dtype,
                 )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
-
-def convert_gptq_v1_to_v2_format(
-    model,
-    quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+def preprocess_checkpoint_qigen(
+    module,
+    names,
+    bits,
+    group_size,
+    checkpoint,
+    name="",
 ):
-    # Limit thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        for _, submodule in model.named_modules():
-            # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
-            # additions here do not overflow.
-            # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
-            # overflow ~<=13% based on testing
-            if isinstance(submodule, qlinear_kernel):
-                if quantize_config.bits == 2:
-                    submodule.qzeros.data += 0b01010101010101010101010101010101
-                elif quantize_config.bits == 3:
-                    submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] += (
-                        0b00100100100100100100100100100100
-                    )
-                    submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] += (
-                        0b10010010010010010010010010010010
-                    )
-                    submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] += (
-                        0b01001001001001001001001001001001
-                    )
-                elif quantize_config.bits == 4:
-                    submodule.qzeros.data += 0b00010001000100010001000100010001
-                elif quantize_config.bits == 8:
-                    submodule.qzeros.data += 0b00000001000000010000000100000001
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+    try:
+        import cQIGen as qinfer
+    except ImportError:
+        logger.error("cQIGen not installed.")
+        raise
 
-    return model
-
-
-def convert_gptq_v2_to_v1_format(
-    model,
-    quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
-):
-    # Limit thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        for _, submodule in model.named_modules():
-            # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
-            if isinstance(submodule, qlinear_kernel):
-                if quantize_config.bits == 2:
-                    submodule.qzeros.data -= 0b01010101010101010101010101010101
-                elif quantize_config.bits == 3:
-                    submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b00100100100100100100100100100100
-                    )
-                    submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b10010010010010010010010010010010
-                    )
-                    submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b01001001001001001001001001001001
-                    )
-                elif quantize_config.bits == 4:
-                    submodule.qzeros.data -= 0b00010001000100010001000100010001
-                elif quantize_config.bits == 8:
-                    submodule.qzeros.data -= 0b00000001000000010000000100000001
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
-
-    return model
-
-def select_quant_linear_with_pack(bits: int,
-    group_size: int,
-    desc_act: bool,
-    sym: bool,
-    backend: Backend, format: str, pack: bool):
-    # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
-    # and the format is converted to BitBLAS in save_quantized().
-    if backend == Backend.BITBLAS:
-        backend = Backend.AUTO
-    QuantLinear = select_quant_linear(
-        bits=bits,
+    QuantLinear = dynamically_import_QuantLinear(
+        use_triton=False,
+        desc_act=False,
         group_size=group_size,
-        desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=pack,
+        bits=bits,
+        disable_exllama=False,
+        use_qigen=True,
     )
-    return QuantLinear
+    if isinstance(module, QuantLinear):
+        in_features = module.infeatures
+        out_features = module.outfeatures
+
+        zeros = checkpoint[name + ".qzeros"]
+        scales = checkpoint[name + ".scales"].float()
+
+        if zeros.dtype != torch.float32:
+            new_zeros = torch.zeros_like(scales).float().contiguous()
+            if bits == 4:
+                qinfer.unpack_zeros4(zeros, new_zeros, new_zeros.shape[0], new_zeros.shape[1])
+            elif bits == 2:
+                qinfer.unpack_zeros2(zeros, new_zeros, new_zeros.shape[0], new_zeros.shape[1])
+            elif bits == 3:
+                logger.info("Unpacking zeros for 3 bits")
+            new_scales = scales.contiguous()
+        else:
+            if scales.shape[1] != out_features:
+                new_scales = scales.transpose(0, 1).contiguous()
+            else:
+                new_scales = scales.contiguous()
+            if zeros.shape[1] != out_features:
+                new_zeros = zeros.transpose(0, 1).contiguous()
+            else:
+                new_zeros = zeros.contiguous()
+
+        checkpoint[name + ".zeros"], checkpoint[name + ".scales"] = (
+            new_zeros,
+            new_scales,
+        )
+        del checkpoint[name + ".qzeros"]
+        del checkpoint[name + ".g_idx"]
+        if name + ".bias" in checkpoint:
+            checkpoint[name + ".bias"] = checkpoint[name + ".bias"].float()
+        else:
+            checkpoint[name + ".bias"] = torch.zeros(out_features)
+        checkpoint_qweight = checkpoint[name + ".qweight"].int().contiguous()
+        if bits == 4:
+            qweight = torch.zeros(int(in_features // 8 * out_features)).int().contiguous()
+            qinfer.pack4(
+                checkpoint_qweight,
+                qweight,
+                in_features // 8,
+                out_features,
+                module.mb,
+                module.tb,
+                module.cutoff,
+            )  # * (module.tt//tb))
+        elif bits == 3:
+            qweight = torch.zeros(int(in_features // 32 * 3 * out_features)).int().contiguous()
+            qinfer.pack3(
+                checkpoint_qweight,
+                qweight,
+                in_features // 32 * 3,
+                out_features,
+                module.mb // 32 * 3,
+                module.tb,
+                module.cutoff,
+            )
+        elif bits == 2:
+            qweight = torch.zeros(int(in_features // 16 * out_features)).int().contiguous()
+            qinfer.pack2(
+                checkpoint_qweight,
+                qweight,
+                in_features // 16,
+                out_features,
+                module.mb,
+                module.tb,
+                module.cutoff,
+            )  # * (module.tt//tb))
+        checkpoint[name + ".qweight"] = qweight
+        return
+
+    for name1, child in module.named_children():
+        preprocess_checkpoint_qigen(
+            child,
+            names,
+            bits,
+            group_size,
+            checkpoint,
+            name + "." + name1 if name != "" else name1,
+        )
+
 
 def pack_model(
     model,
     quantizers,
     bits,
     group_size,
-    backend: Backend,
-    format: str,
-    desc_act=False,
-    sym: bool = True,
+    use_triton=False,
     use_cuda_fp16=True,
+    desc_act=False,
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
+    use_marlin: bool = False,
+    use_tritonv2: bool = False,
 ):
-    QuantLinear = select_quant_linear_with_pack(
-        bits=bits,
-        group_size=group_size,
+    QuantLinear = dynamically_import_QuantLinear(
+        use_triton=use_triton,
         desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=True,
+        group_size=group_size,
+        bits=bits,
+        disable_exllama=False,
+        disable_exllamav2=True,
+        use_marlin=use_marlin,
+        use_tritonv2=use_tritonv2,
     )
 
     if force_layer_back_to_cpu:
@@ -289,75 +290,42 @@ def pack_model(
         quantizers,
         bits,
         group_size,
-        backend=backend,
-        format=format,
+        use_triton=use_triton,
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
-        pack=True,
+        disable_exllama=False,
+        disable_exllamav2=True,
+        use_marlin=use_marlin,
     )
     qlayers = find_layers(model, [QuantLinear])
 
-    # Limit pack() thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        pbar = tqdm(qlayers.keys(), leave=True)
-        for name in pbar:
-            pbar.set_description(f"Packing {name}")
+    pbar = tqdm(qlayers.keys(), leave=True)
+    for name in pbar:
+        pbar.set_description(f"Packing {name}...", refresh=True)
 
-            quantizers[name], scale, zero, g_idx = quantizers[name]
-            # so far can only pack layer on CPU
-            layer_device = qlayers[name].device
-            qlayers[name].to(CPU)
-            layers[name], scale, zero, g_idx = (
-                layers[name].to(CPU),
-                scale.to(CPU),
-                zero.to(CPU),
-                g_idx.to(CPU),
-            )
-            if QuantLinear.QUANT_TYPE == "marlin":
-                qlayers[name].pack(layers[name], scale)
-            else:
-                qlayers[name].pack(layers[name], scale, zero, g_idx)
-            qlayers[name].to(layer_device)
-
+        quantizers[name], scale, zero, g_idx = quantizers[name]
+        # so far can only pack layer on CPU
+        layer_device = qlayers[name].device
+        qlayers[name].to(CPU)
+        layers[name], scale, zero, g_idx = (
+            layers[name].to(CPU),
+            scale.to(CPU),
+            zero.to(CPU),
+            g_idx.to(CPU),
+        )
+        if QuantLinear.QUANT_TYPE == "marlin":
+            qlayers[name].pack(layers[name], scale)
+        else:
+            qlayers[name].pack(layers[name], scale, zero, g_idx)
+        qlayers[name].to(layer_device)
     logger.info("Model packed.")
 
-    if backend != Backend.TRITON and warmup_triton:
+    if use_triton and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )
         QuantLinear.warmup(model.to(CUDA_0), seqlen=model.seqlen)
-    return QuantLinear
 
-def verify_model_hash(file_path: str, verify_hash: str):
-    if not isinstance(verify_hash, str):
-        raise ValueError("model verify_hash must be a string")
-    if ':' not in verify_hash:
-        raise ValueError("verify_hash must be in the format 'hash_type:hash_value'")
-    hash_type, hash_value = verify_hash.split(':', 1)
-    hash_func = getattr(hashlib, hash_type, None)
-    if not hash_func:
-        raise ValueError(f"No hash function found for type: {hash_type}")
-    with open(file_path, "rb") as f:
-        file_hash = hash_func(f.read()).hexdigest()
-    return file_hash == hash_value
-
-
-def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
-    if not isinstance(verify_hash, list):
-        raise ValueError("sharded model verify_hash must be a list")
-
-    with open(jsonPath, 'r') as f:
-        index_data = json.load(f)
-    weight_map = index_data['weight_map']
-    shard_files = set(weight_map.values())
-    if len(shard_files) != len(verify_hash):
-        raise ValueError("Number of shards and number of hash values do not match.")
-
-    for shard_file, expected_hash in zip(shard_files, verify_hash):
-        if not verify_model_hash(shard_file, expected_hash):
-            logger.info(f"Hash verification failed for {shard_file}")
-            return False
-    return True
 
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
@@ -406,24 +374,19 @@ def simple_dispatch_model(model, device_map):
     return model
 
 
-# TODO: refractor. very strange post_init has to re-determine qlinear type again
-# when qliear type is selected, it should auto-override the model post_init method and
-# not have to go about looping over modules to match qlinear type a second time as it is
-# very prone to bugs
-def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[int] = None):
+def autogptq_post_init(model, use_act_order: bool, max_input_length: Optional[int] = None):
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
-
-    # post init for bitblas backend.
     device_to_buffers_size = {}
-    for _, submodule in model.named_modules():
-        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "bitblas":
-            submodule.post_init()
 
     model_uses_exllama = False
+    model_uses_qbits = False
     for name, submodule in model.named_modules():
-        if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllama":
+        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "qbits":
+            model_uses_qbits = True
+            submodule.post_init()
+        elif hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllama":
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -462,7 +425,12 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
     if model_uses_exllama:
         # To be honest this is quite ugly, not proud of this.
-        from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
+        try:
+            from exllama_kernels import prepare_buffers, set_tuning_params
+        except ImportError as e:
+            raise ImportError(
+                f"Could not import exllama backend dependencies prepare_buffers, set_tuning_params with the following error: {e}"
+            )
 
         device_to_buffers = {}
 
@@ -510,15 +478,15 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
         # The buffers need to have been initialized first before calling make_q4.
         for name, submodule in model.named_modules():
-            if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllama":
+            if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllama":
                 submodule.post_init()
 
-    # exllamav2
+    ## exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
 
     for _, submodule in model.named_modules():
-        if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllamav2":
+        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllamav2":
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -535,17 +503,205 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
         model.device_tensors = device_tensors
 
         for _, submodule in model.named_modules():
-            if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllamav2":
+            if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllamav2":
                 device = submodule.qweight.device
                 submodule.post_init(temp_dq=model.device_tensors[device])
-    torch.cuda.empty_cache()
+
+    if not model_uses_qbits:
+        torch.cuda.empty_cache()
 
     return model
 
 
-def get_checkpoints(
-    model_name_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs
+def make_sure_no_tensor_in_meta_device(
+    model, use_triton: bool, desc_act: bool, group_size: int, bits: int, disable_exllama: bool, disable_exllamav2: bool, use_marlin: bool = False, use_tritonv2: bool = False, use_qbits: bool = False
 ):
+    QuantLinear = dynamically_import_QuantLinear(use_triton, desc_act, group_size, bits=bits, disable_exllama=disable_exllama, disable_exllamav2=disable_exllamav2, use_marlin=use_marlin, use_tritonv2=use_tritonv2, use_qbits=use_qbits)
+    for n, m in model.named_modules():
+        if isinstance(m, QuantLinear) and m.bias.device == torch.device("meta"):
+            m.register_buffer("bias", torch.zeros((m.outfeatures), dtype=torch.float16, device="cpu"))
+
+
+def awq_reverse_reorder_int_tensor(int_tensor, bits: int):
+    assert bits == 4
+
+    int_tensor = int_tensor.T.contiguous()
+    compress_ratio = 32 // bits
+    assert int_tensor.shape[-1] % compress_ratio == 0
+
+    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+    order_tensor = torch.tensor(order_map, dtype=torch.int32, device=int_tensor.device).reshape(1, -1)
+    order_tensor = order_tensor.repeat(int_tensor.shape[1] // compress_ratio, 1)
+    order_tensor = order_tensor + torch.arange(
+        0,
+        int_tensor.shape[1],
+        compress_ratio,
+        dtype=torch.int32,
+        device=int_tensor.device,
+    ).reshape(-1, 1)
+    order_tensor = order_tensor.reshape(-1)
+
+    reverse_order_tensor = torch.arange(order_tensor.shape[0]).cuda()[order_tensor]
+    reverse_order_tensor = reverse_order_tensor[order_tensor]
+    int_tensor = int_tensor[:, reverse_order_tensor]
+    return int_tensor
+
+
+def unpack_awq(
+    awq_qweight: torch.Tensor,
+    awq_qzeros: torch.Tensor,
+    awq_scales: torch.Tensor,
+    bits: int,
+    group_size: int,
+):
+    """
+    Args:
+        awq_qweight (`torch.LongTensor`):
+            Expected shape: (in_features, out_features // (32 // bits))
+        awq_qzeros (`torch.LongTensor`):
+            Expected shape: (in_features // group_size, out_features // (32 // bits))
+        awq_scales (`torch.LongTensor`):
+            Expected shape: (in_features // group_size, out_features)
+
+    Returns:
+        fp16_weight (`torch.LongTensor`):
+            With shape (in_features, out_features).
+        zeros (`torch.LongTensor`):
+            With shape (in_features // group_size, out_features).
+    """
+    assert bits == 4
+
+    qzeros = awq_qzeros.cuda()
+    qweight = awq_qweight.cuda()
+    qweight = qweight.T.contiguous()
+
+    infeatures = awq_qweight.shape[0]
+
+    wf = torch.tensor(list(range(0, 32, bits)), dtype=torch.int32, device=qzeros.device).unsqueeze(0)
+    zeros = torch.bitwise_right_shift(torch.unsqueeze(qzeros, 2), wf.unsqueeze(0)).to(
+        torch.int16 if bits == 8 else torch.int8
+    )
+
+    # zeros = zeros + 1
+
+    torch.bitwise_and(zeros, (2**bits) - 1, out=zeros)
+
+    zeros = zeros.reshape(-1, 1, zeros.shape[1] * zeros.shape[2])
+
+    weight = torch.bitwise_right_shift(torch.unsqueeze(qweight, 1), wf.unsqueeze(-1)).to(
+        torch.int16 if bits == 8 else torch.int8
+    )
+    torch.bitwise_and(weight, (2**bits) - 1, out=weight)
+    weight = weight.reshape(-1, group_size, weight.shape[2])
+
+    weight = weight.view(-1, weight.shape[-1])
+    zeros = zeros.view(-1, zeros.shape[-1])
+
+    zeros = zeros.T.contiguous()
+    zeros = awq_reverse_reorder_int_tensor(zeros, bits)
+    weight = awq_reverse_reorder_int_tensor(weight, bits)
+
+    # Dequantize weights.
+    scales = awq_scales.cuda()
+    zeros = zeros.contiguous()
+    scale_zeros = zeros * scales
+
+    g_idx = torch.tensor([i // group_size for i in range(infeatures)], dtype=torch.int32)
+    scale_mat = scales[g_idx]
+    scale_zeros_mat = scale_zeros[g_idx].half()
+
+    qdq_weight_T = weight * scale_mat - scale_zeros_mat.half()
+
+    fp16_weight = qdq_weight_T.T.cuda()
+
+    return fp16_weight, zeros
+
+
+def pack_from_tensors(
+    unpacked_qweight: torch.Tensor,
+    unpacked_qzeros: torch.Tensor,
+    awq_scales: torch.Tensor,
+    bits: int,
+    group_size: int,
+):
+    """
+    Args:
+        unpacked_qweight (`torch.LongTensor`):
+            Expected shape: (in_features, out_features)
+        unpacked_qzeros (`torch.LongTensor`):
+            Expected shape: (in_features // group_size, out_features)
+        awq_scales (`torch.LongTensor`):
+            Expected shape: (in_features // group_size, out_features)
+
+    Returns:
+        qweight (`torch.LongTensor`):
+            With shape (in_features // (32 // bits), out_features)
+        qzeros (`torch.LongTensor`):
+            With shape (in_features // group_size, out_features // (32 // bits))
+    """
+    assert bits == 4
+    W = unpacked_qweight.clone().cpu()
+
+    # TODO: This should be checked somehow.
+    # if isinstance(linear, nn.Conv2d):
+    #     W = W.flatten(1)
+    # if isinstance(linear, transformers.pytorch_utils.Conv1D):
+    #     W = W.t()
+
+    awq_scales = awq_scales.t().contiguous()
+    unpacked_qzeros = unpacked_qzeros.contiguous()
+    unpacked_qzeros = unpacked_qzeros.cpu()
+
+    awq_scales = awq_scales.cpu()
+    scale_zeros = unpacked_qzeros.t() * awq_scales
+    scales = awq_scales.clone()
+
+    infeatures = unpacked_qweight.shape[1]
+
+    intweight = []
+    for idx in range(infeatures):
+        g_idx = idx // group_size
+
+        intweight.append(torch.round((W[:, idx] + scale_zeros[:, g_idx]) / scales[:, g_idx]).to(torch.int)[:, None])
+    intweight = torch.cat(intweight, dim=1)
+    intweight = intweight.t().contiguous()
+    intweight = intweight.numpy().astype(np.uint32)
+
+    i = 0
+    row = 0
+    qweight = np.zeros((intweight.shape[0] // 32 * bits, intweight.shape[1]), dtype=np.uint32)
+    while row < qweight.shape[0]:
+        for j in range(i, i + (32 // bits)):
+            qweight[row] |= intweight[j] << (bits * (j - i))
+        i += 32 // bits
+        row += 1
+
+    qweight = qweight.astype(np.int32)
+    qweight = torch.from_numpy(qweight)
+
+    unpacked_qzeros = unpacked_qzeros - 1
+    torch.bitwise_and(unpacked_qzeros, (2**bits) - 1, out=unpacked_qzeros)
+
+    unpacked_qzeros = unpacked_qzeros.numpy().astype(np.uint32)
+    qzeros = np.zeros(
+        (unpacked_qzeros.shape[0], unpacked_qzeros.shape[1] // 32 * bits),
+        dtype=np.uint32,
+    )
+    i = 0
+    col = 0
+    while col < qzeros.shape[1]:
+        for j in range(i, i + (32 // bits)):
+            qzeros[:, col] |= unpacked_qzeros[:, j] << (bits * (j - i))
+        i += 32 // bits
+        col += 1
+
+    qzeros = qzeros.astype(np.int32)
+    qzeros = torch.from_numpy(qzeros)
+
+    return qweight, qzeros
+
+
+def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs):
     """
     Retrives (and if necessary downloads from Hugging Face Hub) the model checkpoint. Sharding is supported. All the `possible_model_basenames` (e.g. `["model", "model-4bit-gptq"]`) will be explored over all `extensions` (e.g. `[".bin", ".safetensors"]`).
     """
@@ -614,35 +770,17 @@ def get_checkpoints(
     return False, resolved_archive_file, true_model_basename
 
 
-# return the most stable tensor dtype for quantization while minimizing vram
-def auto_dtype_from_config(config: PretrainedConfig, quant_inference: bool = False) -> torch.dtype:
-    # all the gptq inference kernels are float16 only
-    if quant_inference:
-        return torch.float16
-
-    dtype = getattr(config, "torch_dtype")
-    if not dtype or not isinstance(dtype, torch.dtype):
-        raise ValueError("Your model config.json does not have torch_dtype set. Please check for model " "corruption.")
-
-    if dtype == torch.float32:
-        return torch.bfloat16
-    elif dtype == torch.float16:
-        return torch.float16
-    else:
-        # up/down-cast everything else to bfloat16 if not already in bfloat16
-        return torch.bfloat16
-
-
-# generate layer modules for moe models with experts
-def get_moe_layer_modules(layer_modules: List, num_experts: int) -> List:
-    new_inside_layer_modules = []
-    for names in layer_modules:
-        new_inside_layer_modules.append([])
-        for n in names:
-            if EXPERT_INDEX_PLACEHOLDER in n:
-                for index in range(num_experts):
-                    new_inside_layer_modules[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-            else:
-                new_inside_layer_modules[-1].append(n)
-
-    return new_inside_layer_modules
+__all__ = [
+    "get_device",
+    "move_to_device",
+    "find_layers",
+    "get_module_by_name_prefix",
+    "get_module_by_name_suffix",
+    "make_quant",
+    "preprocess_checkpoint_qigen",
+    "pack_model",
+    "autogptq_post_init",
+    "check_and_get_model_type",
+    "simple_dispatch_model",
+    "make_sure_no_tensor_in_meta_device",
+]
