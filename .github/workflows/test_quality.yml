@@ -92,31 +92,8 @@ jobs:
           add-pip-as-python-dependency: true
           auto-activate-base: false
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          conda install cuda-toolkit -c "nvidia/label/cuda-12.1.0"
-
-          # Refer to https://pytorch.org/get-started/locally/
-          python -m pip install torch
-          
-          python -m pip install --upgrade build setuptools wheel numpy
-
-      - name: Check install
-        run: |
-          python -c "import torch; print('torch version:', torch.__version__)"
-
-      - name: Install AutoGPTQ
-        run: |
-          # For some reason $CONDA_PREFIX is empty.
-          export CUDA_HOME=/usr/share/miniconda
-          export CUDA_PATH=/usr/share/miniconda
-
-          echo "CUDA_HOME:"
-          echo $CUDA_HOME
-
-          echo "CUDA_PATH:"
-          echo $CUDA_PATH
-
           pip install -vvv .[quality]
       
       - name: Check style with ruff
