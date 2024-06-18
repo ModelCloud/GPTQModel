@@ -144,11 +144,12 @@ Below is an example to add support for `OPT` model. Use this as guide for future
 ```py
 from auto_gptq_next.models import BaseGPTQForCausalLM
 
+
 class OPTGPTQForCausalLM(BaseGPTQForCausalLM):
     # name of transformer layer block
-    layers_block_name = "model.decoder.layers"
+    layers_node = "model.decoder.layers"
     # names of other nn modules that in the same level as the transformer layer block
-    outside_layer_modules = [
+    non_layer_modules = [
         "model.decoder.embed_tokens", "model.decoder.embed_positions", "model.decoder.project_out",
         "model.decoder.project_in", "model.decoder.final_layer_norm"
     ]
@@ -156,7 +157,7 @@ class OPTGPTQForCausalLM(BaseGPTQForCausalLM):
     # normally, there are four sub lists, for each one the modules in it can be seen as one operation,
     # and the order should be the order when they are truly executed, in this case (and usually in most cases),
     # they are: attention q_k_v projection, attention output projection, MLP project input, MLP project output
-    inside_layer_modules = [
+    layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.out_proj"],
         ["fc1"],

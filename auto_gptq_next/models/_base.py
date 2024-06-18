@@ -48,11 +48,20 @@ def nested_move_to_device(v, device):
 
 
 class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
+    # these modules are non-repeating and at the root level
+    # does not include the node which holds all the repeating layers
+    non_layer_modules: List[str] = None
+
+    # name of lm_head
+    lm_head: str = "lm_head"
+
+    # repeating layers
+    # node holding all the repeating layers
+    layers_node: str = None
+    # repeating layer type
     layer_type: str = None
-    layers_block_name: str = None
-    outside_layer_modules: List[str] = None
-    inside_layer_modules: List[List[str]] = None
-    lm_head_name: str = "lm_head"
+    # for each repeating layer there are multiple modules within each layer
+    layer_modules: List[List[str]] = None
 
     def __init__(
         self,
@@ -171,7 +180,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
         self.model.config.use_cache = False
 
         num_batches = len(examples)
-        layers = get_module_by_name_prefix(self.model, self.layers_block_name)
+        layers = get_module_by_name_prefix(self.model, self.layers_node)
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if cache_examples_on_gpu else CPU
@@ -208,7 +217,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
             force_layer_back_to_cpu = True
 
         ori_outside_layer_module_devices = {}
-        for module_name in self.outside_layer_modules:
+        for module_name in self.non_layer_modules:
             module = get_module_by_name_prefix(self.model, module_name)
 
             if module is None:
@@ -232,14 +241,14 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
         handle.remove()
 
         move_to_device(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
-        for module_name in self.outside_layer_modules:
+        for module_name in self.non_layer_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
                 move_to_device(module, ori_outside_layer_module_devices[module_name])
 
         torch.cuda.empty_cache()
 
-        inside_layer_modules = self.inside_layer_modules
+        inside_layer_modules = self.layer_modules
         if not self.quantize_config.true_sequential:
             inside_layer_modules = [sum(inside_layer_modules, [])]
         quantizers = {}
@@ -324,7 +333,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                             )
                         raise e
 
-                    quantizers[f"{self.layers_block_name}.{i}.{name}"] = (
+                    quantizers[f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
                         move_to_device(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
                         move_to_device(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
@@ -787,18 +796,18 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
             )
 
             layers = find_layers(model)
-            ignore_layers = [cls.lm_head_name] + cls.outside_layer_modules
+            ignore_layers = [cls.lm_head] + cls.non_layer_modules
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == cls.lm_head_name:
+                if quantize_config.lm_head and name == cls.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                    not name.endswith(ignore_layer) for sublist in cls.inside_layer_modules for ignore_layer in sublist
+                        not name.endswith(ignore_layer) for sublist in cls.layer_modules for ignore_layer in sublist
                 ):
                     # log non-lm-head quantizerd layers only
-                    if name is not cls.lm_head_name:
+                    if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del layers[name]
 

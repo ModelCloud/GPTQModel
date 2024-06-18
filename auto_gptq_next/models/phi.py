@@ -2,10 +2,11 @@ from ._base import BaseGPTQForCausalLM
 
 
 class PhiGPTQ(BaseGPTQForCausalLM):
+    non_layer_modules = ["model.embed_tokens", "model.final_layernorm"]
+
+    layers_node = "model.layers"
     layer_type = "PhiDecoderLayer"
-    layers_block_name = "model.layers"
-    outside_layer_modules = ["model.embed_tokens", "model.final_layernorm"]
-    inside_layer_modules = [
+    layer_modules = [
         ["self_attn.q_proj"],
         ["self_attn.k_proj"],
         ["self_attn.v_proj"],
