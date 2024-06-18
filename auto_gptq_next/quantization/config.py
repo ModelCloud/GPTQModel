@@ -15,8 +15,8 @@ logger.propagate = False
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-FORMAT_FIELD = "format"
-FORMAT_FIELD_COMPAT = "checkpoint_format"
+FORMAT_FIELD_CODE = "format"
+FORMAT_FIELD_JSON = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
@@ -60,7 +60,8 @@ QUANTIZE_BLACK_LIST = {}
 QUANT_CONFIG_ARG_SYNONYMS = {
     "w_bit": "bits",
     "q_group_size": "group_size",
-    FORMAT_FIELD_COMPAT: "format",
+    # map format field (checkpoint_format) to class/code (format)
+    FORMAT_FIELD_JSON: FORMAT_FIELD_CODE,
 }
 
 
@@ -168,10 +169,10 @@ class QuantizeConfig(PushToHubMixin):
         if format:
             if format not in valid_formats:
                 raise ValueError(f"Unknown quantization checkpoint format: {format}.")
-            if quantize_cfg.get(FORMAT_FIELD):
+            if quantize_cfg.get(FORMAT_FIELD_CODE):
                 raise ValueError("Conflict: quantization format is passed in and also exists in model config.")
         # compat: warn if checkpoint_format is missing
-        elif quantize_cfg.get(FORMAT_FIELD) is None:
+        elif quantize_cfg.get(FORMAT_FIELD_CODE) is None:
             format_auto_inferred = True
 
         field_names = [field.name for field in fields(cls)]
@@ -179,7 +180,7 @@ class QuantizeConfig(PushToHubMixin):
         normalized = {
             QUANT_METHOD_FIELD: QUANT_METHOD.GPTQ,
             # compat: default to gptq(v1) when loading models
-            FORMAT_FIELD: format if format else FORMAT.GPTQ,
+            FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
         for key, val in quantize_cfg.items():
             key = key.lower()
@@ -188,7 +189,7 @@ class QuantizeConfig(PushToHubMixin):
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
 
-            if key == FORMAT_FIELD:
+            if key == FORMAT_FIELD_CODE:
                 val = val.lower()
 
                 if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN}:
@@ -199,13 +200,13 @@ class QuantizeConfig(PushToHubMixin):
                 val = val.lower()
                 # compat: some hf models use quant_method=marlin
                 if val == FORMAT.MARLIN:
-                    normalized[FORMAT_FIELD] = FORMAT.MARLIN
+                    normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val not in {QUANT_METHOD.GPTQ}:
                     raise ValueError(f"Unknown quantization method: {val}.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
             elif key == FORMAT_FIELD_COMPAT_MARLIN and val:
-                normalized[FORMAT_FIELD] = FORMAT.MARLIN
+                normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
             elif key in field_names:
                 normalized[key] = val
             else:
@@ -213,10 +214,10 @@ class QuantizeConfig(PushToHubMixin):
 
         if format_auto_inferred:
             logger.info(
-                f"`format` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD]}."
+                f"`format` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}."
             )
 
-        if normalized[FORMAT_FIELD] in {FORMAT.MARLIN}:
+        if normalized[FORMAT_FIELD_CODE] in {FORMAT.MARLIN}:
             # Marlin do not reorder the rows.
             normalized["desc_act"] = False
 
@@ -285,10 +286,6 @@ class QuantizeConfig(PushToHubMixin):
             return cls.from_quant_config(args_from_json, format)
 
     def to_dict(self):
-        # move non-inference required variables to meta
-        self.meta["damp_percent"] = self.damp_percent
-        self.meta["true_sequential"] = self.true_sequential
-
         return {
             "bits": self.bits,
             "group_size": self.group_size,
@@ -296,16 +293,15 @@ class QuantizeConfig(PushToHubMixin):
             "static_groups": self.static_groups,
             "sym": self.sym,
             "lm_head": self.lm_head,
+            "damp_percent": self.damp_percent,
+            "true_sequential": self.true_sequential,
             # TODO: deprecate?
             "model_name_or_path": self.model_name_or_path,
             "model_file_base_name": self.model_file_base_name,
             QUANT_METHOD_FIELD: self.quant_method,
-            FORMAT_FIELD: self.format,
-            # compact: until format PR is pushed 3rd party libs such as sglang/vllm, duplicate checkpoint_format
-            FORMAT_FIELD_COMPAT: self.format,
+            FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,
         }
-
 
 # deprecated: will be removed in future update
 @dataclass

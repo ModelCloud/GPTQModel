@@ -1,4 +1,3 @@
-import json
 import logging
 import random
 import time
@@ -8,11 +7,10 @@ from typing import Dict, List, Optional
 
 import torch
 from auto_gptq_next import AutoGPTQNext, QuantizeConfig
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
-from datasets import load_dataset
 
 logger = logging.getLogger(__name__)
 

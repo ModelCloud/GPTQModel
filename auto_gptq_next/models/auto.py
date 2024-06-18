@@ -67,9 +67,9 @@ MODEL_MAP = {
 class AutoGPTQNext:
     def __init__(self):
         raise EnvironmentError(
-            "AutoGPTQModelForCausalLM is designed to be instantiated\n"
-            "using `AutoGPTQModelForCausalLM.from_pretrained` if want to quantize a pretrained model.\n"
-            "using `AutoGPTQModelForCausalLM.from_quantized` if want to inference with quantized model."
+            "AutoGPTQNext is designed to be instantiated\n"
+            "using `AutoGPTQNext.from_pretrained` if want to quantize a pretrained model.\n"
+            "using `AutoGPTQNext.from_quantized` if want to inference with quantized model."
         )
 
     @classmethod

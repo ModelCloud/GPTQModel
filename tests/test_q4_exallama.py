@@ -12,9 +12,8 @@ except ImportError as e:
 from auto_gptq_next import AutoGPTQNext, exllama_set_max_input_length  # noqa: E402
 from auto_gptq_next.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
 from auto_gptq_next.models._utils import autogptq_next_post_init  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
 from test_q4_cuda import get_diff
+from transformers import AutoTokenizer  # noqa: E402
 
 CUDA_OLD_REFERENCE = torch.Tensor(
     [
