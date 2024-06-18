@@ -139,34 +139,8 @@ print(tokenizer.decode(model.generate(**tokenizer("auto_gptq_next is", return_te
 For more advanced features of model quantization, please reference to [this script](examples/quantization/quant_with_alpaca.py)
 
 ### How to Add Support for a New Model
-Below is an example to add support for `OPT` model. Use this as guide for future model support PRs:
 
-```py
-from auto_gptq_next.models import BaseGPTQForCausalLM
-
-
-class OPTGPTQForCausalLM(BaseGPTQForCausalLM):
-    # name of transformer layer block
-    layers_node = "model.decoder.layers"
-    # names of other nn modules that in the same level as the transformer layer block
-    non_layer_modules = [
-        "model.decoder.embed_tokens", "model.decoder.embed_positions", "model.decoder.project_out",
-        "model.decoder.project_in", "model.decoder.final_layer_norm"
-    ]
-    # names of linear layers in transformer layer module
-    # normally, there are four sub lists, for each one the modules in it can be seen as one operation,
-    # and the order should be the order when they are truly executed, in this case (and usually in most cases),
-    # they are: attention q_k_v projection, attention output projection, MLP project input, MLP project output
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.out_proj"],
-        ["fc1"],
-        ["fc2"]
-    ]
-```
-After this, you can use `OPTGPTQForCausalLM.from_pretrained` and other methods as shown in Basic.
-
-</details>
+Read the `auto_gptq_next/models/llama.py` code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
 
 ### Evaluation on Downstream Tasks
 
