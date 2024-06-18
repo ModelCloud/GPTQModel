@@ -43,4 +43,5 @@ jobs:
       
       - name: Check style with ruff
         run: |
-          ruff auto_gptq_next examples tests setup.py
+          cd format
+          ruff ../auto_gptq_next ../examples ../tests ../setup.py
