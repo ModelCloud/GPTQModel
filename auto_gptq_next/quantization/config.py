@@ -214,7 +214,7 @@ class QuantizeConfig(PushToHubMixin):
 
         if format_auto_inferred:
             logger.info(
-                f"`format` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}."
+                f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}."
             )
 
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.MARLIN}:

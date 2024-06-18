@@ -17,7 +17,7 @@ from transformers.utils.generic import ContextManagers
 from transformers.utils.hub import PushToHubMixin
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, META_FIELD_QUANTIZER, META_QUANTIZER_AUTOGPTQ,
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_AUTOGPTQ,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, BaseQuantizeConfig)
 from ..utils.data_utils import collate_data
 from ..utils.import_utils import dynamically_import_QuantLinear
@@ -937,7 +937,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                     f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by autogptq version >= {MIN_VERSION_WITH_V2}"
                 )
 
-            logger.info(f"Compatibility: converting `format` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
 
             model = convert_gptq_v1_to_v2_format(
                 model,
