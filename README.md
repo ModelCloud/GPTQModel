@@ -30,7 +30,9 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * Better default PPL with tweaked internal code (Result may vary depending on calibration set and gpu usage).
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed Packing Performance regression on high core-count systems.
-* Thousands of lines of refractor/cleanup. 
+* Thousands of lines of refractor/cleanup.
+* Debloated 271K lines of which 250K was caused by a single dataset used only by an example. Move dataset to HF.
+* Shorter and more concise public api/internal vars. No need to copy bloated HF style for class names. 
 * Complete tests with every feature and model tested. Everything that does not pass tests will be removed from repo. We want quality over quantity.
 
 ## Roadmap (Target Date: July 2024):
