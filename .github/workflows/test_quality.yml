@@ -37,7 +37,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install
+      - name: Install 
         run: |
           pip install -vvv .[quality]
       

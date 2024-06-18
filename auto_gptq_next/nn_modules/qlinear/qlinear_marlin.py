@@ -132,8 +132,12 @@ class QuantLinear(nn.Module):
         @linear: fake-quantized `torch.nn.Linear` layer to convert (must be of type `torch.half`)
         @scales: corresponding quantization scales of shape `(infeatures, groups)`
         """
+        # 'linear' is a torch.nn.Linear module
         if linear.weight.dtype != torch.half:
-            raise ValueError("Only `torch.half` weights are supported.")
+           #logger.warning(
+           #    f"Only `torch.half` linear.weights are supported. Converting from {linear.weight.dtype} to torch.half")
+           linear.weight.data = linear.weight.data.to(torch.float16)
+
         tile = 16
         maxq = 2**4 - 1
         s = scales.t()
