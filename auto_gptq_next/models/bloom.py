@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class BloomGPTQ(BaseGPTQForCausalLM):
+class BloomGPTQ(BaseGPTQModel):
     # non-layer (root) modules
     non_layer_modules = [
         "transformer.word_embeddings",

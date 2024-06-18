@@ -1,3 +1,4 @@
+# License: AutoGPTQ-NEXT/licenses/LICENSE.mit
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 from logging import getLogger

@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class ChatGLM(BaseGPTQForCausalLM):
+class ChatGLM(BaseGPTQModel):
     non_layer_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
 
     layers_node = "transformer.encoder.layers"

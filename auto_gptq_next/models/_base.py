@@ -47,7 +47,7 @@ def nested_move_to_device(v, device):
         return v
 
 
-class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
+class BaseGPTQModel(nn.Module, PushToHubMixin):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     non_layer_modules: List[str] = None
@@ -993,4 +993,4 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
             return getattr(self.model, item)
 
 
-__all__ = ["BaseGPTQForCausalLM", "BaseQuantizeConfig", "QuantizeConfig"]
+__all__ = ["BaseGPTQModel", "BaseQuantizeConfig", "QuantizeConfig"]

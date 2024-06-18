@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class GPTBigCodeGPTQ(BaseGPTQForCausalLM):
+class GPTBigCodeGPTQ(BaseGPTQModel):
     non_layer_modules = ["transformer.wpe", "transformer.wte", "transformer.ln_f"]
 
     layers_node = "transformer.h"

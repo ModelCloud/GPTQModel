@@ -4,14 +4,14 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from ..models import BaseGPTQForCausalLM
+from ..models import BaseGPTQModel
 from ..utils.data_utils import get_dataloader
 
 
 class BaseTask:
     def __init__(
         self,
-        model: Union[BaseGPTQForCausalLM, PreTrainedModel],
+        model: Union[BaseGPTQModel, PreTrainedModel],
         tokenizer: PreTrainedTokenizer,
         data_name_or_path: str,
         prompt_col_name: str,

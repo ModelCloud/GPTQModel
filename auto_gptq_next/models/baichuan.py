@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class BaiChuanGPTQ(BaseGPTQForCausalLM):
+class BaiChuanGPTQ(BaseGPTQModel):
     # non-layer (root) modules
     non_layer_modules = ["model.embed_tokens", "model.norm"]
 

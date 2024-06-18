@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class StableLMEpochGPTQ(BaseGPTQForCausalLM):
+class StableLMEpochGPTQ(BaseGPTQModel):
     non_layer_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"

@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class Starcoder2GPTQ(BaseGPTQForCausalLM):
+class Starcoder2GPTQ(BaseGPTQModel):
     non_layer_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"

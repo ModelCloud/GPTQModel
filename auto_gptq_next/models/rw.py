@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class RWGPTQ(BaseGPTQForCausalLM):
+class RWGPTQ(BaseGPTQModel):
     non_layer_modules = ["transformer.word_embeddings", "transformer.ln_f"]
 
     layers_node = "transformer.h"

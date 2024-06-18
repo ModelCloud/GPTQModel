@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class LlamaGPTQ(BaseGPTQForCausalLM):
+class LlamaGPTQ(BaseGPTQModel):
     # non-repeating layers at the root level (same level as layers_node)
     non_layer_modules = ["model.embed_tokens", "model.norm"]
 

@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class MOSSGPTQ(BaseGPTQForCausalLM):
+class MOSSGPTQ(BaseGPTQModel):
     non_layer_modules = ["transformer.wte", "transformer.ln_f"]
 
     layers_node = "transformer.h"

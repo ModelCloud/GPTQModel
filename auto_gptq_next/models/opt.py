@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class OPTGPTQ(BaseGPTQForCausalLM):
+class OPTGPTQ(BaseGPTQModel):
     non_layer_modules = [
         "model.decoder.embed_tokens",
         "model.decoder.embed_positions",

@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class QwenGPTQ(BaseGPTQForCausalLM):
+class QwenGPTQ(BaseGPTQModel):
     layer_type = "QWenBlock"
     layers_node = "transformer.h"
     non_layer_modules = [

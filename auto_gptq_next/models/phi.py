@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class PhiGPTQ(BaseGPTQForCausalLM):
+class PhiGPTQ(BaseGPTQModel):
     non_layer_modules = ["model.embed_tokens", "model.final_layernorm"]
 
     layers_node = "model.layers"

@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from ._base import BaseGPTQModel
 
 
-class MPTGPTQ(BaseGPTQForCausalLM):
+class MPTGPTQ(BaseGPTQModel):
     non_layer_modules = ["transformer.wte", "transformer.norm_f"]
 
     layers_node = "transformer.blocks"
