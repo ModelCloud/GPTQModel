@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from auto_gptq_next import AutoGPTQNext
-from auto_gptq_next.quantization import FORMAT, FORMAT_FIELD_CODE, QUANT_CONFIG_FILENAME
+from auto_gptq_next.quantization import FORMAT, FORMAT_FIELD_JSON, QUANT_CONFIG_FILENAME
 
 
 class TestSerialization(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestSerialization(unittest.TestCase):
             with open(os.path.join(tmpdir, QUANT_CONFIG_FILENAME), "r") as config_file:
                 config = json.load(config_file)
 
-            self.assertTrue(config[FORMAT_FIELD_CODE] == FORMAT.MARLIN)
+            self.assertTrue(config[FORMAT_FIELD_JSON] == FORMAT.MARLIN)
 
             model = AutoGPTQNext.from_quantized(tmpdir, device="cuda:0", use_marlin=True)
 
@@ -45,4 +45,4 @@ class TestSerialization(unittest.TestCase):
             with open(os.path.join(tmpdir, "quantize_config.json"), "r") as f:
                 quantize_config = json.load(f)
 
-            self.assertTrue(quantize_config["format"] == "gptq")
+            self.assertTrue(quantize_config[FORMAT_FIELD_JSON] == "gptq")
