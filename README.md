@@ -43,7 +43,10 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * Add Qbits (cpu inference) support from Intel/Qbits.
 * Add back ROCM/AMD support once verything is validated.
 * Store quant loss stat and apply diffs to new quant for quality control.
-* Alert users of non-optimal calibration data.
+* Alert users of non-optimal calibration data. Almost all new-users get this part horribly wrong. 
+* Add CI workflow for PRs.
+* Add Tests for every single supported model.
+
 
 ## Model Support 
 
