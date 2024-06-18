@@ -4,7 +4,7 @@ import torch  # noqa: E402
 from auto_gptq_next.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
 from auto_gptq_next.utils.import_utils import dynamically_import_QuantLinear  # noqa: E402
 
-from .test_q4_exallama import CUDA_OLD_REFERENCE
+from test_q4_exallama import CUDA_OLD_REFERENCE
 
 try:
     from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
@@ -15,7 +15,7 @@ from auto_gptq_next import AutoGPTQNext  # noqa: E402
 from auto_gptq_next.models._utils import autogptq_next_post_init  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from .test_q4_cuda import get_diff
+from test_q4_cuda import get_diff
 
 
 class TestsQ4ExllamaV2(unittest.TestCase):
