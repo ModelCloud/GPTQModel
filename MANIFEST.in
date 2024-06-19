@@ -1,5 +1,5 @@
-global-include autogptq_next_ext/**/*.cuh
-global-include autogptq_next_ext/**/*.h
-global-include autogptq_next_ext/**/*.cpp
-global-include autogptq_next_ext/**/*.cu
-global-include autogptq_next_ext/**/*.py
+global-include gptqmodel_ext/**/*.cuh
+global-include gptqmodel_ext/**/*.h
+global-include gptqmodel_ext/**/*.cpp
+global-include gptqmodel_ext/**/*.cu
+global-include gptqmodel_ext/**/*.py

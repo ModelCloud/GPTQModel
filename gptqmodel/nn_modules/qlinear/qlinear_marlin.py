@@ -15,12 +15,12 @@ from logging import getLogger
 
 import numpy as np
 import torch
-from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
 try:
-    import autogptq_next_marlin_cuda
+    import gptqmodel_marlin_cuda
 except ImportError as e:
     marlin_import_exception = e
 
@@ -29,7 +29,7 @@ except ImportError as e:
             f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
         )
 
-    autogptq_next_marlin_cuda = error_raiser_marlin
+    gptqmodel_marlin_cuda = error_raiser_marlin
 
 
 def mul(A, B, C, s, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
@@ -44,7 +44,7 @@ def mul(A, B, C, s, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
     @sms: number of SMs to use for the kernel (can usually be left as auto -1)
     @max_par: maximum number of batch 64 problems to solve in parallel for large input sizes
     """
-    autogptq_next_marlin_cuda.mul(A, B, C, s, workspace, thread_k, thread_n, sms, max_par)
+    gptqmodel_marlin_cuda.mul(A, B, C, s, workspace, thread_k, thread_n, sms, max_par)
 
 
 # Precompute permutations for Marlin weight and scale shuffling

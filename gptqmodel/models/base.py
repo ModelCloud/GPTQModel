@@ -25,7 +25,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
-from ..utils.model import (auto_dtype_from_config, autogptq_next_post_init, convert_gptq_v1_to_v2_format,
+from ..utils.model import (auto_dtype_from_config, gptqmodel_post_init, convert_gptq_v1_to_v2_format,
                      convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                      get_module_by_name_suffix, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model)
 
@@ -731,7 +731,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             unsupported_reason = _validate_marlin_compatibility(quantize_config)
             if unsupported_reason is None and marlin_compatible:
                 logger.info(
-                    "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = AutoGPTQForCausalLM.from_quantized(..., use_marlin=True)`."
+                    "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
                 )
 
         if model_basename is None:
@@ -961,7 +961,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             model.seqlen = 4096
 
         # Any post-initialization that require device information, for example buffers initialization on device.
-        model = autogptq_next_post_init(model, use_act_order=quantize_config.desc_act)
+        model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act)
 
         model.eval()
 

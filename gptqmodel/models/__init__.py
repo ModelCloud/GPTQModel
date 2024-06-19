@@ -1,5 +1,5 @@
 from .base import BaseGPTQModel
-from .auto import MODEL_MAP, AutoGPTQNext
+from .auto import MODEL_MAP, GPTQModel
 from .baichuan import BaiChuanGPTQ
 from .bloom import BloomGPTQ
 from .chatglm import ChatGLM

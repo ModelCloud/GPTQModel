@@ -64,12 +64,12 @@ MODEL_MAP = {
 }
 
 
-class AutoGPTQNext:
+class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
-            "AutoGPTQNext is designed to be instantiated\n"
-            "using `AutoGPTQNext.from_pretrained` if want to quantize a pretrained model.\n"
-            "using `AutoGPTQNext.from_quantized` if want to inference with quantized model."
+            "ModelGPTQ is designed to be instantiated\n"
+            "using `ModelGPTQ.from_pretrained` if want to quantize a pretrained model.\n"
+            "using `ModelGPTQ.from_quantized` if want to inference with quantized model."
         )
 
     @classmethod
@@ -111,25 +111,7 @@ class AutoGPTQNext:
 
         model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
-        # A static list of kwargs needed for huggingface_hub
-        huggingface_kwargs = [
-            "cache_dir",
-            "force_download",
-            "proxies",
-            "resume_download",
-            "local_files_only",
-            "use_auth_token",
-            "revision",
-            "subfolder",
-            "_raise_exceptions_for_missing_entries",
-            "_commit_hash",
-        ]
-        # TODO: do we need this filtering of kwargs? @PanQiWei is there a reason we can't just pass all kwargs?
-        keywords = {
-            key: kwargs[key]
-            for key in list(signature(quant_func).parameters.keys()) + huggingface_kwargs
-            if key in kwargs
-        }
+
         return quant_func(
             model_name_or_path=model_name_or_path,
             device_map=device_map,
@@ -144,6 +126,6 @@ class AutoGPTQNext:
             warmup_triton=warmup_triton,
             disable_exllama=disable_exllama,
             use_marlin=use_marlin,
-            **keywords,
+            **kwargs,
         )
 

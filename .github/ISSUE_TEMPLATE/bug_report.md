@@ -23,7 +23,7 @@ nvidia-smi
 
 Show output of:
 ```
-pip show torch auto_gptq_next, transformers, accelerate, triton
+pip show torch gptqmodel, transformers, accelerate, triton
 ```
 
 **To Reproduce**

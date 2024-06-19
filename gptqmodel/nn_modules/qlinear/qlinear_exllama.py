@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 

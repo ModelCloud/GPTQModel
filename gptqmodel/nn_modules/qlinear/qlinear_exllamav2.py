@@ -4,7 +4,7 @@ import math
 from logging import getLogger
 
 import torch
-from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 

@@ -129,9 +129,9 @@ def convert_to_marlin(
 
         # Dequantize the weight.
         if repack:
-            import autogptq_next_marlin_cuda
+            import gptqmodel_marlin_cuda
 
-            marlin_repacked_weight = autogptq_next_marlin_cuda.gptq_repack(module.qweight)
+            marlin_repacked_weight = gptqmodel_marlin_cuda.gptq_repack(module.qweight)
 
             if strict:
                 dequantized_qzeros = unpack_qzeros(module.qzeros)

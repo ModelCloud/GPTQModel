@@ -9,7 +9,7 @@ os.environ["CXX"] = "g++"
 
 common_setup_kwargs = {
     "version": "0.9.0",
-    "name": "auto_gptq_next",
+    "name": "modelgptq",
     "author": "Qubitium",
     "description": "An easy-to-use LLMs quantization package with user-friendly apis, based on GPTQ algorithm.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
@@ -76,7 +76,7 @@ if BUILD_CUDA_EXT:
 
     if not CUDA_VERSION:
         print(
-            f"Trying to compile AutoGPTQ-NEXT for CUDA, but Pytorch {torch.__version__} "
+            f"Trying to compile GPTQModel for CUDA, but Pytorch {torch.__version__} "
             "is installed without CUDA support."
         )
         sys.exit(1)
@@ -89,7 +89,7 @@ if BUILD_CUDA_EXT:
         requested_but_unsupported_archs = {arch for arch in archs if arch in UNSUPPORTED_COMPUTE_CAPABILITIES}
         if len(requested_but_unsupported_archs) > 0:
             raise ValueError(
-                f"Trying to compile AutoGPTQ-NEXT for CUDA compute capabilities {torch_cuda_arch_list}, but AutoGPTQ does not support the compute capabilities {requested_but_unsupported_archs} (AutoGPTQ requires Pascal or higher). Please fix your environment variable TORCH_CUDA_ARCH_LIST (Reference: https://github.com/pytorch/pytorch/blob/v2.2.2/setup.py#L135-L139)."
+                f"Trying to compile GPTQModel for CUDA compute capabilities {torch_cuda_arch_list}, but AutoGPTQ does not support the compute capabilities {requested_but_unsupported_archs} (AutoGPTQ requires Pascal or higher). Please fix your environment variable TORCH_CUDA_ARCH_LIST (Reference: https://github.com/pytorch/pytorch/blob/v2.2.2/setup.py#L135-L139)."
             )
     else:
         local_arch_list = detect_local_sm_architectures()
@@ -125,7 +125,7 @@ extras_require = {
     "quality": ["ruff==0.4.9", "isort==5.13.2"],
 }
 
-include_dirs = ["autogptq_cuda"]
+include_dirs = ["gptqmodel_cuda"]
 
 additional_setup_kwargs = {}
 if BUILD_CUDA_EXT:
@@ -142,17 +142,17 @@ if BUILD_CUDA_EXT:
 
     extensions = [
         cpp_extension.CUDAExtension(
-            "autogptq_next_cuda_64",
+            "gptqmodel_cuda_64",
             [
-                "autogptq_next_ext/cuda_64/autogptq_next_cuda_64.cpp",
-                "autogptq_next_ext/cuda_64/autogptq_next_cuda_kernel_64.cu",
+                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
+                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu",
             ],
         ),
         cpp_extension.CUDAExtension(
-            "autogptq_next_cuda_256",
+            "gptqmodel_cuda_256",
             [
-                "autogptq_next_ext/cuda_256/autogptq_next_cuda_256.cpp",
-                "autogptq_next_ext/cuda_256/autogptq_next_cuda_kernel_256.cu",
+                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
+                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu",
             ],
         ),
     ]
@@ -161,11 +161,11 @@ if BUILD_CUDA_EXT:
     if COMPILE_MARLIN:
         extensions.append(
             cpp_extension.CUDAExtension(
-                "autogptq_next_marlin_cuda",
+                "gptqmodel_marlin_cuda",
                 [
-                    "autogptq_next_ext/marlin/marlin_cuda.cpp",
-                    "autogptq_next_ext/marlin/marlin_cuda_kernel.cu",
-                    "autogptq_next_ext/marlin/marlin_repack.cu",
+                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                    "gptqmodel_ext/marlin/marlin_repack.cu",
                 ],
             )
         )
@@ -176,11 +176,11 @@ if BUILD_CUDA_EXT:
         cpp_extension.CUDAExtension(
             "exllama_kernels",
             [
-                "autogptq_next_ext/exllama/exllama_ext.cpp",
-                "autogptq_next_ext/exllama/cuda_buffers.cu",
-                "autogptq_next_ext/exllama/cuda_func/column_remap.cu",
-                "autogptq_next_ext/exllama/cuda_func/q4_matmul.cu",
-                "autogptq_next_ext/exllama/cuda_func/q4_matrix.cu",
+                "gptqmodel_ext/exllama/exllama_ext.cpp",
+                "gptqmodel_ext/exllama/cuda_buffers.cu",
+                "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
             ],
             extra_link_args=extra_link_args,
         )
@@ -189,9 +189,9 @@ if BUILD_CUDA_EXT:
         cpp_extension.CUDAExtension(
             "exllamav2_kernels",
             [
-                "autogptq_next_ext/exllamav2/ext.cpp",
-                "autogptq_next_ext/exllamav2/cuda/q_matrix.cu",
-                "autogptq_next_ext/exllamav2/cuda/q_gemm.cu",
+                "gptqmodel_ext/exllamav2/ext.cpp",
+                "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
             ],
             extra_link_args=extra_link_args,
         )

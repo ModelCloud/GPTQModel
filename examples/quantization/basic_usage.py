@@ -1,4 +1,4 @@
-from auto_gptq_next import AutoGPTQNext, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer, TextGenerationPipeline
 
 pretrained_model_dir = "facebook/opt-125m"
@@ -20,7 +20,7 @@ def main():
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
-    model = AutoGPTQNext.from_pretrained(pretrained_model_dir, quantize_config)
+    model = GPTQModel.from_pretrained(pretrained_model_dir, quantize_config)
 
     # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     model.quantize(calibration_dataset)
@@ -46,13 +46,13 @@ def main():
     model.save_quantized(quantized_model_dir, use_safetensors=True)
 
     # load quantized model to the first GPU
-    model = AutoGPTQNext.from_quantized(quantized_model_dir, device="cuda:0")
+    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
 
     # download quantized model from Hugging Face Hub and load to the first GPU
-    # model = AutoGPTQForCausalLM.from_quantized(repo_id, device="cuda:0", use_safetensors=True, use_triton=False)
+    # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True, use_triton=False)
 
     # inference with model.generate
-    print(tokenizer.decode(model.generate(**tokenizer("auto_gptq_next is", return_tensors="pt").to(model.device))[0]))
+    print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
 
     # or you can also use pipeline
     pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
