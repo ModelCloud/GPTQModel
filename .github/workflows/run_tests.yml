@@ -1,6 +1,9 @@
 name: Run tests
 
-on: [push]
+on:
+  push:
+  repository_dispatch:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -11,7 +14,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt update && sudo apt dist-upgrade -y && sudo apt install git -y
           pip install parameterized
 
       - name: Install local package
