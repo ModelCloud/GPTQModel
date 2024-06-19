@@ -1,5 +1,4 @@
 from logging import getLogger
-from typing import Optional
 
 logger = getLogger(__name__)
 
@@ -9,7 +8,7 @@ def dynamically_import_QuantLinear(
     desc_act: bool,
     group_size: int,
     bits: int,
-    disable_exllama: Optional[bool] = None,
+    disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_marlin: bool = False,
 ):
@@ -17,12 +16,6 @@ def dynamically_import_QuantLinear(
         logger.info("Using tritonv2 for GPTQ")
         from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
     else:
-        # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
-        if disable_exllama is None:
-            if disable_exllamav2:
-                disable_exllama = False
-            else:
-                disable_exllama = True
         if bits == 4 and use_marlin:
             from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
         elif bits == 4 and not disable_exllamav2:

@@ -15,6 +15,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
+from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as QuantLinearMarlin
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
@@ -26,7 +27,6 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
-from ..nn_modules.qliner.qlinear_marlin import QuantLiner as QuantLinearMarlin
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -899,14 +899,12 @@ class BaseGPTQModel(nn.Module):
 
             _validate_marlin_compatibility(quantize_config, throwError=True)
 
-            quant_linear_class = QuantLinearMarlin
-
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
-                quant_linear_class=quant_linear_class,
+                quant_linear_class=QuantLinearMarlin,
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
                 device_map=device_map,

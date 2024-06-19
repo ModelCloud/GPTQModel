@@ -1,7 +1,7 @@
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.utils.importer import dynamically_import_QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearCudaOld
 from parameterized import parameterized  # noqa: E402
 
 try:
@@ -551,17 +551,8 @@ class TestsQ4CUDA(unittest.TestCase):
         n = 256
         device = "cuda"
 
-        linear_class = dynamically_import_QuantLinear(
-            use_triton=False,
-            desc_act=False,
-            group_size=group_size,
-            bits=4,
-            disable_exllama=True,
-            disable_exllamav2=True,
-        )
-
         weight_dtype = torch.float16 if use_half2 else torch.float32
-        linear = linear_class(
+        linear = QuantLinearCudaOld(
             bits=4,
             group_size=group_size,
             infeatures=k,

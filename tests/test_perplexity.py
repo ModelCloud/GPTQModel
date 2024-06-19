@@ -1,12 +1,13 @@
-import torch
-import unittest
 import tempfile
-import math
-from transformers import AutoTokenizer
-from gptqmodel.utils import Perplexity
+import unittest
+
+import torch
 from gptqmodel import GPTQModel
 from gptqmodel.quantization import FORMAT, QuantizeConfig
+from gptqmodel.utils import Perplexity
 from parameterized import parameterized
+from transformers import AutoTokenizer
+
 
 class TestPerplexity(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -31,7 +32,7 @@ class TestPerplexity(unittest.TestCase):
 
         all = ppl.calculate(n_ctx=self.N_CTX, n_batch=self.N_BATCH)
 
-        # average ppl 
+        # average ppl
         avg = sum(all) / len(all)
 
         return avg

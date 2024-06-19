@@ -102,11 +102,10 @@ def make_quant(
     names,
     bits,
     group_size,
-    name="",
     use_triton: bool = False,
     use_marlin: bool = False,
-    disable_exllama: Optional[bool] = None,
-    disable_exllamav2: bool = None,
+    disable_exllama: bool = False,
+    disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
     desc_act: bool = False,
 ):
