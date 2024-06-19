@@ -31,7 +31,7 @@ class TestPerplexity(unittest.TestCase):
 
         all = ppl.calculate(n_ctx=self.N_CTX, n_batch=self.N_BATCH)
 
-        # calculate average perplexity
+        # average ppl 
         avg = sum(all) / len(all)
 
         return avg
@@ -53,7 +53,7 @@ class TestPerplexity(unittest.TestCase):
 
         print(f"Native PPL: {self.native_ppl}")
 
-        # use 4090 gpu, wikitext-2-raw-v1, test, text, 512, 512 as reference, example tinyllama ppl is 8.4790
+        #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790
         assert self.native_ppl < 8.5
 
         return self.native_ppl
@@ -61,7 +61,6 @@ class TestPerplexity(unittest.TestCase):
     def get_wikitext2_data(self, n_samples=1024):
         from datasets import load_dataset
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-        # avoid using very short rows for calibration, min 512 chars
         traindata = traindata.filter(lambda x: len(x['text']) >= 512)
 
         ds = traindata
@@ -112,7 +111,6 @@ class TestPerplexity(unittest.TestCase):
 
             print(f"Format {format}, Quantized PPL: {quantized_ppl}")
 
-            # use 4090 gpu, wikitext-2-raw-v1, test, text, 512, 512 as reference, FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl is 8.7542
-            # use 4090 gpu, wikitext-2-raw-v1, test, text, 512, 512 as reference, FORMAT.MARLIN ppl is 8.9893
-            # after quantization, the perplexity should not increase by more than 0.5, or be less than native_ppl
+            # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
+            # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 8.7542, FORMAT.MARLIN ppl == 8.9893
             assert abs(quantized_ppl - self.native_ppl) < 0.5
