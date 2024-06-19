@@ -19,10 +19,10 @@ from transformers.utils.hub import PushToHubMixin
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_AUTOGPTQ,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, BaseQuantizeConfig)
-from ..utils.data_utils import collate_data
-from ..utils.import_utils import dynamically_import_QuantLinear
-from ..utils.marlin_utils import (_validate_marlin_compatibility,
-                                  _validate_marlin_device_support, prepare_model_for_marlin_load)
+from ..utils.data import collate_data
+from ..utils.importer import dynamically_import_QuantLinear
+from ..utils.marlin import (_validate_marlin_compatibility,
+                            _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 from ._utils import (auto_dtype_from_config, autogptq_next_post_init, convert_gptq_v1_to_v2_format,

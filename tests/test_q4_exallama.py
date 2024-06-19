@@ -2,7 +2,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from auto_gptq_next.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
-from auto_gptq_next.utils.import_utils import dynamically_import_QuantLinear  # noqa: E402
+from auto_gptq_next.utils.importer import dynamically_import_QuantLinear  # noqa: E402
 
 try:
     from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402

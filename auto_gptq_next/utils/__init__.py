@@ -1,1 +1,1 @@
-from .perplexity_utils import Perplexity
+from .perplexity import Perplexity

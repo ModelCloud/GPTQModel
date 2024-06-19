@@ -9,7 +9,7 @@ from tqdm import tqdm
 from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
-from .modeling_utils import recurse_getattr, recurse_setattr
+from .model import recurse_getattr, recurse_setattr
 
 logger = getLogger(__name__)
 

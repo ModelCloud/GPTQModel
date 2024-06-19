@@ -14,8 +14,8 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
 from ..quantization import QuantizeConfig
-from ..utils.import_utils import dynamically_import_QuantLinear
-from ..utils.modeling_utils import recurse_setattr
+from ..utils.importer import dynamically_import_QuantLinear
+from ..utils.model import recurse_setattr
 from ._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
 
 logger = getLogger(__name__)
