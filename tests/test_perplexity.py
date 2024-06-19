@@ -101,14 +101,13 @@ class TestPerplexity(unittest.TestCase):
         model.quantize(cal_data)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_pretrained(
+            model.save_quantized(
                 tmp_dir,
             )
 
             model = AutoGPTQNext.from_quantized(
                 tmp_dir,
                 device_map="auto",
-                use_marlin=format == FORMAT.MARLIN,
             )
 
             quantized_ppl = self.calculate_avg_ppl(model, self.tokenizer)
