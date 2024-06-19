@@ -3,9 +3,9 @@ import unittest
 import tempfile
 
 from transformers import AutoTokenizer
-from auto_gptq_next.utils import Perplexity
-from auto_gptq_next import AutoGPTQNext
-from auto_gptq_next.quantization import FORMAT, QuantizeConfig
+from gptqmodel.utils import Perplexity
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import FORMAT, QuantizeConfig
 from parameterized import parameterized
 
 class TestPerplexity(unittest.TestCase):
@@ -94,7 +94,7 @@ class TestPerplexity(unittest.TestCase):
             format=format,
         )
 
-        model = AutoGPTQNext.from_pretrained(
+        model = GPTQModel.from_pretrained(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
@@ -106,7 +106,7 @@ class TestPerplexity(unittest.TestCase):
                 tmp_dir,
             )
 
-            model = AutoGPTQNext.from_quantized(
+            model = GPTQModel.from_quantized(
                 tmp_dir,
                 device_map="auto",
             )
