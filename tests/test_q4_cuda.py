@@ -557,7 +557,6 @@ class TestsQ4CUDA(unittest.TestCase):
             group_size=group_size,
             bits=4,
             disable_exllama=True,
-            disable_exllamav2=True,
         )
 
         weight_dtype = torch.float16 if use_half2 else torch.float32
@@ -624,7 +623,6 @@ class TestsQ4CUDA(unittest.TestCase):
             use_triton=False,
             model_basename=model_basename,
             disable_exllama=True,
-            disable_exllamav2=True,
             torch_dtype=torch_dtype,
         )
 
@@ -668,7 +666,6 @@ class TestsQ4CUDA(unittest.TestCase):
             device=device,
             use_triton=False,
             disable_exllama=True,
-            disable_exllamav2=True,
             torch_dtype=torch_dtype,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)

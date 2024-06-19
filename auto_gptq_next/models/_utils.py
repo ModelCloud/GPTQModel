@@ -14,7 +14,7 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
 from ..quantization import QuantizeConfig
-from ..utils.importer import dynamically_import_QuantLinear
+from ..utils.importer import dynamically_import_QuantLinear, dynamically_import_QuantLinear_base
 from ..utils.model import recurse_setattr
 from ._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
 
@@ -71,17 +71,9 @@ def make_quant(
     use_triton: bool = False,
     use_marlin: bool = False,
     disable_exllama: Optional[bool] = None,
-    disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
     desc_act: bool = False,
 ):
-    # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
-    if disable_exllama is None:
-        if disable_exllamav2:
-            disable_exllama = False
-        else:
-            disable_exllama = True
-
     QuantLinear = dynamically_import_QuantLinear(
         use_triton=use_triton,
         desc_act=desc_act,
@@ -89,7 +81,6 @@ def make_quant(
         bits=bits,
         use_marlin=use_marlin,
         disable_exllama=disable_exllama,
-        disable_exllamav2=disable_exllamav2,
     )
 
     if isinstance(module, QuantLinear):
@@ -211,7 +202,7 @@ def pack_model(
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
 ):
-    QuantLinear = dynamically_import_QuantLinear(
+    QuantLinear = dynamically_import_QuantLinear_base(
         use_triton=use_triton,
         desc_act=desc_act,
         group_size=group_size,
@@ -236,7 +227,6 @@ def pack_model(
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
         disable_exllama=False,
-        disable_exllamav2=True,
         use_marlin=use_marlin,
     )
     qlayers = find_layers(model, [QuantLinear])

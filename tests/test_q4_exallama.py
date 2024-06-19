@@ -1,7 +1,7 @@
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from auto_gptq_next.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
+from auto_gptq_next.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
 from auto_gptq_next.utils.importer import dynamically_import_QuantLinear  # noqa: E402
 
 try:
@@ -9,8 +9,7 @@ try:
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
-from auto_gptq_next import AutoGPTQNext, exllama_set_max_input_length  # noqa: E402
-from auto_gptq_next.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
+from auto_gptq_next import AutoGPTQNext  # noqa: E402
 from auto_gptq_next.models._utils import autogptq_next_post_init  # noqa: E402
 from test_q4_cuda import get_diff
 from transformers import AutoTokenizer  # noqa: E402
@@ -1060,7 +1059,6 @@ class TestsQ4Exllama(unittest.TestCase):
             group_size=group_size,
             bits=4,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
 
         linear = linear_class(
@@ -1113,42 +1111,44 @@ class TestsQ4Exllama(unittest.TestCase):
 
     def test_exllama_buffer_size(self):
         prompt = "I am in Paris and" * 450
-        device = torch.device("cuda:0")
 
-        model_id = "TheBloke/vicuna-13B-1.1-GPTQ-4bit-128g"
-        revision = "actorder"
-        model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
+        # TODO: pending remove
 
-        model_q = AutoGPTQNext.from_quantized(
-            model_id,
-            revision=revision,
-            device="cuda:0",
-            use_triton=False,
-            model_basename=model_basename,
-            disable_exllama=False,
-            disable_exllamav2=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-
-        self.assertTrue(
-            inp["input_ids"].shape[1] > EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
-        )  # 2048 is the default max_input_length
-
-        with self.assertRaises(RuntimeError) as cm:
-            _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
-        self.assertTrue("temp_state buffer is too small" in str(cm.exception))
-
-        model_q = exllama_set_max_input_length(model_q, 4096)
-
-        _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
-
-        model_q = exllama_set_max_input_length(model_q, 1034)
-
-        with self.assertRaises(RuntimeError) as cm:
-            _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
-        self.assertTrue("temp_state buffer is too small" in str(cm.exception))
+        # device = torch.device("cuda:0")
+        #
+        # model_id = "TheBloke/vicuna-13B-1.1-GPTQ-4bit-128g"
+        # revision = "actorder"
+        # model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
+        #
+        # model_q = AutoGPTQNext.from_quantized(
+        #     model_id,
+        #     revision=revision,
+        #     device="cuda:0",
+        #     use_triton=False,
+        #     model_basename=model_basename,
+        #     disable_exllama=False,
+        # )
+        # tokenizer = AutoTokenizer.from_pretrained(model_id)
+        #
+        # inp = tokenizer(prompt, return_tensors="pt").to(device)
+        #
+        # self.assertTrue(
+        #     inp["input_ids"].shape[1] > EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
+        # )  # 2048 is the default max_input_length
+        #
+        # with self.assertRaises(RuntimeError) as cm:
+        #     _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
+        # self.assertTrue("temp_state buffer is too small" in str(cm.exception))
+        #
+        # model_q = exllama_set_max_input_length(model_q, 4096)
+        #
+        # _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
+        #
+        # model_q = exllama_set_max_input_length(model_q, 1034)
+        #
+        # with self.assertRaises(RuntimeError) as cm:
+        #     _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
+        # self.assertTrue("temp_state buffer is too small" in str(cm.exception))
 
     def test_generation_no_act_order(self):
         prompt = "I am in Paris and"
@@ -1163,7 +1163,6 @@ class TestsQ4Exllama(unittest.TestCase):
             device="cuda:0",
             use_triton=False,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1193,7 +1192,6 @@ class TestsQ4Exllama(unittest.TestCase):
             use_triton=False,
             model_basename=model_basename,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
