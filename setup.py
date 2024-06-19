@@ -10,12 +10,12 @@ os.environ["CXX"] = "g++"
 common_setup_kwargs = {
     "version": "0.9.0",
     "name": "gptqmodel",
-    "author": "Qubitium",
+    "author": "ModelCloud",
     "description": "An easy-to-use LLMs quantization package with user-friendly apis, based on GPTQ algorithm.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
-    "url": "https://github.com/Qubitium/AutoGPTQ",
-    "keywords": ["gptq", "quantization", "large-language-models", "transformers"],
+    "url": "https://github.com/ModelCloud/AutoGPTQ",
+    "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
     "platforms": ["linux"],
     "classifiers": [
         "Environment :: GPU :: NVIDIA CUDA :: 11.7",
