@@ -12,7 +12,7 @@ jobs:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
