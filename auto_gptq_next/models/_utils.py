@@ -38,6 +38,15 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device):
     return obj
 
 
+def nested_move_to_device(v, device):
+    if isinstance(v, torch.Tensor):
+        return move_to(v, device)
+    elif isinstance(v, (list, tuple)):
+        return type(v)([nested_move_to_device(e, device) for e in v])
+    else:
+        return v
+
+
 def find_layers(module, layers=None, name=""):
     if not layers:
         layers = [transformers.pytorch_utils.Conv1D, nn.Conv2d, nn.Linear]

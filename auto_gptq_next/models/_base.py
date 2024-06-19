@@ -17,8 +17,9 @@ from transformers.utils.generic import ContextManagers
 from transformers.utils.hub import PushToHubMixin
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_AUTOGPTQ,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, BaseQuantizeConfig)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
+                                   META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST,
+                                   BaseQuantizeConfig)
 from ..utils.data import collate_data
 from ..utils.importer import dynamically_import_QuantLinear
 from ..utils.marlin import (_validate_marlin_compatibility,
@@ -26,8 +27,9 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 from ._utils import (auto_dtype_from_config, autogptq_next_post_init, convert_gptq_v1_to_v2_format,
-                     convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                     get_module_by_name_suffix, make_quant, move_to, pack_model, simple_dispatch_model)
+                     convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
+                     get_module_by_name_prefix, get_module_by_name_suffix, make_quant, move_to,
+                     nested_move_to_device, pack_model, simple_dispatch_model)
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -38,13 +40,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-def nested_move_to_device(v, device):
-    if isinstance(v, torch.Tensor):
-        return move_to(v, device)
-    elif isinstance(v, (list, tuple)):
-        return type(v)([nested_move_to_device(e, device) for e in v])
-    else:
-        return v
+
 
 
 class BaseGPTQModel(nn.Module, PushToHubMixin):
@@ -657,7 +653,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             model.seqlen = 4096
         model.eval()
 
-        return cls(model, False, quantize_config)
+        return cls(model, quantized=False, quantize_config=quantize_config)
 
     @classmethod
     def from_quantized(
@@ -979,8 +975,8 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
         return cls(
             model,
-            True,
-            quantize_config,
+            quantized=True,
+            quantize_config=quantize_config,
             is_triton_backend=use_triton,
             qlinear_kernel=qlinear_kernel,
         )
@@ -1000,4 +996,4 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             return getattr(self.model, item)
 
 
-__all__ = ["BaseGPTQModel", "BaseQuantizeConfig", "QuantizeConfig"]
+__all__ = ["BaseGPTQModel"]
