@@ -24,7 +24,7 @@ class TestQuantization(unittest.TestCase):
         pretrained_model_dir = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
-        examples = [
+        calibration_dataset = [
             tokenizer(
                 "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
             ),
@@ -45,7 +45,7 @@ class TestQuantization(unittest.TestCase):
             use_flash_attention_2=False,
         )
 
-        model.quantize(examples)
+        model.quantize(calibration_dataset)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save_pretrained(

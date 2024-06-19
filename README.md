@@ -102,7 +102,7 @@ pretrained_model_dir = "facebook/opt-125m"
 quant_output_dir = "opt-125m-4bit"
 
 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
-examples = [
+calibration_dataset = [
     tokenizer(
         "The world is a wonderful place full of beauty and love."
     )
@@ -116,8 +116,8 @@ quant_config = QuantizeConfig(
 # load un-quantized model, by default, the model will always be loaded into CPU memory
 model = AutoGPTQNext.from_pretrained(pretrained_model_dir, quant_config)
 
-# quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
-model.quantize(examples)
+# quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
+model.quantize(calibration_dataset)
 
 # save quantized model
 model.save_quantized(quant_output_dir)

@@ -54,9 +54,9 @@ This will download `opt-125m` from 🤗 Hub and cache it to local disk, then loa
 
 *In later tutorial, you will learn advanced model loading strategies such as CPU offload and load model into multiple devices.*
 
-Then, prepare examples(a list of dict with only two keys, 'input_ids' and 'attention_mask') to guide quantization. Here we use only one text to simplify the code, but you should be noticed that the more examples used, the better(most likely) the quantized model.
+Then, prepare calibration_dataset(a list of dict with only two keys, 'input_ids' and 'attention_mask') to guide quantization. Here we use only one text to simplify the code, but you should be noticed that the more calibration_dataset used, the better(most likely) the quantized model.
 ```python
-examples = [
+calibration_dataset = [
     tokenizer(
         "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
     )
@@ -64,7 +64,7 @@ examples = [
 ```
 After all recipes are prepared, we can now start to quantize the pretrained model.
 ```python
-model.quantize(examples)
+model.quantize(calibration_dataset)
 ```
 Finally, we can save the quantized model:
 ```python

@@ -64,7 +64,7 @@ def main():
     # load train dataset for quantize
     traindataset, testenc = get_wikitext2(128, 0, model.seqlen, tokenizer)
 
-    # quantize model, the examples should be list of dict whose keys contains "input_ids" and "attention_mask"
+    # quantize model, the calibration_dataset should be list of dict whose keys contains "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
     model.quantize(traindataset, use_triton=False)
 

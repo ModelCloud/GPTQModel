@@ -144,7 +144,7 @@ def main():
     # load un-quantized model, the model will always be force loaded into cpu
     model = AutoGPTQNext.from_pretrained(pretrained_model_dir, quantize_config)
 
-    # quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
+    # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
     model.quantize(traindataset, use_triton=False)
 
