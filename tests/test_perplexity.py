@@ -1,5 +1,6 @@
 import torch
 import unittest
+import tempfile
 
 from transformers import AutoTokenizer
 from auto_gptq_next.utils import Perplexity
@@ -32,12 +33,9 @@ class TestPerplexity(unittest.TestCase):
 
         avg = sum(all) / len(all)
 
-        # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
-        assert avg < 8.5
-
         return avg
 
-    def setUp(self):
+    def calculate_native_ppl(self):
         from transformers import AutoModelForCausalLM
         self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
 
@@ -54,6 +52,26 @@ class TestPerplexity(unittest.TestCase):
 
         print(f"Native PPL: {self.native_ppl}")
 
+        # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
+        assert self.native_ppl < 8.5
+
+    def get_wikitext2_data(self, n_samples=1024):
+        from datasets import load_dataset
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        # avoid using very short rows for calibration, min 128 chars
+        traindata = traindata.filter(lambda x: len(x['text']) >= n_samples)
+
+        ds = traindata
+
+        traindataset = []
+        for example in ds:
+            if len(traindataset) == n_samples:
+                break
+
+            traindataset.append(self.tokenizer(example["text"]))
+
+        return traindataset
+
     @parameterized.expand(
         [
             FORMAT.GPTQ_V2,
@@ -62,12 +80,10 @@ class TestPerplexity(unittest.TestCase):
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
-        cal_data = [
-            self.tokenizer(
-                "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
-            ),
-            self.tokenizer("Today I am in Paris and it is a wonderful day."),
-        ]
+        if not hasattr(self, "native_ppl"):
+            self.native_ppl = self.calculate_native_ppl()
+
+        cal_data = self.get_wikitext2_data()
 
         quantize_config = QuantizeConfig(
             bits=4,
@@ -82,8 +98,19 @@ class TestPerplexity(unittest.TestCase):
 
         model.quantize(cal_data)
 
-        quantized_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save_pretrained(
+                tmp_dir,
+            )
 
-        print(f"Quantized PPL: {quantized_ppl}")
+            model = AutoGPTQNext.from_quantized(
+                tmp_dir,
+                device_map="auto",
+                use_marlin=format == FORMAT.MARLIN,
+            )
 
-        assert quantized_ppl - self.native_ppl < 1.0
+            quantized_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+
+            print(f"Format {format}, Quantized PPL: {quantized_ppl}")
+
+            assert quantized_ppl - self.native_ppl < 1.0
