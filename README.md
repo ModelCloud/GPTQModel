@@ -15,11 +15,11 @@
 
 ## How is GPTQModel different from AutoGPTQ?
 
-GPTQModel is an opinionated fork/refractor of AugtoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
 
 ## Mission Statement
 
-We want GPTQModel to be highy focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
+We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
 ## Major Changes vs AutoGPTQ
 
@@ -31,7 +31,7 @@ We want GPTQModel to be highy focused on GPTQ based quantization and target infe
 * Alert users of sub-optimal calibration data. Almost all new-users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed Packing Performance regression on high core-count systems.
-* Thousands of lines of refractor/cleanup.
+* Thousands of lines of refactor/cleanup.
 * Debloated 271K lines of which 250K was caused by a single dataset used only by an example. Move dataset to HF.
 * Debloat the number of args presented in public .from_quantized()/.from_pretrained() api
 * Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
@@ -40,10 +40,10 @@ We want GPTQModel to be highy focused on GPTQ based quantization and target infe
 ## Roadmap (Target Date: July 2024):
 
 * DBRX support.
-* `lm_head` quantization support by integrating with Intel/Autoround.
+* `lm_head` quantization support by integrating with Intel/AutoRound.
 * Customizable callback in Per-Layer quantization.
 * Add Qbits (cpu inference) support from Intel/Qbits.
-* Add back ROCM/AMD support once verything is validated.
+* Add back ROCM/AMD support once everything is validated.
 * Store quant loss stat and apply diffs to new quant for quality control.
 * Add CI workflow for PRs.
 * Add Tests for every single supported model.
@@ -64,15 +64,15 @@ We want GPTQModel to be highy focused on GPTQ based quantization and target infe
 
 
 ## Platform Support
-GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a furture version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
+GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
 
 ## Install
 
 GPTQModel is available for Linux only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
 
-| CUDA version | Installation                                                                                      | Built against PyTorch |
-|-------------------|---------------------------------------------------------------------------------------------------|-----------------------|
-| CUDA 12.1         | `pip install gptq-model --no-build-isolation`                                                                            | 2.3.1+cu121           |
+|  CUDA version | Installation                                   | Built against PyTorch |
+|---------------|------------------------------------------------|-----------------------|
+| CUDA 12.1     | `pip install gptq-model --no-build-isolation`  | 2.3.1+cu121           |
 
 
 GPTQModel does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
