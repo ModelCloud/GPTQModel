@@ -17,7 +17,7 @@ class TestPerplexity(unittest.TestCase):
     N_CTX = 512
     N_BATCH = 512
 
-    def test_native_model_perplexity(self):
+    def test_native_perplexity(self):
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True)
 
@@ -45,7 +45,7 @@ class TestPerplexity(unittest.TestCase):
 
         assert avg_perplexity < 9
 
-    def test_quantized_gptq_format_model_perplexity(self):
+    def test_quantized_perplexity(self):
         from auto_gptq_next import AutoGPTQNext
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True)
 
