@@ -5,7 +5,7 @@ from os.path import isdir, join
 from typing import Any, Dict, Optional, Tuple
 
 from packaging import version
-from transformers.utils.hub import PushToHubMixin, cached_file
+from transformers.utils.hub import cached_file
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -20,6 +20,7 @@ FORMAT_FIELD_JSON = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
+QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
 
 MIN_VERSION_WITH_V2 = "0.8.0-dev1"
 
@@ -66,7 +67,7 @@ QUANT_CONFIG_ARG_SYNONYMS = {
 
 
 @dataclass
-class QuantizeConfig(PushToHubMixin):
+class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
     group_size: int = field(default=-1)
     damp_percent: float = field(default=0.01)
@@ -213,13 +214,7 @@ class QuantizeConfig(PushToHubMixin):
                 logger.info(f"Ignoring unknown parameter in the quantization configuration: {key}.")
 
         if format_auto_inferred:
-            logger.info(
-                f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}."
-            )
-
-        if normalized[FORMAT_FIELD_CODE] in {FORMAT.MARLIN}:
-            # Marlin do not reorder the rows.
-            normalized["desc_act"] = False
+            logger.info(f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
 
         if "sym" not in normalized:
             logger.warning(
@@ -244,11 +239,7 @@ class QuantizeConfig(PushToHubMixin):
         format = kwargs.pop("format", None)
 
         transformers_config = False
-        for quantize_config_filename in [
-            QUANT_CONFIG_FILENAME,
-            "quant_config.json",
-            "config.json",
-        ]:
+        for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
             if isdir(save_dir):  # Local
                 resolved_config_file = join(save_dir, quantize_config_filename)
             else:  # Remote
