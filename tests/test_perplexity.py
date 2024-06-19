@@ -54,12 +54,12 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (False, True, FORMAT.GPTQ_V2),
-            (False, False, FORMAT.GPTQ),
-            (True, True, FORMAT.MARLIN),
+            FORMAT.GPTQ_V2,
+            FORMAT.GPTQ,
+            FORMAT.MARLIN,
         ]
     )
-    def test_quantized_perplexity(self, use_marlin: bool, sym: bool, format: FORMAT):
+    def test_quantized_perplexity(self, format: FORMAT):
         calibration_dataset = [
             self.tokenizer(
                 "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
@@ -71,7 +71,6 @@ class TestPerplexity(unittest.TestCase):
             bits=4,
             group_size=128,
             desc_act=True,
-            sym=sym,
             format=format,
         )
 
