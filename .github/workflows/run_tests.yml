@@ -16,7 +16,7 @@ jobs:
 
       - name: Install pip depends
         run: |
-          pip install parameterized protobuf
+          pip install -U parameterized protobuf pytest
 
       - name: Compile
         run: |
@@ -25,4 +25,4 @@ jobs:
       - name: Run tests
         run: |
           cd tests
-          pytests -v 
+          pytest -v 
