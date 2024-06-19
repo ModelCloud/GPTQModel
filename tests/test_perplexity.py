@@ -20,22 +20,22 @@ class TestPerplexity(unittest.TestCase):
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
-            model,
-            tokenizer,
-            self.DATASET_PATH,
-            self.DATASET_NAME,
-            self.DATASET_SPLIT,
-            self.DATASET_COLUMN,
+            model=model,
+            tokenizer=tokenizer,
+            dataset_path=self.DATASET_PATH,
+            dataset_name=self.DATASET_NAME,
+            split=self.DATASET_SPLIT,
+            text_column=self.DATASET_COLUMN,
         )
 
-        all_perplexity = ppl.calculate_perplexity(self.N_CTX, self.N_BATCH)
+        all = ppl.calculate(n_ctx=self.N_CTX, n_batch=self.N_BATCH)
 
-        avg_perplexity = sum(all_perplexity) / len(all_perplexity)
+        avg = sum(all) / len(all)
 
         # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
-        assert avg_perplexity < 8.5
+        assert avg < 8.5
 
-        return avg_perplexity
+        return avg
 
     def setUp(self):
         from transformers import AutoModelForCausalLM
@@ -52,6 +52,8 @@ class TestPerplexity(unittest.TestCase):
 
         self.native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
+        print(f"Native PPL: {self.native_ppl}")
+
     @parameterized.expand(
         [
             FORMAT.GPTQ_V2,
@@ -60,7 +62,7 @@ class TestPerplexity(unittest.TestCase):
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
-        calibration_dataset = [
+        cal_data = [
             self.tokenizer(
                 "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
             ),
@@ -70,7 +72,6 @@ class TestPerplexity(unittest.TestCase):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
-            desc_act=True,
             format=format,
         )
 
@@ -79,8 +80,10 @@ class TestPerplexity(unittest.TestCase):
             quantize_config=quantize_config,
         )
 
-        model.quantize(calibration_dataset)
+        model.quantize(cal_data)
 
         quantized_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+
+        print(f"Quantized PPL: {quantized_ppl}")
 
         assert quantized_ppl - self.native_ppl < 1.0
