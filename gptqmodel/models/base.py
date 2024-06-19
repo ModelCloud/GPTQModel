@@ -347,7 +347,6 @@ class BaseGPTQModel(nn.Module):
                         if "not positive-definite" in str(e).lower():
                             logger.warning(
                                 "Please increase damp or nsamples for calibration data to avoid the following quant error. "
-                                "Ref: https://github.com/AutoGPTQ/AutoGPTQ/issues/572#issuecomment-2006686913"
                             )
                         raise e
 
@@ -467,7 +466,7 @@ class BaseGPTQModel(nn.Module):
 
         if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
             logger.warning(
-                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by AutoGPTQ version >= {MIN_VERSION_WITH_V2}."
+                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
         if format is not None and quantize_config.format != format:
@@ -478,7 +477,7 @@ class BaseGPTQModel(nn.Module):
             if format == FORMAT.GPTQ_V2:
                 if quantize_config.format != FORMAT.GPTQ:
                     raise NotImplementedError(
-                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported. Please open an issue at https://github.com/AutoGPTQ/AutoGPTQ/issues."
+                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported."
                     )
 
                 model = convert_gptq_v1_to_v2_format(
@@ -491,7 +490,7 @@ class BaseGPTQModel(nn.Module):
             elif format == FORMAT.GPTQ:
                 if quantize_config.format != FORMAT.GPTQ_V2:
                     raise NotImplementedError(
-                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported. Please open an issue at https://github.com/AutoGPTQ/AutoGPTQ/issues."
+                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported."
                     )
 
                 model = convert_gptq_v2_to_v1_format(
@@ -884,13 +883,9 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported. Please raise an issue in AutoGPTQ repository."
                 )
-            if torch.version.hip:
-                raise ValueError(
-                    "Can not use Marlin int4*fp16 kernel with AMD ROCm version of PyTorch as the kernel is not compatible. Please do not use `use_marlin=True` when using ROCm devices."
-                )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Can not use Marlin int4*fp16 kernel with a device of compute capability {torch.cuda.get_device_capability()}, the minimum compute capability is 8.0 for Marlin kernel. Please do not use `use_marlin=True`, or please upgrade your GPU ("The more you buy, the more you save." - Taiwanese proverb).'
+                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `use_marlin=True`.'
                 )
 
             # Validate the model can run in Marlin.

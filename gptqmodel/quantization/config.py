@@ -22,7 +22,7 @@ QUANT_METHOD_FIELD = "quant_method"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
 QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
 
-MIN_VERSION_WITH_V2 = "0.8.0-dev1"
+MIN_VERSION_WITH_V2 = "0.9.0"
 
 META_FIELD = "meta"
 # quantizer is the tool that did the quantization
@@ -100,7 +100,6 @@ class QuantizeConfig():
         if self.format not in valid_formats:
             raise ValueError(
                 f"The checkpoint format used is {self.format}, and the quantization method is {self.quant_method}. "
-                f"This is not supported, please open an issue at https://github.com/AutoGPTQ/AutoGPTQ/issues."
             )
 
         if self.bits not in fields_info[0].metadata["choices"]:
