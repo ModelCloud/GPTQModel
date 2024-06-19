@@ -33,7 +33,7 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * Fixed Packing Performance regression on high core-count systems.
 * Thousands of lines of refractor/cleanup.
 * Debloated 271K lines of which 250K was caused by a single dataset used only by an example. Move dataset to HF.
-* Shorter and more concise public api/internal vars. No need to copy bloated HF style for class names. 
+* Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
 * Complete tests with every feature and model tested. Everything that does not pass tests will be removed from repo. We want quality over quantity.
 
 ## Roadmap (Target Date: July 2024):
@@ -239,7 +239,7 @@ Currently, `auto_gptq_next` supports: `LanguageModelingTask`, `SequenceClassific
 
 ### Which kernel is used by default?
 
-AutoGPTQ-NEXT will use Marlin, Exllama v2, Exallama v1, Triton/CUDA kernels in that order for maximum inference performance.
+AutoGPTQ-NEXT will use Marlin, Exllama v2, Triton/CUDA kernels in that order for maximum inference performance.
 
 ## Acknowledgement
 
