@@ -1,4 +1,4 @@
-name: Example Workflow
+name: Run tests
 
 on: [push]
 
@@ -6,49 +6,44 @@ jobs:
   build:
     runs-on: self-hosted
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Run a script
-      run: |
-        sudo apt update && sudo apt dist-upgrade -y && sudo apt install git -y
-        cd AutoGPTQ
-        pip install -vvv --no-build-isolation -e .
+      - name: Install dependencies
+        run: |
+          sudo apt update && sudo apt dist-upgrade -y && sudo apt install git -y
+          pip install parameterized
 
-        cd tests
+      - name: Install local package
+        run: |
+          cd AutoGPTQ
+          pip install -vvv --no-build-isolation -e .
 
-        pip install parameterized
-
-        run_tests() {
-            tests=(*.py)
-
-            passed=0
-            failed=0
-
-            for test in "${tests[@]}"; do
-                echo "Running $test..."
-                python -m unittest "$test"
-                if [ $? -eq 0 ]; then
-                    echo "$test passed."
-                    passed=$((passed + 1))
-                else
-                    echo "$test failed."
-                    failed=$((failed + 1))
-                fi
-            done
-
-            echo "----------------------"
-            echo "Total tests run: ${#tests[@]}"
-            echo "Passed: $passed"
-            echo "Failed: $failed"
-
-            if [ $failed -eq 0 ]; then
-                echo "All tests passed."
-                exit 0
-            else
-                echo "Some tests failed."
-                exit 1
-            fi
-        }
-
-        run_tests
+      - name: Run tests
+        run: |
+          cd tests
+          tests=(*.py)
+          passed=0
+          failed=0
+          for test in "${tests[@]}"; do
+              echo "Running $test..."
+              python -m unittest "$test"
+              if [ $? -eq 0 ]; then
+                  echo "$test passed."
+                  passed=$((passed + 1))
+              else
+                  echo "$test failed."
+                  failed=$((failed + 1))
+              fi
+          done
+          echo "----------------------"
+          echo "Total tests run: ${#tests[@]}"
+          echo "Passed: $passed"
+          echo "Failed: $failed"
+          if [ $failed -eq 0 ]; then
+              echo "All tests passed."
+              exit 0
+          else
+              echo "Some tests failed."
+              exit 1
+          fi
