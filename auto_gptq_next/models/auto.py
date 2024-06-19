@@ -1,8 +1,8 @@
 from inspect import signature
 from typing import Dict, Optional, Union
 
-from ._base import BaseGPTQModel, QuantizeConfig
-from ._utils import check_and_get_model_type
+from .base import BaseGPTQModel, QuantizeConfig
+from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
 from .bloom import BloomGPTQ
 from .chatglm import ChatGLM

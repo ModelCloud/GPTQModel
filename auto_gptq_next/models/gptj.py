@@ -1,4 +1,4 @@
-from ._base import BaseGPTQModel
+from .base import BaseGPTQModel
 
 
 class GPTJGPTQ(BaseGPTQModel):

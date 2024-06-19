@@ -11,7 +11,7 @@ except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
 from auto_gptq_next import AutoGPTQNext  # noqa: E402
-from auto_gptq_next.models._utils import autogptq_next_post_init  # noqa: E402
+from auto_gptq_next.utils.model import autogptq_next_post_init  # noqa: E402
 from test_q4_cuda import get_diff
 from transformers import AutoTokenizer  # noqa: E402
 
