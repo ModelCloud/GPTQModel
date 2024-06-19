@@ -23,7 +23,7 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 
 ## Major Changes vs AutoGPTQ
 
-* `Sym=False` Support. AutoGPTQ main has broken `sym=false`.
+* `Sym=False` Support. AutoGPTQ main has unusable `sym=false`. (Re-quant required)
 * `lm_head` module quantized inference support for further vram reduction.
 * ChatGLM Model Support.
 * Better defaults resulting in faster inference.
@@ -35,7 +35,7 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * Debloated 271K lines of which 250K was caused by a single dataset used only by an example. Move dataset to HF.
 * Debloat the number of args presented in public .from_quantized()/.from_pretrained() api
 * Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
-* Complete tests with every feature and model tested. Everything that does not pass tests will be removed from repo. We want quality over quantity.
+* More tests with every feature and model tested. Everything that does not pass tests will be removed from repo. We want quality over quantity.
 
 ## Roadmap (Target Date: July 2024):
 
