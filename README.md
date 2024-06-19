@@ -1,11 +1,11 @@
 <h1 align="center">GPTQModel</h1>
 <p align="center">An easy-to-use LLM quantization and inference toolkit based on GPTQ algorithm (weight-only quantization).</p>
 <p align="center">
-    <a href="https://github.com/Qubitium/AutoGPTQ/releases">
-        <img alt="GitHub release" src="https://img.shields.io/github/release/Qubitium/AutoGPTQ.svg">
+    <a href="https://github.com/Qubitium/GPTQModel/releases">
+        <img alt="GitHub release" src="https://img.shields.io/github/release/Qubitium/GPTQModel.svg">
     </a>
-    <a href="https://pypi.org/project/auto-gptq/">
-        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/auto-gptq-next">
+    <a href="https://pypi.org/project/model-gptq/">
+        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptq-model">
     </a>
 </p>
 
@@ -72,7 +72,7 @@ GPTQModel is available for Linux only. You can install the latest stable release
 
 | CUDA version | Installation                                                                                      | Built against PyTorch |
 |-------------------|---------------------------------------------------------------------------------------------------|-----------------------|
-| CUDA 12.1         | `pip install auto-gptq-next --no-build-isolation`                                                                            | 2.3.1+cu121           |
+| CUDA 12.1         | `pip install gptq-model --no-build-isolation`                                                                            | 2.3.1+cu121           |
 
 
 GPTQModel does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
@@ -134,7 +134,7 @@ print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors
 
 # or you can also use pipeline
 # pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-# print(pipeline("auto-gptq is")[0]["generated_text"])
+# print(pipeline("GPTQ is")[0]["generated_text"])
 ```
 
 For more advanced features of model quantization, please reference to [this script](examples/quantization/quant_with_alpaca.py)
