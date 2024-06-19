@@ -11,7 +11,7 @@ jobs:
 
     - name: Run a script
       run: |
-        apt update && apt dist-upgrade -y && apt install git -y
+        sudo apt update && sudo apt dist-upgrade -y && sudo apt install git -y
         cd AutoGPTQ
         pip install -vvv --no-build-isolation -e .
 
