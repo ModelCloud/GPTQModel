@@ -902,8 +902,7 @@ class BaseGPTQModel(nn.Module):
             quant_linear_class = QuantLinearMarlin
 
             # Prepare model for marlin load.
-            #   If stub is marlin serialized load from ddirectly
-            #   Otherwise convert to marlin
+            # If is marlin serialized load then load directly. Otherwise convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
