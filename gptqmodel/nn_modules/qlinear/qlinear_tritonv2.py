@@ -6,30 +6,11 @@ import torch
 import torch.nn as nn
 import transformers
 
+from ..triton_utils.dequant import QuantLinearFunction, quant_matmul_248
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
 
 logger = getLogger(__name__)
-
-try:
-    from ..triton_utils.dequant import QuantLinearFunction, quant_matmul_248
-except ImportError as e:
-    triton_import_exception = e
-
-    def error_raiser_triton(*args, **kwargs):
-        raise ValueError(
-            f"Trying to use the triton backend, but could not import triton dependencies with the following error: {triton_import_exception}"
-        )
-
-    class FakeTriton:
-        def __getattr__(self, name):
-            raise ImportError(
-                f"Trying to use the triton backend, but could not import triton dependencies with the following error: {triton_import_exception}"
-            )
-
-    quant_matmul_248 = error_raiser_triton
-    QuantLinearFunction = FakeTriton
-    QuantLinearInferenceOnlyFunction = FakeTriton
 
 
 class QuantLinear(BaseQuantLinear, TritonModuleMixin):
