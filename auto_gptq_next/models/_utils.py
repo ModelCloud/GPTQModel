@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from logging import getLogger
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import accelerate
 import threadpoolctl as tctl
@@ -26,19 +26,16 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-def get_device(obj: Union[torch.Tensor, nn.Module]):
+def get_device(obj: torch.Tensor | nn.Module):
     if isinstance(obj, torch.Tensor):
         return obj.device
     return next(obj.parameters()).device
 
 
-def move_to_device(obj: Optional[Union[torch.Tensor, nn.Module]], device: torch.device):
-    if obj is None:
-        return obj
-    else:
-        if get_device(obj) != device:
-            obj = obj.to(device)
-        return obj
+def move_to(obj: torch.Tensor | nn.Module, device: torch.device):
+    if get_device(obj) != device:
+        obj = obj.to(device)
+    return obj
 
 
 def find_layers(module, layers=None, name=""):

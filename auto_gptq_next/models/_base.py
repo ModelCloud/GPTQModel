@@ -27,7 +27,7 @@ from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 from ._utils import (auto_dtype_from_config, autogptq_next_post_init, convert_gptq_v1_to_v2_format,
                      convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                     get_module_by_name_suffix, make_quant, move_to_device, pack_model, simple_dispatch_model)
+                     get_module_by_name_suffix, make_quant, move_to, pack_model, simple_dispatch_model)
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -40,7 +40,7 @@ logger.setLevel(logging.INFO)
 
 def nested_move_to_device(v, device):
     if isinstance(v, torch.Tensor):
-        return move_to_device(v, device)
+        return move_to(v, device)
     elif isinstance(v, (list, tuple)):
         return type(v)([nested_move_to_device(e, device) for e in v])
     else:
@@ -210,7 +210,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             # Positional arguments.
             layer_input = []
             for inp in args:
-                layer_input.append(move_to_device(inp, data_device))
+                layer_input.append(move_to(inp, data_device))
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
@@ -221,7 +221,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to_device(pos_ids, data_device))
+                position_ids.append(move_to(pos_ids, data_device))
             one_kwargs = {}
             for (
                 k,
@@ -246,7 +246,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
             ori_outside_layer_module_devices[module_name] = get_device(module)
             if module is not None:
-                move_to_device(module, cur_layer_device)
+                move_to(module, cur_layer_device)
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
@@ -254,18 +254,18 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             for k, v in example.items():
                 if len(v.shape) == 1:
                     v = v.unsqueeze(0)
-                example[k] = move_to_device(v, cur_layer_device)
+                example[k] = move_to(v, cur_layer_device)
             try:
                 self.model(**example)
             except ValueError:
                 pass
         handle.remove()
 
-        move_to_device(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
+        move_to(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
         for module_name in self.non_layer_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
-                move_to_device(module, ori_outside_layer_module_devices[module_name])
+                move_to(module, ori_outside_layer_module_devices[module_name])
 
         torch.cuda.empty_cache()
 
@@ -284,7 +284,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             layer = layers[i]
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU:
-                move_to_device(layer, CUDA_0)
+                move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
 
@@ -314,12 +314,14 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
-                        layer_input.append(move_to_device(layer_inp, cur_layer_device))
+                        layer_input.append(move_to(layer_inp, cur_layer_device))
 
-                    layer_attention_mask = move_to_device(attention_masks[j], cur_layer_device)
+                    mask = attention_masks[j]
+                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+
                     additional_layer_inputs = {"attention_mask": layer_attention_mask}
                     layer_position_ids = (
-                        None if not position_ids else move_to_device(position_ids[j], cur_layer_device)
+                        None if not position_ids else move_to(position_ids[j], cur_layer_device)
                     )
                     if layer_position_ids is not None:
                         additional_layer_inputs["position_ids"] = layer_position_ids
@@ -356,31 +358,33 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to_device(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to_device(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to_device(g_idx, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        move_to(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        move_to(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        move_to(g_idx, CPU if force_layer_back_to_cpu else cur_layer_device),
                     )
                     gptq[name].free()
 
             for j in range(num_batches):
                 layer_input = []
                 for k, layer_inp in enumerate(layer_inputs[j]):
-                    layer_input.append(move_to_device(layer_inp, cur_layer_device))
+                    layer_input.append(move_to(layer_inp, cur_layer_device))
 
-                layer_attention_mask = move_to_device(attention_masks[j], cur_layer_device)
+                mask = attention_masks[j]
+                layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+
                 additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                layer_position_ids = None if not position_ids else move_to_device(position_ids[j], cur_layer_device)
+                layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
                 if layer_position_ids is not None:
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
                     additional_layer_inputs[k] = nested_move_to_device(v, cur_layer_device)
-                layer_output = move_to_device(
+                layer_output = move_to(
                     layer(*layer_input, **additional_layer_inputs)[0],
                     cur_layer_device if calibration_enable_gpu_cache else CPU,
                 )
                 layer_outputs.append([layer_output])
 
-            layers[i] = move_to_device(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+            layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
             del layer
             del gptq
             del layer_inputs
