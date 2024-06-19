@@ -70,9 +70,9 @@ GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDI
 
 GPTQModel is available for Linux only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
 
-| CUDA version | Installation                                                                                      | Built against PyTorch |
-|-------------------|---------------------------------------------------------------------------------------------------|-----------------------|
-| CUDA 12.1         | `pip install gptq-model --no-build-isolation`                                                                            | 2.3.1+cu121           |
+|  CUDA version | Installation                                   | Built against PyTorch |
+|---------------|------------------------------------------------|-----------------------|
+| CUDA 12.1     | `pip install gptq-model --no-build-isolation`  | 2.3.1+cu121           |
 
 
 GPTQModel does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
