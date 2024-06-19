@@ -38,11 +38,11 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device):
     return obj
 
 
-def nested_move_to_device(v, device):
+def nested_move_to(v, device):
     if isinstance(v, torch.Tensor):
         return move_to(v, device)
     elif isinstance(v, (list, tuple)):
-        return type(v)([nested_move_to_device(e, device) for e in v])
+        return type(v)([nested_move_to(e, device) for e in v])
     else:
         return v
 

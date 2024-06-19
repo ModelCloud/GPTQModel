@@ -18,8 +18,7 @@ from transformers.utils.hub import PushToHubMixin
 
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
-                                   META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST,
-                                   BaseQuantizeConfig)
+                                   META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.data import collate_data
 from ..utils.importer import dynamically_import_QuantLinear
 from ..utils.marlin import (_validate_marlin_compatibility,
@@ -27,9 +26,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 from ._utils import (auto_dtype_from_config, autogptq_next_post_init, convert_gptq_v1_to_v2_format,
-                     convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
-                     get_module_by_name_prefix, get_module_by_name_suffix, make_quant, move_to,
-                     nested_move_to_device, pack_model, simple_dispatch_model)
+                     convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
+                     get_module_by_name_suffix, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model)
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -224,7 +222,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 v,
             ) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to_device(v, data_device)
+                    one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
             raise ValueError
 
@@ -322,7 +320,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                     if layer_position_ids is not None:
                         additional_layer_inputs["position_ids"] = layer_position_ids
                     for k, v in layer_input_kwargs[j].items():
-                        additional_layer_inputs[k] = nested_move_to_device(v, cur_layer_device)
+                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
                     layer(*layer_input, **additional_layer_inputs)
                 for h in handles:
                     h.remove()
@@ -373,7 +371,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 if layer_position_ids is not None:
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
-                    additional_layer_inputs[k] = nested_move_to_device(v, cur_layer_device)
+                    additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
                 layer_output = move_to(
                     layer(*layer_input, **additional_layer_inputs)[0],
                     cur_layer_device if calibration_enable_gpu_cache else CPU,
