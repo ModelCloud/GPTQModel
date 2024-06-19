@@ -61,8 +61,8 @@ class TestPerplexity(unittest.TestCase):
     def get_wikitext2_data(self, n_samples=1024):
         from datasets import load_dataset
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-        # avoid using very short rows for calibration, min 128 chars
-        traindata = traindata.filter(lambda x: len(x['text']) >= 128)
+        # avoid using very short rows for calibration, min 512 chars
+        traindata = traindata.filter(lambda x: len(x['text']) >= 512)
 
         ds = traindata
 
