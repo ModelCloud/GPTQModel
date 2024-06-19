@@ -17,7 +17,7 @@ from transformers.utils.hub import cached_file
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
-from .importer import dynamically_import_QuantLinear
+from .importer import select_quant_linear
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -109,7 +109,7 @@ def make_quant(
     use_cuda_fp16: bool = True,
     desc_act: bool = False,
 ):
-    QuantLinear = dynamically_import_QuantLinear(
+    QuantLinear = select_quant_linear(
         use_triton=use_triton,
         desc_act=desc_act,
         group_size=group_size,
@@ -238,7 +238,7 @@ def pack_model(
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
 ):
-    QuantLinear = dynamically_import_QuantLinear(
+    QuantLinear = select_quant_linear(
         use_triton=use_triton,
         desc_act=desc_act,
         group_size=group_size,

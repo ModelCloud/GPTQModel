@@ -103,6 +103,8 @@ class TestPerplexity(unittest.TestCase):
                 tmp_dir,
             )
 
+            del model
+
             model = GPTQModel.from_quantized(
                 tmp_dir,
                 device_map="auto",

@@ -3,7 +3,8 @@ from logging import getLogger
 logger = getLogger(__name__)
 
 
-def dynamically_import_QuantLinear(
+# auto select the correct/optimal QuantLinear class
+def select_quant_linear(
     use_triton: bool,
     desc_act: bool,
     group_size: int,

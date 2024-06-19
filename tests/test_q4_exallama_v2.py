@@ -2,7 +2,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
-from gptqmodel.utils.importer import dynamically_import_QuantLinear  # noqa: E402
+from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from test_q4_exallama import CUDA_OLD_REFERENCE
 
 try:
@@ -25,7 +25,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         n = 1024
         device = torch.device("cuda:0")
 
-        linear_class = dynamically_import_QuantLinear(use_triton=False, desc_act=False, group_size=group_size, bits=4)
+        linear_class = select_quant_linear(use_triton=False, desc_act=False, group_size=group_size, bits=4)
 
         linear = linear_class(
             bits=4,
