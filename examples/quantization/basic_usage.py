@@ -33,13 +33,13 @@ def main():
     # or pass explcit token with: use_auth_token="hf_xxxxxxx"
     # (uncomment the following three lines to enable this feature)
     # repo_id = f"YourUserName/{quantized_model_dir}"
-    # commit_message = f"AutoGPTQ model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
+    # commit_message = f"GPTQModel model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
     # model.push_to_hub(repo_id, commit_message=commit_message, use_auth_token=True)
 
     # alternatively you can save and push at the same time
     # (uncomment the following three lines to enable this feature)
     # repo_id = f"YourUserName/{quantized_model_dir}"
-    # commit_message = f"AutoGPTQ model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
+    # commit_message = f"GPTQModel model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
     # model.push_to_hub(repo_id, save_dir=quantized_model_dir, use_safetensors=True, commit_message=commit_message, use_auth_token=True)
 
     # save quantized model using safetensors
