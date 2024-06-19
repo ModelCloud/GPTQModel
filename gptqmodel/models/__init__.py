@@ -1,6 +1,6 @@
-from .base import BaseGPTQModel
 from .auto import MODEL_MAP, GPTQModel
 from .baichuan import BaiChuanGPTQ
+from .base import BaseGPTQModel
 from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
 from .codegen import CodeGenGPTQ

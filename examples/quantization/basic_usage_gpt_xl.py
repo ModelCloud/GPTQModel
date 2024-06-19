@@ -2,8 +2,8 @@ import random
 
 import numpy as np
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig
 from datasets import load_dataset
+from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import TextGenerationPipeline
 
 pretrained_model_dir = "gpt2-xl"

@@ -23,11 +23,12 @@ from ..utils.data import collate_data
 from ..utils.importer import dynamically_import_QuantLinear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
+                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
+                           get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
+                           nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
-from ..utils.model import (auto_dtype_from_config, gptqmodel_post_init, convert_gptq_v1_to_v2_format,
-                     convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                     get_module_by_name_suffix, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model)
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -670,10 +671,19 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         trust_remote_code: bool = False,
         warmup_triton: bool = False,
         disable_exllama: bool = False,
+        disable_exllamav2: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
         **kwargs,
     ):
+        """load quantized model from local disk"""
+        # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
+        if disable_exllama is None:
+            if disable_exllamav2:
+                disable_exllama = False
+            else:
+                disable_exllama = True
+
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
         force_download = kwargs.pop("force_download", False)
@@ -697,6 +707,12 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             "_raise_exceptions_for_missing_entries": False,
             "_commit_hash": commit_hash,
         }
+
+        if not disable_exllamav2 and not disable_exllama:
+            logger.warning(
+                "You have activated both exllama and exllamav2 kernel. Setting disable_exllama to True and keeping disable_exllamav2 to False"
+            )
+            disable_exllama = True
 
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
@@ -822,6 +838,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 quantize_config.group_size,
                 use_triton=use_triton,
                 disable_exllama=disable_exllama,
+                disable_exllamav2=disable_exllamav2,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
                 use_marlin=quantize_config.format == FORMAT.MARLIN,
@@ -893,6 +910,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 group_size=quantize_config.group_size,
                 bits=quantize_config.bits,
                 disable_exllama=disable_exllama,
+                disable_exllamav2=disable_exllamav2,
                 use_marlin=False,
             )
 
@@ -927,6 +945,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             group_size=quantize_config.group_size,
             bits=quantize_config.bits,
             disable_exllama=disable_exllama,
+            disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
         )
 
