@@ -31,6 +31,7 @@ class TestPerplexity(unittest.TestCase):
 
         all = ppl.calculate(n_ctx=self.N_CTX, n_batch=self.N_BATCH)
 
+        # calculate average perplexity
         avg = sum(all) / len(all)
 
         return avg
@@ -50,10 +51,10 @@ class TestPerplexity(unittest.TestCase):
 
         native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
-        print(f"Native PPL: {self.native_ppl}")
+        print(f"Native PPL: {native_ppl}")
 
         # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
-        assert self.native_ppl < 8.5
+        assert native_ppl < 8.5
 
         return native_ppl
 
@@ -114,4 +115,5 @@ class TestPerplexity(unittest.TestCase):
 
             print(f"Format {format}, Quantized PPL: {quantized_ppl}")
 
+            # after quantization, the perplexity should not increase by more than 1.0
             assert quantized_ppl - self.native_ppl < 1.0
