@@ -5,7 +5,9 @@ from transformers import AutoTokenizer
 from auto_gptq_next.utils import Perplexity
 
 class TestPerplexity(unittest.TestCase):
-    MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    QUANTIZED_MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     DATASET_PATH = "wikitext"
     DATASET_NAME = "wikitext-2-raw-v1"
@@ -37,16 +39,18 @@ class TestPerplexity(unittest.TestCase):
             self.DATASET_COLUMN,
         )
 
-        ppl.calculate_perplexity(self.N_CTX, self.N_BATCH)
+        all_perplexity = ppl.calculate_perplexity(self.N_CTX, self.N_BATCH)
 
-    def test_quantized_model_perplexity(self):
+        avg_perplexity = sum(all_perplexity) / len(all_perplexity)
+
+        assert avg_perplexity < 9
+
+    def test_quantized_gptq_format_model_perplexity(self):
         from auto_gptq_next import AutoGPTQNext
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True)
 
-        #TODO: quantize model
-
         quantized_model = AutoGPTQNext.from_quantized(
-            self.MODEL_ID,
+            self.QUANTIZED_MODEL_ID,
             device_map="auto",
             use_safetensors=True,
             disable_exllama=False,
@@ -61,4 +65,8 @@ class TestPerplexity(unittest.TestCase):
             self.DATASET_COLUMN,
         )
 
-        ppl.calculate_perplexity(self.N_CTX, self.N_BATCH)
+        all_perplexity = ppl.calculate_perplexity(self.N_CTX, self.N_BATCH)
+
+        avg_perplexity = sum(all_perplexity) / len(all_perplexity)
+
+        assert avg_perplexity < 9
