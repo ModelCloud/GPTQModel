@@ -7,7 +7,7 @@ quantized_model_dir = "opt-125m-4bit-128g"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
-    examples = [
+    calibration_dataset = [
         tokenizer(
             "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
         )
@@ -22,8 +22,8 @@ def main():
     # load un-quantized model, by default, the model will always be loaded into CPU memory
     model = AutoGPTQNext.from_pretrained(pretrained_model_dir, quantize_config)
 
-    # quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
-    model.quantize(examples)
+    # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
+    model.quantize(calibration_dataset)
 
     # save quantized model
     model.save_quantized(quantized_model_dir)

@@ -109,4 +109,4 @@ if __name__ == "__main__":
         args.split,
         args.text_column,
     )
-    ppl.calculate_perplexity(args.n_ctx, args.n_batch)
+    ppl.calculate(args.n_ctx, args.n_batch)

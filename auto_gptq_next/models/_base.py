@@ -17,17 +17,17 @@ from transformers.utils.generic import ContextManagers
 from transformers.utils.hub import PushToHubMixin
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_AUTOGPTQ,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, BaseQuantizeConfig)
-from ..utils.data_utils import collate_data
-from ..utils.import_utils import dynamically_import_QuantLinear
-from ..utils.marlin_utils import (_validate_marlin_compatibility,
-                                  _validate_marlin_device_support, prepare_model_for_marlin_load)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
+                                   META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+from ..utils.data import collate_data
+from ..utils.importer import dynamically_import_QuantLinear
+from ..utils.marlin import (_validate_marlin_compatibility,
+                            _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 from ._utils import (auto_dtype_from_config, autogptq_next_post_init, convert_gptq_v1_to_v2_format,
                      convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                     get_module_by_name_suffix, make_quant, move_to_device, pack_model, simple_dispatch_model)
+                     get_module_by_name_suffix, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model)
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -38,13 +38,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-def nested_move_to_device(v, device):
-    if isinstance(v, torch.Tensor):
-        return move_to_device(v, device)
-    elif isinstance(v, (list, tuple)):
-        return type(v)([nested_move_to_device(e, device) for e in v])
-    else:
-        return v
+
 
 
 class BaseGPTQModel(nn.Module, PushToHubMixin):
@@ -92,9 +86,9 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
     def hf_device_map(self):
         return getattr(self.model, "hf_device_map", None)
 
-    def _prepare_examples_for_quantization(
+    def _prepare_dataset_for_quantization(
         self,
-        examples: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
     ):
         def _convert_tensor_to_list(tensor):
@@ -105,8 +99,8 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 return tensor.cpu().numpy().tolist()
             return [tensor]
 
-        new_examples = []
-        for example in examples:
+        new_calibration_dataset = []
+        for example in calibration_dataset:
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
             if "labels" in example:
@@ -117,7 +111,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 labels = _convert_tensor_to_list(example["label_ids"])
             else:
                 labels = copy.deepcopy(input_ids)
-            new_examples.append(
+            new_calibration_dataset.append(
                 {
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
@@ -128,24 +122,24 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         if not pad_token_id:
             pad_token_id = self.config.eos_token_id
 
-        new_examples = [
-            collate_data(new_examples[start : start + batch_size], pad_token_id)
-            for start in range(0, len(new_examples), batch_size)
+        new_calibration_dataset = [
+            collate_data(new_calibration_dataset[start : start + batch_size], pad_token_id)
+            for start in range(0, len(new_calibration_dataset), batch_size)
         ]
-        for new_example in new_examples:
+        for new_example in new_calibration_dataset:
             del new_example["labels"]
 
-        return new_examples
+        return new_calibration_dataset
 
     @torch.inference_mode()
     def quantize(
         self,
-        examples: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         use_triton: bool = False,
         use_cuda_fp16: bool = True,
         autotune_warmup_after_quantized: bool = False,
-        cache_examples_on_gpu: bool = True,
+        calibration_enable_gpu_cache: bool = True,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -158,6 +152,27 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
             raise ValueError("lm_head quantization is currently inference only and not applicable for quantization. Please set `lm_head=False`.")
+
+        if len(calibration_dataset) == 0:
+            raise ValueError("Calibration dataset must not be empty.")
+
+        MIN_CALIBRATION_DATASET_SIZE = 256
+        MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH = 256
+
+        if len(calibration_dataset) < MIN_CALIBRATION_DATASET_SIZE:
+            logger.warning(f"Calibration dataset size should be greater than {MIN_CALIBRATION_DATASET_SIZE}. "
+                             f"Current size: {len(calibration_dataset)}.")
+
+        # Calculate the average length of the average input_ids
+        total_input_ids_length = 0
+        for e in calibration_dataset:
+            input_ids_length = len(e["input_ids"])
+            total_input_ids_length += input_ids_length
+        avg = total_input_ids_length / len(calibration_dataset)
+
+        if avg < MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH:
+            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
+                             f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
@@ -174,22 +189,22 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         layer_input_kwargs = []
         layer_outputs = []
 
-        examples = self._prepare_examples_for_quantization(examples, batch_size)
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
 
         forward_pass_use_cache = self.model.config.use_cache
         self.model.config.use_cache = False
 
-        num_batches = len(examples)
+        num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
         cur_layer_device = get_device(layers[0])
-        data_device = cur_layer_device if cache_examples_on_gpu else CPU
+        data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         def store_input_hook(_, args, kwargs):
             # Positional arguments.
             layer_input = []
             for inp in args:
-                layer_input.append(move_to_device(inp, data_device))
+                layer_input.append(move_to(inp, data_device))
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
@@ -200,14 +215,14 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to_device(pos_ids, data_device))
+                position_ids.append(move_to(pos_ids, data_device))
             one_kwargs = {}
             for (
                 k,
                 v,
             ) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to_device(v, data_device)
+                    one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
             raise ValueError
 
@@ -225,26 +240,26 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
             ori_outside_layer_module_devices[module_name] = get_device(module)
             if module is not None:
-                move_to_device(module, cur_layer_device)
+                move_to(module, cur_layer_device)
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        for example in examples:
+        for example in calibration_dataset:
             for k, v in example.items():
                 if len(v.shape) == 1:
                     v = v.unsqueeze(0)
-                example[k] = move_to_device(v, cur_layer_device)
+                example[k] = move_to(v, cur_layer_device)
             try:
                 self.model(**example)
             except ValueError:
                 pass
         handle.remove()
 
-        move_to_device(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
+        move_to(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
         for module_name in self.non_layer_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
-                move_to_device(module, ori_outside_layer_module_devices[module_name])
+                move_to(module, ori_outside_layer_module_devices[module_name])
 
         torch.cuda.empty_cache()
 
@@ -263,7 +278,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             layer = layers[i]
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU:
-                move_to_device(layer, CUDA_0)
+                move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
 
@@ -293,17 +308,19 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
-                        layer_input.append(move_to_device(layer_inp, cur_layer_device))
+                        layer_input.append(move_to(layer_inp, cur_layer_device))
 
-                    layer_attention_mask = move_to_device(attention_masks[j], cur_layer_device)
+                    mask = attention_masks[j]
+                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+
                     additional_layer_inputs = {"attention_mask": layer_attention_mask}
                     layer_position_ids = (
-                        None if not position_ids else move_to_device(position_ids[j], cur_layer_device)
+                        None if not position_ids else move_to(position_ids[j], cur_layer_device)
                     )
                     if layer_position_ids is not None:
                         additional_layer_inputs["position_ids"] = layer_position_ids
                     for k, v in layer_input_kwargs[j].items():
-                        additional_layer_inputs[k] = nested_move_to_device(v, cur_layer_device)
+                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
                     layer(*layer_input, **additional_layer_inputs)
                 for h in handles:
                     h.remove()
@@ -335,31 +352,33 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to_device(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to_device(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to_device(g_idx, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        move_to(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        move_to(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        move_to(g_idx, CPU if force_layer_back_to_cpu else cur_layer_device),
                     )
                     gptq[name].free()
 
             for j in range(num_batches):
                 layer_input = []
                 for k, layer_inp in enumerate(layer_inputs[j]):
-                    layer_input.append(move_to_device(layer_inp, cur_layer_device))
+                    layer_input.append(move_to(layer_inp, cur_layer_device))
 
-                layer_attention_mask = move_to_device(attention_masks[j], cur_layer_device)
+                mask = attention_masks[j]
+                layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+
                 additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                layer_position_ids = None if not position_ids else move_to_device(position_ids[j], cur_layer_device)
+                layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
                 if layer_position_ids is not None:
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
-                    additional_layer_inputs[k] = nested_move_to_device(v, cur_layer_device)
-                layer_output = move_to_device(
+                    additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+                layer_output = move_to(
                     layer(*layer_input, **additional_layer_inputs)[0],
-                    cur_layer_device if cache_examples_on_gpu else CPU,
+                    cur_layer_device if calibration_enable_gpu_cache else CPU,
                 )
                 layer_outputs.append([layer_output])
 
-            layers[i] = move_to_device(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+            layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
             del layer
             del gptq
             del layer_inputs
@@ -424,7 +443,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         self,
         save_dir: str,
         safetensors_metadata: Optional[Dict[str, str]] = None,
-        format: Optional[str] = None,
+        format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
     ):
         """save quantized model and configs to local disk"""
@@ -632,7 +651,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             model.seqlen = 4096
         model.eval()
 
-        return cls(model, False, quantize_config)
+        return cls(model, quantized=False, quantize_config=quantize_config)
 
     @classmethod
     def from_quantized(
@@ -650,20 +669,11 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         warmup_triton: bool = False,
-        disable_exllama: Optional[bool] = None,
-        disable_exllamav2: bool = False,
-        format: Optional[str | FORMAT] = None,
-        allow_unsafe_loading: Optional[bool] = False,
+        disable_exllama: bool = False,
+        format: Optional[FORMAT] = None,
+        allow_unsafe_loading: bool = False,
         **kwargs,
     ):
-        """load quantized model from local disk"""
-        # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
-        if disable_exllama is None:
-            if disable_exllamav2:
-                disable_exllama = False
-            else:
-                disable_exllama = True
-
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
         force_download = kwargs.pop("force_download", False)
@@ -687,12 +697,6 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             "_raise_exceptions_for_missing_entries": False,
             "_commit_hash": commit_hash,
         }
-
-        if not disable_exllamav2 and not disable_exllama:
-            logger.warning(
-                "You have activated both exllama and exllamav2 kernel. Setting disable_exllama to True and keeping disable_exllamav2 to False"
-            )
-            disable_exllama = True
 
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
@@ -818,7 +822,6 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 quantize_config.group_size,
                 use_triton=use_triton,
                 disable_exllama=disable_exllama,
-                disable_exllamav2=disable_exllamav2,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
                 use_marlin=quantize_config.format == FORMAT.MARLIN,
@@ -890,7 +893,6 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                 group_size=quantize_config.group_size,
                 bits=quantize_config.bits,
                 disable_exllama=disable_exllama,
-                disable_exllamav2=disable_exllamav2,
                 use_marlin=False,
             )
 
@@ -925,7 +927,6 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             group_size=quantize_config.group_size,
             bits=quantize_config.bits,
             disable_exllama=disable_exllama,
-            disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
         )
 
@@ -972,8 +973,8 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
         return cls(
             model,
-            True,
-            quantize_config,
+            quantized=True,
+            quantize_config=quantize_config,
             is_triton_backend=use_triton,
             qlinear_kernel=qlinear_kernel,
         )
@@ -993,4 +994,4 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             return getattr(self.model, item)
 
 
-__all__ = ["BaseGPTQModel", "BaseQuantizeConfig", "QuantizeConfig"]
+__all__ = ["BaseGPTQModel"]

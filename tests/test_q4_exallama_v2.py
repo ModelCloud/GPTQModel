@@ -2,7 +2,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from auto_gptq_next.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
-from auto_gptq_next.utils.import_utils import dynamically_import_QuantLinear  # noqa: E402
+from auto_gptq_next.utils.importer import dynamically_import_QuantLinear  # noqa: E402
 from test_q4_exallama import CUDA_OLD_REFERENCE
 
 try:

@@ -93,7 +93,7 @@ class Perplexity:
         e_x = np.exp(logits - np.max(logits))
         return e_x / e_x.sum(axis=0)
 
-    def calculate_perplexity(self, n_ctx=512, n_batch=512):
+    def calculate(self, n_ctx=512, n_batch=512):
         """
         Calculates the perplexity of the language model.
 
