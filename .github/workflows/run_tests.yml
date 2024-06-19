@@ -20,7 +20,6 @@ jobs:
 
       - name: Install local package
         run: |
-          cd GPTQModel
           pip install -vvv --no-build-isolation -e .
 
       - name: Run tests
