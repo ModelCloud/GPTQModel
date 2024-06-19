@@ -16,7 +16,7 @@ jobs:
 
       - name: Apt dpends
         run: |
-          apt install lsb-core -y
+          apt update && apt install lsb-core -y
           
       - name: Setup python
         uses: actions/setup-python@v5
