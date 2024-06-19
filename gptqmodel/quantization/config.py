@@ -70,7 +70,7 @@ class QuantizeConfig(PushToHubMixin):
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
     group_size: int = field(default=-1)
     damp_percent: float = field(default=0.01)
-    desc_act: bool = field(default=True)
+    desc_act: bool = field(default=False)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
