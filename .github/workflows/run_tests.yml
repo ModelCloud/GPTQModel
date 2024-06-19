@@ -16,11 +16,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install parameterized
+          pip install parameterized protobuf
 
       - name: Install local package
         run: |
-          cd AutoGPTQ
+          cd GPTQModel
           pip install -vvv --no-build-isolation -e .
 
       - name: Run tests
