@@ -48,12 +48,14 @@ class TestPerplexity(unittest.TestCase):
             torch_dtype=torch.float16,
         )
 
-        self.native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+        native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
         print(f"Native PPL: {self.native_ppl}")
 
         # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
         assert self.native_ppl < 8.5
+
+        return native_ppl
 
     def get_wikitext2_data(self, n_samples=1024):
         from datasets import load_dataset
