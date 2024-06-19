@@ -14,9 +14,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Print Env
-        run: nvidia-smi
-
       - name: Install dependencies
         run: |
           pip install parameterized protobuf
