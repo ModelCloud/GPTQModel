@@ -14,7 +14,6 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
-from transformers.utils.hub import PushToHubMixin
 
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
@@ -27,6 +26,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
+from ..nn_modules.qliner.qlinear_marlin import QuantLiner as QuantLinearMarlin
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -39,10 +39,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-
-
-
-class BaseGPTQModel(nn.Module, PushToHubMixin):
+class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     non_layer_modules: List[str] = None
@@ -149,6 +146,9 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
+
+        if self.quantize_config.format == FORMAT.MARLIN:
+            _validate_marlin_compatibility(self.quantize_config, throwError=True)
 
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
@@ -744,8 +744,8 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         marlin_compatible = _validate_marlin_device_support()
 
         if not use_marlin:
-            unsupported_reason = _validate_marlin_compatibility(quantize_config)
-            if unsupported_reason is None and marlin_compatible:
+            unsupported = _validate_marlin_compatibility(quantize_config)
+            if unsupported is None and marlin_compatible:
                 logger.info(
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
                 )
@@ -896,28 +896,13 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             # Validate the model can run in Marlin.
             if torch_dtype != torch.float16:
                 raise ValueError("Marlin kernel requires torch_dtype=torch.float16.")
-            unsupported_reason = _validate_marlin_compatibility(quantize_config)
-            if unsupported_reason is not None:
-                raise ValueError(
-                    f"The model {model_name_or_path} can not be converted to use the Marlin kernel for the following reason: {unsupported_reason}, which is not supported by Marlin kernel."
-                )
 
-            # Load the quant linear type we need.
-            # TODO: load marlin directly with the right quantlinear class.
-            quant_linear_class = dynamically_import_QuantLinear(
-                use_triton=use_triton,
-                desc_act=quantize_config.desc_act,
-                group_size=quantize_config.group_size,
-                bits=quantize_config.bits,
-                disable_exllama=disable_exllama,
-                disable_exllamav2=disable_exllamav2,
-                use_marlin=False,
-            )
+            _validate_marlin_compatibility(quantize_config, throwError=True)
+
+            quant_linear_class = QuantLinearMarlin
 
             # Prepare model for marlin load.
-            #   If stub is marlin serialized         --> load from directly
-            #   If stub has cached marlin version   --> load from the cached version
-            #   Otherwise                           --> convert to marlin, cache, load from cache
+            # If is marlin serialized load then load directly. Otherwise convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,

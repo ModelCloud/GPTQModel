@@ -77,16 +77,21 @@ def _validate_marlin_device_support() -> bool:
 
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion
-def _validate_marlin_compatibility(cfg: QuantizeConfig):
+def _validate_marlin_compatibility(cfg: QuantizeConfig, throwError: bool = False):
+    err = None
     if cfg.bits != 4:
-        return f"The quantized model uses a bitwidth different than 4 (found {cfg.bits})"
+        err = f"Marlin only supports 4bit quantization: actual = `{cfg.bits}`."
     if cfg.group_size != 128 and cfg.group_size != -1:
-        return "The quantized model uses a group size that is not 128 or -1 (found quantization_config.group_size)"
+        err = f"Marlin only supports group size of 128 or -1: actual = `{cfg.group_size}`."
     if not cfg.sym:
-        return "The quantized model uses asymmetric quantization"
+        err = "Marlin does not support symmetric quantization: `sym=False`."
     if cfg.desc_act:
-        return "The quantized model uses act-order (also called desc-act) scheme"
-    return None
+        err = "Marlin does not support act-order: `desc-act=True`."
+
+    if throwError and err is not None:
+        raise ValueError(err)
+
+    return err
 
 
 @torch.no_grad()
