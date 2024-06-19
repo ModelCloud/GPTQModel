@@ -7,6 +7,7 @@ import torch.nn as nn
 import transformers
 
 from ..triton_utils.mixin import TritonModuleMixin
+from . import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -31,7 +32,7 @@ except ImportError as e:
     QuantLinearInferenceOnlyFunction = FakeTriton
 
 
-class QuantLinear(nn.Module, TritonModuleMixin):
+class QuantLinear(BaseQuantLinear, TritonModuleMixin):
     """
     Triton v2 quantized linear layer.
 
