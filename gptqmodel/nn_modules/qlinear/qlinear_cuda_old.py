@@ -6,18 +6,10 @@ import torch
 import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+import gptqmodel_cuda_64
+import gptqmodel_cuda_256
 
 logger = getLogger(__name__)
-try:
-    import gptqmodel_cuda_64
-    import gptqmodel_cuda_256
-
-    _gptqmodel_cuda_available = True
-except ImportError:
-    logger.warning("CUDA extension not installed.")
-    gptqmodel_cuda_256 = None
-    gptqmodel_cuda_64 = None
-    _gptqmodel_cuda_available = False
 
 
 class QuantLinear(BaseQuantLinear):
