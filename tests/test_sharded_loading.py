@@ -1,6 +1,6 @@
 import unittest
 
-from auto_gptq_next import AutoGPTQNext
+from gptqmodel import GPTQModel
 from transformers import AutoTokenizer
 
 
@@ -10,7 +10,7 @@ class TestShardedLoading(unittest.TestCase):
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
-        model = AutoGPTQNext.from_quantized(
+        model = GPTQModel.from_quantized(
             model_name,
             device="cuda:0",
         )
@@ -23,7 +23,7 @@ class TestShardedLoading(unittest.TestCase):
     def test_loading_large(self):
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-7B-Chat-GPTQ-Int4")
 
-        model = AutoGPTQNext.from_quantized("Qwen/Qwen1.5-7B-Chat-GPTQ-Int4", device="cuda:0")
+        model = GPTQModel.from_quantized("Qwen/Qwen1.5-7B-Chat-GPTQ-Int4", device="cuda:0")
 
         tokens = model.generate(
             **tokenizer("Today I am in Paris and", return_tensors="pt").to(model.device), max_new_tokens=20

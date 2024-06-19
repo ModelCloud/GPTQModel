@@ -1,11 +1,11 @@
-<h1 align="center">AutoGPTQ-NEXT</h1>
+<h1 align="center">GPTQModel</h1>
 <p align="center">An easy-to-use LLM quantization and inference toolkit based on GPTQ algorithm (weight-only quantization).</p>
 <p align="center">
-    <a href="https://github.com/Qubitium/AutoGPTQ/releases">
-        <img alt="GitHub release" src="https://img.shields.io/github/release/Qubitium/AutoGPTQ.svg">
+    <a href="https://github.com/Qubitium/GPTQModel/releases">
+        <img alt="GitHub release" src="https://img.shields.io/github/release/Qubitium/GPTQModel.svg">
     </a>
-    <a href="https://pypi.org/project/auto-gptq/">
-        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/auto-gptq-next">
+    <a href="https://pypi.org/project/model-gptq/">
+        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptq-model">
     </a>
 </p>
 
@@ -13,13 +13,13 @@
 
 - 2024-06-XX - (News)   🤗 PENDING
 
-## How is AutoGPTQ-NEXT different from AutoGPTQ?
+## How is GPTQModel different from AutoGPTQ?
 
-AutoGPTQ-NEXT is an opinionated fork/refractor of AugtoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
 
 ## Mission Statement
 
-We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
+We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
 ## Major Changes vs AutoGPTQ
 
@@ -31,7 +31,7 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * Alert users of sub-optimal calibration data. Almost all new-users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed Packing Performance regression on high core-count systems.
-* Thousands of lines of refractor/cleanup.
+* Thousands of lines of refactor/cleanup.
 * Debloated 271K lines of which 250K was caused by a single dataset used only by an example. Move dataset to HF.
 * Debloat the number of args presented in public .from_quantized()/.from_pretrained() api
 * Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
@@ -40,10 +40,10 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 ## Roadmap (Target Date: July 2024):
 
 * DBRX support.
-* `lm_head` quantization support by integrating with Intel/Autoround.
+* `lm_head` quantization support by integrating with Intel/AutoRound.
 * Customizable callback in Per-Layer quantization.
 * Add Qbits (cpu inference) support from Intel/Qbits.
-* Add back ROCM/AMD support once verything is validated.
+* Add back ROCM/AMD support once everything is validated.
 * Store quant loss stat and apply diffs to new quant for quality control.
 * Add CI workflow for PRs.
 * Add Tests for every single supported model.
@@ -64,24 +64,24 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 
 
 ## Platform Support
-AutoGPTQ-NEXT is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a furture version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
+GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
 
 ## Install
 
-AutoGPTQ-NEXT is available for Linux only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
+GPTQModel is available for Linux only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
 
-| CUDA version | Installation                                                                                      | Built against PyTorch |
-|-------------------|---------------------------------------------------------------------------------------------------|-----------------------|
-| CUDA 12.1         | `pip install auto-gptq-next --no-build-isolation`                                                                            | 2.3.1+cu121           |
+|  CUDA version | Installation                                   | Built against PyTorch |
+|---------------|------------------------------------------------|-----------------------|
+| CUDA 12.1     | `pip install gptq-model --no-build-isolation`  | 2.3.1+cu121           |
 
 
-AutoGPTQ-NEXT does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
+GPTQModel does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
 
 ### Install from source
 
 Clone repo:
 ```bash
-git clone https://github.com/Qubitium/AutoGPTQ-NEXT.git && cd AutoGPTQ-NEXT
+git clone https://github.com/Qubitium/GPTQModel.git && cd GPTQModel
 ```
 
 Compile:
@@ -91,13 +91,13 @@ pip install -vvv --no-build-isolation -e .
 
 ### Quantization and Inference
 
-> warning: this is just a showcase of the usage of basic apis in AutoGPTQ-NEXT, which uses only one sample to quantize a much small model, quality of quantized model using such little samples may not good.
+> warning: this is just a showcase of the usage of basic apis in GPTQModel, which uses only one sample to quantize a much small model, quality of quantized model using such little samples may not good.
 
-Below is an example for the simplest use of `auto_gptq_next` to quantize a model and inference after quantization:
+Below is an example for the simplest use of `gptqmodel` to quantize a model and inference after quantization:
 
 ```py
 from transformers import AutoTokenizer
-from auto_gptq_next import AutoGPTQNext, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig
 
 pretrained_model_dir = "facebook/opt-125m"
 quant_output_dir = "opt-125m-4bit"
@@ -115,7 +115,7 @@ quant_config = QuantizeConfig(
 )
 
 # load un-quantized model, by default, the model will always be loaded into CPU memory
-model = AutoGPTQNext.from_pretrained(pretrained_model_dir, quant_config)
+model = GPTQModel.from_pretrained(pretrained_model_dir, quant_config)
 
 # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
 model.quantize(calibration_dataset)
@@ -124,28 +124,28 @@ model.quantize(calibration_dataset)
 model.save_quantized(quant_output_dir)
 
 # load quantized model to the first GPU
-model = AutoGPTQNext.from_quantized(quant_output_dir, device="cuda:0")
+model = GPTQModel.from_quantized(quant_output_dir, device="cuda:0")
 
 # download quantized model from Hugging Face Hub and load to the first GPU
-# model = AutoGPTQForCausalLM.from_quantized(repo_id, device="cuda:0")
+# model = GPTQModel.from_quantized(repo_id, device="cuda:0")
 
 # inference with model.generate
-print(tokenizer.decode(model.generate(**tokenizer("auto_gptq_next is", return_tensors="pt").to(model.device))[0]))
+print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
 
 # or you can also use pipeline
 # pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-# print(pipeline("auto-gptq is")[0]["generated_text"])
+# print(pipeline("GPTQ is")[0]["generated_text"])
 ```
 
 For more advanced features of model quantization, please reference to [this script](examples/quantization/quant_with_alpaca.py)
 
 ### How to Add Support for a New Model
 
-Read the `auto_gptq_next/models/llama.py` code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
+Read the `gptqmodel/models/llama.py` code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
 
 ### Evaluation on Downstream Tasks
 
-You can use tasks defined in `auto_gptq_next.eval_tasks` to evaluate model's performance on specific down-stream task before and after quantization.
+You can use tasks defined in `gptqmodel.eval_tasks` to evaluate model's performance on specific down-stream task before and after quantization.
 
 The predefined tasks support all causal-language-models implemented in [🤗 transformers](https://github.com/huggingface/transformers) and in this project.
 
@@ -158,8 +158,8 @@ from functools import partial
 
 import datasets
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-from auto_gptq_next import AutoGPTQNext, QuantizeConfig
-from auto_gptq_next.eval_tasks import SequenceClassificationTask
+from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel.eval_tasks import SequenceClassificationTask
 
 MODEL = "EleutherAI/gpt-j-6b"
 DATASET = "cardiffnlp/tweet_sentiment_multilingual"
@@ -186,7 +186,7 @@ def ds_refactor_fn(samples):
 
 
 #  model = AutoModelForCausalLM.from_pretrained(MODEL).eval().half().to("cuda:0")
-model = AutoGPTQNext.from_pretrained(MODEL, QuantizeConfig())
+model = GPTQModel.from_pretrained(MODEL, QuantizeConfig())
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 task = SequenceClassificationTask(
@@ -230,17 +230,17 @@ print(
 
 ## Learn More
 
-[tutorials](docs/tutorial) provide step-by-step guidance to integrate `auto_gptq_next` with your own project and some best practice principles.
+[tutorials](docs/tutorial) provide step-by-step guidance to integrate `gptqmodel` with your own project and some best practice principles.
 
-[examples](examples/README.md) provide plenty of example scripts to use `auto_gptq_next` in different ways.
+[examples](examples/README.md) provide plenty of example scripts to use `gptqmodel` in different ways.
 
 ## Supported Evaluation Tasks
 
-Currently, `auto_gptq_next` supports: `LanguageModelingTask`, `SequenceClassificationTask` and `TextSummarizationTask`; more Tasks will come soon!
+Currently, `gptqmodel` supports: `LanguageModelingTask`, `SequenceClassificationTask` and `TextSummarizationTask`; more Tasks will come soon!
 
 ### Which kernel is used by default?
 
-AutoGPTQ-NEXT will use Marlin, Exllama v2, Triton/CUDA kernels in that order for maximum inference performance.
+GPTQModel will use Marlin, Exllama v2, Triton/CUDA kernels in that order for maximum inference performance.
 
 ## Acknowledgement
 

@@ -1,7 +1,7 @@
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from auto_gptq_next.utils.importer import dynamically_import_QuantLinear  # noqa: E402
+from gptqmodel.utils.importer import dynamically_import_QuantLinear  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 try:
@@ -9,7 +9,7 @@ try:
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
-from auto_gptq_next import AutoGPTQNext  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
@@ -557,6 +557,7 @@ class TestsQ4CUDA(unittest.TestCase):
             group_size=group_size,
             bits=4,
             disable_exllama=True,
+            disable_exllamav2=True,
         )
 
         weight_dtype = torch.float16 if use_half2 else torch.float32
@@ -575,7 +576,7 @@ class TestsQ4CUDA(unittest.TestCase):
         linear.scales = linear.scales + 0.002
         linear.qzeros += 0b00010001000100010001000100010001  # for new weight format
         linear.use_cuda_fp16 = use_half2
-        self.assertTrue(linear.autogptq_next_cuda_available)
+        self.assertTrue(linear.gptqmodel_cuda_available)
 
         # We cast twice just for the seed.
         inp = torch.rand(1, m, k, dtype=torch.float16).to(device).to(weight_dtype)
@@ -616,13 +617,14 @@ class TestsQ4CUDA(unittest.TestCase):
         revision = "actorder"
         model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
 
-        model_q = AutoGPTQNext.from_quantized(
+        model_q = GPTQModel.from_quantized(
             model_id,
             revision=revision,
             device=device,
             use_triton=False,
             model_basename=model_basename,
             disable_exllama=True,
+            disable_exllamav2=True,
             torch_dtype=torch_dtype,
         )
 
@@ -661,11 +663,12 @@ class TestsQ4CUDA(unittest.TestCase):
 
         model_id = "TheBloke/WizardLM-7B-uncensored-GPTQ"
 
-        model_q = AutoGPTQNext.from_quantized(
+        model_q = GPTQModel.from_quantized(
             model_id,
             device=device,
             use_triton=False,
             disable_exllama=True,
+            disable_exllamav2=True,
             torch_dtype=torch_dtype,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)

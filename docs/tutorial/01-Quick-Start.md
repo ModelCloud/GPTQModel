@@ -35,10 +35,10 @@ set BUILD_CUDA_EXT=0 && pip install auto-gptq
 ## Basic Usage
 *The full script of basic usage demonstrated here is `examples/quantization/basic_usage.py`*
 
-The two main classes currently used in AutoGPTQ are `AutoGPTQForCausalLM` and `QuantizeConfig`.
+The two main classes currently used in AutoGPTQ are `GPTQModel` and `QuantizeConfig`.
 
 ```python
-from auto_gptq_next import AutoGPTQNext, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig
 ```
 ### Quantize a pretrained model
 To quantize a model, you need to load pretrained model and tokenizer first, for example:
@@ -47,7 +47,7 @@ from transformers import AutoTokenizer
 
 pretrained_model_name = "facebook/opt-125m"
 quantize_config = QuantizeConfig(bits=4, group_size=128)
-model = AutoGPTQForCausalLM.from_pretrained(pretrained_model_name, quantize_config)
+model = GPTQModel.from_pretrained(pretrained_model_name, quantize_config)
 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
 ```
 This will download `opt-125m` from 🤗 Hub and cache it to local disk, then load into **CPU memory**.
@@ -79,7 +79,7 @@ Pretrained model's config and the quantize config will also be saved with file n
 Instead of `.from_pretrained`, you should use `.from_quantized` to load a quantized model.
 ```python
 device = "cuda:0"
-model = AutoGPTQForCausalLM.from_quantized(quantized_model_dir, device=device)
+model = GPTQModel.from_quantized(quantized_model_dir, device=device)
 ```
 This will first read and load `quantize_config.json` in `opt-125m-4bit-128g` directory, then based on the values of `bits` and `group_size` in it, load `gptq_model-4bit-128g.bin` model file into the first visible GPU.
 

@@ -1,14 +1,14 @@
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from auto_gptq_next.nn_modules.qlinear.qlinear_tritonv2 import QuantLinear as TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import QuantLinear as TritonV2QuantLinear  # noqa: E402
 
 try:
     from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
-from auto_gptq_next import AutoGPTQNext  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
@@ -21,11 +21,12 @@ class TestsQ4Triton(unittest.TestCase):
 
         model_id = "TheBloke/WizardLM-7B-uncensored-GPTQ"
 
-        model_q = AutoGPTQNext.from_quantized(
+        model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
             use_triton=True,
             disable_exllama=True,
+            disable_exllamav2=True,
             torch_dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
@@ -59,13 +60,14 @@ class TestsQ4Triton(unittest.TestCase):
         revision = "actorder"
         model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
 
-        model_q = AutoGPTQNext.from_quantized(
+        model_q = GPTQModel.from_quantized(
             model_id,
             revision=revision,
             device="cuda:0",
             use_triton=True,
             model_basename=model_basename,
             disable_exllama=True,
+            disable_exllamav2=True,
         )
         for _, submodule in model_q.named_modules():
             if isinstance(submodule, TritonV2QuantLinear):

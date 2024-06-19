@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "auto_gptq_next/**.py"
+      - "gptqmodel/**.py"
       - "tests/**.py"
       - "examples/**.py"
       - "setup.py"
@@ -12,7 +12,7 @@ on:
   pull_request:
     branches: [ main ]
     paths:
-      - "auto_gptq_next/**.py"
+      - "gptqmodel/**.py"
       - "tests/**.py"
       - "examples/**.py"
       - "setup.py"
@@ -44,4 +44,4 @@ jobs:
       - name: Check style with ruff
         run: |
           cd format
-          ruff ../auto_gptq_next ../examples ../tests ../setup.py
+          ruff ../gptqmodel ../examples ../tests ../setup.py
