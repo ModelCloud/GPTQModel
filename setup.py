@@ -9,7 +9,7 @@ os.environ["CXX"] = "g++"
 
 common_setup_kwargs = {
     "version": "0.9.0",
-    "name": "modelgptq",
+    "name": "gptqmodel",
     "author": "Qubitium",
     "description": "An easy-to-use LLMs quantization package with user-friendly apis, based on GPTQ algorithm.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
