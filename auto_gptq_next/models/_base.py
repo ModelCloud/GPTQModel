@@ -449,7 +449,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         self,
         save_dir: str,
         safetensors_metadata: Optional[Dict[str, str]] = None,
-        format: Optional[str] = None,
+        format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
     ):
         """save quantized model and configs to local disk"""
@@ -675,10 +675,10 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         warmup_triton: bool = False,
-        disable_exllama: Optional[bool] = None,
+        disable_exllama: bool = False,
         disable_exllamav2: bool = False,
-        format: Optional[str | FORMAT] = None,
-        allow_unsafe_loading: Optional[bool] = False,
+        format: Optional[FORMAT] = None,
+        allow_unsafe_loading: bool = False,
         **kwargs,
     ):
         """load quantized model from local disk"""
