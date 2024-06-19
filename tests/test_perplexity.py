@@ -53,7 +53,7 @@ class TestPerplexity(unittest.TestCase):
 
         print(f"Native PPL: {self.native_ppl}")
 
-        # use 4090 gpu, wikitext-2-raw-v1, test, text, 512, 512 as reference, example tinyllama ppl is 8.4442
+        # use 4090 gpu, wikitext-2-raw-v1, test, text, 512, 512 as reference, example tinyllama ppl is 8.4790
         assert self.native_ppl < 8.5
 
         return self.native_ppl
