@@ -28,6 +28,7 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * ChatGLM Model Support.
 * Better defaults resulting in faster inference.
 * Better default PPL with tweaked internal code (Result may vary depending on calibration set and gpu usage).
+* Alert users of sub-optimal calibration data. Almost all new-users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed Packing Performance regression on high core-count systems.
 * Thousands of lines of refractor/cleanup.
@@ -43,7 +44,6 @@ We want AutoGPTQ-NEXT to be highy focused on GPTQ based quantization and target 
 * Add Qbits (cpu inference) support from Intel/Qbits.
 * Add back ROCM/AMD support once verything is validated.
 * Store quant loss stat and apply diffs to new quant for quality control.
-* Alert users of non-optimal calibration data. Almost all new-users get this part horribly wrong. 
 * Add CI workflow for PRs.
 * Add Tests for every single supported model.
 
