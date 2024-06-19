@@ -4,7 +4,7 @@ import torch  # noqa: E402
 from gptqmodel import GPTQModel, exllama_set_max_input_length
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
-from gptqmodel.utils.importer import dynamically_import_QuantLinear  # noqa: E402
+from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init
 
 try:
@@ -1054,7 +1054,7 @@ class TestsQ4Exllama(unittest.TestCase):
         n = 1024
         device = torch.device("cuda:0")
 
-        linear_class = dynamically_import_QuantLinear(
+        linear_class = select_quant_linear(
             use_triton=False,
             desc_act=False,
             group_size=group_size,

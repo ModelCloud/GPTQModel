@@ -127,11 +127,11 @@ class QuantizeConfig():
     def meta_get(self, key: str) -> Any:
         return self.meta.get(key)
 
-    # verionable is a meta.property that pairs value with version i.e "value:1.0.0"
+    # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_set_versionable(self, key: str, value: str, version: str):
         self.meta_set(key, f"{value}:{version}")
 
-    # verionable is a meta.property that pairs value with version i.e "value:1.0.0"
+    # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_get_versionable(self, key: str) -> Tuple[str, str]:
         val = self.meta_get(key)
         if val is None:
@@ -141,10 +141,9 @@ class QuantizeConfig():
 
     # is quantized model quantized or packed by autogptq version with v2 format code
     def is_quantized_or_packed_by_v2(self) -> bool:
-        by_v2 = False
         # check meta.quantizer
         producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        by_v2 = producer == META_QUANTIZER_AUTOGPTQ and version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
+        by_v2 = (producer == META_QUANTIZER_AUTOGPTQ) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
 
         # fallback to meta.packer
         if not by_v2:

@@ -20,7 +20,7 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.data import collate_data
-from ..utils.importer import dynamically_import_QuantLinear
+from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
@@ -881,7 +881,7 @@ class BaseGPTQModel(nn.Module):
         if use_marlin:
             if is_sharded:
                 raise ValueError(
-                    "The loading of sharded checkpoints with Marlin is currently not supported. Please raise an issue in AutoGPTQ repository."
+                    "The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
@@ -894,12 +894,24 @@ class BaseGPTQModel(nn.Module):
 
             _validate_marlin_compatibility(quantize_config, throwError=True)
 
+            # Load the quant linear type we need.
+            # TODO: load marlin directly with the right quantlinear class.
+            quant_linear_class = select_quant_linear(
+                use_triton=use_triton,
+                desc_act=quantize_config.desc_act,
+                group_size=quantize_config.group_size,
+                bits=quantize_config.bits,
+                disable_exllama=disable_exllama,
+                disable_exllamav2=disable_exllamav2,
+                use_marlin=False,
+            )
+
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
-                quant_linear_class=QuantLinearMarlin,
+                quant_linear_class=quant_linear_class,
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
                 device_map=device_map,
@@ -917,7 +929,7 @@ class BaseGPTQModel(nn.Module):
         # TODO: Why are we using this custom function and not dispatch_model?
         model = simple_dispatch_model(model, device_map)
 
-        qlinear_kernel = dynamically_import_QuantLinear(
+        qlinear_kernel = select_quant_linear(
             use_triton=use_triton,
             desc_act=quantize_config.desc_act,
             group_size=quantize_config.group_size,
