@@ -1,7 +1,7 @@
 import torch
 import unittest
 import tempfile
-
+import math
 from transformers import AutoTokenizer
 from gptqmodel.utils import Perplexity
 from gptqmodel import GPTQModel
@@ -36,7 +36,7 @@ class TestPerplexity(unittest.TestCase):
 
         return avg
 
-    def calculate_native_ppl(self):
+    def setUp(self):
         from transformers import AutoModelForCausalLM
         self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
 
@@ -53,7 +53,7 @@ class TestPerplexity(unittest.TestCase):
 
         print(f"Native PPL: {native_ppl}")
 
-        # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
+        # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference, example tinyllama ppl is 8.4442
         assert native_ppl < 8.5
 
         return native_ppl
@@ -83,9 +83,6 @@ class TestPerplexity(unittest.TestCase):
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
-        if not hasattr(self, "native_ppl"):
-            self.native_ppl = self.calculate_native_ppl()
-
         cal_data = self.get_wikitext2_data()
 
         quantize_config = QuantizeConfig(
@@ -115,5 +112,6 @@ class TestPerplexity(unittest.TestCase):
 
             print(f"Format {format}, Quantized PPL: {quantized_ppl}")
 
-            # after quantization, the perplexity should not increase by more than 1.0
-            assert quantized_ppl - self.native_ppl < 1.0
+            # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference, FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl is 8.7542
+            # after quantization, the perplexity should not increase by more than 0.5, or be less than native_ppl
+            assert abs(quantized_ppl - self.native_ppl) < 0.5
