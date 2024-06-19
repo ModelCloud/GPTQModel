@@ -4,7 +4,7 @@ import math
 from logging import getLogger
 
 import torch
-import torch.nn as nn
+from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -104,7 +104,7 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
             )
 
 
-class QuantLinear(nn.Module):
+class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllamav2"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""

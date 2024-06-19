@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -20,7 +21,7 @@ except ImportError:
     _autogptq_next_cuda_available = False
 
 
-class QuantLinear(nn.Module):
+class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "cuda"
 
     def __init__(

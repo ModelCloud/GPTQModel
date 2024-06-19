@@ -15,7 +15,7 @@ from logging import getLogger
 
 import numpy as np
 import torch
-import torch.nn as nn
+from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -82,7 +82,7 @@ def _get_perms():
 _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 
-class QuantLinear(nn.Module):
+class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "marlin"
 
     def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):

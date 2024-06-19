@@ -8,7 +8,7 @@ os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
 
 common_setup_kwargs = {
-    "version": "0.9.0.dev0",
+    "version": "0.9.0",
     "name": "auto_gptq_next",
     "author": "Qubitium",
     "description": "An easy-to-use LLMs quantization package with user-friendly apis, based on GPTQ algorithm.",

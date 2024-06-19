@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+from auto_gptq_next.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -43,7 +44,7 @@ def ext_q4_matmul(x, q4, q4_width):
     return output.view(outshape)
 
 
-class QuantLinear(nn.Module):
+class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllama"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""

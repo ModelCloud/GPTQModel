@@ -13,6 +13,7 @@ from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
 from ..utils.importer import dynamically_import_QuantLinear, dynamically_import_QuantLinear_base
 from ..utils.model import recurse_setattr
@@ -327,7 +328,7 @@ def autogptq_next_post_init(model, use_act_order: bool, max_input_length: Option
 
     model_uses_exllama = False
     for name, submodule in model.named_modules():
-        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllama":
+        if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllama":
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -419,7 +420,7 @@ def autogptq_next_post_init(model, use_act_order: bool, max_input_length: Option
 
         # The buffers need to have been initialized first before calling make_q4.
         for name, submodule in model.named_modules():
-            if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllama":
+            if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllama":
                 submodule.post_init()
 
     # exllamav2
@@ -427,7 +428,7 @@ def autogptq_next_post_init(model, use_act_order: bool, max_input_length: Option
     model_uses_exllamav2 = False
 
     for _, submodule in model.named_modules():
-        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllamav2":
+        if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllamav2":
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -444,7 +445,7 @@ def autogptq_next_post_init(model, use_act_order: bool, max_input_length: Option
         model.device_tensors = device_tensors
 
         for _, submodule in model.named_modules():
-            if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "exllamav2":
+            if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllamav2":
                 device = submodule.qweight.device
                 submodule.post_init(temp_dq=model.device_tensors[device])
     torch.cuda.empty_cache()
