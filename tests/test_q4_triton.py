@@ -26,6 +26,7 @@ class TestsQ4Triton(unittest.TestCase):
             device="cuda:0",
             use_triton=True,
             disable_exllama=True,
+            disable_exllamav2=True,
             torch_dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
@@ -66,6 +67,7 @@ class TestsQ4Triton(unittest.TestCase):
             use_triton=True,
             model_basename=model_basename,
             disable_exllama=True,
+            disable_exllamav2=True,
         )
         for _, submodule in model_q.named_modules():
             if isinstance(submodule, TritonV2QuantLinear):

@@ -6,8 +6,8 @@ from itertools import chain
 from typing import Dict, List, Optional
 
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig
 from datasets import Dataset, load_dataset
+from gptqmodel import GPTQModel, QuantizeConfig
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor

@@ -14,10 +14,10 @@ from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
+from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
-from .importer import dynamically_import_QuantLinear, dynamically_import_QuantLinear_base
-from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
+from .importer import dynamically_import_QuantLinear
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -106,6 +106,7 @@ def make_quant(
     use_triton: bool = False,
     use_marlin: bool = False,
     disable_exllama: Optional[bool] = None,
+    disable_exllamav2: bool = None,
     use_cuda_fp16: bool = True,
     desc_act: bool = False,
 ):
@@ -116,6 +117,7 @@ def make_quant(
         bits=bits,
         use_marlin=use_marlin,
         disable_exllama=disable_exllama,
+        disable_exllamav2=disable_exllamav2,
     )
 
     if isinstance(module, QuantLinear):
@@ -237,7 +239,7 @@ def pack_model(
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
 ):
-    QuantLinear = dynamically_import_QuantLinear_base(
+    QuantLinear = dynamically_import_QuantLinear(
         use_triton=use_triton,
         desc_act=desc_act,
         group_size=group_size,
@@ -262,6 +264,7 @@ def pack_model(
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
         disable_exllama=False,
+        disable_exllamav2=True,
         use_marlin=use_marlin,
     )
     qlayers = find_layers(model, [QuantLinear])
