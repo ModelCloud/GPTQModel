@@ -1,12 +1,11 @@
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.utils.model import gptqmodel_post_init
-
 from gptqmodel import GPTQModel, exllama_set_max_input_length
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
 from gptqmodel.utils.importer import dynamically_import_QuantLinear  # noqa: E402
+from gptqmodel.utils.model import gptqmodel_post_init
 
 try:
     from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
