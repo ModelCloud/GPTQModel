@@ -141,7 +141,7 @@ For more advanced features of model quantization, please reference to [this scri
 
 ### How to Add Support for a New Model
 
-Read the `gptqmodel/models/llama.py` code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
+Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
 
 ### Evaluation on Downstream Tasks
 
