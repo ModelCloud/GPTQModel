@@ -11,14 +11,14 @@ jobs:
     container:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
     steps:
-      - name: Checkout code
+      - name: Git Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install pip depends
         run: |
           pip install parameterized protobuf
 
-      - name: Install local package
+      - name: Compile
         run: |
           pip install -vvv --no-build-isolation -e .
 
