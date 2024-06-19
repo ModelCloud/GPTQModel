@@ -14,18 +14,16 @@ jobs:
       - name: Git Checkout
         uses: actions/checkout@v4
 
-      - name: Install pip depends
-        uses: actions/setup-python@v5
+      - name: Setup python
         with:
-          python-version: '3.11.5'
+          python-version: '3.11'
           cache: 'pip' # caching pip dependencies
+          
+      - name: Install pip depends
         run: |
           pip install -U parameterized protobuf pytest ninja
 
       - name: Compile
-        with:
-          python-version: '3.11.5'
-          cache: 'pip' # caching pip dependencies
         run: |
           pip install -v --no-build-isolation .
 
