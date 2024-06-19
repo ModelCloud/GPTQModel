@@ -3,11 +3,12 @@ import unittest
 
 from transformers import AutoTokenizer
 from auto_gptq_next.utils import Perplexity
+from auto_gptq_next import AutoGPTQNext
+from auto_gptq_next.quantization import FORMAT, QuantizeConfig
+from parameterized import parameterized
 
 class TestPerplexity(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-
-    QUANTIZED_MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     DATASET_PATH = "wikitext"
     DATASET_NAME = "wikitext-2-raw-v1"
@@ -17,19 +18,7 @@ class TestPerplexity(unittest.TestCase):
     N_CTX = 512
     N_BATCH = 512
 
-    def test_native_perplexity(self):
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True)
-
-        if not tokenizer.pad_token_id:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-
-        model = AutoModelForCausalLM.from_pretrained(
-            self.MODEL_ID,
-            device_map="auto",
-            torch_dtype=torch.float16,
-        )
-
+    def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
             model,
             tokenizer,
@@ -43,30 +32,56 @@ class TestPerplexity(unittest.TestCase):
 
         avg_perplexity = sum(all_perplexity) / len(all_perplexity)
 
-        assert avg_perplexity < 9
+        # use 4090, wikitext-2-raw-v1, test, text, 512, 512 as reference
+        assert avg_perplexity < 8.5
 
-    def test_quantized_perplexity(self):
-        from auto_gptq_next import AutoGPTQNext
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True)
+        return avg_perplexity
 
-        quantized_model = AutoGPTQNext.from_quantized(
-            self.QUANTIZED_MODEL_ID,
+    def setUp(self):
+        from transformers import AutoModelForCausalLM
+        self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
+
+        if not self.tokenizer.pad_token_id:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        model = AutoModelForCausalLM.from_pretrained(
+            self.NATIVE_MODEL_ID,
             device_map="auto",
-            use_safetensors=True,
-            disable_exllama=False,
+            torch_dtype=torch.float16,
         )
 
-        ppl = Perplexity(
-            quantized_model,
-            tokenizer,
-            self.DATASET_PATH,
-            self.DATASET_NAME,
-            self.DATASET_SPLIT,
-            self.DATASET_COLUMN,
+        self.native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+
+    @parameterized.expand(
+        [
+            (False, True, FORMAT.GPTQ_V2),
+            (False, False, FORMAT.GPTQ),
+            (True, True, FORMAT.MARLIN),
+        ]
+    )
+    def test_quantized_perplexity(self, use_marlin: bool, sym: bool, format: FORMAT):
+        calibration_dataset = [
+            self.tokenizer(
+                "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+            ),
+            self.tokenizer("Today I am in Paris and it is a wonderful day."),
+        ]
+
+        quantize_config = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            desc_act=True,
+            sym=sym,
+            format=format,
         )
 
-        all_perplexity = ppl.calculate_perplexity(self.N_CTX, self.N_BATCH)
+        model = AutoGPTQNext.from_pretrained(
+            self.NATIVE_MODEL_ID,
+            quantize_config=quantize_config,
+        )
 
-        avg_perplexity = sum(all_perplexity) / len(all_perplexity)
+        model.quantize(calibration_dataset)
 
-        assert avg_perplexity < 9
+        quantized_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+
+        assert quantized_ppl - self.native_ppl < 1.0
