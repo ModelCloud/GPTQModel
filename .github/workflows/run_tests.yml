@@ -20,7 +20,7 @@ jobs:
 
       - name: Compile
         run: |
-          pip install -vvv --no-build-isolation -e .
+          pip install -v --no-build-isolation -e .
 
       - name: Run tests
         run: |
