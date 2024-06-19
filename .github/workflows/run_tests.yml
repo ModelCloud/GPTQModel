@@ -14,6 +14,10 @@ jobs:
       - name: Git Checkout
         uses: actions/checkout@v4
 
+      - name: Apt dpends
+        run: |
+          apt install lsb-core -y
+          
       - name: Setup python
         uses: actions/setup-python@v5
         with:
