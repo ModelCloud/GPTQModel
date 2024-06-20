@@ -58,7 +58,7 @@ if BUILD_CUDA_EXT:
     if not PYPI_RELEASE:
         common_setup_kwargs["version"] += f"+cu{CUDA_VERSION}"
 
-# TODO clean unused pkg
+
 with open('requirements.txt') as f:
     requirements = f.read().splitlines()
 

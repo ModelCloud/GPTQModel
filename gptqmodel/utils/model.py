@@ -14,7 +14,7 @@ from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS
+from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
 from .importer import select_quant_linear
@@ -568,3 +568,18 @@ def auto_dtype_from_config(config: PretrainedConfig, quant_inference: bool = Fal
     else:
         # up/down-cast everything else to bfloat16 if not already in bfloat16
         return torch.bfloat16
+
+
+# generate layer modules for moe models with experts
+def get_moe_layer_modules(layer_modules: List, num_experts: int) -> List:
+    new_inside_layer_modules = []
+    for names in layer_modules:
+        new_inside_layer_modules.append([])
+        for n in names:
+            if EXPERT_INDEX_PLACEHOLDER in n:
+                for index in range(num_experts):
+                    new_inside_layer_modules[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+            else:
+                new_inside_layer_modules[-1].append(n)
+
+    return new_inside_layer_modules

@@ -24,8 +24,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
-                           nested_move_to, pack_model, simple_dispatch_model)
+                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+                           move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -53,6 +53,15 @@ class BaseGPTQModel(nn.Module):
     layer_type: str = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
+
+    # some models may only be quantizable under specific gptq property
+    require_true_sequential: Optional[bool] = None
+
+    # TODO: use a better name and what if the value is not at the config root?
+    # allow dynamic expert n-count layer extraction
+    # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
+    # usage: set to property in model.config that holds this int value: total number of experts
+    dynamic_expert_index: Optional[str] = None
 
     def __init__(
         self,
@@ -152,6 +161,10 @@ class BaseGPTQModel(nn.Module):
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
             raise ValueError("lm_head quantization is currently inference only and not applicable for quantization. Please set `lm_head=False`.")
+
+        # TODO: we need to move all the validation into a helper method
+        if self.require_true_sequential is not None and self.quantize_config.true_sequential != self.require_true_sequential:
+            raise ValueError(f"This model requires `true_sequential == {self.require_true_sequential}: actual true_sequential = {self.quantize_config.true_sequential}")
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
@@ -263,9 +276,17 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
-        inside_layer_modules = self.layer_modules
+        layer_modules = self.layer_modules
+
         if not self.quantize_config.true_sequential:
-            inside_layer_modules = [sum(inside_layer_modules, [])]
+            layer_modules = [sum(layer_modules, [])]
+
+            # dynamic expert layer index for model defs
+            if self.dynamic_expert_index is not None:
+                num_experts = getattr(self.model.config, self.dynamic_expert_index)
+                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+                                                      num_experts=num_experts)
+
         quantizers = {}
 
         # stores all per-layer quant stats such as avg loss and processing time
@@ -283,7 +304,7 @@ class BaseGPTQModel(nn.Module):
             cur_layer_device = get_device(layer)
 
             full = find_layers(layer)
-            for names in inside_layer_modules:
+            for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
                 gptq = {}
                 for name in subset:
@@ -813,6 +834,11 @@ class BaseGPTQModel(nn.Module):
             model = AutoModelForCausalLM.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
+
+            if cls.dynamic_expert_index is not None:
+                num_experts = getattr(config, cls.dynamic_expert_index)
+                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
+                                                          num_experts=num_experts)
 
             layers = find_layers(model)
             ignore_layers = [cls.lm_head] + cls.base_modules

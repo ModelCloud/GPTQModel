@@ -35,7 +35,11 @@ SUPPORTED_MODELS = [
     "starcoder2",
     "cohere",
     "minicpm",
+    "qwen2_moe",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
+
+EXPERT_INDEX_PLACEHOLDER = "{expert_index}"
+
 
