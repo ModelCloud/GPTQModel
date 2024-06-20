@@ -1,12 +1,14 @@
 import copy
 import unittest
 
-import gptqmodel_marlin_cuda
-import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight
+
+import torch # isort: skip
+import gptqmodel_marlin_cuda # isort: skip
+
 
 
 def gen_quant4(k, n, groupsize=-1):
