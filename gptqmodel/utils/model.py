@@ -14,8 +14,7 @@ from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import (CPU, CUDA_0, DYNAMIC_EXPERT_INDEX_PLACEHOLDER,
-                             EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, SUPPORTED_MODELS)
+from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
 from .importer import select_quant_linear
@@ -577,9 +576,9 @@ def get_moe_layer_modules(layer_modules: List, num_experts: int) -> List:
     for names in layer_modules:
         new_inside_layer_modules.append([])
         for n in names:
-            if DYNAMIC_EXPERT_INDEX_PLACEHOLDER in n:
+            if EXPERT_INDEX_PLACEHOLDER in n:
                 for index in range(num_experts):
-                    new_inside_layer_modules[-1].append(n.replace(DYNAMIC_EXPERT_INDEX_PLACEHOLDER, str(index)))
+                    new_inside_layer_modules[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
             else:
                 new_inside_layer_modules[-1].append(n)
 
