@@ -14,13 +14,13 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
-from transformers.utils.hub import PushToHubMixin
 
+from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as QuantLinearMarlin
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.data import collate_data
-from ..utils.importer import dynamically_import_QuantLinear
+from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
@@ -39,10 +39,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-
-
-
-class BaseGPTQModel(nn.Module, PushToHubMixin):
+class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     non_layer_modules: List[str] = None
@@ -149,6 +146,9 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
+
+        if self.quantize_config.format == FORMAT.MARLIN:
+            _validate_marlin_compatibility(self.quantize_config, throwError=True)
 
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
@@ -347,7 +347,6 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
                         if "not positive-definite" in str(e).lower():
                             logger.warning(
                                 "Please increase damp or nsamples for calibration data to avoid the following quant error. "
-                                "Ref: https://github.com/AutoGPTQ/AutoGPTQ/issues/572#issuecomment-2006686913"
                             )
                         raise e
 
@@ -467,7 +466,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
 
         if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
             logger.warning(
-                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by AutoGPTQ version >= {MIN_VERSION_WITH_V2}."
+                f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
         if format is not None and quantize_config.format != format:
@@ -478,7 +477,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             if format == FORMAT.GPTQ_V2:
                 if quantize_config.format != FORMAT.GPTQ:
                     raise NotImplementedError(
-                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported. Please open an issue at https://github.com/AutoGPTQ/AutoGPTQ/issues."
+                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported."
                     )
 
                 model = convert_gptq_v1_to_v2_format(
@@ -491,7 +490,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             elif format == FORMAT.GPTQ:
                 if quantize_config.format != FORMAT.GPTQ_V2:
                     raise NotImplementedError(
-                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported. Please open an issue at https://github.com/AutoGPTQ/AutoGPTQ/issues."
+                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported."
                     )
 
                 model = convert_gptq_v2_to_v1_format(
@@ -744,8 +743,8 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         marlin_compatible = _validate_marlin_device_support()
 
         if not use_marlin:
-            unsupported_reason = _validate_marlin_compatibility(quantize_config)
-            if unsupported_reason is None and marlin_compatible:
+            unsupported = _validate_marlin_compatibility(quantize_config)
+            if unsupported is None and marlin_compatible:
                 logger.info(
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
                 )
@@ -882,29 +881,22 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         if use_marlin:
             if is_sharded:
                 raise ValueError(
-                    "The loading of sharded checkpoints with Marlin is currently not supported. Please raise an issue in AutoGPTQ repository."
-                )
-            if torch.version.hip:
-                raise ValueError(
-                    "Can not use Marlin int4*fp16 kernel with AMD ROCm version of PyTorch as the kernel is not compatible. Please do not use `use_marlin=True` when using ROCm devices."
+                    "The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Can not use Marlin int4*fp16 kernel with a device of compute capability {torch.cuda.get_device_capability()}, the minimum compute capability is 8.0 for Marlin kernel. Please do not use `use_marlin=True`, or please upgrade your GPU ("The more you buy, the more you save." - Taiwanese proverb).'
+                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `use_marlin=True`.'
                 )
 
             # Validate the model can run in Marlin.
             if torch_dtype != torch.float16:
                 raise ValueError("Marlin kernel requires torch_dtype=torch.float16.")
-            unsupported_reason = _validate_marlin_compatibility(quantize_config)
-            if unsupported_reason is not None:
-                raise ValueError(
-                    f"The model {model_name_or_path} can not be converted to use the Marlin kernel for the following reason: {unsupported_reason}, which is not supported by Marlin kernel."
-                )
+
+            _validate_marlin_compatibility(quantize_config, throwError=True)
 
             # Load the quant linear type we need.
             # TODO: load marlin directly with the right quantlinear class.
-            quant_linear_class = dynamically_import_QuantLinear(
+            quant_linear_class = select_quant_linear(
                 use_triton=use_triton,
                 desc_act=quantize_config.desc_act,
                 group_size=quantize_config.group_size,
@@ -915,9 +907,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
             )
 
             # Prepare model for marlin load.
-            #   If stub is marlin serialized         --> load from directly
-            #   If stub has cached marlin version   --> load from the cached version
-            #   Otherwise                           --> convert to marlin, cache, load from cache
+            # If is marlin serialized load then load directly. Otherwise convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
@@ -939,7 +929,7 @@ class BaseGPTQModel(nn.Module, PushToHubMixin):
         # TODO: Why are we using this custom function and not dispatch_model?
         model = simple_dispatch_model(model, device_map)
 
-        qlinear_kernel = dynamically_import_QuantLinear(
+        qlinear_kernel = select_quant_linear(
             use_triton=use_triton,
             desc_act=quantize_config.desc_act,
             group_size=quantize_config.group_size,

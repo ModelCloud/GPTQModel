@@ -62,8 +62,12 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 | falcon           | ✅ | longllama    | ✅ | qwen2       | ✅ |                  |    |
 | gemma            | ✅ | mistral      | ✅ | RefinedWeb  | ✅ |                  |    |
 
+## Compatiblity 
 
-## Platform Support
+We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case. 
+
+## Platform
+
 GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
 
 ## Install
@@ -75,17 +79,13 @@ GPTQModel is available for Linux only. You can install the latest stable release
 | CUDA 12.1     | `pip install gptq-model --no-build-isolation`  | 2.3.1+cu121           |
 
 
-GPTQModel does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
-
 ### Install from source
 
-Clone repo:
 ```bash
+# clone repo
 git clone https://github.com/Qubitium/GPTQModel.git && cd GPTQModel
-```
 
-Compile:
-```bash
+# compile and install
 pip install -vvv --no-build-isolation -e .
 ```
 
@@ -141,7 +141,7 @@ For more advanced features of model quantization, please reference to [this scri
 
 ### How to Add Support for a New Model
 
-Read the `gptqmodel/models/llama.py` code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
+Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
 
 ### Evaluation on Downstream Tasks
 

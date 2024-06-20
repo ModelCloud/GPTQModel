@@ -7,22 +7,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+from exllama_kernels import make_q4, q4_matmul
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
-try:
-    from exllama_kernels import make_q4, q4_matmul
-except ImportError as e:
-    exllama_import_exception = e
-
-    def error_raiser_exllama(*args, **kwargs):
-        raise ValueError(
-            f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
-        )
-
-    make_q4 = error_raiser_exllama
-    q4_matmul = error_raiser_exllama
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")

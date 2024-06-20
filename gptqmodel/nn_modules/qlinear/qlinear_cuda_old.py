@@ -1,6 +1,8 @@
 import math
 from logging import getLogger
 
+import gptqmodel_cuda_64
+import gptqmodel_cuda_256
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,16 +10,6 @@ import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
-try:
-    import gptqmodel_cuda_64
-    import gptqmodel_cuda_256
-
-    _gptqmodel_cuda_available = True
-except ImportError:
-    logger.warning("CUDA extension not installed.")
-    gptqmodel_cuda_256 = None
-    gptqmodel_cuda_64 = None
-    _gptqmodel_cuda_available = False
 
 
 class QuantLinear(BaseQuantLinear):
@@ -35,7 +27,6 @@ class QuantLinear(BaseQuantLinear):
         weight_dtype=torch.float16,
     ):
         super().__init__()
-        global _gptqmodel_cuda_available
         if bits not in [2, 3, 4, 8]:
             raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
@@ -93,7 +84,6 @@ class QuantLinear(BaseQuantLinear):
             ).reshape(1, 3, 12)
 
         self.kernel_switch_threshold = kernel_switch_threshold
-        self.gptqmodel_cuda_available = _gptqmodel_cuda_available
         self.gptqmodel_cuda = gptqmodel_cuda_256
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64

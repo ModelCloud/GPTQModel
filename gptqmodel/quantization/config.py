@@ -5,7 +5,7 @@ from os.path import isdir, join
 from typing import Any, Dict, Optional, Tuple
 
 from packaging import version
-from transformers.utils.hub import PushToHubMixin, cached_file
+from transformers.utils.hub import cached_file
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -20,8 +20,9 @@ FORMAT_FIELD_JSON = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
+QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
 
-MIN_VERSION_WITH_V2 = "0.8.0-dev1"
+MIN_VERSION_WITH_V2 = "0.9.0"
 
 META_FIELD = "meta"
 # quantizer is the tool that did the quantization
@@ -66,11 +67,11 @@ QUANT_CONFIG_ARG_SYNONYMS = {
 
 
 @dataclass
-class QuantizeConfig(PushToHubMixin):
+class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
     group_size: int = field(default=-1)
     damp_percent: float = field(default=0.01)
-    desc_act: bool = field(default=True)
+    desc_act: bool = field(default=False)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
@@ -99,7 +100,6 @@ class QuantizeConfig(PushToHubMixin):
         if self.format not in valid_formats:
             raise ValueError(
                 f"The checkpoint format used is {self.format}, and the quantization method is {self.quant_method}. "
-                f"This is not supported, please open an issue at https://github.com/AutoGPTQ/AutoGPTQ/issues."
             )
 
         if self.bits not in fields_info[0].metadata["choices"]:
@@ -127,11 +127,11 @@ class QuantizeConfig(PushToHubMixin):
     def meta_get(self, key: str) -> Any:
         return self.meta.get(key)
 
-    # verionable is a meta.property that pairs value with version i.e "value:1.0.0"
+    # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_set_versionable(self, key: str, value: str, version: str):
         self.meta_set(key, f"{value}:{version}")
 
-    # verionable is a meta.property that pairs value with version i.e "value:1.0.0"
+    # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_get_versionable(self, key: str) -> Tuple[str, str]:
         val = self.meta_get(key)
         if val is None:
@@ -141,10 +141,9 @@ class QuantizeConfig(PushToHubMixin):
 
     # is quantized model quantized or packed by autogptq version with v2 format code
     def is_quantized_or_packed_by_v2(self) -> bool:
-        by_v2 = False
         # check meta.quantizer
         producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        by_v2 = producer == META_QUANTIZER_AUTOGPTQ and version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
+        by_v2 = (producer == META_QUANTIZER_AUTOGPTQ) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
 
         # fallback to meta.packer
         if not by_v2:
@@ -213,13 +212,7 @@ class QuantizeConfig(PushToHubMixin):
                 logger.info(f"Ignoring unknown parameter in the quantization configuration: {key}.")
 
         if format_auto_inferred:
-            logger.info(
-                f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}."
-            )
-
-        if normalized[FORMAT_FIELD_CODE] in {FORMAT.MARLIN}:
-            # Marlin do not reorder the rows.
-            normalized["desc_act"] = False
+            logger.info(f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
 
         if "sym" not in normalized:
             logger.warning(
@@ -244,11 +237,7 @@ class QuantizeConfig(PushToHubMixin):
         format = kwargs.pop("format", None)
 
         transformers_config = False
-        for quantize_config_filename in [
-            QUANT_CONFIG_FILENAME,
-            "quant_config.json",
-            "config.json",
-        ]:
+        for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
             if isdir(save_dir):  # Local
                 resolved_config_file = join(save_dir, quantize_config_filename)
             else:  # Remote

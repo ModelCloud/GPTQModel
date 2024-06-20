@@ -9,13 +9,13 @@ os.environ["CXX"] = "g++"
 
 common_setup_kwargs = {
     "version": "0.9.0",
-    "name": "modelgptq",
-    "author": "Qubitium",
-    "description": "An easy-to-use LLMs quantization package with user-friendly apis, based on GPTQ algorithm.",
+    "name": "gptqmodel",
+    "author": "ModelCloud",
+    "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
-    "url": "https://github.com/Qubitium/AutoGPTQ",
-    "keywords": ["gptq", "quantization", "large-language-models", "transformers"],
+    "url": "https://github.com/ModelCloud/GPTQModel",
+    "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
     "platforms": ["linux"],
     "classifiers": [
         "Environment :: GPU :: NVIDIA CUDA :: 11.7",
@@ -89,14 +89,14 @@ if BUILD_CUDA_EXT:
         requested_but_unsupported_archs = {arch for arch in archs if arch in UNSUPPORTED_COMPUTE_CAPABILITIES}
         if len(requested_but_unsupported_archs) > 0:
             raise ValueError(
-                f"Trying to compile GPTQModel for CUDA compute capabilities {torch_cuda_arch_list}, but AutoGPTQ does not support the compute capabilities {requested_but_unsupported_archs} (AutoGPTQ requires Pascal or higher). Please fix your environment variable TORCH_CUDA_ARCH_LIST (Reference: https://github.com/pytorch/pytorch/blob/v2.2.2/setup.py#L135-L139)."
+                f"Trying to compile for CUDA compute capabilities {torch_cuda_arch_list}, but pkg does not support the compute capabilities {requested_but_unsupported_archs} (Require Pascal or higher). Please fix your environment variable TORCH_CUDA_ARCH_LIST (Reference: https://github.com/pytorch/pytorch/blob/v2.2.2/setup.py#L135-L139)."
             )
     else:
         local_arch_list = detect_local_sm_architectures()
         local_but_unsupported_archs = {arch for arch in local_arch_list if arch in UNSUPPORTED_COMPUTE_CAPABILITIES}
         if len(local_but_unsupported_archs) > 0:
             raise ValueError(
-                f"PyTorch detected the compute capabilities {local_arch_list} for the NVIDIA GPUs on the current machine, but AutoGPTQ can not be built for compute capabilities {local_but_unsupported_archs} (AutoGPTQ requires Pascal or higher). Please set the environment variable TORCH_CUDA_ARCH_LIST (Reference: https://github.com/pytorch/pytorch/blob/v2.2.2/setup.py#L135-L139) with your necessary architectures."
+                f"PyTorch detected the compute capabilities {local_arch_list} for the NVIDIA GPUs on the current machine, but can not be built for compute capabilities {local_but_unsupported_archs} (Require Pascal or higher). Please set the environment variable TORCH_CUDA_ARCH_LIST (Reference: https://github.com/pytorch/pytorch/blob/v2.2.2/setup.py#L135-L139) with your necessary architectures."
             )
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
