@@ -15,7 +15,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as QuantLinearMarlin
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
