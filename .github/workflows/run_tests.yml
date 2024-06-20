@@ -5,14 +5,33 @@ on:
   repository_dispatch:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   build:
     runs-on: self-hosted
     container:
       image: modelcloud/gptqmodel:github-ci-v1
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        test_file:
+          - test_lm_head.py
+          - test_perplexity.py
+          - test_q4_cuda.py
+          - test_q4_exallama.py
+          - test_q4_exallama_v2.py
+          - test_q4_marlin.py
+          - test_q4_triton.py
+          - test_quant_formats.py
+          - test_repacking.py
+          - test_serialization.py
+          - test_sharded_loading.py
+          - test_triton.py
 
     steps:
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -25,16 +44,4 @@ jobs:
           pip install -v --no-build-isolation .
 
       - name: Run tests
-        run: |
-          pytest test_lm_head.py
-          pytest test_perplexity.py
-          pytest test_q4_cuda.py
-          pytest test_q4_exallama.py
-          pytest test_q4_exallama_v2.py
-          pytest test_q4_marlin.py
-          pytest test_q4_triton.py
-          pytest test_quant_formats.py
-          pytest test_repacking.py
-          pytest test_serialization.py
-          pytest test_sharded_loading.py
-          pytest test_triton.py
+        run: pytest ${{ matrix.test_file }}
