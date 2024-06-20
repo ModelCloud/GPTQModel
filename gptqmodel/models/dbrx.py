@@ -8,7 +8,5 @@ class DbrxGPTQ(BaseGPTQModel):
     layer_type = "DbrxBlock"
     layer_modules = [
         ["norm_attn_norm.attn.Wqkv"],
-        ["norm_attn_norm.attn.o_proj"],
-        ["ffn.experts.mlp.w1", "ffn.experts.mlp.v1"],
-        ["ffn.experts.mlp.w2"],
+        ["norm_attn_norm.attn.out_proj"],
     ]
