@@ -1,8 +1,8 @@
 <h1 align="center">GPTQModel</h1>
 <p align="center">An easy-to-use LLM quantization and inference toolkit based on GPTQ algorithm (weight-only quantization).</p>
 <p align="center">
-    <a href="https://github.com/Qubitium/GPTQModel/releases">
-        <img alt="GitHub release" src="https://img.shields.io/github/release/Qubitium/GPTQModel.svg">
+    <a href="https://github.com/ModelCloud/GPTQModel/releases">
+        <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
     </a>
     <a href="https://pypi.org/project/model-gptq/">
         <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptq-model">
@@ -85,7 +85,7 @@ GPTQModel is available for Linux only. You can install the latest stable release
 
 ```bash
 # clone repo
-git clone https://github.com/Qubitium/GPTQModel.git && cd GPTQModel
+git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # compile and install
 pip install -vvv --no-build-isolation .
