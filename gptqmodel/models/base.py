@@ -24,8 +24,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
-                           nested_move_to, pack_model, simple_dispatch_model, get_moe_inside_layer_modules)
+                           get_module_by_name_suffix, get_moe_inside_layer_modules, gptqmodel_post_init, make_quant,
+                           move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -53,6 +53,9 @@ class BaseGPTQModel(nn.Module):
     layer_type: str = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
+
+    # some models may only be quantizable under specific gptq property
+    require_true_sequential: Optional[bool] = None
 
     def __init__(
         self,
@@ -152,6 +155,10 @@ class BaseGPTQModel(nn.Module):
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
             raise ValueError("lm_head quantization is currently inference only and not applicable for quantization. Please set `lm_head=False`.")
+
+        # TODO: we need to move all the validation into a helper method
+        if self.require_true_sequential is not None and self.quantize_config.true_sequential != self.require_true_sequential:
+            raise ValueError(f"This model requires `true_sequential == {self.require_true_sequential}: actual true_sequential = {self.quantize_config.true_sequential}")
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
@@ -264,6 +271,7 @@ class BaseGPTQModel(nn.Module):
         torch.cuda.empty_cache()
 
         inside_layer_modules = self.layer_modules
+
         if not self.quantize_config.true_sequential:
             inside_layer_modules = [sum(inside_layer_modules, [])]
 

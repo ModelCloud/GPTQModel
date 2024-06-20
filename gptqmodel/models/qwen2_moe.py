@@ -2,6 +2,9 @@ from .base import BaseGPTQModel
 
 
 class Qwen2MoeGPTQ(BaseGPTQModel):
+    # qwen2moe requires true_sequential = False
+    require_true_sequential = False
+
     base_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"
