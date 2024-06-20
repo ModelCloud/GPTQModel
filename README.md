@@ -11,7 +11,7 @@
 
 ## News
 
-- 2024-06-XX - (News)   🤗 PENDING
+- 2024-06-29 🤗 GPTQModel 0.9.0 Released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## How is GPTQModel different from AutoGPTQ?
 
