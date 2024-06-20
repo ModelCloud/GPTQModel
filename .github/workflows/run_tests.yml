@@ -1,6 +1,9 @@
 name: Run tests
 
 on:
+  push:
+    branches:
+      - csy-runner
   repository_dispatch:
   workflow_dispatch:
 
