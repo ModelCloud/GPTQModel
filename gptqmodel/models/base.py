@@ -57,6 +57,11 @@ class BaseGPTQModel(nn.Module):
     # some models may only be quantizable under specific gptq property
     require_true_sequential: Optional[bool] = None
 
+    # allow dynamic expert n-count layer extraction
+    # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
+    # usage: set to property in model.config that holds this int value: total number of experts
+    dynamic_expert_layer_index: Optional[str] = None
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -275,9 +280,11 @@ class BaseGPTQModel(nn.Module):
         if not self.quantize_config.true_sequential:
             inside_layer_modules = [sum(inside_layer_modules, [])]
 
-            if hasattr(self.model.config, "num_experts"):
+            # dynamic expert layer index for model defs
+            if self.dynamic_expert_layer_index is not None:
+                num_experts = hasattr(self.model.config, self.dynamic_expert_layer_index)
                 inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=self.layer_modules,
-                                                                    num_experts=self.model.config.num_experts)
+                                                                    num_experts=num_experts)
 
         quantizers = {}
 
@@ -827,9 +834,10 @@ class BaseGPTQModel(nn.Module):
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
 
-            if hasattr(config, "num_experts"):
+            if cls.dynamic_expert_layer_index is not None:
+                num_experts = hasattr(config, cls.dynamic_expert_layer_index)
                 cls.inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=cls.layer_modules,
-                                                                        num_experts=config.num_experts)
+                                                                        num_experts=num_experts)
 
             layers = find_layers(model)
             ignore_layers = [cls.lm_head] + cls.base_modules
