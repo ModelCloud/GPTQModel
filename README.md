@@ -15,7 +15,7 @@
 
 ## How is GPTQModel different from AutoGPTQ?
 
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
 
 ## Mission Statement
 
@@ -25,9 +25,9 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 * `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * `lm_head` module quant inference support for further vram reduction.
+* Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (A100)
+* Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, A100)
 * ChatGLM Model Support.
-* Better defaults resulting in faster inference.
-* Better quality quants (improved PPL) with tweaked internal code (Result may vary depending on calibration set and gpu usage).
 * Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed packing Performance regression on high core-count systems.
