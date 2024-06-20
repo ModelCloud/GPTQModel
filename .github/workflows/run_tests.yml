@@ -24,8 +24,8 @@ jobs:
         run: |
           mkdir build
           touch build/000000
-          pip install pytest ninja
-          pip install -v --no-build-isolation .
+          # pip install pytest ninja
+          # pip install -v --no-build-isolation .
 
       - name: Get size of build directory
         id: dir-size
@@ -76,7 +76,7 @@ jobs:
         run: |
           ls -alh
           cd tests
-          pip install pytest ninja
+          # pip install pytest ninja
           # pip install -v --no-build-isolation .
 
       - name: Run tests
