@@ -11,38 +11,39 @@
 
 ## News
 
-- 2024-06-XX - (News)   🤗 PENDING
-
-## How is GPTQModel different from AutoGPTQ?
-
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+- 2024-06-29 ✨ GPTQModel 0.9.0 Released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## Mission Statement
 
 We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
-## Major Changes/Advantage vs AutoGPTQ
+## How is GPTQModel different from AutoGPTQ?
 
-* `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* `lm_head` module quant inference support for further vram reduction.
-* ChatGLM Model Support.
-* Better defaults resulting in faster inference.
-* Better quality quants (improved PPL) with tweaked internal code (Result may vary depending on calibration set and gpu usage).
-* Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
-* Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
-* Fixed packing Performance regression on high core-count systems.
-* Fixed crash on H100.
-* Many thousands of lines of refactor/cleanup.
-* Added CI workflow for validation of future PRs and prevent code regressions.
-* Added perplexity unit-test to prevent against model quant quality regressions.
-* De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
-* De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
-* Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
-* Everything that did not pass unit-tests have been removed from repo.
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+
+## Major Changes (Advantages) vs AutoGPTQ
+
+* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
+* 🚀`lm_head` module quant inference support for further VRAM reduction. 
+* 🚀 Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
+* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
+* 🚀 Added `ChatGLM` Model Support
+* 🚀 Added `MiniCPM` Model Support
+* 🚀 Added `DBRX` Model Support
+* ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
+* 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
+* 👾 Fixed packing Performance regression on high core-count systems.
+* 👾 Fixed crash on H100.
+* ✨ Many thousands of lines of refactor/cleanup.
+* ✨ Added CI workflow for validation of future PRs and prevent code regressions.
+* ✨ Added perplexity unit-test to prevent against model quant quality regressions.
+* 👾 De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
+* 👾 De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
+* ✨ Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
+* ✨ Everything that did not pass unit-tests have been removed from repo.
 
 ## Roadmap (Target Date: July 2024):
 
-* DBRX support.
 * `lm_head` quantization support by integrating with Intel/AutoRound.
 * Customizable callback in Per-Layer quantization.
 * Add Qbits (cpu inference) support from Intel/Qbits.
@@ -51,18 +52,18 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 * Add Tests for every single supported model.
 
 
-## Model Support 
+## Model Support ( 🚀 GPTQModel only )
 
-| Model            |    |              |    |              |    |                  |    |
-|------------------|----|--------------|----|--------------|----|------------------|----|
-| baichuan         | ✅ | gpt_bigcode  | ✅ | mixtral     | ✅ | RefinedWebModel  | ✅ |
-| bloom            | ✅ | gpt_neox     | ✅ | moss        | ✅ | stablelm_epoch   | ✅ |
-| chatglm          | ✅ | gpt2         | ✅ | mpt         | ✅ | starcoder2       | ✅ |
-| codegen          | ✅ | gptj         | ✅ | opt         | ✅ | xverse           | ✅ |
-| cohere           | ✅ | internlm     | ✅ | phi         | ✅ | Yi               | ✅ |
-| deci             | ✅ | llama        | ✅ | qwen        | ✅ |                  |    |
-| falcon           | ✅ | longllama    | ✅ | qwen2       | ✅ |                  |    |
-| gemma            | ✅ | mistral      | ✅ | RefinedWeb  | ✅ |                  |    |
+| Model     |  |             |  |            |    |            |    |
+|-----------|--|-------------|--|------------|----|------------|----|
+| Baichuan  | ✅ | GPTBigCod   | ✅ | Mistral    | ✅ | StableLM   | ✅ |
+| Bloom     | ✅ | GPTNeoX     | ✅ | Mixtral    | ✅ | StarCoder2 | ✅ |
+| ChatGLM   | 🚀 | GPT-2       | ✅ | MOSS       | ✅ | XVERSE     | ✅ |
+| CodeGen   | ✅ | GPT-J       | ✅ | MPT        | ✅ | Yi         | ✅ |
+| Cohere    | ✅ | InternLM    | ✅ | OPT        | ✅ |            | ✅ |
+| DBRX      | 🚀 | Llama       | ✅ | Phi        | ✅ |            |    |
+| Deci      | ✅ | LongLLaMA   | ✅ | Qwen       | ✅ |            |    |
+| Falcon    | ✅ | MiniCPM     | 🚀 | RefinedWeb | ✅ |            |    |
 
 ## Compatiblity 
 

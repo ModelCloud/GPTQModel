@@ -16,6 +16,7 @@ from .gptj import GPTJGPTQ
 from .internlm import InternLMGPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
+from .minicpm import MiniCPMGPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
 from .moss import MOSSGPTQ
@@ -60,6 +61,7 @@ MODEL_MAP = {
     "gemma": GemmaGPTQ,
     "phi": PhiGPTQ,
     "mpt": MPTGPTQ,
+    "minicpm": MiniCPMGPTQ,
 }
 
 

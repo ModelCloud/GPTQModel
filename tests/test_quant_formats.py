@@ -7,7 +7,7 @@ import unittest  # noqa: E402
 import torch.cuda  # noqa: E402
 from gptqmodel import GPTQModel, __version__  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
-from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_AUTOGPTQ
+from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -72,7 +72,7 @@ class TestQuantization(unittest.TestCase):
 
             logging.info(f"Loaded config: {model.quantize_config}")
             assert model.quantize_config.meta_get_versionable(META_FIELD_QUANTIZER) == (
-                META_QUANTIZER_AUTOGPTQ,
+                META_QUANTIZER_GPTQMODEL,
                 __version__,
             )
             del model
