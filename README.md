@@ -27,7 +27,8 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 * `lm_head` module quant inference support for further VRAM reduction. 
 * Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
 * Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
-* ChatGLM Model Support.
+* ChatGLM Model Support
+* MiniCPM Model Support
 * Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed packing Performance regression on high core-count systems.
