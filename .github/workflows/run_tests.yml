@@ -29,20 +29,54 @@ jobs:
         run: |
           pip install pytest ninja parameterized
           pip install -v --no-build-isolation .
-
-      - name: Test
-        run: |
           cd tests
-          echo "running test_lm_head.py" && pytest test_lm_head.py
-          echo "running test_perplexity.py" && pytest test_perplexity.py
-          echo "running test_q4_cuda.py" && pytest test_q4_cuda.py
-          echo "running test_q4_exallama.py" && pytest test_q4_exallama.py
-          echo "running test_q4_exallama_v2.py" && pytest test_q4_exallama_v2.py
-          echo "running test_q4_marlin.py" && pytest test_q4_marlin.py
-          echo "running test_q4_triton.py" && pytest test_q4_triton.py
-          echo "running test_quant_formats.py" && pytest test_quant_formats.py
-          echo "running test_repacking.py" && pytest test_repacking.py
-          echo "running test_serialization.py" && pytest test_serialization.py
-          echo "running test_sharded_loading.py" && pytest test_sharded_loading.py
-          echo "running test_triton.py" && pytest test_triton.py
+
+      - name: test_lm_head.py
+        run: |
+          pytest test_lm_head.py
+
+      - name: test_perplexity.py
+        run: |
+          pytest test_perplexity.py
+
+      - name: test_q4_cuda.py
+        run: |
+          pytest test_q4_cuda.py
+
+      - name: test_q4_exallama.py
+        run: |
+          pytest test_q4_exallama.py
+
+      - name: test_q4_exallama_v2.py
+        run: |
+          pytest test_q4_exallama_v2.py
+
+      - name: test_q4_marlin.py
+        run: |
+          pytest test_q4_marlin.py
+
+      - name: test_q4_triton.py
+        run: |
+          pytest test_q4_triton.py
+
+      - name: test_quant_formats.py
+        run: |
+          pytest test_quant_formats.py
+
+      - name: test_repacking.py
+        run: |
+          pytest test_repacking.py
+
+      - name: test_serialization.py
+        run: |
+          pytest test_serialization.py
+
+      - name: test_sharded_loading.py
+        run: |
+          pytest test_sharded_loading.py
+
+      - name: test_triton.py
+        run: |
+          pytest test_triton.py
+
         
