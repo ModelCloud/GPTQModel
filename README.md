@@ -15,13 +15,13 @@
 
 ## How is GPTQModel different from AutoGPTQ?
 
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
 
 ## Mission Statement
 
 We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
-## Major Changes/Advantage vs AutoGPTQ
+## Major Changes (Advantages) vs AutoGPTQ
 
 * `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * `lm_head` module quant inference support for further vram reduction.
