@@ -16,6 +16,7 @@ from .gptj import GPTJGPTQ
 from .internlm import InternLMGPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
+from .minicpm import MiniCPMGPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
 from .moss import MOSSGPTQ
@@ -29,7 +30,6 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .minicpm import MiniCPMGPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
