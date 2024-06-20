@@ -509,13 +509,10 @@ class BaseGPTQModel(nn.Module):
 
         model.to(CPU)
 
-        if quantize_config.model_file_base_name is None:
-            if use_safetensors:
-                model_base_name = "model"
-            else:
-                model_base_name = "pytorch_model"
+        if use_safetensors:
+            model_base_name = "model"
         else:
-            model_base_name = quantize_config.model_file_base_name
+            model_base_name = "pytorch_model"
 
         if use_safetensors:
             model_save_name = model_base_name + ".safetensors"
@@ -561,8 +558,6 @@ class BaseGPTQModel(nn.Module):
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
 
-        quantize_config.model_name_or_path = save_dir
-        quantize_config.model_file_base_name = model_base_name
         quantize_config.save_pretrained(save_dir)
 
     def save_pretrained(
@@ -749,17 +744,12 @@ class BaseGPTQModel(nn.Module):
                 )
 
         if model_basename is None:
-            if quantize_config.model_file_base_name:
-                possible_model_basenames = [quantize_config.model_file_base_name]
-            else:
-                possible_model_basenames = [
-                    f"gptq_model-{quantize_config.bits}bit-{quantize_config.group_size}g",
-                    "model",
-                ]
+            possible_model_basenames = [
+                f"gptq_model-{quantize_config.bits}bit-{quantize_config.group_size}g",
+                "model",
+            ]
         else:
             possible_model_basenames = [model_basename]
-
-        quantize_config.model_name_or_path = model_name_or_path
 
         extensions = []
         if use_safetensors:
@@ -787,8 +777,6 @@ class BaseGPTQModel(nn.Module):
                 raise RuntimeError(
                     "Loading of unsafe .bin files are not allowed by default. Pass allow_unsafe_loading=True to bypass."
                 )
-
-        quantize_config.model_file_base_name = true_model_basename
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
 
