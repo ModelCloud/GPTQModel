@@ -33,6 +33,7 @@ SUPPORTED_MODELS = [
     "gemma",
     "starcoder2",
     "cohere",
+    "minicpm",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
