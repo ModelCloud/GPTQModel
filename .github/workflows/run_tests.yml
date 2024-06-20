@@ -1,4 +1,4 @@
-name: Run tests
+name: Unit Tests (GPU)
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Compile
         run: |
-          pip install pytest ninja parameterized
+          pip install -U pytest ninja parameterized
           pip install -v --no-build-isolation .
 
       - name: test_lm_head.py
