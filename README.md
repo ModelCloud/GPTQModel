@@ -29,6 +29,7 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 * Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
 * ChatGLM Model Support
 * MiniCPM Model Support
+* DBRX Model Support
 * Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed packing Performance regression on high core-count systems.
@@ -43,7 +44,6 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 ## Roadmap (Target Date: July 2024):
 
-* DBRX support.
 * `lm_head` quantization support by integrating with Intel/AutoRound.
 * Customizable callback in Per-Layer quantization.
 * Add Qbits (cpu inference) support from Intel/Qbits.
