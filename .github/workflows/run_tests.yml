@@ -10,6 +10,11 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
 
+env:
+  DAY_OF_WEEK: Monday
+  CUDA_DEVICE_ORDER: PCI_BUS_ID
+  CUDA_VISIBLE_DEVICES: 0
+
 jobs:
   build:
     runs-on: self-hosted
