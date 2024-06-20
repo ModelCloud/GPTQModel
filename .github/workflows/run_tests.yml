@@ -22,69 +22,22 @@ jobs:
 
       - name: Compile
         run: |
-          mkdir -p ~/.cache/gpt/build
-          touch ~/.cache/gpt/build/000000
-          # pip install pytest ninja
-          # pip install -v --no-build-isolation .
+          pip install pytest ninja
+          pip install -v --no-build-isolation .
 
-      - name: Get size of build directory
-        id: dir-size
-        run: echo "DIR_SIZE=$(du -sb build | cut -f1)" >> $GITHUB_ENV
-
-      # - name: Cache dependencies
-      #   uses: corca-ai/local-cache@v2
-      #   with:
-      #     path: build
-      #     key: ${{ env.DIR_SIZE }}
-      #     base: ~/.cache/gpt
-
-  run-test:
-    needs: build
-    runs-on: self-hosted
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        test_file:
-          - test_lm_head.py
-          - test_perplexity.py
-          - test_q4_cuda.py
-          - test_q4_exallama.py
-          - test_q4_exallama_v2.py
-          - test_q4_marlin.py
-          - test_q4_triton.py
-          - test_quant_formats.py
-          - test_repacking.py
-          - test_serialization.py
-          - test_sharded_loading.py
-          - test_triton.py
-    steps:
-      - name: List dir
+      - name: Test
         run: |
-          ls ~/.cache/gpt/build
-
-      # - name: Checkout code
-        # uses: actions/checkout@v4
-
-      # - name: Cache dependencies
-      #   uses: corca-ai/local-cache@v2
-      #   with:
-      #     path: build
-      #     key: ${{ env.DIR_SIZE }}
-      #     base: ~/.cache
-
-
-      - name: List dir
-        run: |
-          ls -alh
-          ls -alh build
-
-      - name: Compile
-        run: |
-          ls -alh
           cd tests
-          # pip install pytest ninja
-          # pip install -v --no-build-isolation .
-
-      - name: Run tests
-        run: pytest ${{ matrix.test_file }}
+          pytest test_lm_head.py
+          pytest test_perplexity.py
+          pytest test_q4_cuda.py
+          pytest test_q4_exallama.py
+          pytest test_q4_exallama_v2.py
+          pytest test_q4_marlin.py
+          pytest test_q4_triton.py
+          pytest test_quant_formats.py
+          pytest test_repacking.py
+          pytest test_serialization.py
+          pytest test_sharded_loading.py
+          pytest test_triton.py
+        
