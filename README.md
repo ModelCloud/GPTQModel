@@ -54,16 +54,16 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 ## Model Support 
 
-| Model            |    |              |    |              |    |                  |    |
-|------------------|----|--------------|----|--------------|----|------------------|----|
-| baichuan         | ✅ | gpt_bigcode  | ✅ | mixtral     | ✅ | RefinedWebModel  | ✅ |
-| bloom            | ✅ | gpt_neox     | ✅ | moss        | ✅ | stablelm_epoch   | ✅ |
-| chatglm          | ✅ | gpt2         | ✅ | mpt         | ✅ | starcoder2       | ✅ |
-| codegen          | ✅ | gptj         | ✅ | opt         | ✅ | xverse           | ✅ |
-| cohere           | ✅ | internlm     | ✅ | phi         | ✅ | Yi               | ✅ |
-| deci             | ✅ | llama        | ✅ | qwen        | ✅ |                  |    |
-| falcon           | ✅ | longllama    | ✅ | qwen2       | ✅ |                  |    |
-| gemma            | ✅ | mistral      | ✅ | RefinedWeb  | ✅ |                  |    |
+| Model     |    |             |    |            |    |            |    |
+|-----------|----|-------------|----|------------|----|------------|----|
+| Baichuan  | ✅ | GPTBigCod   | ✅ | Mistral    | ✅ | StableLM   | ✅ |
+| Bloom     | ✅ | GPTNeoX     | ✅ | Mixtral    | ✅ | StarCoder2 | ✅ |
+| ChatGLM   | ✅ | GPT-2       | ✅ | MOSS       | ✅ | XVERSE     | ✅ |
+| CodeGen   | ✅ | GPT-J       | ✅ | MPT        | ✅ | Yi         | ✅ |
+| Cohere    | ✅ | InternLM    | ✅ | OPT        | ✅ |            | ✅ |
+| DBRX      | ✅ | Llama       | ✅ | Phi        | ✅ |            |    |
+| Deci      | ✅ | LongLLaMA   | ✅ | Qwen       | ✅ |            |    |
+| Falcon    | ✅ | MiniCPM     | ✅ | RefinedWeb | ✅ |            |    |
 
 ## Compatiblity 
 
