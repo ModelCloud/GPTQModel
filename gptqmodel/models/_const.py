@@ -34,6 +34,7 @@ SUPPORTED_MODELS = [
     "starcoder2",
     "cohere",
     "minicpm",
+    "dbrx",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048

@@ -30,6 +30,7 @@ from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
 from .minicpm import MiniCPMGPTQ
+from .dbrx import DbrxGPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -62,6 +63,7 @@ MODEL_MAP = {
     "phi": PhiGPTQ,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
+    "dbrx": DbrxGPTQ,
 }
 
 
