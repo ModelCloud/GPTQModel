@@ -25,7 +25,7 @@ jobs:
       - name: Run tests
         run: |
           cd tests
-          tests=(*.py)
+          tests=$(ls *.py -1 | xargs -n 1 basename)
           passed=0
           failed=0
           for test in "${tests[@]}"; do
