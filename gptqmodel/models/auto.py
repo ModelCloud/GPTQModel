@@ -23,6 +23,7 @@ from .moss import MOSSGPTQ
 from .mpt import MPTGPTQ
 from .opt import OPTGPTQ
 from .phi import PhiGPTQ
+from .phi3 import Phi3GPTQ
 from .qwen import QwenGPTQ
 from .qwen2 import Qwen2GPTQ
 from .rw import RWGPTQ
@@ -60,6 +61,7 @@ MODEL_MAP = {
     "longllama": LongLlamaGPTQ,
     "gemma": GemmaGPTQ,
     "phi": PhiGPTQ,
+    "phi3": Phi3GPTQ,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
 }
