@@ -58,10 +58,10 @@ jobs:
           - test_sharded_loading.py
           - test_triton.py
     steps:
-      - name: List dir
-        run: |
-          ls -alh
-          ls -alh build
+    #   - name: List dir
+    #     run: |
+    #       ls -alh
+    #       ls -alh build
 
       # - name: Checkout code
         # uses: actions/checkout@v4
@@ -71,6 +71,12 @@ jobs:
         with:
           path: build
           key: ${{ env.DIR_SIZE }}
+
+
+      - name: List dir
+        run: |
+          ls -alh
+          ls -alh build
 
       - name: Compile
         run: |
