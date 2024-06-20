@@ -29,43 +29,42 @@ jobs:
         run: |
           pip install pytest ninja parameterized
           pip install -v --no-build-isolation .
-          cd tests
 
       - name: test_lm_head.py
-        run: pytest test_lm_head.py
+        run: pytest tests/test_lm_head.py
 
       - name: test_perplexity.py
-        run: pytest test_perplexity.py
+        run: pytest tests/test_perplexity.py
 
       - name: test_q4_cuda.py
-        run: pytest test_q4_cuda.py
+        run: pytest tests/test_q4_cuda.py
 
       - name: test_q4_exallama.py
-        run: pytest test_q4_exallama.py
+        run: pytest tests/test_q4_exallama.py
 
       - name: test_q4_exallama_v2.py
-        run: pytest test_q4_exallama_v2.py
+        run: pytest tests/test_q4_exallama_v2.py
 
       - name: test_q4_marlin.py
-        run: pytest test_q4_marlin.py
+        run: pytest tests/test_q4_marlin.py
 
       - name: test_q4_triton.py
-        run: pytest test_q4_triton.py
+        run: pytest tests/test_q4_triton.py
 
       - name: test_quant_formats.py
-        run: pytest test_quant_formats.py
+        run: pytest tests/test_quant_formats.py
 
       - name: test_repacking.py
-        run: pytest test_repacking.py
+        run: pytest tests/test_repacking.py
 
       - name: test_serialization.py
-        run: pytest test_serialization.py
+        run: pytest tests/test_serialization.py
 
       - name: test_sharded_loading.py
-        run: pytest test_sharded_loading.py
+        run: pytest tests/test_sharded_loading.py
 
       - name: test_triton.py
-        run: pytest test_triton.py
+        run: pytest tests/test_triton.py
 
 
         
