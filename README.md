@@ -76,13 +76,6 @@ GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDI
 
 ## Install
 
-GPTQModel is available for Linux only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
-
-|  CUDA version | Installation                                   | Built against PyTorch |
-|---------------|------------------------------------------------|-----------------------|
-| CUDA 12.1     | `pip install gptq-model --no-build-isolation`  | 2.3.1+cu121           |
-
-
 ### Install from source
 
 ```bash
@@ -91,6 +84,12 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # compile and install
 pip install -vvv --no-build-isolation .
+```
+
+### PIP (PENDING RELEASE) 
+
+```bash
+pip install gptq-model --no-build-isolation
 ```
 
 ### Quantization and Inference
