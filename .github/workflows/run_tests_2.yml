@@ -25,4 +25,4 @@ jobs:
       - name: Run tests
         run: |
           cd tests
-           python -m unittest test_quant_formats.py
+           python -m unittest test_lm_head.py
