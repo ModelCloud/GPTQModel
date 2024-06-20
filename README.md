@@ -21,21 +21,23 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes appl
 
 We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
-## Major Changes vs AutoGPTQ
+## Major Changes/Advantage vs AutoGPTQ
 
-* `Sym=False` Support. AutoGPTQ main has unusable `sym=false`. (Re-quant required)
-* `lm_head` module quantized inference support for further vram reduction.
+* `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
+* `lm_head` module quant inference support for further vram reduction.
 * ChatGLM Model Support.
 * Better defaults resulting in faster inference.
-* Better default PPL with tweaked internal code (Result may vary depending on calibration set and gpu usage).
-* Alert users of sub-optimal calibration data. Almost all new-users get this part horribly wrong.
+* Better quality quants (improved PPL) with tweaked internal code (Result may vary depending on calibration set and gpu usage).
+* Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
-* Fixed Packing Performance regression on high core-count systems.
-* Thousands of lines of refactor/cleanup.
-* Debloated 271K lines of which 250K was caused by a single dataset used only by an example. Move dataset to HF.
-* Debloat the number of args presented in public .from_quantized()/.from_pretrained() api
+* Fixed packing Performance regression on high core-count systems.
+* Many thousands of lines of refactor/cleanup.
+* Added CI workflow for validation of PRs and prevent code regressions.
+* Added perplexity unit-test to prevent against quant quality regressions.
+* De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. Moved dataset to HF.
+* De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
 * Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
-* More tests with every feature and model tested. Everything that does not pass tests will be removed from repo. We want quality over quantity.
+* Everything that did not pass unit-tests have been removed from repo.
 
 ## Roadmap (Target Date: July 2024):
 
@@ -45,7 +47,6 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 * Add Qbits (cpu inference) support from Intel/Qbits.
 * Add back ROCM/AMD support once everything is validated.
 * Store quant loss stat and apply diffs to new quant for quality control.
-* Add CI workflow for PRs.
 * Add Tests for every single supported model.
 
 
@@ -64,7 +65,7 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 ## Compatiblity 
 
-We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case. 
+We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case basis. 
 
 ## Platform
 
@@ -86,7 +87,7 @@ GPTQModel is available for Linux only. You can install the latest stable release
 git clone https://github.com/Qubitium/GPTQModel.git && cd GPTQModel
 
 # compile and install
-pip install -vvv --no-build-isolation -e .
+pip install -vvv --no-build-isolation .
 ```
 
 ### Quantization and Inference
@@ -124,17 +125,10 @@ model.quantize(calibration_dataset)
 model.save_quantized(quant_output_dir)
 
 # load quantized model to the first GPU
-model = GPTQModel.from_quantized(quant_output_dir, device="cuda:0")
-
-# download quantized model from Hugging Face Hub and load to the first GPU
-# model = GPTQModel.from_quantized(repo_id, device="cuda:0")
+model = GPTQModel.from_quantized(quant_output_dir)
 
 # inference with model.generate
 print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
-
-# or you can also use pipeline
-# pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-# print(pipeline("GPTQ is")[0]["generated_text"])
 ```
 
 For more advanced features of model quantization, please reference to [this script](examples/quantization/quant_with_alpaca.py)
@@ -242,10 +236,11 @@ Currently, `gptqmodel` supports: `LanguageModelingTask`, `SequenceClassification
 
 GPTQModel will use Marlin, Exllama v2, Triton/CUDA kernels in that order for maximum inference performance.
 
-## Acknowledgement
+# Acknowledgements
 
-* **PanQiWei** and **FXMarty** for their creation and support of AutoGPTQ of which this project is based upon.
-* **Elias Frantar**, **Saleh Ashkboos**, **Torsten Hoefler** and **Dan Alistarh** for **GPTQ**/**Marlin** algorithm and [code](https://github.com/IST-DASLab/gptq) [Marlin kernel](https://github.com/IST-DASLab/marlin).
-* **qwopqwop200**, for quantization code used in this project adapted from [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda).
-* **turboderp**, for releasing [Exllama](https://github.com/turboderp/exllama) and [Exllama v2](https://github.com/turboderp/exllamav2) kernels adapted for use in this project.
-* **FPGAMiner**, for triton kernels used in GPTQ-for-LLaMa which is adapted into this project.
+* **Elias Frantar**, **Saleh Ashkboos**, **Torsten Hoefler** and **Dan Alistarh**: for creating [GPTQ](https://github.com/IST-DASLab/gptq) and [Marlin](https://github.com/IST-DASLab/marlin).
+* **PanQiWei**: for creation of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ) which this project code is based upon.
+* **FXMarty**: for maintaining and support of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ).
+* **Qwopqwop200**: for quantization code used in this project adapted from [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda).
+* **Turboderp**: for releasing [Exllama v1](https://github.com/turboderp/exllama) and [Exllama v2](https://github.com/turboderp/exllamav2) kernels adapted for use in this project.
+* **FpgaMiner**: for [GPTQ-Triton](https://github.com/fpgaminer/GPTQ-triton) kernels used in [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda) which is adapted into this project.
