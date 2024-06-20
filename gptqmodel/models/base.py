@@ -839,11 +839,9 @@ class BaseGPTQModel(nn.Module):
                 num_experts = getattr(config, cls.dynamic_expert_index)
                 cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
-                print("layer_modules", cls.layer_modules)
 
             layers = find_layers(model)
             ignore_layers = [cls.lm_head] + cls.base_modules
-            print("ignore_layers", ignore_layers)
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
