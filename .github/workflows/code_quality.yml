@@ -23,4 +23,4 @@ jobs:
     - name: Check style with ruff
       run: |
         pip install -U ruff==0.4.9
-        ruff check gptqmodel examples tests setup.py --exit-non-zero-on-fix
+        ruff check gptqmodel examples tests setup.py
