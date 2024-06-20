@@ -88,7 +88,7 @@ class QuantLinear(BaseQuantLinear):
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
         if infeatures % 64 != 0 or outfeatures % 64 != 0:
-            self.gptqmodel_cuda_available = False
+            raise RuntimeError(f"Cuda old kernel does not support infeatures and outfeatures not divisible by 64: actual outfeatures = {outfeatures}, infeatures = {infeatures} ")
 
     def post_init(self):
         pass
