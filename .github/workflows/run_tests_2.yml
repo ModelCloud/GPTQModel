@@ -27,6 +27,8 @@ jobs:
           else
             build_cache_size=0
           fi
+          echo "Huggingface cache size: $hf_cache_size"
+          echo "Build cache size: $build_cache_size"
           echo "hf-cache-size=$hf_cache_size" >> $GITHUB_ENV
           echo "build-cache-size=$build_cache_size" >> $GITHUB_ENV
 
