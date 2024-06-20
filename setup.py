@@ -59,21 +59,8 @@ if BUILD_CUDA_EXT:
         common_setup_kwargs["version"] += f"+cu{CUDA_VERSION}"
 
 # TODO clean unused pkg
-requirements = [
-    "accelerate>=0.31.0",
-    "datasets>=2.20.0",
-    "sentencepiece>=0.2.0",
-    "numpy>=1.26.4",
-    "rouge>=1.0.1",
-    "gekko>=1.1.1",
-    "torch>=2.3.1",
-    "safetensors>=0.4.3",
-    "transformers>=4.41.2",
-    "tqdm>=4.66.4",
-    "threadpoolctl>=3.5.0",
-    "packaging>=24.1",
-    "triton>=2.3.1",
-]
+with open('requirements.txt') as f:
+    requirements = f.read().splitlines()
 
 extras_require = {
     "test": ["pytest>=8.2.2", "parameterized"],

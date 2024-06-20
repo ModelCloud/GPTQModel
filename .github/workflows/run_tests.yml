@@ -1,0 +1,70 @@
+name: Run tests
+
+on:
+  push:
+    branches:
+      - csy-runner
+  repository_dispatch:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  DAY_OF_WEEK: Monday
+  CUDA_DEVICE_ORDER: PCI_BUS_ID
+  CUDA_VISIBLE_DEVICES: 0
+
+jobs:
+  build:
+    runs-on: self-hosted
+    container:
+      image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compile
+        run: |
+          pip install pytest ninja parameterized
+          pip install -v --no-build-isolation .
+
+      - name: test_lm_head.py
+        run: pytest tests/test_lm_head.py
+
+      - name: test_perplexity.py
+        run: pytest tests/test_perplexity.py
+
+      - name: test_q4_cuda.py
+        run: pytest tests/test_q4_cuda.py
+
+      - name: test_q4_exallama.py
+        run: pytest tests/test_q4_exallama.py
+
+      - name: test_q4_exallama_v2.py
+        run: pytest tests/test_q4_exallama_v2.py
+
+      - name: test_q4_marlin.py
+        run: pytest tests/test_q4_marlin.py
+
+      - name: test_q4_triton.py
+        run: pytest tests/test_q4_triton.py
+
+      - name: test_quant_formats.py
+        run: pytest tests/test_quant_formats.py
+
+      - name: test_repacking.py
+        run: pytest tests/test_repacking.py
+
+      - name: test_serialization.py
+        run: pytest tests/test_serialization.py
+
+      - name: test_sharded_loading.py
+        run: pytest tests/test_sharded_loading.py
+
+      - name: test_triton.py
+        run: pytest tests/test_triton.py
+
+
+        
