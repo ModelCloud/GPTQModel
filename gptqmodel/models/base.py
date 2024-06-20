@@ -25,7 +25,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
-                           nested_move_to, pack_model, simple_dispatch_model)
+                           nested_move_to, pack_model, simple_dispatch_model, get_moe_inside_layer_modules)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -266,6 +266,11 @@ class BaseGPTQModel(nn.Module):
         inside_layer_modules = self.layer_modules
         if not self.quantize_config.true_sequential:
             inside_layer_modules = [sum(inside_layer_modules, [])]
+
+            if hasattr(self.model.config, "num_experts"):
+                inside_layer_modules = get_moe_inside_layer_modules(self.inside_layer_modules,
+                                                                    self.model.config.num_experts)
+
         quantizers = {}
 
         # stores all per-layer quant stats such as avg loss and processing time
@@ -813,6 +818,10 @@ class BaseGPTQModel(nn.Module):
             model = AutoModelForCausalLM.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
+
+            if hasattr(config, "num_experts"):
+                cls.inside_layer_modules = get_moe_inside_layer_modules(cls.inside_layer_modules,
+                                                                        config.num_experts)
 
             layers = find_layers(model)
             ignore_layers = [cls.lm_head] + cls.base_modules

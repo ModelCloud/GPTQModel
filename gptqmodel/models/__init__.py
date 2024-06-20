@@ -22,6 +22,7 @@ from .opt import OPTGPTQ
 from .phi import PhiGPTQ
 from .qwen import QwenGPTQ
 from .qwen2 import Qwen2GPTQ
+from .qwen2_moe import Qwen2MoeGPTQ
 from .rw import RWGPTQ
 from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ

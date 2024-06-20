@@ -568,3 +568,18 @@ def auto_dtype_from_config(config: PretrainedConfig, quant_inference: bool = Fal
     else:
         # up/down-cast everything else to bfloat16 if not already in bfloat16
         return torch.bfloat16
+
+
+# generate inside layer modules for MoE models with massive experts
+def get_moe_inside_layer_modules(inside_layer_modules, num_experts):
+    new_inside_layer_modules = []
+    for names in inside_layer_modules:
+        new_inside_layer_modules.append([])
+        for n in names:
+            if "{expert_idx}" in n:
+                for expert_idx in range(num_experts):
+                    new_inside_layer_modules[-1].append(n.replace("{expert_idx}", str(expert_idx)))
+            else:
+                new_inside_layer_modules[-1].append(n)
+
+    return new_inside_layer_modules

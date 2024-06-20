@@ -30,6 +30,7 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
+from .qwen2_moe import Qwen2MoeGPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -62,6 +63,7 @@ MODEL_MAP = {
     "phi": PhiGPTQ,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
+    "qwen2_moe": Qwen2GPTQ,
 }
 
 
