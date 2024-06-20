@@ -88,7 +88,7 @@ class QuantLinear(BaseQuantLinear):
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
         if infeatures % 64 != 0 or outfeatures % 64 != 0:
-            self.gptqmodel_cuda_available = False
+            raise RuntimeError(f"Cuda old kernel does not support infeatures and outfeatures not divisible by 64: actual outfeatures = {outfeatures}, infeatures = {infeatures} ")
 
     def post_init(self):
         pass
@@ -190,7 +190,6 @@ class QuantLinear(BaseQuantLinear):
         x = x.reshape(-1, x.shape[-1])
         if (
             x.device.type == "cuda"
-            and self.gptqmodel_cuda_available is True
             and (self.kernel_switch_threshold is False or x.shape[0] < self.kernel_switch_threshold)
         ):
             out = torch.zeros(x.shape[0], out_shape[-1], dtype=torch.float, device=x.device)
