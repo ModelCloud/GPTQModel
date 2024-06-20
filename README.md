@@ -11,7 +11,7 @@
 
 ## News
 
-- 2024-06-29 🤗 GPTQModel 0.9.0 Released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
+- 2024-06-29 ✨ GPTQModel 0.9.0 Released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## Mission Statement
 
@@ -23,24 +23,24 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 ## Major Changes (Advantages) vs AutoGPTQ
 
-* `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* `lm_head` module quant inference support for further VRAM reduction. 
-* Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
-* Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
-* ChatGLM Model Support
-* MiniCPM Model Support
-* DBRX Model Support
-* Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
-* Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
-* Fixed packing Performance regression on high core-count systems.
-* Fixed crash on H100.
-* Many thousands of lines of refactor/cleanup.
-* Added CI workflow for validation of future PRs and prevent code regressions.
-* Added perplexity unit-test to prevent against model quant quality regressions.
-* De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
-* De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
-* Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
-* Everything that did not pass unit-tests have been removed from repo.
+* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
+* 🚀`lm_head` module quant inference support for further VRAM reduction. 
+* 🚀 Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
+* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
+* 🚀 Added `ChatGLM` Model Support
+* 🚀 Added `MiniCPM` Model Support
+* 🚀 Added `DBRX` Model Support
+* ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
+* 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
+* 👾 Fixed packing Performance regression on high core-count systems.
+* 👾 Fixed crash on H100.
+* ✨ Many thousands of lines of refactor/cleanup.
+* ✨ Added CI workflow for validation of future PRs and prevent code regressions.
+* ✨ Added perplexity unit-test to prevent against model quant quality regressions.
+* 👾 De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
+* 👾 De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
+* ✨ Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
+* ✨ Everything that did not pass unit-tests have been removed from repo.
 
 ## Roadmap (Target Date: July 2024):
 
@@ -52,18 +52,18 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 * Add Tests for every single supported model.
 
 
-## Model Support 
+## Model Support ( 🚀 GPTQModel only )
 
-| Model     |    |             |    |            |    |            |    |
-|-----------|----|-------------|----|------------|----|------------|----|
+| Model     |  |             |  |            |    |            |    |
+|-----------|--|-------------|--|------------|----|------------|----|
 | Baichuan  | ✅ | GPTBigCod   | ✅ | Mistral    | ✅ | StableLM   | ✅ |
 | Bloom     | ✅ | GPTNeoX     | ✅ | Mixtral    | ✅ | StarCoder2 | ✅ |
-| ChatGLM   | ✅ | GPT-2       | ✅ | MOSS       | ✅ | XVERSE     | ✅ |
+| ChatGLM   | 🚀 | GPT-2       | ✅ | MOSS       | ✅ | XVERSE     | ✅ |
 | CodeGen   | ✅ | GPT-J       | ✅ | MPT        | ✅ | Yi         | ✅ |
 | Cohere    | ✅ | InternLM    | ✅ | OPT        | ✅ |            | ✅ |
-| DBRX      | ✅ | Llama       | ✅ | Phi        | ✅ |            |    |
+| DBRX      | 🚀 | Llama       | ✅ | Phi        | ✅ |            |    |
 | Deci      | ✅ | LongLLaMA   | ✅ | Qwen       | ✅ |            |    |
-| Falcon    | ✅ | MiniCPM     | ✅ | RefinedWeb | ✅ |            |    |
+| Falcon    | ✅ | MiniCPM     | 🚀 | RefinedWeb | ✅ |            |    |
 
 ## Compatiblity 
 

@@ -555,6 +555,7 @@ class BaseGPTQModel(nn.Module):
             safetensors_metadata["format"] = "pt"
             safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
         else:
+            logger.warning("We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
             model_save_name = model_base_name + ".bin"
             torch.save(model.state_dict(), join(save_dir, model_save_name))
 
