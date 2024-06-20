@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.cache/huggingface/hub
-          key: ${{ runner.os }}-huggingface-hub-${{ env.hf-cache-size }}
+          key: ${{ runner.os }}-huggingface-hub-${{ env.hf-cache-size != '0' && env.hf-cache-size || 'default' }}
           restore-keys: |
             ${{ runner.os }}-huggingface-hub-
 
@@ -44,7 +44,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: build
-          key: ${{ runner.os }}-build-${{ env.build-cache-size }}
+          key: ${{ runner.os }}-build-${{ env.build-cache-size != '0' && env.build-cache-size || 'default' }}
           restore-keys: |
             ${{ runner.os }}-build-
 
