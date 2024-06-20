@@ -14,40 +14,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Calculate cache directory sizes
-        id: cache-sizes
-        run: |
-          if [ -d ~/.cache/huggingface/hub ]; then
-            hf_cache_size=$(du -s ~/.cache/huggingface/hub | awk '{print $1}')
-          else
-            hf_cache_size=0
-          fi
-          if [ -d build ]; then
-            build_cache_size=$(du -s build | awk '{print $1}')
-          else
-            build_cache_size=0
-          fi
-          echo "Huggingface cache size: $hf_cache_size"
-          echo "Build cache size: $build_cache_size"
-          echo "hf-cache-size=$hf_cache_size" >> $GITHUB_ENV
-          echo "build-cache-size=$build_cache_size" >> $GITHUB_ENV
-
-      - name: Cache Huggingface Hub
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/huggingface/hub
-          key: ${{ runner.os }}-huggingface-hub-${{ env.hf-cache-size != '0' && env.hf-cache-size || 'default' }}
-          restore-keys: |
-            ${{ runner.os }}-huggingface-hub-
-
-      - name: Cache Build Folder
-        uses: actions/cache@v3
-        with:
-          path: build
-          key: ${{ runner.os }}-build-${{ env.build-cache-size != '0' && env.build-cache-size || 'default' }}
-          restore-keys: |
-            ${{ runner.os }}-build-
-
       - name: Install dependencies
         run: |
           pip install parameterized protobuf
