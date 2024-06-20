@@ -33,10 +33,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install test dependencies
-        run: |
-          pip install -U parameterized protobuf ninja
           
       - name: Compile
         run: |
