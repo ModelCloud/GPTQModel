@@ -571,7 +571,7 @@ def auto_dtype_from_config(config: PretrainedConfig, quant_inference: bool = Fal
 
 
 # generate inside layer modules for MoE models with massive experts
-def get_moe_inside_layer_modules(inside_layer_modules, num_experts):
+def get_moe_inside_layer_modules(inside_layer_modules: list, num_experts: int):
     new_inside_layer_modules = []
     for names in inside_layer_modules:
         new_inside_layer_modules.append([])
