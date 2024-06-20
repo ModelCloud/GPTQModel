@@ -34,7 +34,7 @@ class TestQuantization(unittest.TestCase):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
-            desc_act=True,
+            desc_act=False if format == FORMAT.MARLIN else True,
             sym=sym,
             format=format,
         )
@@ -87,7 +87,7 @@ class TestQuantization(unittest.TestCase):
                 "bits": 4,
                 "group_size": 128,
                 "sym": sym,
-                "desc_act": True,
+                "desc_act": False if format == FORMAT.MARLIN else True,
                 "is_marlin_format": use_marlin,
             }
 
@@ -108,7 +108,7 @@ class TestQuantization(unittest.TestCase):
                 "bits": 4,
                 "group_size": 128,
                 "sym": sym,
-                "desc_act": True,
+                "desc_act": False if format == FORMAT.MARLIN else True,
             }
             model = GPTQModel.from_quantized(
                 tmpdirname,
