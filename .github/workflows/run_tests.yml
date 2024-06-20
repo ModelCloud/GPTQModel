@@ -16,13 +16,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install test dependencies
+        run: |
+          pip install -U parameterized protobuf ninja
+          
       - name: Compile
         run: |
           pip install -v --no-build-isolation .
-
-      - name: Install test dependencies
-        run: |
-          pip install parameterized protobuf
 
       - name: Run tests
         run: |
