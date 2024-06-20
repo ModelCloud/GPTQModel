@@ -268,7 +268,7 @@ class BaseGPTQModel(nn.Module):
             inside_layer_modules = [sum(inside_layer_modules, [])]
 
             if hasattr(self.model.config, "num_experts"):
-                inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=self.inside_layer_modules,
+                inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=self.layer_modules,
                                                                     num_experts=self.model.config.num_experts)
 
         quantizers = {}
@@ -820,7 +820,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             if hasattr(config, "num_experts"):
-                cls.inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=cls.inside_layer_modules,
+                cls.inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=cls.layer_modules,
                                                                         num_experts=config.num_experts)
 
             layers = find_layers(model)
