@@ -63,7 +63,7 @@ MODEL_MAP = {
     "phi": PhiGPTQ,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
-    "qwen2_moe": Qwen2GPTQ,
+    "qwen2_moe": Qwen2MoeGPTQ,
 }
 
 
