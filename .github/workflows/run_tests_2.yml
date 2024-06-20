@@ -14,15 +14,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Cache build
-      - uses: actions/cache@v4
-        with:
-          path: |
-            build
-          key: ${{ runner.os }}-build-${{ hashFiles('build/*/*.so') }}
-          restore-keys: |
-            ${{ runner.os }}-build-
-
       - name: Install dependencies
         run: |
           pip install parameterized protobuf
