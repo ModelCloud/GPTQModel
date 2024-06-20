@@ -22,8 +22,8 @@ jobs:
 
       - name: Compile
         run: |
-          mkdir build
-          touch build/000000
+          mkdir -p ~/.cache/gpt/build
+          touch ~/.cache/gpt/build/000000
           # pip install pytest ninja
           # pip install -v --no-build-isolation .
 
@@ -31,12 +31,12 @@ jobs:
         id: dir-size
         run: echo "DIR_SIZE=$(du -sb build | cut -f1)" >> $GITHUB_ENV
 
-      - name: Cache dependencies
-        uses: corca-ai/local-cache@v2
-        with:
-          path: build
-          key: ${{ env.DIR_SIZE }}
-          base: ~/.cache
+      # - name: Cache dependencies
+      #   uses: corca-ai/local-cache@v2
+      #   with:
+      #     path: build
+      #     key: ${{ env.DIR_SIZE }}
+      #     base: ~/.cache/gpt
 
   run-test:
     needs: build
@@ -59,20 +59,19 @@ jobs:
           - test_sharded_loading.py
           - test_triton.py
     steps:
-    #   - name: List dir
-    #     run: |
-    #       ls -alh
-    #       ls -alh build
+      - name: List dir
+        run: |
+          ls ~/.cache/gpt/build
 
       # - name: Checkout code
         # uses: actions/checkout@v4
 
-      - name: Cache dependencies
-        uses: corca-ai/local-cache@v2
-        with:
-          path: build
-          key: ${{ env.DIR_SIZE }}
-          base: ~/.cache
+      # - name: Cache dependencies
+      #   uses: corca-ai/local-cache@v2
+      #   with:
+      #     path: build
+      #     key: ${{ env.DIR_SIZE }}
+      #     base: ~/.cache
 
 
       - name: List dir
