@@ -57,6 +57,7 @@ class BaseGPTQModel(nn.Module):
     # some models may only be quantizable under specific gptq property
     require_true_sequential: Optional[bool] = None
 
+    # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
     # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
     # usage: set to property in model.config that holds this int value: total number of experts
