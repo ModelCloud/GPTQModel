@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class MPTGPTQ(BaseGPTQModel):
-    non_layer_modules = ["transformer.wte", "transformer.norm_f"]
+    base_modules = ["transformer.wte", "transformer.norm_f"]
 
     layers_node = "transformer.blocks"
     layer_type = "MPTBlock"

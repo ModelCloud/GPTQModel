@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class PhiGPTQ(BaseGPTQModel):
-    non_layer_modules = ["model.embed_tokens", "model.final_layernorm"]
+    base_modules = ["model.embed_tokens", "model.final_layernorm"]
 
     layers_node = "model.layers"
     layer_type = "PhiDecoderLayer"

@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class Qwen2GPTQ(BaseGPTQModel):
-    non_layer_modules = ["model.embed_tokens", "model.norm"]
+    base_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"
     layer_type = "Qwen2DecoderLayer"

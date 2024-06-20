@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class GPTJGPTQ(BaseGPTQModel):
-    non_layer_modules = ["transformer.wte", "transformer.ln_f"]
+    base_modules = ["transformer.wte", "transformer.ln_f"]
 
     layers_node = "transformer.h"
     layer_type = "GPTJBlock"

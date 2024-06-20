@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class RWGPTQ(BaseGPTQModel):
-    non_layer_modules = ["transformer.word_embeddings", "transformer.ln_f"]
+    base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
 
     layers_node = "transformer.h"
     layer_type = "DecoderLayer"
