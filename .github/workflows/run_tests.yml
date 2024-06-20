@@ -36,7 +36,7 @@ jobs:
         with:
           path: build
           key: ${{ env.DIR_SIZE }}
-          base: /tmp/gptqmodel
+          base: ~/.cache
 
   run-test:
     needs: build
@@ -72,7 +72,7 @@ jobs:
         with:
           path: build
           key: ${{ env.DIR_SIZE }}
-          base: /tmp/gptqmodel
+          base: ~/.cache
 
 
       - name: List dir
