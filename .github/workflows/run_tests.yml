@@ -65,5 +65,10 @@ jobs:
           path: build
           key: ${{ env.DIR_SIZE }}
 
+      - name: Compile
+        run: |
+          pip install pytest ninja
+          pip install -v --no-build-isolation .
+
       - name: Run tests
         run: pytest ${{ matrix.test_file }}
