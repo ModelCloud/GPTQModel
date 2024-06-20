@@ -15,7 +15,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as QuantLinearMarlin
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
@@ -42,7 +41,7 @@ logger.setLevel(logging.INFO)
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
-    non_layer_modules: List[str] = None
+    base_modules: List[str] = None
 
     # name of lm_head
     lm_head: str = "lm_head"
@@ -233,7 +232,7 @@ class BaseGPTQModel(nn.Module):
             force_layer_back_to_cpu = True
 
         ori_outside_layer_module_devices = {}
-        for module_name in self.non_layer_modules:
+        for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
 
             if module is None:
@@ -257,7 +256,7 @@ class BaseGPTQModel(nn.Module):
         handle.remove()
 
         move_to(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
-        for module_name in self.non_layer_modules:
+        for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
                 move_to(module, ori_outside_layer_module_devices[module_name])
@@ -815,7 +814,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             layers = find_layers(model)
-            ignore_layers = [cls.lm_head] + cls.non_layer_modules
+            ignore_layers = [cls.lm_head] + cls.base_modules
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head

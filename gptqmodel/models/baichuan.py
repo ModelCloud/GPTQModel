@@ -3,7 +3,7 @@ from .base import BaseGPTQModel
 
 class BaiChuanGPTQ(BaseGPTQModel):
     # non-layer (root) modules
-    non_layer_modules = ["model.embed_tokens", "model.norm"]
+    base_modules = ["model.embed_tokens", "model.norm"]
 
     # repeating layers
     layers_node = "model.layers"

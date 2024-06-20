@@ -3,7 +3,7 @@ from .base import BaseGPTQModel
 
 class BloomGPTQ(BaseGPTQModel):
     # non-layer (root) modules
-    non_layer_modules = [
+    base_modules = [
         "transformer.word_embeddings",
         "transformer.word_embeddings_layernorm",
         "transformer.ln_f",
