@@ -1,7 +1,7 @@
-from ._base import BaseGPTQForCausalLM
+from .base import BaseGPTQModel
 
 
-class MiniCPMGPTQForCausalLM(BaseGPTQForCausalLM):
+class MiniCPMGPTQ(BaseGPTQModel):
     layer_type = "MiniCPMDecoderLayer"
     layers_block_name = "model.layers"
     outside_layer_modules = [
@@ -17,4 +17,4 @@ class MiniCPMGPTQForCausalLM(BaseGPTQForCausalLM):
     ]
 
 
-__all__ = ["MiniCPMGPTQForCausalLM"]
+__all__ = ["MiniCPMGPTQ"]
