@@ -33,16 +33,16 @@ jobs:
       - name: Test
         run: |
           cd tests
-          pytest test_lm_head.py
-          pytest test_perplexity.py
-          pytest test_q4_cuda.py
-          pytest test_q4_exallama.py
-          pytest test_q4_exallama_v2.py
-          pytest test_q4_marlin.py
-          pytest test_q4_triton.py
-          pytest test_quant_formats.py
-          pytest test_repacking.py
-          pytest test_serialization.py
-          pytest test_sharded_loading.py
-          pytest test_triton.py
+          echo "running test_lm_head.py" && pytest test_lm_head.py
+          echo "running test_perplexity.py" && pytest test_perplexity.py
+          echo "running test_q4_cuda.py" && pytest test_q4_cuda.py
+          echo "running test_q4_exallama.py" && pytest test_q4_exallama.py
+          echo "running test_q4_exallama_v2.py" && pytest test_q4_exallama_v2.py
+          echo "running test_q4_marlin.py" && pytest test_q4_marlin.py
+          echo "running test_q4_triton.py" && pytest test_q4_triton.py
+          echo "running test_quant_formats.py" && pytest test_quant_formats.py
+          echo "running test_repacking.py" && pytest test_repacking.py
+          echo "running test_serialization.py" && pytest test_serialization.py
+          echo "running test_sharded_loading.py" && pytest test_sharded_loading.py
+          echo "running test_triton.py" && pytest test_triton.py
         
