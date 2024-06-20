@@ -11,23 +11,25 @@
 
 ## News
 
-- 2024-06-XX - (News)   🤗 PENDING
-
-## How is GPTQModel different from AutoGPTQ?
-
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes applied, new features, better/latest model support, and a pledge from the ModelCloud.ai team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+- 2024-06-29 🤗 GPTQModel 0.9.0 Released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## Mission Statement
 
 We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
-## Major Changes/Advantage vs AutoGPTQ
+## How is GPTQModel different from AutoGPTQ?
+
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+
+## Major Changes (Advantages) vs AutoGPTQ
 
 * `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* `lm_head` module quant inference support for further vram reduction.
-* ChatGLM Model Support.
-* Better defaults resulting in faster inference.
-* Better quality quants (improved PPL) with tweaked internal code (Result may vary depending on calibration set and gpu usage).
+* `lm_head` module quant inference support for further VRAM reduction. 
+* Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
+* Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
+* ChatGLM Model Support
+* MiniCPM Model Support
+* DBRX Model Support
 * Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed packing Performance regression on high core-count systems.
@@ -42,7 +44,6 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 ## Roadmap (Target Date: July 2024):
 
-* DBRX support.
 * `lm_head` quantization support by integrating with Intel/AutoRound.
 * Customizable callback in Per-Layer quantization.
 * Add Qbits (cpu inference) support from Intel/Qbits.
