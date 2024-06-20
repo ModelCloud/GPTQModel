@@ -1,9 +1,11 @@
 import copy
 import unittest
 
-import gptqmodel_marlin_cuda
+# isort: off
 import torch
 import torch.nn as nn
+import gptqmodel_marlin_cuda
+# isort: on
 from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight
