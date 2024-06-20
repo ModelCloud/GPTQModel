@@ -26,15 +26,15 @@ jobs:
           pip install pytest ninja
           pip install -v --no-build-isolation .
 
-      # - name: Get size of build directory
-      #   id: dir-size
-      #   run: echo "DIR_SIZE=$(du -sb build | cut -f1)" >> $GITHUB_ENV
+      - name: Get size of build directory
+        id: dir-size
+        run: echo "DIR_SIZE=$(du -sb build | cut -f1)" >> $GITHUB_ENV
 
-      # - name: Cache dependencies
-      #   uses: corca-ai/local-cache@v2
-      #   with:
-      #     path: build
-      #     key: ${{ env.DIR_SIZE }}
+      - name: Cache dependencies
+        uses: corca-ai/local-cache@v2
+        with:
+          path: build
+          key: ${{ env.DIR_SIZE }}
 
   run-test:
     needs: build
@@ -62,13 +62,13 @@ jobs:
           ls -alh
 
       # - name: Checkout code
-      #   uses: actions/checkout@v4
+        # uses: actions/checkout@v4
 
-      # - name: Cache dependencies
-      #   uses: corca-ai/local-cache@v2
-      #   with:
-      #     path: build
-      #     key: ${{ env.DIR_SIZE }}
+      - name: Cache dependencies
+        uses: corca-ai/local-cache@v2
+        with:
+          path: build
+          key: ${{ env.DIR_SIZE }}
 
       - name: Compile
         run: |
