@@ -25,11 +25,10 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 * 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * 🚀`lm_head` module quant inference support for further VRAM reduction. 
-* 🚀 Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
+* 🚀 Faster quantization: Up to 6% faster for TinyLlama + A100.
 * 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
 * 🚀 Added `ChatGLM` Model Support
 * 🚀 Added `MiniCPM` Model Support
-* 🚀 Added `DBRX` Model Support
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * 👾 Fixed packing Performance regression on high core-count systems.
@@ -61,7 +60,7 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 | ChatGLM   | 🚀 | GPT-2       | ✅ | MOSS       | ✅ | XVERSE     | ✅ |
 | CodeGen   | ✅ | GPT-J       | ✅ | MPT        | ✅ | Yi         | ✅ |
 | Cohere    | ✅ | InternLM    | ✅ | OPT        | ✅ |            | ✅ |
-| DBRX      | 🚀 | Llama       | ✅ | Phi        | ✅ |            |    |
+| _         | 🚀 | Llama       | ✅ | Phi        | ✅ |            |    |
 | Deci      | ✅ | LongLLaMA   | ✅ | Qwen       | ✅ |            |    |
 | Falcon    | ✅ | MiniCPM     | 🚀 | RefinedWeb | ✅ |            |    |
 
