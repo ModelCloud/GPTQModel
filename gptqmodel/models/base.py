@@ -282,7 +282,7 @@ class BaseGPTQModel(nn.Module):
 
             # dynamic expert layer index for model defs
             if self.dynamic_expert_layer_index is not None:
-                num_experts = hasattr(self.model.config, self.dynamic_expert_layer_index)
+                num_experts = getattr(self.model.config, self.dynamic_expert_layer_index)
                 inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=self.layer_modules,
                                                                     num_experts=num_experts)
 
@@ -835,7 +835,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             if cls.dynamic_expert_layer_index is not None:
-                num_experts = hasattr(config, cls.dynamic_expert_layer_index)
+                num_experts = getattr(config, cls.dynamic_expert_layer_index)
                 cls.inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=cls.layer_modules,
                                                                         num_experts=num_experts)
 
