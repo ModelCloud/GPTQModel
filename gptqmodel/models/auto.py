@@ -7,6 +7,7 @@ from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
 from .codegen import CodeGenGPTQ
 from .cohere import CohereGPTQ
+from .dbrx import DbrxGPTQ
 from .decilm import DeciLMGPTQ
 from .gemma import GemmaGPTQ
 from .gpt2 import GPT2GPTQ
@@ -16,6 +17,7 @@ from .gptj import GPTJGPTQ
 from .internlm import InternLMGPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
+from .minicpm import MiniCPMGPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
 from .moss import MOSSGPTQ
@@ -29,8 +31,7 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .minicpm import MiniCPMGPTQ
-from .dbrx import DbrxGPTQ
+
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
