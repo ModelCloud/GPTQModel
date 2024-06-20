@@ -248,6 +248,8 @@ def pack_model(
         use_marlin=use_marlin,
     )
 
+    print(f"eeeeeee pack_model QuantLinear {QuantLinear.QUANT_TYPE}")
+
     if force_layer_back_to_cpu:
         model.to(CPU)
 

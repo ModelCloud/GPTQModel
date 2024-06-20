@@ -105,7 +105,7 @@ class GPTQModel:
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         warmup_triton: bool = False,
-        disable_exllama: Optional[bool] = None,
+        disable_exllama: Optional[bool] = False,
         use_marlin: bool = False,
         **kwargs,
     ) -> BaseGPTQModel:
