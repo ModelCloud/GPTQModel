@@ -61,7 +61,7 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 | ChatGLM   | ✅ | GPT-2       | ✅ | MOSS       | ✅ | XVERSE     | ✅ |
 | CodeGen   | ✅ | GPT-J       | ✅ | MPT        | ✅ | Yi         | ✅ |
 | Cohere    | ✅ | InternLM    | ✅ | OPT        | ✅ |            | ✅ |
-| DBL       | ✅ | Llama       | ✅ | Phi        | ✅ |            |    |
+| DBRX      | ✅ | Llama       | ✅ | Phi        | ✅ |            |    |
 | Deci      | ✅ | LongLLaMA   | ✅ | Qwen       | ✅ |            |    |
 | Falcon    | ✅ | MiniCPM     | ✅ | RefinedWeb | ✅ |            |    |
 
