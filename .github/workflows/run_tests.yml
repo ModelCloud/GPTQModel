@@ -23,7 +23,7 @@ jobs:
       - name: Compile
         run: |
           pip install pytest ninja
-          pip install -v --no-build-isolation .
+          # pip install -v --no-build-isolation .
 
       - name: Get size of build directory
         id: dir-size
@@ -56,6 +56,10 @@ jobs:
           - test_sharded_loading.py
           - test_triton.py
     steps:
+      - name: List dir
+        run: |
+          ls -alh
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -67,8 +71,9 @@ jobs:
 
       - name: Compile
         run: |
+          ls -alh
           pip install pytest ninja
-          pip install -v --no-build-isolation .
+          # pip install -v --no-build-isolation .
 
       - name: Run tests
         run: pytest ${{ matrix.test_file }}
