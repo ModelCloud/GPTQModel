@@ -25,7 +25,7 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 * 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * 🚀`lm_head` module quant inference support for further VRAM reduction. 
-* 🚀 Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
+* 🚀 Faster quantization: Up to 6% faster for TinyLlama + A100.
 * 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
 * 🚀 Added `ChatGLM` Model Support
 * 🚀 Added `MiniCPM` Model Support
