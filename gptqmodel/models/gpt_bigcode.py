@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class GPTBigCodeGPTQ(BaseGPTQModel):
-    non_layer_modules = ["transformer.wpe", "transformer.wte", "transformer.ln_f"]
+    base_modules = ["transformer.wpe", "transformer.wte", "transformer.ln_f"]
 
     layers_node = "transformer.h"
     layer_type = "GPTBigCodeBlock"

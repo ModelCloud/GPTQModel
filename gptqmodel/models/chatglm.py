@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class ChatGLM(BaseGPTQModel):
-    non_layer_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
+    base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
 
     layers_node = "transformer.encoder.layers"
     layer_type = "GLMBlock"

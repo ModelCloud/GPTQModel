@@ -2,7 +2,7 @@ from .base import BaseGPTQModel
 
 
 class OPTGPTQ(BaseGPTQModel):
-    non_layer_modules = [
+    base_modules = [
         "model.decoder.embed_tokens",
         "model.decoder.embed_positions",
         "model.decoder.project_out",
