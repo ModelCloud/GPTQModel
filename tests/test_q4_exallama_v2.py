@@ -6,7 +6,7 @@ from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from test_q4_exallama import CUDA_OLD_REFERENCE
 
 try:
-    from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
+    from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 

@@ -81,6 +81,6 @@ class TestTriton(unittest.TestCase):
 
         qlinear_ref = ref_model.model.model.layers[0].self_attn.q_proj
 
-        ref_out = qlinear_ref(test_data)
+        ref_out = qlinear_ref(test_data) # noqa: F841
 
         _, measure_triton = benchmark_forward(qlinear_ref, test_data, desc="Triton", verbose=True)
