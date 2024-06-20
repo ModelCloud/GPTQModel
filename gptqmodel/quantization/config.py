@@ -30,7 +30,7 @@ META_FIELD_QUANTIZER = "quantizer"
 # packer is the tool that packed the weights post quantization
 META_FIELD_PACKER = "packer"
 
-META_QUANTIZER_AUTOGPTQ = "autogptq"
+META_QUANTIZER_GPTQMODEL = "gptqmodel"
 
 
 # saved formats
@@ -143,12 +143,12 @@ class QuantizeConfig():
     def is_quantized_or_packed_by_v2(self) -> bool:
         # check meta.quantizer
         producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        by_v2 = (producer == META_QUANTIZER_AUTOGPTQ) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
+        by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
 
         # fallback to meta.packer
         if not by_v2:
             producer, _version = self.meta_get_versionable(META_FIELD_PACKER)
-            by_v2 = producer == META_QUANTIZER_AUTOGPTQ and version.parse(_version) >= version.parse(
+            by_v2 = producer == META_QUANTIZER_GPTQMODEL and version.parse(_version) >= version.parse(
                 MIN_VERSION_WITH_V2
             )
 

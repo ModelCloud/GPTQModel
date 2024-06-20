@@ -17,7 +17,7 @@ from transformers.utils.generic import ContextManagers
 
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
-                                   META_QUANTIZER_AUTOGPTQ, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
@@ -451,7 +451,7 @@ class BaseGPTQModel(nn.Module):
         # write autogptq tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
-            value=META_QUANTIZER_AUTOGPTQ,
+            value=META_QUANTIZER_GPTQMODEL,
             version=__version__,
         )
 
