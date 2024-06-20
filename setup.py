@@ -42,23 +42,6 @@ BUILD_CUDA_EXT = True
 COMPILE_MARLIN = True
 UNSUPPORTED_COMPUTE_CAPABILITIES = ["3.5", "3.7", "5.0", "5.2", "5.3"]
 
-
-def remove_unwanted_pytorch_nvcc_flags():
-    from torch.utils import cpp_extension as cpp_ext
-
-    REMOVE_NVCC_FLAGS = [
-        "-D__CUDA_NO_HALF_OPERATORS__",
-        "-D__CUDA_NO_HALF_CONVERSIONS__",
-        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-D__CUDA_NO_HALF2_OPERATORS__",
-    ]
-    for flag in REMOVE_NVCC_FLAGS:
-        try:
-            cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
-        except ValueError:
-            pass
-
-
 if BUILD_CUDA_EXT:
     import torch
     default_cuda_version = torch.version.cuda
@@ -111,8 +94,6 @@ if BUILD_CUDA_EXT:
     if os.path.isdir(conda_cuda_include_dir):
         include_dirs.append(conda_cuda_include_dir)
         print(f"appending conda cuda include dir {conda_cuda_include_dir}")
-
-    remove_unwanted_pytorch_nvcc_flags()
 
     extra_link_args = []
     extra_compile_args = {
