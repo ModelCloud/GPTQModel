@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: self-hosted
     container:
-      image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+      image: modelcloud/gptqmodel:github-ci-v1
 
     steps:
 
