@@ -10,22 +10,6 @@ jobs:
     runs-on: self-hosted
     container:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
-    strategy:
-      fail-fast: false
-      matrix:
-        test_file:
-          - test_lm_head.py
-          - test_perplexity.py
-          - test_q4_cuda.py
-          - test_q4_exallama.py
-          - test_q4_exallama_v2.py
-          - test_q4_marlin.py
-          - test_q4_triton.py
-          - test_quant_formats.py
-          - test_repacking.py
-          - test_serialization.py
-          - test_sharded_loading.py
-          - test_triton.py
 
     steps:
 
@@ -41,4 +25,16 @@ jobs:
           pip install parameterized protobuf
 
       - name: Run tests
-        run: python -m unittest ${{ matrix.test_file }}
+        run: |
+          python -m unittest test_lm_head.py
+          python -m unittest test_perplexity.py
+          python -m unittest test_q4_cuda.py
+          python -m unittest test_q4_exallama.py
+          python -m unittest test_q4_exallama_v2.py
+          python -m unittest test_q4_marlin.py
+          python -m unittest test_q4_triton.py
+          python -m unittest test_quant_formats.py
+          python -m unittest test_repacking.py
+          python -m unittest test_serialization.py
+          python -m unittest test_sharded_loading.py
+          python -m unittest test_triton.py
