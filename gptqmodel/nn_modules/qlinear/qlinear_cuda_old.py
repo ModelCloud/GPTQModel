@@ -190,7 +190,6 @@ class QuantLinear(BaseQuantLinear):
         x = x.reshape(-1, x.shape[-1])
         if (
             x.device.type == "cuda"
-            and self.gptqmodel_cuda_available is True
             and (self.kernel_switch_threshold is False or x.shape[0] < self.kernel_switch_threshold)
         ):
             out = torch.zeros(x.shape[0], out_shape[-1], dtype=torch.float, device=x.device)
