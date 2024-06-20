@@ -2,24 +2,7 @@ name: check code quality
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - "gptqmodel/**.py"
-      - "tests/**.py"
-      - "examples/**.py"
-      - "setup.py"
-
   pull_request:
-    branches: [ main ]
-    paths:
-      - "gptqmodel/**.py"
-      - "tests/**.py"
-      - "examples/**.py"
-      - "setup.py"
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
 
 jobs:
   build:
