@@ -15,6 +15,19 @@ jobs:
     runs-on: self-hosted
     container:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compile
+        run: |
+          pip install pytest ninja
+          pip install -v --no-build-isolation .
+
+  run-test:
+    needs: build
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -32,15 +45,6 @@ jobs:
           - test_serialization.py
           - test_sharded_loading.py
           - test_triton.py
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-          
-      - name: Compile
-        run: |
-          pip install pytest ninja
-          pip install -v --no-build-isolation .
-
       - name: Run tests
         run: pytest ${{ matrix.test_file }}
