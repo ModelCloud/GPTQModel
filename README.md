@@ -13,13 +13,13 @@
 
 - 2024-06-29 🤗 GPTQModel 0.9.0 Released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
-## How is GPTQModel different from AutoGPTQ?
-
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
-
 ## Mission Statement
 
 We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
+
+## How is GPTQModel different from AutoGPTQ?
+
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
 
 ## Major Changes (Advantages) vs AutoGPTQ
 
