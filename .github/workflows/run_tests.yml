@@ -26,15 +26,15 @@ jobs:
 
       - name: Run tests
         run: |
-          python -m unittest test_lm_head.py
-          python -m unittest test_perplexity.py
-          python -m unittest test_q4_cuda.py
-          python -m unittest test_q4_exallama.py
-          python -m unittest test_q4_exallama_v2.py
-          python -m unittest test_q4_marlin.py
-          python -m unittest test_q4_triton.py
-          python -m unittest test_quant_formats.py
-          python -m unittest test_repacking.py
-          python -m unittest test_serialization.py
-          python -m unittest test_sharded_loading.py
-          python -m unittest test_triton.py
+          pytest test_lm_head.py
+          pytest test_perplexity.py
+          pytest test_q4_cuda.py
+          pytest test_q4_exallama.py
+          pytest test_q4_exallama_v2.py
+          pytest test_q4_marlin.py
+          pytest test_q4_triton.py
+          pytest test_quant_formats.py
+          pytest test_repacking.py
+          pytest test_serialization.py
+          pytest test_sharded_loading.py
+          pytest test_triton.py
