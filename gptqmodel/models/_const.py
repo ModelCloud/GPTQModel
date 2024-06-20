@@ -30,6 +30,7 @@ SUPPORTED_MODELS = [
     "mixtral",
     "qwen2",
     "phi",
+    "phi3",
     "gemma",
     "starcoder2",
     "cohere",
