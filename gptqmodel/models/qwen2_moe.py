@@ -8,7 +8,7 @@ class Qwen2MoeGPTQ(BaseGPTQModel):
 
     # allow dynamic expansion so we don't need to write out 64 layers here
     # usage: config.num_experts contains the actual expert count used for index
-    dynamic_expert_layer_index = "num_experts"
+    dynamic_expert_index = "num_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]
 
