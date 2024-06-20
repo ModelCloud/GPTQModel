@@ -1,8 +1,6 @@
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import GPTQModel, exllama_set_max_input_length
-from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init
@@ -13,7 +11,6 @@ except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
 from test_q4_cuda import get_diff
-from transformers import AutoTokenizer  # noqa: E402
 
 CUDA_OLD_REFERENCE = torch.Tensor(
     [
