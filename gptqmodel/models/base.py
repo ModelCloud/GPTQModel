@@ -24,7 +24,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, get_moe_inside_layer_modules, gptqmodel_post_init, make_quant,
+                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
@@ -276,16 +276,16 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
-        inside_layer_modules = self.layer_modules
+        layer_modules = self.layer_modules
 
         if not self.quantize_config.true_sequential:
-            inside_layer_modules = [sum(inside_layer_modules, [])]
+            layer_modules = [sum(layer_modules, [])]
 
             # dynamic expert layer index for model defs
             if self.dynamic_expert_index is not None:
                 num_experts = getattr(self.model.config, self.dynamic_expert_index)
-                inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=self.layer_modules,
-                                                                    num_experts=num_experts)
+                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+                                                      num_experts=num_experts)
 
         quantizers = {}
 
@@ -304,7 +304,7 @@ class BaseGPTQModel(nn.Module):
             cur_layer_device = get_device(layer)
 
             full = find_layers(layer)
-            for names in inside_layer_modules:
+            for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
                 gptq = {}
                 for name in subset:
@@ -837,8 +837,8 @@ class BaseGPTQModel(nn.Module):
 
             if cls.dynamic_expert_index is not None:
                 num_experts = getattr(config, cls.dynamic_expert_index)
-                cls.inside_layer_modules = get_moe_inside_layer_modules(inside_layer_modules=cls.layer_modules,
-                                                                        num_experts=num_experts)
+                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
+                                                          num_experts=num_experts)
 
             layers = find_layers(model)
             ignore_layers = [cls.lm_head] + cls.base_modules
