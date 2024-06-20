@@ -1,4 +1,4 @@
-name: check code quality
+name: Ruff Check
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
 
-    - name: Check style with ruff
+    - name: Ruff Check
       run: |
         cd format
         ./format.sh
