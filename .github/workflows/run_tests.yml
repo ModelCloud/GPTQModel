@@ -22,6 +22,7 @@ jobs:
 
       - name: Compile
         run: |
+          mkdir build
           pip install pytest ninja
           # pip install -v --no-build-isolation .
 
