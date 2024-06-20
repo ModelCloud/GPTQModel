@@ -25,6 +25,16 @@ jobs:
           pip install pytest ninja
           pip install -v --no-build-isolation .
 
+      - name: Get size of build directory
+        id: dir-size
+        run: echo "DIR_SIZE=$(du -sb build | cut -f1)" >> $GITHUB_ENV
+
+      - name: Cache dependencies
+        uses: actions/cache@v2
+        with:
+          path: build
+          key: ${{ env.DIR_SIZE }}
+
   run-test:
     needs: build
     runs-on: self-hosted
@@ -46,5 +56,14 @@ jobs:
           - test_sharded_loading.py
           - test_triton.py
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v2
+        with:
+          path: build
+          key: ${{ env.DIR_SIZE }}
+
       - name: Run tests
         run: pytest ${{ matrix.test_file }}
