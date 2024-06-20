@@ -1060,7 +1060,6 @@ class TestsQ4Exllama(unittest.TestCase):
             group_size=group_size,
             bits=4,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
 
         linear = linear_class(
@@ -1126,7 +1125,6 @@ class TestsQ4Exllama(unittest.TestCase):
             use_triton=False,
             model_basename=model_basename,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1163,7 +1161,6 @@ class TestsQ4Exllama(unittest.TestCase):
             device="cuda:0",
             use_triton=False,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1193,7 +1190,6 @@ class TestsQ4Exllama(unittest.TestCase):
             use_triton=False,
             model_basename=model_basename,
             disable_exllama=False,
-            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
