@@ -1,7 +1,6 @@
 name: Run tests
 
 on:
-  push:
   repository_dispatch:
   workflow_dispatch:
 
