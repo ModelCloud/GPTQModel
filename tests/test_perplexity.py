@@ -77,9 +77,9 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # FORMAT.GPTQ_V2,
+            FORMAT.GPTQ_V2,
             FORMAT.GPTQ,
-            # FORMAT.MARLIN,
+            FORMAT.MARLIN,
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
