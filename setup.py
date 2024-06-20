@@ -66,13 +66,13 @@ requirements = [
     "numpy>=1.26.4",
     "rouge>=1.0.1",
     "gekko>=1.1.1",
-    "torch>=2.3.1",
+    "torch>=2.0.0",
     "safetensors>=0.4.3",
     "transformers>=4.41.2",
     "tqdm>=4.66.4",
     "threadpoolctl>=3.5.0",
     "packaging>=24.1",
-    "triton>=2.3.1",
+    "triton>=2.0.0",
 ]
 
 extras_require = {
