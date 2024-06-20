@@ -23,6 +23,7 @@ jobs:
       - name: Compile
         run: |
           mkdir build
+          touch build/000000
           pip install pytest ninja
           pip install -v --no-build-isolation .
 
@@ -60,6 +61,7 @@ jobs:
       - name: List dir
         run: |
           ls -alh
+          ls -alh build
 
       # - name: Checkout code
         # uses: actions/checkout@v4
