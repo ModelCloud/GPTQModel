@@ -31,10 +31,11 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 * Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * Fixed packing Performance regression on high core-count systems.
+* Fixed crash on H100.
 * Many thousands of lines of refactor/cleanup.
-* Added CI workflow for validation of PRs and prevent code regressions.
-* Added perplexity unit-test to prevent against quant quality regressions.
-* De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. Moved dataset to HF.
+* Added CI workflow for validation of future PRs and prevent code regressions.
+* Added perplexity unit-test to prevent against model quant quality regressions.
+* De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
 * De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
 * Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
 * Everything that did not pass unit-tests have been removed from repo.
