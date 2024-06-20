@@ -24,9 +24,9 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 ## Major Changes (Advantages) vs AutoGPTQ
 
 * `Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* `lm_head` module quant inference support for further vram reduction.
-* Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (A100)
-* Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, A100)
+* `lm_head` module quant inference support for further VRAM reduction. 
+* Faster quantization: Up to 20% faster for GPTQ and 5% for Marlin formats. (TinyLlama + A100)
+* Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
 * ChatGLM Model Support.
 * Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
