@@ -10,29 +10,35 @@ jobs:
     runs-on: self-hosted
     container:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
-    steps:
-      - name: Git Checkout
-        uses: actions/checkout@v4
+    strategy:
+      fail-fast: false
+      matrix:
+        test_file:
+          - test_lm_head.py
+          - test_perplexity.py
+          - test_q4_cuda.py
+          - test_q4_exallama.py
+          - test_q4_exallama_v2.py
+          - test_q4_marlin.py
+          - test_q4_triton.py
+          - test_quant_formats.py
+          - test_repacking.py
+          - test_serialization.py
+          - test_sharded_loading.py
+          - test_triton.py
 
-      - name: Apt dpends
-        run: |
-          apt update && apt install lsb-core -y
-          
-      - name: Setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11.5'
-          cache: 'pip' # caching pip dependencies
-          
-      - name: Install pip depends
-        run: |
-          pip install -U parameterized protobuf pytest ninja
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Compile
         run: |
           pip install -v --no-build-isolation .
 
-      - name: Run tests
+      - name: Install test dependencies
         run: |
-          cd tests
-          pytest -v 
+          pip install parameterized protobuf
+
+      - name: Run tests
+        run: python -m unittest ${{ matrix.test_file }}
