@@ -101,7 +101,7 @@ class QuantLinear(nn.Module):
         self.reset_parameters()
 
     def _validate_parameters(
-        self, bits, group_size, infeatures, outfeatures, trainable
+        self, bits: int, group_size: int, infeatures: int, outfeatures: int
     ):
         if infeatures % 16 != 0 or outfeatures % 16 != 0:
             raise ValueError("`infeatures` and `outfeatures` must be divisible by 16.")
@@ -109,13 +109,11 @@ class QuantLinear(nn.Module):
             raise NotImplementedError("Only 1/2/4 bits are supported.")
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
-        if trainable:
-            raise NotImplementedError("Training is not supported.")
 
-    def _set_group_size(self, group_size, infeatures):
+    def _set_group_size(self, group_size: int, infeatures: int):
         return infeatures if group_size == -1 else group_size
 
-    def _initialize_buffers(self, infeatures, outfeatures, bias):
+    def _initialize_buffers(self, infeatures: int, outfeatures: int, bias: bool):
         self.register_buffer(
             "qweight",
             torch.zeros(
@@ -152,7 +150,7 @@ class QuantLinear(nn.Module):
             self.bias = None
 
     def _configure_bitblas_matmul(
-        self, enable_tuning, fast_decoding, bias, propagate_b, layout, bits
+        self, enable_tuning: bool, fast_decoding: bool, bias: bool, propagate_b, layout, bits: int
     ):
         # Assuming MatmulWeightOnlyDequantizeConfig and MatmulWeightOnlyDequantize are defined elsewhere
         bitblas_dtype = self.BITBLAS_DTYPES[self.TORCH_DTYPE]
@@ -232,7 +230,7 @@ class QuantLinear(nn.Module):
         # scales in gptq old quant linear stored with (infeatures // group_size, outfeatures), should be transposed.
         scales = gptq_module.scales.T.contiguous().view(self.TORCH_DTYPE)
         self.scales = scales
-        # qzeros should be dequantized to int zeros.
+        # qzeros should be de-quantized to int zeros.
         intzeros = unpack_qzeros(gptq_module.qzeros, self.bits).T.contiguous()
         if self.bitblas_matmul.config.zeros_mode == "original":
             self.zeros = intzeros.to(torch.float16).contiguous()
