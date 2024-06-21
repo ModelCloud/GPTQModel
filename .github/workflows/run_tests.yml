@@ -42,9 +42,6 @@ jobs:
       - name: test_q4_triton.py
         run: pytest tests/test_q4_triton.py
 
-      - name: test_quant_formats.py
-        run: pytest tests/test_quant_formats.py
-
       - name: test_repacking.py
         run: pytest tests/test_repacking.py
 
@@ -56,6 +53,9 @@ jobs:
 
       - name: test_triton.py
         run: pytest tests/test_triton.py
+
+      - name: test_quant_formats.py
+        run: pytest tests/test_quant_formats.py
 
       - name: test_q4_cuda.py
         run: pytest tests/test_q4_cuda.py
