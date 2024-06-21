@@ -63,7 +63,9 @@ class BaseGPTQModel(nn.Module):
     # usage: set to property in model.config that holds this int value: total number of experts
     dynamic_expert_index: Optional[str] = None
 
-    info: Dict = {}
+    # allow models to define optional notes that output messages to users that want to use this model
+    # list of supported keys: [ "notes" = print the notes value on model load ]
+    info: Dict[str, str] = {}
 
     def __init__(
         self,
@@ -612,6 +614,7 @@ class BaseGPTQModel(nn.Module):
         if not torch.cuda.is_available():
             raise EnvironmentError("Load pretrained model to do quantization requires CUDA available.")
 
+        # allow models to define optional notes that output messages to users that want to use this model
         notes = cls.info.get("notes")
         if notes:
             logger.info(notes)
