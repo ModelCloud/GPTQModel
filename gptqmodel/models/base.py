@@ -951,6 +951,7 @@ class BaseGPTQModel(nn.Module):
             device_map=device_map,
             offload_state_dict=True,
             offload_buffers=True,
+            ignore_unexpected_keys=True,
         )
 
         # TODO: Why are we using this custom function and not dispatch_model?
