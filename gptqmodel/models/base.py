@@ -21,7 +21,6 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.data import collate_data
-from ..utils.importer import BITBLAS_AVAILABLE
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
@@ -741,10 +740,6 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         """load quantized model from local disk"""
-        if use_bitblas and not BITBLAS_AVAILABLE:
-            logger.warning("BitBlas is not installed, reset use_bitblas to False.")
-            use_bitblas = False
-
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
         if disable_exllama is None:
             if disable_exllamav2:

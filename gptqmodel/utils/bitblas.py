@@ -8,11 +8,9 @@ from tqdm import tqdm
 
 from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .importer import BITBLAS_AVAILABLE
 from .model import recurse_getattr, recurse_setattr
 from safetensors.torch import save_file as safe_save
-if BITBLAS_AVAILABLE:
-    pass
+
 
 logger = getLogger(__name__)
 

@@ -1,13 +1,5 @@
 from logging import getLogger
 
-try:
-    import bitblas  # noqa: F401
-
-    BITBLAS_AVAILABLE = True
-    BITBLAS_EXCEPTION = None
-except Exception as e:
-    BITBLAS_AVAILABLE = False
-    BITBLAS_EXCEPTION = e
 
 logger = getLogger(__name__)
 
