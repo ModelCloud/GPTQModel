@@ -30,6 +30,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model)
 
+
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
 formatter = logging.Formatter("%(levelname)s - %(message)s")
@@ -472,6 +473,7 @@ class BaseGPTQModel(nn.Module):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
+        from gptqmodel import __version__
         # write autogptq tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
@@ -607,7 +609,6 @@ class BaseGPTQModel(nn.Module):
                 safetensors_metadata["format"] = "pt"
 
                 # Store the quantization configuration as safetensors metadata
-                from gptqmodel import __version__
 
                 safetensors_metadata["gptqmodel_version"] = str(__version__)
                 safetensors_metadata["gptq_bits"] = str(self.quantize_config.bits)
