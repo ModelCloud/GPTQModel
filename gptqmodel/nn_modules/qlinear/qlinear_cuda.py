@@ -144,8 +144,6 @@ class QuantLinear(BaseQuantLinear):
                     qweight[row] |= intweight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -179,8 +177,6 @@ class QuantLinear(BaseQuantLinear):
                     qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
                 i += 10
                 col += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -230,8 +226,6 @@ class QuantLinear(BaseQuantLinear):
                     self.qzeros,
                     self.g_idx,
                 )
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         else:
             if self.wf.device != self.qzeros.device:
                 self.wf = self.wf.to(self.qzeros.device)
@@ -273,8 +267,6 @@ class QuantLinear(BaseQuantLinear):
                 weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
                 weight = weight & 0x7
                 weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
             num_itr = self.g_idx.shape[0] // x.shape[-1]

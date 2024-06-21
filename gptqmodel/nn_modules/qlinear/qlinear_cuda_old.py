@@ -143,8 +143,6 @@ class QuantLinear(BaseQuantLinear):
                     qweight[row] |= intweight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -178,8 +176,6 @@ class QuantLinear(BaseQuantLinear):
                     qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
                 i += 10
                 col += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -229,9 +225,6 @@ class QuantLinear(BaseQuantLinear):
                         self.group_size,
                         self.half_indim,
                     )
-
-                else:
-                    raise NotImplementedError("Only 2,3,4 bits are supported.")
             else:
                 x = x.to(torch.float32)  # This is required for autocast compatibility.
                 if self.bits == 2:
@@ -270,8 +263,6 @@ class QuantLinear(BaseQuantLinear):
                         self.qzeros,
                         self.group_size,
                     )
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         else:
             if self.wf.device != self.qzeros.device:
                 self.wf = self.wf.to(self.qzeros.device)
@@ -324,8 +315,6 @@ class QuantLinear(BaseQuantLinear):
                 weight = weight & 0x7
                 weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
                 weight = weight.reshape(-1, self.group_size, weight.shape[2])
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
             weight = scales * (weight - zeros)
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
