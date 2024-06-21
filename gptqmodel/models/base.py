@@ -173,11 +173,11 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
-        MIN_CALIBRATION_DATASET_SIZE = 256
-        MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH = 256
+        min_calibration_dataset_size = 256
+        min_calibration_dataset_input_ids_avg_length = 256
 
-        if len(calibration_dataset) < MIN_CALIBRATION_DATASET_SIZE:
-            logger.warning(f"Calibration dataset size should be greater than {MIN_CALIBRATION_DATASET_SIZE}. "
+        if len(calibration_dataset) < min_calibration_dataset_size:
+            logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
                              f"Current size: {len(calibration_dataset)}.")
 
         # Calculate the average length of the average input_ids
@@ -187,9 +187,9 @@ class BaseGPTQModel(nn.Module):
             total_input_ids_length += input_ids_length
         avg = total_input_ids_length / len(calibration_dataset)
 
-        if avg < MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH:
+        if avg < min_calibration_dataset_input_ids_avg_length:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                             f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
+                             f"{min_calibration_dataset_input_ids_avg_length}! Current AVG is {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
