@@ -3,6 +3,8 @@
 
 import ctypes
 import operator
+import os
+import time
 from functools import reduce
 from logging import getLogger
 
@@ -26,16 +28,20 @@ except ImportError as e:
 
 from typing import List, Union
 
-from bitblas.cache import global_operator_cache
+from bitblas.cache import global_operator_cache, get_database_path
 from bitblas import MatmulConfig, Matmul
 from bitblas.quantization.utils import general_compress
 from bitblas.utils import auto_detect_nvidia_target
+from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 
+auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
+
 bitblas.set_log_level("INFO")
 BITBLAS_TARGET = auto_detect_nvidia_target()
-BITBLAS_DATABASE_PATH = ".bitblas_database"
+print("BITBLAS_TARGET", BITBLAS_TARGET)
+BITBLAS_DATABASE_PATH = get_database_path()
 BITBLAS_PROPAGATE_WEIGHTS = False
 
 def unpack_qzeros(qzeros, bits):
@@ -82,11 +88,10 @@ class QuantLinear(nn.Module):
         propagate_b: bool = BITBLAS_PROPAGATE_WEIGHTS,
         opt_features: Union[int, List[int]] = OPT_FEATURES,
         layout: str = "nt",
-        trainable: bool = False,
         **kwargs,
     ):
         super().__init__()
-        self._validate_parameters(bits, group_size, infeatures, outfeatures, trainable)
+        self._validate_parameters(bits, group_size, infeatures, outfeatures)
 
         self.bits = bits
         self.infeatures = infeatures
