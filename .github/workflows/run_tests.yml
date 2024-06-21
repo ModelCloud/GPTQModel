@@ -3,6 +3,11 @@ name: Unit Tests (GPU)
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      test_names:
+        description: 'List of test files to run(comma-separated)'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,39 +33,51 @@ jobs:
           pip install -v --no-build-isolation .
 
       - name: test_lm_head.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_lm_head.py') }}
         run: pytest tests/test_lm_head.py
 
       - name: test_q4_exallama.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_exallama.py') }}
         run: pytest tests/test_q4_exallama.py
 
       - name: test_q4_exallama_v2.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_exallama_v2.py') }}
         run: pytest tests/test_q4_exallama_v2.py
 
       - name: test_q4_marlin.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_marlin.py') }}
         run: pytest tests/test_q4_marlin.py
 
       - name: test_q4_triton.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_triton.py') }}
         run: pytest tests/test_q4_triton.py
 
       - name: test_repacking.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_repacking.py') }}
         run: pytest tests/test_repacking.py
 
       - name: test_serialization.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_serialization.py') }}
         run: pytest tests/test_serialization.py
 
       - name: test_sharded.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_sharded.py') }}
         run: pytest tests/test_sharded.py
 
       - name: test_triton.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_triton.py') }}
         run: pytest tests/test_triton.py
 
       - name: test_quant_formats.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_quant_formats.py') }}
         run: pytest tests/test_quant_formats.py
 
       - name: test_q4_cuda.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_cuda.py') }}
         run: pytest tests/test_q4_cuda.py
 
       - name: test_perplexity.py
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_perplexity.py') }}
         run: pytest tests/test_perplexity.py
 
 
