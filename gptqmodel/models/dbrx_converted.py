@@ -1,8 +1,8 @@
 from .base import BaseGPTQModel
 
 
-class DbrxGPTQ(BaseGPTQModel):
-    # dbrx requires true_sequential = False
+class DbrxConvertedGPTQ(BaseGPTQModel):
+    # dbrx_converted requires true_sequential = False
     require_true_sequential = False
 
     base_modules = ["transformer.wte", "transformer.norm_f"]
