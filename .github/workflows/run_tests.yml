@@ -1,9 +1,6 @@
 name: Unit Tests (GPU)
 
 on:
-  push:
-    branches:
-      - csy-runner
   repository_dispatch:
   workflow_dispatch:
 
@@ -27,17 +24,11 @@ jobs:
 
       - name: Compile
         run: |
-          pip install -U pytest ninja parameterized
+          pip install -U pytest ninja parameterized protobuf
           pip install -v --no-build-isolation .
 
       - name: test_lm_head.py
         run: pytest tests/test_lm_head.py
-
-      - name: test_perplexity.py
-        run: pytest tests/test_perplexity.py
-
-      - name: test_q4_cuda.py
-        run: pytest tests/test_q4_cuda.py
 
       - name: test_q4_exallama.py
         run: pytest tests/test_q4_exallama.py
@@ -51,9 +42,6 @@ jobs:
       - name: test_q4_triton.py
         run: pytest tests/test_q4_triton.py
 
-      - name: test_quant_formats.py
-        run: pytest tests/test_quant_formats.py
-
       - name: test_repacking.py
         run: pytest tests/test_repacking.py
 
@@ -65,6 +53,15 @@ jobs:
 
       - name: test_triton.py
         run: pytest tests/test_triton.py
+
+      - name: test_quant_formats.py
+        run: pytest tests/test_quant_formats.py
+
+      - name: test_q4_cuda.py
+        run: pytest tests/test_q4_cuda.py
+
+      - name: test_perplexity.py
+        run: pytest tests/test_perplexity.py
 
 
         
