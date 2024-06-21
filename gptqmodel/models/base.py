@@ -2,9 +2,10 @@ import copy
 import json
 import logging
 import os
-import re
-from os.path import isfile, join
+from os.path import join
 from typing import Dict, List, Optional, Union
+import re
+from os.path import isdir, isfile, join
 
 import accelerate
 import torch
@@ -17,7 +18,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
-from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
@@ -29,7 +29,8 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model)
-
+from ..version import __version__
+from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -473,8 +474,6 @@ class BaseGPTQModel(nn.Module):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
-        # fix circular import
-        from gptqmodel import __version__
         # write autogptq tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
