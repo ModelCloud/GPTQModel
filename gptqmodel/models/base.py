@@ -963,9 +963,6 @@ class BaseGPTQModel(nn.Module):
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
-            if torch.version.hip:
-                raise ValueError(
-                    "Can not use BitBLAS int4*fp16 kernel with AMD ROCm version of PyTorch as the kernel is not compatible. Please do not use `use_bitblas=True` when using ROCm devices.")
 
             # Load the quant linear type we need.
             # TODO: load directy bitblas with the right quantlinear class.
