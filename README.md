@@ -30,6 +30,7 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 * 🚀 Added `ChatGLM` Model Support
 * 🚀 Added `MiniCPM` Model Support
 * 🚀 Added `Phi-3` Model Support
+* 🚀 Added `Qwen2MoE` Model Support
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * 👾 Fixed packing Performance regression on high core-count systems.
@@ -54,16 +55,16 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 ## Model Support ( 🚀 GPTQModel only )
 
-| Model     |    |           |    |            |    |            |   |
-|-----------|----|-----------|----|------------|----|------------|---|
-| Baichuan  | ✅  | GPTNeoX   | ✅  | Mixtral    | ✅  | StableLM   | ✅ |
-| Bloom     | ✅  | GPT-2     | ✅  | MOSS       | ✅  | StarCoder2 | ✅ |
-| ChatGLM   | 🚀 | GPT-J     | ✅  | MPT        | ✅  | XVERSE     | ✅ |
-| CodeGen   | ✅  | InternLM  | ✅  | OPT        | ✅  | Yi         | ✅ |
-| Cohere    | ✅  | Llama     | ✅  | Phi        | ✅  |            | ✅ |
-| Deci      | ✅  | LongLLaMA | ✅  | Phi-3      | 🚀 |            |   |
-| Falcon    | ✅  | MiniCPM   | ✅  | Qwen       | ✅  |            |   |
-| GPTBigCod | ✅  | Mistral   | 🚀 | RefinedWeb | ✅  |            |   |
+| Model     |    |           |    |          |    |            |   |
+|-----------|----|-----------|----|----------|----|------------|---|
+| Baichuan  | ✅  | GPTNeoX   | ✅  | Mixtral  | ✅  | RefinedWeb | ✅ |
+| Bloom     | ✅  | GPT-2     | ✅  | MOSS     | ✅  | StableLM   | ✅ |
+| ChatGLM   | 🚀 | GPT-J     | ✅  | MPT      | ✅  | StarCoder2 | ✅ |
+| CodeGen   | ✅  | InternLM  | ✅  | OPT      | ✅  | XVERSE     | ✅ |
+| Cohere    | ✅  | Llama     | ✅  | Phi      | ✅  | Yi         | ✅ |
+| Deci      | ✅  | LongLLaMA | ✅  | Phi-3    | 🚀 |            |   |
+| Falcon    | ✅  | MiniCPM   | 🚀 | Qwen     | ✅  |            |   |
+| GPTBigCod | ✅  | Mistral   | ✅  | Qwen2MoE | 🚀 |            |   |
 
 ## Compatiblity 
 
@@ -75,13 +76,6 @@ GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDI
 
 ## Install
 
-GPTQModel is available for Linux only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
-
-|  CUDA version | Installation                                   | Built against PyTorch |
-|---------------|------------------------------------------------|-----------------------|
-| CUDA 12.1     | `pip install gptq-model --no-build-isolation`  | 2.3.1+cu121           |
-
-
 ### Install from source
 
 ```bash
@@ -90,6 +84,12 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # compile and install
 pip install -vvv --no-build-isolation .
+```
+
+### PIP (PENDING RELEASE) 
+
+```bash
+pip install gptq-model --no-build-isolation
 ```
 
 ### Quantization and Inference

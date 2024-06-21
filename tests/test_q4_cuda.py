@@ -5,7 +5,7 @@ from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLi
 from parameterized import parameterized  # noqa: E402
 
 try:
-    from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
+    from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 

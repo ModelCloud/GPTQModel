@@ -170,8 +170,10 @@ class Perplexity:
             token_org = tokens[0][batch_start].item()
 
             if j == 0:
-                # Replace the first token with the BOS token
-                tokens[0][batch_start] = self._tokenizer.bos_token_id
+                # some models do not set/use bos_token
+                if self._tokenizer.bos_token_id is not None:
+                    # Replace the first token with the BOS token
+                    tokens[0][batch_start] = self._tokenizer.bos_token_id
 
             # Compute the logits for the current batch of tokens
             batch_logits = self._compute_batch_logits(tokens, batch_start, batch_size)

@@ -1,7 +1,9 @@
 import copy
+import json
 import logging
 import os
-from os.path import join
+import re
+from os.path import isfile, join
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -12,7 +14,7 @@ from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
-from transformers.modeling_utils import no_init_weights
+from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
 from ..quantization import GPTQ, QuantizeConfig
@@ -24,8 +26,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, gptqmodel_post_init, make_quant, move_to,
-                           nested_move_to, pack_model, simple_dispatch_model)
+                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+                           move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -53,6 +55,15 @@ class BaseGPTQModel(nn.Module):
     layer_type: str = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
+
+    # some models may only be quantizable under specific gptq property
+    require_true_sequential: Optional[bool] = None
+
+    # TODO: use a better name and what if the value is not at the config root?
+    # allow dynamic expert n-count layer extraction
+    # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
+    # usage: set to property in model.config that holds this int value: total number of experts
+    dynamic_expert_index: Optional[str] = None
 
     def __init__(
         self,
@@ -152,6 +163,10 @@ class BaseGPTQModel(nn.Module):
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
             raise ValueError("lm_head quantization is currently inference only and not applicable for quantization. Please set `lm_head=False`.")
+
+        # TODO: we need to move all the validation into a helper method
+        if self.require_true_sequential is not None and self.quantize_config.true_sequential != self.require_true_sequential:
+            raise ValueError(f"This model requires `true_sequential == {self.require_true_sequential}: actual true_sequential = {self.quantize_config.true_sequential}")
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
@@ -263,9 +278,17 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
-        inside_layer_modules = self.layer_modules
+        layer_modules = self.layer_modules
+
         if not self.quantize_config.true_sequential:
-            inside_layer_modules = [sum(inside_layer_modules, [])]
+            layer_modules = [sum(layer_modules, [])]
+
+            # dynamic expert layer index for model defs
+            if self.dynamic_expert_index is not None:
+                num_experts = getattr(self.model.config, self.dynamic_expert_index)
+                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+                                                      num_experts=num_experts)
+
         quantizers = {}
 
         # stores all per-layer quant stats such as avg loss and processing time
@@ -283,7 +306,7 @@ class BaseGPTQModel(nn.Module):
             cur_layer_device = get_device(layer)
 
             full = find_layers(layer)
-            for names in inside_layer_modules:
+            for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
                 gptq = {}
                 for name in subset:
@@ -444,6 +467,8 @@ class BaseGPTQModel(nn.Module):
         safetensors_metadata: Optional[Dict[str, str]] = None,
         format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
+        max_shard_size: str = "10GB",
+        model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -462,6 +487,14 @@ class BaseGPTQModel(nn.Module):
 
         if not self.quantized:
             raise EnvironmentError("can only save quantized model, please execute .quantize first.")
+
+        if model_base_name is None:
+            model_base_name = (
+                self.quantize_config.model_file_base_name or
+                f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
+            )
+
+        state_dict = self.model.state_dict()
 
         if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
             logger.warning(
@@ -518,47 +551,73 @@ class BaseGPTQModel(nn.Module):
             model_base_name = quantize_config.model_file_base_name
 
         if use_safetensors:
-            model_save_name = model_base_name + ".safetensors"
-            state_dict = model.state_dict()
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
-            if safetensors_metadata is None:
-                safetensors_metadata = {}
-            elif not isinstance(safetensors_metadata, dict):
-                raise TypeError("safetensors_metadata must be a dictionary.")
-            else:
-                logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
-                new_safetensors_metadata = {}
-                converted_keys = False
-                for key, value in safetensors_metadata.items():
-                    if not isinstance(key, str) or not isinstance(value, str):
-                        converted_keys = True
-                        try:
-                            new_key = str(key)
-                            new_value = str(value)
-                        except Exception as e:
-                            raise TypeError(
-                                f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
-                            )
-                        if new_key in new_safetensors_metadata:
-                            logger.warning(
-                                f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
-                            )
-                        new_safetensors_metadata[new_key] = new_value
-                safetensors_metadata = new_safetensors_metadata
-                if converted_keys:
-                    logger.debug(
-                        f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
-                    )
-
-            # Format is required to enable Accelerate to load the metadata
-            # otherwise it raises an OSError
-            safetensors_metadata["format"] = "pt"
-            safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
+            model_save_name = model_base_name + ".safetensors"
         else:
-            logger.warning("We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
             model_save_name = model_base_name + ".bin"
-            torch.save(model.state_dict(), join(save_dir, model_save_name))
+            # Shard checkpoint
+        shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
 
+        # Clean the folder from a previous save
+        for filename in os.listdir(save_dir):
+            full_filename = join(save_dir, filename)
+
+            # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
+            filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
+            reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
+
+            if (
+                    filename.startswith(model_base_name)
+                    and isfile(full_filename)
+                    and filename not in shards.keys()
+                    and reg.fullmatch(filename_no_suffix) is not None
+            ):
+                os.remove(full_filename)
+
+        # Save the model
+        for shard_file, shard in shards.items():
+            if use_safetensors:
+                if safetensors_metadata is None:
+                    safetensors_metadata = {}
+                elif not isinstance(safetensors_metadata, dict):
+                    raise TypeError("safetensors_metadata must be a dictionary.")
+                else:
+                    logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                    new_safetensors_metadata = {}
+                    converted_keys = False
+                    for key, value in safetensors_metadata.items():
+                        if not isinstance(key, str) or not isinstance(value, str):
+                            converted_keys = True
+                            try:
+                                new_key = str(key)
+                                new_value = str(value)
+                            except Exception as e:
+                                raise TypeError(
+                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
+                            if new_key in new_safetensors_metadata:
+                                logger.warning(
+                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
+                            new_safetensors_metadata[new_key] = new_value
+                    safetensors_metadata = new_safetensors_metadata
+                    if converted_keys:
+                        logger.debug(
+                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
+
+                # Format is required to enable Accelerate to load the metadata
+                # otherwise it raises an OSError
+                safetensors_metadata["format"] = "pt"
+
+                safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
+            else:
+                torch.save(shard, join(save_dir, shard_file))
+
+        if index is not None:
+            index_save_name = model_save_name + ".index.json"
+            index_save_path = join(save_dir, index_save_name)
+            # Save the index as well
+            with open(index_save_path, "w", encoding="utf-8") as f:
+                content = json.dumps(index, indent=2, sort_keys=True) + "\n"
+                f.write(content)
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
 
@@ -798,6 +857,11 @@ class BaseGPTQModel(nn.Module):
             model = AutoModelForCausalLM.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
+
+            if cls.dynamic_expert_index is not None:
+                num_experts = getattr(config, cls.dynamic_expert_index)
+                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
+                                                          num_experts=num_experts)
 
             layers = find_layers(model)
             ignore_layers = [cls.lm_head] + cls.base_modules

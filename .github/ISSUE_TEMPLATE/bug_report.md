@@ -8,36 +8,42 @@ assignees: ''
 ---
 
 **Describe the bug**
+
 A clear and concise description of what the bug is.
 
-**Hardware details**
-Information about CPU and GPU, such as RAM, number, etc.
-
-**Software version**
-Operating system and version. 
+**GPU Info**
 
 Show output of:
+
 ```
 nvidia-smi
 ```
 
+**Softwarwe Info**
+
+Operation System/Version + Python Version
+
 Show output of:
 ```
-pip show torch gptqmodel, transformers, accelerate, triton
+pip show gptqmodel torch transformers accelerate triton
 ```
 
 **To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+
+How to reproduce this bug if possible.
 
 **Expected behavior**
+
 A clear and concise description of what you expected to happen.
 
+**Model/Datasets**
+
+Make sure your model/dataset is downloadable (on HF for example) so we can reproduce your issue.
+
 **Screenshots**
+
 If applicable, add screenshots to help explain your problem.
 
 **Additional context**
+
 Add any other context about the problem here.
