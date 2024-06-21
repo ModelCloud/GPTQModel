@@ -614,7 +614,6 @@ class TestsQ4CUDA(unittest.TestCase):
             use_triton=False,
             model_basename=model_basename,
             disable_exllama=True,
-            disable_exllamav2=True,
             torch_dtype=torch_dtype,
         )
 
@@ -653,12 +652,12 @@ class TestsQ4CUDA(unittest.TestCase):
 
         model_id = "TheBloke/WizardLM-7B-uncensored-GPTQ"
 
+
         model_q = GPTQModel.from_quantized(
             model_id,
             device=device,
             use_triton=False,
             disable_exllama=True,
-            disable_exllamav2=True,
             torch_dtype=torch_dtype,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
