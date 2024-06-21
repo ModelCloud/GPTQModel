@@ -40,7 +40,7 @@ auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
 
 bitblas.set_log_level("INFO")
 BITBLAS_TARGET = auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-print("BITBLAS_TARGET", BITBLAS_TARGET)
+logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
 BITBLAS_DATABASE_PATH = get_database_path()
 BITBLAS_PROPAGATE_WEIGHTS = False
 
@@ -195,13 +195,13 @@ class QuantLinear(nn.Module):
                 global_operator_cache.save_into_database(
                     BITBLAS_DATABASE_PATH, BITBLAS_TARGET
                 )
-                print(
+                logger.info(
                     "BitBLAS Tuning done, appended operator to global_operator_cache."
                 )
             else:
-                print("BitBLAS Operator created.")
+                logger.info("BitBLAS Operator created.")
         else:
-            print("BitBLAS Operator found in global_operator_cache.")
+            logger.info("BitBLAS Operator found in global_operator_cache.")
         return bitblas_matmul
 
     def reset_parameters(self):

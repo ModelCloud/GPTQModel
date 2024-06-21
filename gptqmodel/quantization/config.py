@@ -18,7 +18,6 @@ logger.setLevel(logging.INFO)
 FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_JSON = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
-FORMAT_FIELD_COMPAT_BITBLAS = "is_bitblas_format"
 QUANT_METHOD_FIELD = "quant_method"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
 QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
@@ -210,8 +209,6 @@ class QuantizeConfig():
                     normalized[QUANT_METHOD_FIELD] = val
             elif key == FORMAT_FIELD_COMPAT_MARLIN and val:
                 normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
-            elif key == FORMAT_FIELD_COMPAT_BITBLAS and val:
-                normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
             elif key in field_names:
                 normalized[key] = val
             else:
