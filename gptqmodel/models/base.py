@@ -19,6 +19,7 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.data import collate_data
+from ..utils.importer import BITBLAS_AVAILABLE
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
@@ -27,6 +28,9 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
+from ..utils.bitblas_utils import (
+    prepare_model_for_bitblas_load,
+)
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
@@ -423,6 +427,7 @@ class BaseGPTQModel(nn.Module):
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             use_marlin=self.quantize_config.format == FORMAT.MARLIN,
+            use_bitblas=self.quantize_config.checkpoint_format == FORMAT.BITBLAS,
         )
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
@@ -683,6 +688,7 @@ class BaseGPTQModel(nn.Module):
         device: Optional[Union[str, int]] = None,
         use_triton: bool = True,
         use_marlin: bool = True,
+        use_bitblas: bool = False,
         torch_dtype: [str | torch.dtype] = "auto",
         use_cuda_fp16: bool = True,
         quantize_config: Optional[QuantizeConfig] = None,
@@ -697,6 +703,10 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         """load quantized model from local disk"""
+        if use_bitblas and not BITBLAS_AVAILABLE:
+            logger.warning("BitBlas is not installed, reset use_bitblas to False.")
+            use_bitblas = False
+
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
         if disable_exllama is None:
             if disable_exllamav2:
@@ -769,6 +779,10 @@ class BaseGPTQModel(nn.Module):
                 logger.info(
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
                 )
+
+        if quantize_config.checkpoint_format == FORMAT.BITBLAS:
+            # format bitblas requires bitblas kernel
+            use_bitblas = True
 
         if model_basename is None:
             if quantize_config.model_file_base_name:
@@ -867,6 +881,7 @@ class BaseGPTQModel(nn.Module):
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
                 use_marlin=quantize_config.format == FORMAT.MARLIN,
+                use_bitblas=quantize_config.format == FORMAT.BITBLAS,
             )
             model.tie_weights()
 
@@ -930,11 +945,46 @@ class BaseGPTQModel(nn.Module):
                 disable_exllama=disable_exllama,
                 disable_exllamav2=disable_exllamav2,
                 use_marlin=False,
+                use_bitblas=False,
             )
 
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise convert to marlin.
             model = prepare_model_for_marlin_load(
+                model=model,
+                quantize_config=quantize_config,
+                quant_linear_class=quant_linear_class,
+                torch_dtype=torch_dtype,
+                current_model_save_name=model_save_name,
+                device_map=device_map,
+            )
+
+        if use_bitblas:
+            if is_sharded:
+                raise ValueError(
+                    "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in AutoGPTQ repository.")
+            if torch.version.hip:
+                raise ValueError(
+                    "Can not use BitBLAS int4*fp16 kernel with AMD ROCm version of PyTorch as the kernel is not compatible. Please do not use `use_bitblas=True` when using ROCm devices.")
+
+            # Load the quant linear type we need.
+            # TODO: load directy bitblas with the right quantlinear class.
+            quant_linear_class = select_quant_linear(
+                use_triton=use_triton,
+                desc_act=quantize_config.desc_act,
+                group_size=quantize_config.group_size,
+                bits=quantize_config.bits,
+                disable_exllama=disable_exllama,
+                disable_exllamav2=disable_exllamav2,
+                use_marlin=False,
+                use_bitblas=False,
+            )
+
+            # Prepare model for marlin load.
+            #   If stub is marlin serialzed         --> load from directly
+            #   If stub has cached marlin version   --> load from the cached versin
+            #   Otherwise                           --> convert to marlin, cache, load from cache
+            model, model_save_name = prepare_model_for_bitblas_load(
                 model=model,
                 quantize_config=quantize_config,
                 quant_linear_class=quant_linear_class,
@@ -963,6 +1013,7 @@ class BaseGPTQModel(nn.Module):
             disable_exllama=disable_exllama,
             disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
+            use_bitblas=use_bitblas,
         )
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format

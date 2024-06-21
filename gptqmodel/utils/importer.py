@@ -1,5 +1,14 @@
 from logging import getLogger
 
+try:
+    import bitblas  # noqa: F401
+
+    BITBLAS_AVAILABLE = True
+    BITBLAS_EXCEPTION = None
+except Exception as e:
+    BITBLAS_AVAILABLE = False
+    BITBLAS_EXCEPTION = e
+
 logger = getLogger(__name__)
 
 
@@ -12,11 +21,14 @@ def select_quant_linear(
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_marlin: bool = False,
+    use_bitblas: bool = True,
 ):
     if use_triton:
         logger.info("Using tritonv2 for GPTQ")
         from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
     else:
+        if use_bitblas:
+            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear
         if bits == 4 and use_marlin:
             from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
         elif bits == 4 and not disable_exllamav2:

@@ -104,6 +104,7 @@ def make_quant(
     group_size,
     use_triton: bool = False,
     use_marlin: bool = False,
+    use_bitblas: bool = False,
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
@@ -115,6 +116,7 @@ def make_quant(
         group_size=group_size,
         bits=bits,
         use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
         disable_exllama=disable_exllama,
         disable_exllamav2=disable_exllamav2,
     )
@@ -237,6 +239,7 @@ def pack_model(
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
+    use_bitblas: bool = False,
 ):
     QuantLinear = select_quant_linear(
         use_triton=use_triton,
@@ -246,6 +249,7 @@ def pack_model(
         disable_exllama=False,
         disable_exllamav2=True,
         use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
     )
 
     if force_layer_back_to_cpu:
@@ -265,6 +269,7 @@ def pack_model(
         disable_exllama=False,
         disable_exllamav2=True,
         use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
     )
     qlayers = find_layers(model, [QuantLinear])
 
@@ -351,7 +356,12 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
+
+    # post init for bitblas backend.
     device_to_buffers_size = {}
+    for _, submodule in model.named_modules():
+        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "bitblas":
+            submodule.post_init()
 
     model_uses_exllama = False
     for name, submodule in model.named_modules():
