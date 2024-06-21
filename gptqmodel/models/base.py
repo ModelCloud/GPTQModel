@@ -57,6 +57,9 @@ class BaseGPTQModel(nn.Module):
     # some models may only be quantizable under specific gptq property
     require_true_sequential: Optional[bool] = None
 
+    # some models require trust_remove_code = True (dbrx_converted)
+    require_trust_remote_code = None
+
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
     # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
