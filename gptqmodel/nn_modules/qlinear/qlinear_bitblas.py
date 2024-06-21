@@ -39,7 +39,7 @@ from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
 
 bitblas.set_log_level("INFO")
-BITBLAS_TARGET = auto_detect_nvidia_target()
+BITBLAS_TARGET = auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
 print("BITBLAS_TARGET", BITBLAS_TARGET)
 BITBLAS_DATABASE_PATH = get_database_path()
 BITBLAS_PROPAGATE_WEIGHTS = False
