@@ -63,6 +63,8 @@ class BaseGPTQModel(nn.Module):
     # usage: set to property in model.config that holds this int value: total number of experts
     dynamic_expert_index: Optional[str] = None
 
+    info: Dict = {}
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -609,6 +611,10 @@ class BaseGPTQModel(nn.Module):
 
         if not torch.cuda.is_available():
             raise EnvironmentError("Load pretrained model to do quantization requires CUDA available.")
+
+        notes = cls.info.get("notes")
+        if notes:
+            logger.info(notes)
 
         def skip(*args, **kwargs):
             pass

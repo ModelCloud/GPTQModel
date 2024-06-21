@@ -5,6 +5,8 @@ from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
 from .codegen import CodeGenGPTQ
 from .cohere import CohereGPTQ
+from .dbrx import DbrxGPTQ
+from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ
 from .gemma import GemmaGPTQ
 from .gpt2 import GPT2GPTQ
@@ -29,4 +31,3 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .dbrx_converted import DbrxConvertedGPTQ
