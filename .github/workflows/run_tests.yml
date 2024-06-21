@@ -48,8 +48,8 @@ jobs:
       - name: test_serialization.py
         run: pytest tests/test_serialization.py
 
-      - name: test_sharded_loading.py
-        run: pytest tests/test_sharded_loading.py
+      - name: test_sharded.py
+        run: pytest tests/test_sharded.py
 
       - name: test_triton.py
         run: pytest tests/test_triton.py
