@@ -473,6 +473,7 @@ class BaseGPTQModel(nn.Module):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
+        # fix circular import
         from gptqmodel import __version__
         # write autogptq tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
