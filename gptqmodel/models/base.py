@@ -608,16 +608,6 @@ class BaseGPTQModel(nn.Module):
                 # otherwise it raises an OSError
                 safetensors_metadata["format"] = "pt"
 
-                # Store the quantization configuration as safetensors metadata
-
-                safetensors_metadata["gptqmodel_version"] = str(__version__)
-                safetensors_metadata["gptq_bits"] = str(self.quantize_config.bits)
-                safetensors_metadata["gptq_group_size"] = str(self.quantize_config.group_size)
-                safetensors_metadata["gptq_desc_act"] = str(self.quantize_config.desc_act)
-                safetensors_metadata["gptq_damp_percent"] = str(self.quantize_config.damp_percent)
-                safetensors_metadata["gptq_checkpoint_format"] = self.quantize_config.checkpoint_format
-                safetensors_metadata["gptq_quant_method"] = self.quantize_config.quant_method
-
                 safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
             else:
                 torch.save(shard, join(save_dir, shard_file))
