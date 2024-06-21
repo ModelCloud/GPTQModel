@@ -59,11 +59,18 @@ class BaseGPTQModel(nn.Module):
     # some models may only be quantizable under specific gptq property
     require_true_sequential: Optional[bool] = None
 
+    # some models require trust_remove_code = True (dbrx_converted)
+    require_trust_remote_code = None
+
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
     # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
     # usage: set to property in model.config that holds this int value: total number of experts
     dynamic_expert_index: Optional[str] = None
+
+    # allow models to define optional notes that output messages to users that want to use this model
+    # list of supported keys: [ "notes" = print the notes value on model load ]
+    info: Dict[str, str] = {}
 
     def __init__(
         self,
@@ -648,6 +655,16 @@ class BaseGPTQModel(nn.Module):
         if not torch.cuda.is_available():
             raise EnvironmentError("Load pretrained model to do quantization requires CUDA available.")
 
+        if cls.require_trust_remote_code and not trust_remote_code:
+            raise ValueError(
+                f"{pretrained_model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+            )
+
+        # allow models to define optional notes that output messages to users that want to use this model
+        notes = cls.info.get("notes")
+        if notes:
+            logger.info(notes)
+
         def skip(*args, **kwargs):
             pass
 
@@ -741,6 +758,11 @@ class BaseGPTQModel(nn.Module):
                 disable_exllama = False
             else:
                 disable_exllama = True
+
+        if cls.require_trust_remote_code and not trust_remote_code:
+            raise ValueError(
+                f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+            )
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)

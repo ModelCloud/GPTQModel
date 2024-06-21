@@ -36,6 +36,7 @@ SUPPORTED_MODELS = [
     "cohere",
     "minicpm",
     "qwen2_moe",
+    "dbrx_converted",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
