@@ -26,7 +26,7 @@ class TestSharded(unittest.TestCase):
 
         return traindataset
 
-    def test_save(self):
+    def test_save_and_load(self):
         model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
         model = GPTQModel.from_pretrained(
