@@ -950,7 +950,8 @@ class BaseGPTQModel(nn.Module):
                 desc_act=quantize_config.desc_act,
                 group_size=quantize_config.group_size,
                 bits=quantize_config.bits,
-                disable_exllama=disable_exllama,
+                disable_exllama=True,
+                disable_exllamav2=disable_exllama,
                 use_marlin=False,
             )
 
@@ -982,7 +983,8 @@ class BaseGPTQModel(nn.Module):
             desc_act=quantize_config.desc_act,
             group_size=quantize_config.group_size,
             bits=quantize_config.bits,
-            disable_exllama=disable_exllama,
+            disable_exllama=True,
+            disable_exllamav2=disable_exllama,
             use_marlin=use_marlin,
         )
 
