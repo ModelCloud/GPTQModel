@@ -24,7 +24,7 @@ jobs:
 
       - name: Compile
         run: |
-          pip install -U pytest ninja parameterized
+          pip install -U pytest ninja parameterized protobuf
           pip install -v --no-build-isolation .
 
       - name: test_lm_head.py
