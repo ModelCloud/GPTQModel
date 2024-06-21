@@ -10,7 +10,7 @@ from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLine
 from ..quantization import FORMAT, QuantizeConfig
 from .importer import BITBLAS_AVAILABLE
 from .model import recurse_getattr, recurse_setattr
-
+from safetensors.torch import save_file as safe_save
 if BITBLAS_AVAILABLE:
     pass
 
@@ -65,6 +65,8 @@ def prepare_model_for_bitblas_load(
                         recurse_getattr(model, param_name).clone(),
                     )
 
+        # Cache the converted model.
+        safe_save(model.state_dict(), current_model_save_name)
     return model
 
 
@@ -100,7 +102,6 @@ def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeCo
                 infeatures=module.infeatures,
                 outfeatures=module.outfeatures,
                 bias=module.bias is not None,
-                trainable=False,
                 enable_tuning=True
             )
 

@@ -1,10 +1,11 @@
 from transformers import AutoTokenizer, TextGenerationPipeline, AutoModelForCausalLM
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQModel
+from gptqmodel.quantization import FORMAT, QuantizeConfig
 
-use_bitblas = False
-pretrained_model_dir = "dist/opt-125m"
-quantized_model_dir = "dist/opt-125m-4bit-128g"
+use_bitblas = True
+pretrained_model_dir = "facebook/opt-125m"
+quantized_model_dir = "./facebook/opt-125m-4bit-128g"
 
 if use_bitblas:
     quantized_model_dir += "-bitblas"
@@ -65,14 +66,14 @@ def main():
     print(
         tokenizer.decode(
             model.generate(
-                **tokenizer("auto_gptq is", return_tensors="pt").to(model.device)
+                **tokenizer("gptqmodel is", return_tensors="pt").to(model.device)
             )[0]
         )
     )
 
     # or you can also use pipeline
     pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-    print(pipeline("auto-gptq is")[0]["generated_text"])
+    print(pipeline("gptqmodel is")[0]["generated_text"])
 
 
 if __name__ == "__main__":

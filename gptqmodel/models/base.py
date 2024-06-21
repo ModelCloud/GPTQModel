@@ -981,7 +981,7 @@ class BaseGPTQModel(nn.Module):
             #   If stub is marlin serialzed         --> load from directly
             #   If stub has cached marlin version   --> load from the cached versin
             #   Otherwise                           --> convert to marlin, cache, load from cache
-            model, model_save_name = prepare_model_for_bitblas_load(
+            model = prepare_model_for_bitblas_load(
                 model=model,
                 quantize_config=quantize_config,
                 quant_linear_class=quant_linear_class,
