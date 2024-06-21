@@ -20,13 +20,12 @@ def prepare_model_for_bitblas_load(
         quantize_config: QuantizeConfig,
         quant_linear_class,
         torch_dtype,
-        current_model_save_name,
+        model_save_name,
         device_map,
 ):
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
     if quantize_config.format == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
-        model_save_name = current_model_save_name
         logger.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, quantize_config, repack=False)
     else:
@@ -37,7 +36,7 @@ def prepare_model_for_bitblas_load(
         accelerate.utils.modeling.load_checkpoint_in_model(
             model,
             dtype=torch_dtype,
-            checkpoint=current_model_save_name,
+            checkpoint=model_save_name,
             device_map=device_map,
             offload_state_dict=True,
             offload_buffers=True,
@@ -64,7 +63,7 @@ def prepare_model_for_bitblas_load(
                     )
 
         # Cache the converted model.
-        safe_save(model.state_dict(), current_model_save_name)
+        safe_save(model.state_dict(), model_save_name)
     return model
 
 

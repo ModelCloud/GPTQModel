@@ -1019,7 +1019,7 @@ class BaseGPTQModel(nn.Module):
                 quantize_config=quantize_config,
                 quant_linear_class=quant_linear_class,
                 torch_dtype=torch_dtype,
-                current_model_save_name=model_save_name,
+                model_save_name=model_save_name,
                 device_map=device_map,
             )
 

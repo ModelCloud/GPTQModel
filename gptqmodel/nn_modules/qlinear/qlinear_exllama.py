@@ -35,15 +35,14 @@ def ext_q4_matmul(x, q4, q4_width):
 
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllama"
+    SUPPORTED_BITS = [4]
+
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
     def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):
         super().__init__()
-        if bits != 4:
-            raise ValueError(
-                f"Exllama kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
-            )
+        self.validate_bits(bits=bits)
 
         self.padding = -outfeatures % 32
         self.outfeatures = outfeatures + self.padding

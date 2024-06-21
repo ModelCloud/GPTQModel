@@ -63,9 +63,13 @@ _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "marlin"
+    SUPPORTED_BITS = [4]
+    SUPPORTED_GROUP_SIZES = [128, -1]
 
     def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):
         super().__init__()
+        self.validate_bits(bits=bits)
+        self.validate_group_size(group_size=group_size)
 
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(
@@ -74,8 +78,6 @@ class QuantLinear(BaseQuantLinear):
 
         if infeatures % 128 != 0 or outfeatures % 256 != 0:
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
-        if bits not in [4]:
-            raise NotImplementedError("Only 4 bits are supported.")
         if group_size not in [-1, 128] and group_size != infeatures:
             raise ValueError("Only group_size -1 and 128 are supported.")
         if infeatures % group_size != 0:

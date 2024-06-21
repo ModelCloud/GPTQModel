@@ -10,7 +10,7 @@ from logging import getLogger
 
 import torch
 import torch.nn as nn
-
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -61,7 +61,7 @@ def unpack_qzeros(qzeros, bits):
     return unpacked_zeros + 1
 
 
-class QuantLinear(nn.Module):
+class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "bitblas"
     SUPPORTED_BITS = [1, 2, 4]
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
@@ -91,7 +91,8 @@ class QuantLinear(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self._validate_parameters(bits, group_size, infeatures, outfeatures)
+        self.validate_bits(bits=bits)
+        self._validate_parameters(group_size, infeatures, outfeatures)
 
         self.bits = bits
         self.infeatures = infeatures
@@ -106,12 +107,10 @@ class QuantLinear(nn.Module):
         self.reset_parameters()
 
     def _validate_parameters(
-        self, bits: int, group_size: int, infeatures: int, outfeatures: int
+        self, group_size: int, infeatures: int, outfeatures: int
     ):
         if infeatures % 16 != 0 or outfeatures % 16 != 0:
             raise ValueError("`infeatures` and `outfeatures` must be divisible by 16.")
-        if bits not in self.SUPPORTED_BITS:
-            raise NotImplementedError("Only 1/2/4 bits are supported.")
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
 
