@@ -49,10 +49,6 @@ class QuantLinear(BaseQuantLinear):
         self.outfeatures = outfeatures + self.padding
         outfeatures = self.outfeatures
 
-        self.padding = -outfeatures % 32
-        self.outfeatures = outfeatures + self.padding
-        outfeatures = self.outfeatures
-
         self.infeatures = infeatures
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
