@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       test_names:
-        description: 'List of test files to run(comma-separated)'
+        description: 'List of test files to run'
         required: false
         default: ''
 
