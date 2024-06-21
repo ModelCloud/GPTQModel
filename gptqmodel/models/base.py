@@ -617,6 +617,11 @@ class BaseGPTQModel(nn.Module):
         if not torch.cuda.is_available():
             raise EnvironmentError("Load pretrained model to do quantization requires CUDA available.")
 
+        if cls.require_trust_remote_code and not trust_remote_code:
+            raise ValueError(
+                f"{pretrained_model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+            )
+
         # allow models to define optional notes that output messages to users that want to use this model
         notes = cls.info.get("notes")
         if notes:
@@ -715,6 +720,11 @@ class BaseGPTQModel(nn.Module):
                 disable_exllama = False
             else:
                 disable_exllama = True
+
+        if cls.require_trust_remote_code and not trust_remote_code:
+            raise ValueError(
+                f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+            )
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
