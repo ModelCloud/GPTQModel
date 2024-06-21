@@ -28,7 +28,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
-from ..utils.bitblas_utils import (
+from ..utils.bitblas import (
     prepare_model_for_bitblas_load,
 )
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
@@ -427,7 +427,7 @@ class BaseGPTQModel(nn.Module):
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             use_marlin=self.quantize_config.format == FORMAT.MARLIN,
-            use_bitblas=self.quantize_config.checkpoint_format == FORMAT.BITBLAS,
+            use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
         )
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
@@ -780,7 +780,7 @@ class BaseGPTQModel(nn.Module):
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
                 )
 
-        if quantize_config.checkpoint_format == FORMAT.BITBLAS:
+        if quantize_config.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
             use_bitblas = True
 
@@ -962,7 +962,7 @@ class BaseGPTQModel(nn.Module):
         if use_bitblas:
             if is_sharded:
                 raise ValueError(
-                    "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in AutoGPTQ repository.")
+                    "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
             if torch.version.hip:
                 raise ValueError(
                     "Can not use BitBLAS int4*fp16 kernel with AMD ROCm version of PyTorch as the kernel is not compatible. Please do not use `use_bitblas=True` when using ROCm devices.")
@@ -1021,7 +1021,7 @@ class BaseGPTQModel(nn.Module):
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
             if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
                 raise ValueError(
-                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by autogptq version >= {MIN_VERSION_WITH_V2}"
+                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
             logger.info(f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
