@@ -487,7 +487,7 @@ class BaseGPTQModel(nn.Module):
         model = self.model
 
         if not self.quantized:
-            raise EnvironmentError("can only save quantized model, please execute .quantize first.")
+            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
         if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
             logger.warning(
