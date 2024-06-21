@@ -1,11 +1,12 @@
-from ._base import BaseGPTQForCausalLM
+from .base import BaseGPTQModel
 
 
-class DbrxGPTQForCausalLM(BaseGPTQForCausalLM):
+class DbrxGPTQ(BaseGPTQModel):
+    base_modules = ["transformer.wte", "transformer.norm_f"]
+
+    layers_node = "transformer.blocks"
     layer_type = "DbrxBlock"
-    layers_block_name = "transformer.blocks"
-    outside_layer_modules = ["transformer.wte", "transformer.norm_f"]
-    inside_layer_modules = [
+    layer_modules = [
         ["norm_attn_norm.attn.q_proj", "norm_attn_norm.attn.k_proj", "norm_attn_norm.attn.v_proj"],
         ["norm_attn_norm.attn.out_proj"],
         [
@@ -45,6 +46,3 @@ class DbrxGPTQForCausalLM(BaseGPTQForCausalLM):
             "ffn.experts.mlp.15.w2",
         ]
     ]
-
-
-__all__ = ["DbrxGPTQForCausalLM"]
