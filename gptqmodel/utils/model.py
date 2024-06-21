@@ -1,3 +1,5 @@
+# Adapted from https://github.com/huggingface/accelerate
+
 import functools
 import gc
 import json
@@ -106,16 +108,16 @@ def get_module_by_name_suffix(model, module_name: str):
 
 
 def make_quant(
-        module,
-        names,
-        bits,
-        group_size,
-        use_triton: bool = False,
-        use_marlin: bool = False,
-        disable_exllama: bool = False,
-        disable_exllamav2: bool = False,
-        use_cuda_fp16: bool = True,
-        desc_act: bool = False,
+    module,
+    names,
+    bits,
+    group_size,
+    use_triton: bool = False,
+    use_marlin: bool = False,
+    disable_exllama: bool = False,
+    disable_exllamav2: bool = False,
+    use_cuda_fp16: bool = True,
+    desc_act: bool = False,
 ):
     QuantLinear = select_quant_linear(
         use_triton=use_triton,
@@ -168,9 +170,9 @@ def make_quant(
 
 
 def convert_gptq_v1_to_v2_format(
-        model,
-        quantize_config: QuantizeConfig,
-        qlinear_kernel: nn.Module,
+    model,
+    quantize_config: QuantizeConfig,
+    qlinear_kernel: nn.Module,
 ):
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
@@ -203,9 +205,9 @@ def convert_gptq_v1_to_v2_format(
 
 
 def convert_gptq_v2_to_v1_format(
-        model,
-        quantize_config: QuantizeConfig,
-        qlinear_kernel: nn.Module,
+    model,
+    quantize_config: QuantizeConfig,
+    qlinear_kernel: nn.Module,
 ):
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
@@ -235,16 +237,16 @@ def convert_gptq_v2_to_v1_format(
 
 
 def pack_model(
-        model,
-        quantizers,
-        bits,
-        group_size,
-        use_triton=False,
-        use_cuda_fp16=True,
-        desc_act=False,
-        warmup_triton: bool = False,
-        force_layer_back_to_cpu: bool = False,
-        use_marlin: bool = False,
+    model,
+    quantizers,
+    bits,
+    group_size,
+    use_triton=False,
+    use_cuda_fp16=True,
+    desc_act=False,
+    warmup_triton: bool = False,
+    force_layer_back_to_cpu: bool = False,
+    use_marlin: bool = False,
 ):
     QuantLinear = select_quant_linear(
         use_triton=use_triton,
