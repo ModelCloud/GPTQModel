@@ -30,7 +30,7 @@ class QuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         super().__init__()
-        self.validate_bits(bits=bits)
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
