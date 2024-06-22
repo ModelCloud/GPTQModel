@@ -44,6 +44,8 @@ jobs:
 
       - name: Compile
         run: |
+          apt update && apt install net-tools iproute2 -y
+          ip link show
           pip install -U pytest ninja parameterized protobuf
           pip install -v --no-build-isolation GPTQModel
 
