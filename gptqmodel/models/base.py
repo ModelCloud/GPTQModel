@@ -981,7 +981,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             # Prepare model for marlin load.
-            # If is marlin serialized load then load directly. Otherwise convert to marlin.
+            # If is marlin serialized load then load directly. Otherwise, convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
@@ -1012,10 +1012,8 @@ class BaseGPTQModel(nn.Module):
                 use_bitblas=False,
             )
 
-            # Prepare model for marlin load.
-            #   If stub is marlin serialzed         --> load from directly
-            #   If stub has cached marlin version   --> load from the cached versin
-            #   Otherwise                           --> convert to marlin, cache, load from cache
+            # Prepare model for bitblas load.
+            # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
                 model=model,
                 quantize_config=quantize_config,
@@ -1027,7 +1025,9 @@ class BaseGPTQModel(nn.Module):
                 sym=quantize_config.sym,
             )
 
-        if not use_bitblas:
+        # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
+        # and we no longer need to call load_checkpoint_in_model()
+        if not (use_marlin or use_bitblas):
             accelerate.utils.modeling.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
