@@ -16,7 +16,7 @@ jobs:
           - gpu_group1
           - gpu_group2
     container:
-      image: modelcloud/gptqmodel
+      image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
 
     steps:
       - name: Find suitable GPU
