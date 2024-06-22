@@ -1038,10 +1038,11 @@ class BaseGPTQModel(nn.Module):
         model = simple_dispatch_model(model, device_map)
 
         qlinear_kernel = select_quant_linear(
-            use_triton=use_triton,
-            desc_act=quantize_config.desc_act,
-            group_size=quantize_config.group_size,
             bits=quantize_config.bits,
+            group_size=quantize_config.group_size,
+            desc_act=quantize_config.desc_act,
+            sym=quantize_config.sym,
+            use_triton=use_triton,
             disable_exllama=disable_exllama,
             disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
