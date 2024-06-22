@@ -3,14 +3,6 @@ name: Unit Tests (GPU)
 on:
   repository_dispatch:
   workflow_dispatch:
-    inputs:
-      test_names:
-        description: 'Input Test(s) to Run (default all)'
-        required: false
-        default: ''
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -18,6 +10,11 @@ env:
 jobs:
   build:
     runs-on: self-hosted
+    strategy:
+      matrix:
+        test-group:
+          - gpu_group1
+          - gpu_group2
     container:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
 
@@ -50,54 +47,20 @@ jobs:
           pip install -U pytest ninja parameterized protobuf
           pip install -v --no-build-isolation GPTQModel
 
-
-      - name: test_lm_head.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_lm_head') }}
-        run: pytest GPTQModel/tests/test_lm_head.py
-
-      - name: test_q4_exallama.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_exallama') }}
-        run: pytest GPTQModel/tests/test_q4_exallama.py
-
-      - name: test_q4_exallama_v2.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_exallama_v2') }}
-        run: pytest GPTQModel/tests/test_q4_exallama_v2.py
-
-      - name: test_q4_marlin.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_marlin') }}
-        run: pytest GPTQModel/tests/test_q4_marlin.py
-
-      - name: test_q4_triton.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_triton') }}
-        run: pytest GPTQModel/tests/test_q4_triton.py
-
-      - name: test_repacking.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_repacking') }}
-        run: pytest GPTQModel/tests/test_repacking.py
-
-      - name: test_serialization.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_serialization') }}
-        run: pytest GPTQModel/tests/test_serialization.py
-
-      - name: test_sharded.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_sharded') }}
-        run: pytest GPTQModel/tests/test_sharded.py
-
-      - name: test_triton.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_triton') }}
-        run: pytest GPTQModel/tests/test_triton.py
-
-      - name: test_quant_formats.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_quant_formats') }}
-        run: pytest GPTQModel/tests/test_quant_formats.py
-
-      - name: test_q4_cuda.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_q4_cuda') }}
-        run: pytest GPTQModel/tests/test_q4_cuda.py
-
-      - name: test_perplexity.py
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, 'test_perplexity') }}
-        run: pytest GPTQModel/tests/test_perplexity.py
-
-
-        
+      - name: Run tests
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_perplexity.py
+      - name: Run tests
+        if: matrix.test-group == 'gpu_group1'
+        run: |
+          pytest tests/test_lm_head.py
+          pytest tests/test_q4_exallama.py
+          pytest tests/test_q4_exallama_v2.py
+          pytest tests/test_q4_marlin.py
+          pytest tests/test_q4_triton.py
+          pytest tests/test_repacking.py
+          pytest tests/test_serialization.py
+          pytest tests/test_sharded.py
+          pytest tests/test_triton.py
+          pytest tests/test_quant_formats.py
+          pytest tests/test_q4_cuda.py
