@@ -53,14 +53,22 @@ jobs:
       - name: Run tests
         if: matrix.test-group == 'gpu_group1'
         run: |
-          pytest tests/test_lm_head.py
-          pytest tests/test_q4_exallama.py
-          pytest tests/test_q4_exallama_v2.py
-          pytest tests/test_q4_marlin.py
-          pytest tests/test_q4_triton.py
-          pytest tests/test_repacking.py
-          pytest tests/test_serialization.py
-          pytest tests/test_sharded.py
-          pytest tests/test_triton.py
-          pytest tests/test_quant_formats.py
-          pytest tests/test_q4_cuda.py
+          run_test() {
+              echo -e "\033[1;34mRunning $1...\033[0m"
+              echo "========================================"
+              pytest tests/$1
+              echo -e "\033[1;32mFinished $1\033[0m"
+              echo "========================================"
+          }
+
+          run_test test_lm_head.py
+          run_test test_q4_exallama.py
+          run_test test_q4_exallama_v2.py
+          run_test test_q4_marlin.py
+          run_test test_q4_triton.py
+          run_test test_repacking.py
+          run_test test_serialization.py
+          run_test test_sharded.py
+          run_test test_triton.py
+          run_test test_quant_formats.py
+          run_test test_q4_cuda.py
