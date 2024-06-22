@@ -20,6 +20,7 @@ from transformers.utils.generic import ContextManagers
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+from ..utils.bitblas import prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
@@ -29,9 +30,6 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ..version import __version__
-from ..utils.bitblas import (
-    prepare_model_for_bitblas_load,
-)
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)

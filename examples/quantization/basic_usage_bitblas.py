@@ -1,7 +1,7 @@
-from transformers import AutoTokenizer, TextGenerationPipeline, AutoModelForCausalLM
 import torch
 from gptqmodel import GPTQModel
-from gptqmodel.quantization import FORMAT, QuantizeConfig
+from gptqmodel.quantization import QuantizeConfig
+from transformers import AutoTokenizer, TextGenerationPipeline
 
 use_bitblas = True
 pretrained_model_dir = "facebook/opt-125m"

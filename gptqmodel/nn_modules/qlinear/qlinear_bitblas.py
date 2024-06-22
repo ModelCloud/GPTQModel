@@ -4,7 +4,6 @@
 import ctypes
 import operator
 import os
-import time
 from functools import reduce
 from logging import getLogger
 
@@ -28,12 +27,12 @@ except ImportError as e:
 
 from typing import List, Union
 
-from bitblas.cache import global_operator_cache, get_database_path
-from bitblas import MatmulConfig, Matmul
+from bitblas import Matmul, MatmulConfig
+from bitblas.cache import get_database_path, global_operator_cache
 from bitblas.quantization.utils import general_compress
 from bitblas.utils import auto_detect_nvidia_target
-from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 
+from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 
 auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
@@ -94,7 +93,8 @@ class QuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         super().__init__()
-        self.validate_bits(bits=bits)
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
+
         self._validate_parameters(group_size, infeatures, outfeatures)
 
         self.bits = bits

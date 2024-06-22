@@ -42,7 +42,7 @@ class QuantLinear(BaseQuantLinear):
 
     def __init__(self, bits: int, group_size: int , sym:bool, desc_act: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
         super().__init__()
-        self.validate_bits(bits=bits)
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self.padding = -outfeatures % 32
         self.outfeatures = outfeatures + self.padding
