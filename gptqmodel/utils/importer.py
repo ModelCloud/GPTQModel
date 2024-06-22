@@ -21,7 +21,7 @@ def select_quant_linear(
     else:
         if use_bitblas:
             from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear
-        if bits == 4 and sym and not desc_act and use_marlin:
+        elif bits == 4 and sym and not desc_act and use_marlin:
             from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
         elif bits == 4 and not disable_exllamav2:
             from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear
