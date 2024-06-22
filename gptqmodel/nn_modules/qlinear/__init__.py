@@ -22,9 +22,9 @@ class BaseQuantLinear(nn.Module):
         if sym not in self.SUPPORTED_SYM:
             raise NotImplementedError(f"{self.QUANT_TYPE} only supports `{self.SUPPORTED_SYM}` bits: actual bits = `{sym}`")
 
-    def validate_desc_act(self, dsc_act: bool):
-        if dsc_act not in self.SUPPORTED_DESC_ACT:
-            raise NotImplementedError(f"{self.QUANT_TYPE} only supports `{self.SUPPORTED_DESC_ACT}` bits: actual bits = `{dsc_act}`")
+    def validate_desc_act(self, desc_act: bool):
+        if desc_act not in self.SUPPORTED_DESC_ACT:
+            raise NotImplementedError(f"{self.QUANT_TYPE} only supports `{self.SUPPORTED_DESC_ACT}` bits: actual bits = `{desc_act}`")
 
     # override me
     def post_init(self):
