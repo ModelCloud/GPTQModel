@@ -100,21 +100,24 @@ def get_module_by_name_suffix(model, module_name: str):
 def make_quant(
     module,
     names,
-    bits,
-    group_size,
+    bits: int,
+    group_size: int,
+    desc_act: bool = False,
+    sym: bool = True,
     use_triton: bool = False,
     use_marlin: bool = False,
     use_bitblas: bool = False,
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
-    desc_act: bool = False,
+
 ):
     QuantLinear = select_quant_linear(
-        use_triton=use_triton,
-        desc_act=desc_act,
-        group_size=group_size,
         bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        use_triton=use_triton,
         use_marlin=use_marlin,
         use_bitblas=use_bitblas,
         disable_exllama=disable_exllama,
@@ -137,24 +140,31 @@ def make_quant(
             elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
                 in_features = submodule.weight.shape[0]
                 out_features = submodule.weight.shape[1]
+            else:
+                raise NotImplementedError(f"Unsupported module {submodule}")
+
             bias = submodule.bias is not None
             if (not (desc_act) or group_size == -1) and not use_triton:
                 new_layer = QuantLinear(
-                    bits,
-                    group_size,
-                    in_features,
-                    out_features,
-                    bias,
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    infeatures=in_features,
+                    outfeatures=out_features,
+                    bias=bias,
                     use_cuda_fp16=use_cuda_fp16,
                     weight_dtype=submodule.weight.dtype,
                 )
             else:
                 new_layer = QuantLinear(
-                    bits,
-                    group_size,
-                    in_features,
-                    out_features,
-                    bias,
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    infeatures=in_features,
+                    outfeatures=out_features,
+                    bias=bias,
                     weight_dtype=submodule.weight.dtype,
                 )
             new_layer.device = ori_layer_device
@@ -233,19 +243,21 @@ def pack_model(
     quantizers,
     bits,
     group_size,
+    desc_act=False,
+    sym: bool = True,
     use_triton=False,
     use_cuda_fp16=True,
-    desc_act=False,
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
     use_bitblas: bool = False,
 ):
     QuantLinear = select_quant_linear(
-        use_triton=use_triton,
-        desc_act=desc_act,
-        group_size=group_size,
         bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        use_triton=use_triton,
         disable_exllama=False,
         disable_exllamav2=True,
         use_marlin=use_marlin,

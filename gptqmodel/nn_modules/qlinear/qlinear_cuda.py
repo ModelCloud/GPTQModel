@@ -18,13 +18,16 @@ class QuantLinear(BaseQuantLinear):
 
     def __init__(
         self,
-        bits,
-        group_size,
-        infeatures,
-        outfeatures,
-        bias,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        infeatures: int,
+        outfeatures: int,
+        bias: bool,
         kernel_switch_threshold=128,
         weight_dtype=torch.float16,
+        **kwargs,
     ):
         super().__init__()
         self.validate_bits(bits=bits)

@@ -6,10 +6,11 @@ logger = getLogger(__name__)
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-    use_triton: bool,
-    desc_act: bool,
-    group_size: int,
     bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    use_triton: bool,
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_marlin: bool = False,
@@ -21,7 +22,7 @@ def select_quant_linear(
     else:
         if use_bitblas:
             from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear
-        if bits == 4 and use_marlin:
+        if bits == 4 and sym and not desc_act and use_marlin:
             from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
         elif bits == 4 and not disable_exllamav2:
             from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear

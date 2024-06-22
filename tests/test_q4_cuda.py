@@ -555,6 +555,8 @@ class TestsQ4CUDA(unittest.TestCase):
         linear = QuantLinearCudaOld(
             bits=4,
             group_size=group_size,
+            desc_act=False,
+            sym=True,
             infeatures=k,
             outfeatures=n,
             bias=False,

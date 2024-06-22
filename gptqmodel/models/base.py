@@ -853,7 +853,7 @@ class BaseGPTQModel(nn.Module):
                     "There are security risks when loading tensors from .bin files. Make sure you are loading model only from a trusted source."
                 )
             else:
-                raise RuntimeError(
+                raise ValueError(
                     "Loading of unsafe .bin files are not allowed by default. Pass allow_unsafe_loading=True to bypass."
                 )
 
@@ -971,10 +971,11 @@ class BaseGPTQModel(nn.Module):
             # Load the quant linear type we need.
             # TODO: load marlin directly with the right quantlinear class.
             quant_linear_class = select_quant_linear(
-                use_triton=use_triton,
-                desc_act=quantize_config.desc_act,
-                group_size=quantize_config.group_size,
                 bits=quantize_config.bits,
+                group_size=quantize_config.group_size,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
+                use_triton=use_triton,
                 disable_exllama=disable_exllama,
                 disable_exllamav2=disable_exllamav2,
                 use_marlin=False,
@@ -1000,10 +1001,11 @@ class BaseGPTQModel(nn.Module):
             # Load the quant linear type we need.
             # TODO: load directy bitblas with the right quantlinear class.
             quant_linear_class = select_quant_linear(
-                use_triton=use_triton,
-                desc_act=quantize_config.desc_act,
-                group_size=quantize_config.group_size,
                 bits=quantize_config.bits,
+                group_size=quantize_config.group_size,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
+                use_triton=use_triton,
                 disable_exllama=disable_exllama,
                 disable_exllamav2=disable_exllamav2,
                 use_marlin=False,

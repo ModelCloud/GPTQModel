@@ -64,6 +64,7 @@ def unpack_qzeros(qzeros, bits):
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "bitblas"
     SUPPORTED_BITS = [1, 2, 4]
+
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
     TORCH_DTYPE = torch.float16
@@ -80,6 +81,8 @@ class QuantLinear(BaseQuantLinear):
         self,
         bits: int,
         group_size: int,
+        sym: bool,
+        desc_act: bool,
         infeatures: int,
         outfeatures: int,
         bias: bool,

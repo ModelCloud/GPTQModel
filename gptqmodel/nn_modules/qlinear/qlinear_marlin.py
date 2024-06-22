@@ -65,11 +65,16 @@ class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "marlin"
     SUPPORTED_BITS = [4]
     SUPPORTED_GROUP_SIZES = [128, -1]
+    SUPPORTED_DESC_ACT = [False]
+    SUPPORTED_SYM = [True]
 
-    def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):
+    def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool, infeatures: int, outfeatures: int,
+                 bias: bool, **kwargs):
         super().__init__()
         self.validate_bits(bits=bits)
         self.validate_group_size(group_size=group_size)
+        self.validate_sym(sym=sym)
+        self.validate_desc_act(desc_act=desc_act)
 
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(
@@ -105,8 +110,6 @@ class QuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
-    def post_init(self):
-        pass
 
     def pack(self, linear, scales):
         """Pack a fake-quantized linear layer into this actual Marlin representation.

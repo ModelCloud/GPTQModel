@@ -6,6 +6,8 @@ class BaseQuantLinear(nn.Module):
     QUANT_TYPE = "base"
     SUPPORTED_BITS = []
     SUPPORTED_GROUP_SIZES = []
+    SUPPORTED_DESC_ACT = [True, False]
+    SUPPORTED_SYM = [True, False]
 
     def validate_bits(self, bits: int):
         if bits not in self.SUPPORTED_BITS:
@@ -16,5 +18,16 @@ class BaseQuantLinear(nn.Module):
             raise NotImplementedError(
                 f"{self.QUANT_TYPE} only supports `{self.SUPPORTED_GROUP_SIZES}` group_size: actual group_size = `{group_size}`")
 
+    def validate_sym(self, sym: bool):
+        if sym not in self.SUPPORTED_SYM:
+            raise NotImplementedError(f"{self.QUANT_TYPE} only supports `{self.SUPPORTED_SYM}` bits: actual bits = `{sym}`")
+
+    def validate_dsc_act(self, dsc_act: bool):
+        if dsc_act not in self.SUPPORTED_DESC_ACT:
+            raise NotImplementedError(f"{self.QUANT_TYPE} only supports `{self.SUPPORTED_DESC_ACT}` bits: actual bits = `{dsc_act}`")
+
+    # override me
+    def post_init(self):
+        pass
 
 

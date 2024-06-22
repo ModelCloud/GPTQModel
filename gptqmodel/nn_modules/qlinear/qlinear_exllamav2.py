@@ -100,7 +100,8 @@ class QuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):
+    def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool, infeatures: int, outfeatures: int,
+                 bias: bool,  **kwargs,):
         super().__init__()
         self.validate_bits(bits=bits)
 
