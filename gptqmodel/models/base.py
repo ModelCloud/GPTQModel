@@ -71,6 +71,7 @@ class BaseGPTQModel(nn.Module):
         model: PreTrainedModel,
         quantized: bool,
         quantize_config: QuantizeConfig,
+        # TODO: remove is_triton_backend arg..why? doesn't pass smell test @ZX-ModelCloud
         is_triton_backend: bool = False,
         qlinear_kernel: nn.Module = None,
     ):
@@ -145,8 +146,11 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
+
+        # TODO: remove use_triton and use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
         use_triton: bool = False,
         use_cuda_fp16: bool = True,
+
         autotune_warmup_after_quantized: bool = False,
         calibration_enable_gpu_cache: bool = True,
     ):
@@ -721,9 +725,16 @@ class BaseGPTQModel(nn.Module):
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
+
+        # TODO: refract this bewildering amount of ugly args @ZX-ModelCloud
+        # combine into Backend.ENUM class of Backend.AUTO, Backend.TRITON, Backend.MARLIN
+        # single arp of backend: Backend = Backend.AUTO (default to auto)
         use_triton: bool = True,
         use_marlin: bool = True,
         use_bitblas: bool = False,
+        disable_exllama: bool = False,
+        disable_exllamav2: bool = False,
+
         torch_dtype: [str | torch.dtype] = "auto",
         use_cuda_fp16: bool = True,
         quantize_config: Optional[QuantizeConfig] = None,
@@ -731,8 +742,6 @@ class BaseGPTQModel(nn.Module):
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         warmup_triton: bool = False,
-        disable_exllama: bool = False,
-        disable_exllamav2: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
         **kwargs,
