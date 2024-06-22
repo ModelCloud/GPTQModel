@@ -54,11 +54,11 @@ jobs:
         if: matrix.test-group == 'gpu_group1'
         run: |
           run_test() {
-              echo -e "\033[1;34mRunning $1...\033[0m"
+              echo "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
               pytest tests/$1
-              echo -e "\033[1;32mFinished $1\033[0m"
-              echo "========================================"
+              echo "\033[1;32mFinished $1\033[0m"
+              echo "========================================\n\n\n"
           }
 
           run_test test_lm_head.py
