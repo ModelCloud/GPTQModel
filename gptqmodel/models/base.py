@@ -1027,14 +1027,15 @@ class BaseGPTQModel(nn.Module):
                 sym=quantize_config.sym,
             )
 
-        accelerate.utils.modeling.load_checkpoint_in_model(
-            model,
-            dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=model_save_name,
-            device_map=device_map,
-            offload_state_dict=True,
-            offload_buffers=True,
-        )
+        if not use_bitblas:
+            accelerate.utils.modeling.load_checkpoint_in_model(
+                model,
+                dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                checkpoint=model_save_name,
+                device_map=device_map,
+                offload_state_dict=True,
+                offload_buffers=True,
+            )
 
         # TODO: Why are we using this custom function and not dispatch_model?
         model = simple_dispatch_model(model, device_map)
