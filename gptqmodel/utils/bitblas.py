@@ -4,7 +4,6 @@ from logging import getLogger
 import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
-from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 
 from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear

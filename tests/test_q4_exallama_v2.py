@@ -31,7 +31,13 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         n = 1024
         device = torch.device("cuda:0")
 
-        linear_class = select_quant_linear(use_triton=False, desc_act=False, group_size=group_size, bits=4)
+        linear_class = select_quant_linear(
+            bits=4,
+            group_size=group_size,
+            desc_act=False,
+            sym=True,
+            use_triton=False,
+        )
 
         linear = linear_class(
             bits=4,
