@@ -42,8 +42,11 @@ jobs:
             echo "CUDA_VISIBLE_DEVICES set to ${{ env.CUDA_VISIBLE_DEVICES }}"
           fi
 
+      - name: Display Environment Variable
+        run: echo "CUDA_VISIBLE_DEVICES set to ${{ env.CUDA_VISIBLE_DEVICES }}"
+
       - name: Checkout code
-        run: git clone --depth=1 https://github.com/ModelCloud/GPTQModel
+        run: apt update && apt install git && git clone --depth=1 https://github.com/ModelCloud/GPTQModel
 
       - name: Compile
         run: |
