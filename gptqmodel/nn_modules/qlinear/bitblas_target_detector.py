@@ -91,7 +91,7 @@ def corrected_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
     # TODO: move to a more res-usable device remapping util method
     # compat: Nvidia makes several oem (non-public) versions of A100 and perhaps other models that
     # do not have clearly defined TVM matching target so we need to manually map them to the correct one.
-    if gpu_model == "NVIDIA PG506-230":
+    if gpu_model in ["NVIDIA PG506-230", "NVIDIA PG506-232"]:
         gpu_model = "NVIDIA A100"
 
     print("GPU_model",gpu_model)
