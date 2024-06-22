@@ -13,9 +13,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
 
 env:
-  DAY_OF_WEEK: Monday
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  CUDA_VISIBLE_DEVICES: 0
 
 jobs:
   build:
@@ -26,6 +24,23 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Find suitable GPU and set CUDA_VISIBLE_DEVICES
+        run: |
+          suitable_gpu=$(nvidia-smi -L | grep "RTX 4090" | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
+          do
+            mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i $gpu_id)
+            mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu_id)
+            mem_used_pct=$((100 * mem_used / mem_total))
+            if [ $mem_used_pct -lt 2 ]; then
+              echo $gpu_id
+              break
+            fi
+          done)
+          echo "CUDA_VISIBLE_DEVICES=$suitable_gpu" >> $GITHUB_ENV
+
+      - name: Display Environment Variable
+        run: echo "CUDA_VISIBLE_DEVICES set to ${{ env.CUDA_VISIBLE_DEVICES }}"
 
       - name: Compile
         run: |
