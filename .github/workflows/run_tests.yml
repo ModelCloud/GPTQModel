@@ -45,7 +45,7 @@ jobs:
       - name: Compile
         run: |
           pip install -U pytest ninja parameterized protobuf
-          pip install -v --no-build-isolation GPTQModel
+          pip install -v --no-build-isolation .
 
       - name: Run tests
         if: matrix.test-group == 'gpu_group2'
