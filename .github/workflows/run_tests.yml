@@ -39,14 +39,11 @@ jobs:
             exit 1
           else
             echo "CUDA_VISIBLE_DEVICES=$suitable_gpu" >> $GITHUB_ENV
-            echo "CUDA_VISIBLE_DEVICES set to ${{ env.CUDA_VISIBLE_DEVICES }}"
+            echo "CUDA_VISIBLE_DEVICES set to $suitable_gpu"
           fi
 
-      - name: Display Environment Variable
-        run: echo "CUDA_VISIBLE_DEVICES set to ${{ env.CUDA_VISIBLE_DEVICES }}"
-
       - name: Checkout code
-        run: apt update && apt install git && git clone --depth=1 https://github.com/ModelCloud/GPTQModel
+        uses: actions/checkout@v4
 
       - name: Compile
         run: |
