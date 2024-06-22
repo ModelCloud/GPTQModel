@@ -22,12 +22,14 @@ def prepare_model_for_bitblas_load(
         torch_dtype,
         model_save_name,
         device_map,
+        sym: bool,
+        desc_act: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
     if quantize_config.format == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
         logger.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
-        model = convert_to_bitblas(model, quant_linear_class, quantize_config, repack=False)
+        model = convert_to_bitblas(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
     else:
         # Loading the GPTQ checkpoint to do the conversion.
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
@@ -42,7 +44,7 @@ def prepare_model_for_bitblas_load(
             offload_buffers=True,
         )
         # Convert model to bitblas, repacking weights into BitBLAS format.
-        model = convert_to_bitblas(model, quant_linear_class, quantize_config, repack=True)
+        model = convert_to_bitblas(model, quant_linear_class, quantize_config, sym, desc_act, repack=True)
 
         # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
         tied_params = find_tied_parameters(model)
@@ -62,13 +64,13 @@ def prepare_model_for_bitblas_load(
                         recurse_getattr(model, param_name).clone(),
                     )
 
-        # Cache the converted model.
-        safe_save(model.state_dict(), model_save_name)
+        # # Cache the converted model.
+        # safe_save(model.state_dict(), model_save_name)
     return model
 
 
 @torch.no_grad()
-def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeConfig, repack: bool,
+def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool,
                        strict: bool = False):
     """
     Converts GPTQ-packed weights to the Bitblas format.
@@ -96,6 +98,8 @@ def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeCo
             bitblas_module = BitBLASQuantLinear(
                 bits=quantization_config.bits,
                 group_size=quantization_config.group_size,
+                sym=sym,
+                desc_act=desc_act,
                 infeatures=module.infeatures,
                 outfeatures=module.outfeatures,
                 bias=module.bias is not None,

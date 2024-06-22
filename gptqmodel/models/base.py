@@ -991,6 +991,8 @@ class BaseGPTQModel(nn.Module):
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
                 device_map=device_map,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
             )
 
         if use_bitblas:
@@ -1023,6 +1025,8 @@ class BaseGPTQModel(nn.Module):
                 torch_dtype=torch_dtype,
                 model_save_name=model_save_name,
                 device_map=device_map,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
             )
 
         accelerate.utils.modeling.load_checkpoint_in_model(
