@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+import logging
 import os
 import subprocess
 from typing import List
+
 from thefuzz import process
 from tvm.target import Target
 from tvm.target.tag import list_tags
-
-import logging
 
 logger = logging.getLogger(__name__)
 
