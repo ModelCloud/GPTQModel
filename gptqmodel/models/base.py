@@ -777,21 +777,18 @@ class BaseGPTQModel(nn.Module):
 
             for i, shard_file in enumerate(shard_files):
                 expected_hash = verify_hash[i]
-
                 if not verify_file_hash(shard_file, expected_hash):
-                    raise ValueError(f"Hash verification failed for {shard_file}")
+                    logger.info(f"Hash verification failed for {shard_file}")
+                    return False
                 else:
                     logger.info(f"Hash verification succeeded for {shard_file}")
+            return True
 
         def verify_model_or_shards(path, verify_hash: Union[str, List[str]], isSharded: bool):
             if isSharded:
                 return verify_sharded_model_hashes(path, verify_hash)
             else:
-                if not verify_file_hash(path, verify_hash):
-                    raise ValueError(f"Hash verification failed for {path}")
-                else:
-                    logger.info(f"Hash verification succeeded for {path}")
-
+                return verify_file_hash(path, verify_hash)
 
         """load quantized model from local disk"""
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
@@ -918,6 +915,7 @@ class BaseGPTQModel(nn.Module):
         if verify_hash:
             if not verify_model_or_shards(model_save_name, verify_hash, is_sharded):
                 raise ValueError(f"Hash verification failed for {model_save_name}")
+            logger.info(f"Hash verification succeeded for {model_save_name}")
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
             pass
