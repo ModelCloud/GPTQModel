@@ -53,7 +53,7 @@ jobs:
       - name: Run tests
         if: matrix.test-group == 'gpu_group1'
         run: |
-          declare -a failed_tests
+          failed_tests=()
           
           run_test() {
               echo "\033[1;34mRunning $1...\033[0m"
