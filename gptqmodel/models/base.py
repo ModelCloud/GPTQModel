@@ -783,19 +783,15 @@ class BaseGPTQModel(nn.Module):
                 else:
                     logger.info(f"Hash verification succeeded for {shard_file}")
 
-        def verify_model_or_shards(path, verify_hash: Union[str, List[str]]):
-            if path.endswith('.safetensors.index.json'):
+        def verify_model_or_shards(path, verify_hash: Union[str, List[str]], isSharded: bool):
+            if isSharded:
                 return verify_sharded_model_hashes(path, verify_hash)
-            elif path.endswith('.safetensors'):
-                if isinstance(verify_hash, str):
-                    if not verify_file_hash(path, verify_hash):
-                        raise ValueError(f"Hash verification failed for {path}")
-                    else:
-                        logger.info(f"Hash verification succeeded for {path}")
-                else:
-                    raise ValueError("Expected a single hash value for non-sharded model.")
             else:
-                raise ValueError("Unsupported file format.")
+                if not verify_file_hash(path, verify_hash):
+                    raise ValueError(f"Hash verification failed for {path}")
+                else:
+                    logger.info(f"Hash verification succeeded for {path}")
+
 
         """load quantized model from local disk"""
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
@@ -920,7 +916,7 @@ class BaseGPTQModel(nn.Module):
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
         if verify_hash:
-            if not verify_model_or_shards(model_save_name, verify_hash):
+            if not verify_model_or_shards(model_save_name, verify_hash, is_sharded):
                 raise ValueError(f"Hash verification failed for {model_save_name}")
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
