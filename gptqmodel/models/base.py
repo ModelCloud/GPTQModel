@@ -6,6 +6,7 @@ import re
 from os.path import isfile, join
 from typing import Dict, List, Optional, Union
 
+import hashlib
 import accelerate
 import torch
 import torch.nn as nn
@@ -749,8 +750,53 @@ class BaseGPTQModel(nn.Module):
         disable_exllamav2: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
+        verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+
+        def verify_file_hash(file_path: str, verify_hash: str):
+            hash_type, hash_value = verify_hash.split(':')
+            if hash_type not in ['crc', 'md5', 'aes128', 'aes256', 'aes512']:
+                raise ValueError(f"Unsupported hash type: {hash_type}")
+
+            hash_func = getattr(hashlib, hash_type, None)
+            if not hash_func:
+                raise ValueError(f"No hash function found for type: {hash_type}")
+
+            with open(file_path, "rb") as f:
+                file_hash = hash_func(f.read()).hexdigest()
+            return file_hash == hash_value
+
+        def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
+            with open(jsonPath, 'r') as f:
+                index_data = json.load(f)
+            weight_map = index_data['weight_map']
+            shard_files = set(weight_map.values())
+            if len(shard_files) != len(verify_hash):
+                raise ValueError("Number of shards and number of hash values do not match.")
+
+            for i, shard_file in enumerate(shard_files):
+                expected_hash = verify_hash[i]
+
+                if not verify_file_hash(shard_file, expected_hash):
+                    raise ValueError(f"Hash verification failed for {shard_file}")
+                else:
+                    logger.info(f"Hash verification succeeded for {shard_file}")
+
+        def verify_model_or_shards(path, verify_hash: Union[str, List[str]]):
+            if path.endswith('.safetensors.index.json'):
+                return verify_sharded_model_hashes(path, verify_hash)
+            elif path.endswith('.safetensors'):
+                if isinstance(verify_hash, str):
+                    if not verify_file_hash(path, verify_hash):
+                        raise ValueError(f"Hash verification failed for {path}")
+                    else:
+                        logger.info(f"Hash verification succeeded for {path}")
+                else:
+                    raise ValueError("Expected a single hash value for non-sharded model.")
+            else:
+                raise ValueError("Unsupported file format.")
+
         """load quantized model from local disk"""
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
         if disable_exllama is None:
@@ -873,7 +919,9 @@ class BaseGPTQModel(nn.Module):
         quantize_config.model_file_base_name = true_model_basename
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
-
+        if verify_hash:
+            if not verify_model_or_shards(model_save_name, verify_hash):
+                raise ValueError(f"Hash verification failed for {model_save_name}")
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
             pass
