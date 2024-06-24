@@ -53,14 +53,18 @@ jobs:
       - name: Run tests
         if: matrix.test-group == 'gpu_group1'
         run: |
+          declare -a failed_tests
+          
           run_test() {
               echo "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
               pytest tests/$1
+              if [ $? -ne 0 ]; then
+                  failed_tests+=($1)
+              fi
               echo "\033[1;32mFinished $1\033[0m"
               echo "========================================\n\n\n"
           }
-
           run_test test_lm_head.py
           run_test test_q4_exallama.py
           run_test test_q4_exallama_v2.py
