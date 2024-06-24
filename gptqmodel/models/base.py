@@ -543,19 +543,18 @@ class BaseGPTQModel(nn.Module):
             # fix gptqmodel_cuda cannot be serialized
             # no need to set it back, no calculation below
             if quantize_config.bits != 4:
-                cuda_name_modules = []
-                from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
-                for item in model.named_modules():
-                    if isinstance(item, tuple) and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
-                        cuda_name_modules.append((item[0], item[1].gptqmodel_cuda))
-                        item[1].gptqmodel_cuda = None
+                cuda_name_modules = {}
+                from gptqmodel.nn_modules.qlinear.qlinear_cuda import BaseCudaQuantLinear
+                for name, module in model.named_modules():
+                    if isinstance(module, BaseCudaQuantLinear):
+                        cuda_name_modules[name] = module.gptqmodel_cuda
+                        module.gptqmodel_cuda = None
                 model = copy.deepcopy(self.model)
 
-                for item in model.named_modules():
-                    if isinstance(item, tuple) and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
-                        for cuda_name, cuda_module in cuda_name_modules:
-                            if item[0] == cuda_name:
-                                item[1].gptqmodel_cuda = cuda_module
+                for name, modules in model.named_modules():
+                    if isinstance(module, BaseCudaQuantLinear) and name in cuda_name_modules:
+                        module.gptqmodel_cuda = cuda_name_modules[name]
+
                 del cuda_name_modules
             else:
                 model = copy.deepcopy(self.model)
