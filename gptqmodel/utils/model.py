@@ -1,10 +1,10 @@
 import functools
+import hashlib
 import json
 import logging
 import os
-import hashlib
 from logging import getLogger
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import accelerate
 import threadpoolctl as tctl

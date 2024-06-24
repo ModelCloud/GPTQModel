@@ -4,7 +4,6 @@ import unittest
 
 from gptqmodel import GPTQModel
 from gptqmodel.quantization import FORMAT, QuantizeConfig
-
 from transformers import AutoTokenizer
 
 
