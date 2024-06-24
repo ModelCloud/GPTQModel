@@ -168,10 +168,10 @@ class QuantizeConfig():
         if format:
             if format not in valid_formats:
                 raise ValueError(f"Unknown quantization checkpoint format: {format}.")
-            if quantize_cfg.get(FORMAT_FIELD_CODE):
+            if quantize_cfg.get(FORMAT_FIELD_JSON):
                 raise ValueError("Conflict: quantization format is passed in and also exists in model config.")
         # compat: warn if checkpoint_format is missing
-        elif quantize_cfg.get(FORMAT_FIELD_CODE) is None:
+        elif quantize_cfg.get(FORMAT_FIELD_JSON) is None:
             format_auto_inferred = True
 
         field_names = [field.name for field in fields(cls)]
@@ -188,11 +188,11 @@ class QuantizeConfig():
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
 
-            if key == FORMAT_FIELD_CODE:
+            if key == FORMAT_FIELD_JSON:
                 val = val.lower()
 
                 if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN}:
-                    normalized[key] = val
+                    normalized[FORMAT_FIELD_CODE] = val
                 else:
                     raise ValueError(f"Unknown quantization format: {val}.")
             elif key == QUANT_METHOD_FIELD:
