@@ -73,12 +73,12 @@ class BaseGPTQModel(nn.Module):
     info: Dict[str, str] = {}
 
     def __init__(
-        self,
-        model: PreTrainedModel,
-        quantized: bool,
-        quantize_config: QuantizeConfig,
-        is_triton_backend: bool = False,
-        qlinear_kernel: nn.Module = None,
+            self,
+            model: PreTrainedModel,
+            quantized: bool,
+            quantize_config: QuantizeConfig,
+            is_triton_backend: bool = False,
+            qlinear_kernel: nn.Module = None,
     ):
         super().__init__()
 
@@ -102,9 +102,9 @@ class BaseGPTQModel(nn.Module):
         return getattr(self.model, "hf_device_map", None)
 
     def _prepare_dataset_for_quantization(
-        self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-        batch_size: int = 1,
+            self,
+            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+            batch_size: int = 1,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -138,7 +138,7 @@ class BaseGPTQModel(nn.Module):
             pad_token_id = self.config.eos_token_id
 
         new_calibration_dataset = [
-            collate_data(new_calibration_dataset[start : start + batch_size], pad_token_id)
+            collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
             for start in range(0, len(new_calibration_dataset), batch_size)
         ]
         for new_example in new_calibration_dataset:
@@ -148,13 +148,13 @@ class BaseGPTQModel(nn.Module):
 
     @torch.inference_mode()
     def quantize(
-        self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-        batch_size: int = 1,
-        use_triton: bool = False,
-        use_cuda_fp16: bool = True,
-        autotune_warmup_after_quantized: bool = False,
-        calibration_enable_gpu_cache: bool = True,
+            self,
+            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+            batch_size: int = 1,
+            use_triton: bool = False,
+            use_cuda_fp16: bool = True,
+            autotune_warmup_after_quantized: bool = False,
+            calibration_enable_gpu_cache: bool = True,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -183,7 +183,7 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) < MIN_CALIBRATION_DATASET_SIZE:
             logger.warning(f"Calibration dataset size should be greater than {MIN_CALIBRATION_DATASET_SIZE}. "
-                             f"Current size: {len(calibration_dataset)}.")
+                           f"Current size: {len(calibration_dataset)}.")
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -194,7 +194,7 @@ class BaseGPTQModel(nn.Module):
 
         if avg < MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                             f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
+                           f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
@@ -240,8 +240,8 @@ class BaseGPTQModel(nn.Module):
                 position_ids.append(move_to(pos_ids, data_device))
             one_kwargs = {}
             for (
-                k,
-                v,
+                    k,
+                    v,
             ) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
                     one_kwargs[k] = nested_move_to(v, data_device)
@@ -469,13 +469,13 @@ class BaseGPTQModel(nn.Module):
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
     def save_quantized(
-        self,
-        save_dir: str,
-        safetensors_metadata: Optional[Dict[str, str]] = None,
-        format: Optional[FORMAT] = None,
-        use_safetensors: bool = True,
-        max_shard_size: str = "10GB",
-        model_base_name: Optional[str] = None
+            self,
+            save_dir: str,
+            safetensors_metadata: Optional[Dict[str, str]] = None,
+            format: Optional[FORMAT] = None,
+            use_safetensors: bool = True,
+            max_shard_size: str = "10GB",
+            model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -497,8 +497,8 @@ class BaseGPTQModel(nn.Module):
 
         if model_base_name is None:
             model_base_name = (
-                self.quantize_config.model_file_base_name or
-                f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
+                    self.quantize_config.model_file_base_name or
+                    f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
             )
 
         state_dict = self.model.state_dict()
@@ -545,12 +545,23 @@ class BaseGPTQModel(nn.Module):
             # fix ModelCloud/GPTQModel/issues/47
             # fix gptqmodel_cuda cannot be serialized
             # no need to set it back, no calculation below
-            if quantize_config.bits != 4 :
+            if quantize_config.bits != 4:
+                cuda_name_modules = []
                 from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
-                for name, module in model.named_modules():
-                    if isinstance (module, QuantLinear):
-                        module.gptqmodel_cuda = None
-            model = copy.deepcopy(self.model)
+                for item in model.named_modules():
+                    if len(item) > 1 and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
+                        cuda_name_modules.append((item[0], item[1].gptqmodel_cuda))
+                        item[1].gptqmodel_cuda = None
+                model = copy.deepcopy(self.model)
+
+                for item in model.named_modules():
+                    if len(item) > 1 and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
+                        for cuda_name, cuda_module in cuda_name_modules:
+                            if item[0] == cuda_name:
+                                item[1].gptqmodel_cuda = cuda_module
+                del cuda_name_modules
+            else:
+                model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
                 model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
             )
@@ -641,22 +652,22 @@ class BaseGPTQModel(nn.Module):
         quantize_config.save_pretrained(save_dir)
 
     def save_pretrained(
-        self,
-        save_dir: str,
-        **kwargs,
+            self,
+            save_dir: str,
+            **kwargs,
     ):
         logger.warning("You are using save_pretrained, which will re-direct to save_quantized.")
         self.save_quantized(save_dir=save_dir, **kwargs)
 
     @classmethod
     def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str,
-        quantize_config: QuantizeConfig,
-        max_memory: Optional[dict] = None,
-        trust_remote_code: bool = False,
-        torch_dtype: [str | torch.dtype] = "auto",
-        **model_init_kwargs,
+            cls,
+            pretrained_model_name_or_path: str,
+            quantize_config: QuantizeConfig,
+            max_memory: Optional[dict] = None,
+            trust_remote_code: bool = False,
+            torch_dtype: [str | torch.dtype] = "auto",
+            **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
 
@@ -739,25 +750,25 @@ class BaseGPTQModel(nn.Module):
 
     @classmethod
     def from_quantized(
-        cls,
-        model_name_or_path: Optional[str],
-        device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-        max_memory: Optional[dict] = None,
-        device: Optional[Union[str, int]] = None,
-        use_triton: bool = True,
-        use_marlin: bool = True,
-        torch_dtype: [str | torch.dtype] = "auto",
-        use_cuda_fp16: bool = True,
-        quantize_config: Optional[QuantizeConfig] = None,
-        model_basename: Optional[str] = None,
-        use_safetensors: bool = True,
-        trust_remote_code: bool = False,
-        warmup_triton: bool = False,
-        disable_exllama: bool = False,
-        disable_exllamav2: bool = False,
-        format: Optional[FORMAT] = None,
-        allow_unsafe_loading: bool = False,
-        **kwargs,
+            cls,
+            model_name_or_path: Optional[str],
+            device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+            max_memory: Optional[dict] = None,
+            device: Optional[Union[str, int]] = None,
+            use_triton: bool = True,
+            use_marlin: bool = True,
+            torch_dtype: [str | torch.dtype] = "auto",
+            use_cuda_fp16: bool = True,
+            quantize_config: Optional[QuantizeConfig] = None,
+            model_basename: Optional[str] = None,
+            use_safetensors: bool = True,
+            trust_remote_code: bool = False,
+            warmup_triton: bool = False,
+            disable_exllama: bool = False,
+            disable_exllamav2: bool = False,
+            format: Optional[FORMAT] = None,
+            allow_unsafe_loading: bool = False,
+            **kwargs,
     ):
         """load quantized model from local disk"""
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
