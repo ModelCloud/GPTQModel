@@ -28,7 +28,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model)
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_or_shards)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -753,43 +753,6 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
-
-        def verify_file_hash(file_path: str, verify_hash: str):
-            hash_type, hash_value = verify_hash.split(':')
-            if hash_type not in ['crc', 'md5', 'aes128', 'aes256', 'aes512']:
-                raise ValueError(f"Unsupported hash type: {hash_type}")
-
-            hash_func = getattr(hashlib, hash_type, None)
-            if not hash_func:
-                raise ValueError(f"No hash function found for type: {hash_type}")
-
-            with open(file_path, "rb") as f:
-                file_hash = hash_func(f.read()).hexdigest()
-            return file_hash == hash_value
-
-        def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
-            with open(jsonPath, 'r') as f:
-                index_data = json.load(f)
-            weight_map = index_data['weight_map']
-            shard_files = set(weight_map.values())
-            if len(shard_files) != len(verify_hash):
-                raise ValueError("Number of shards and number of hash values do not match.")
-
-            for i, shard_file in enumerate(shard_files):
-                expected_hash = verify_hash[i]
-                if not verify_file_hash(shard_file, expected_hash):
-                    logger.info(f"Hash verification failed for {shard_file}")
-                    return False
-                else:
-                    logger.info(f"Hash verification succeeded for {shard_file}")
-            return True
-
-        def verify_model_or_shards(path, verify_hash: Union[str, List[str]], isSharded: bool):
-            if isSharded:
-                return verify_sharded_model_hashes(path, verify_hash)
-            else:
-                return verify_file_hash(path, verify_hash)
-
         """load quantized model from local disk"""
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
         if disable_exllama is None:
