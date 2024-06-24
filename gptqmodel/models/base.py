@@ -547,7 +547,6 @@ class BaseGPTQModel(nn.Module):
             for module in model.named_modules():
                 if len(module) == 2 and isinstance (module[1], QuantLinear):
                     module[1].gptqmodel_cuda = None
-                    print(module)
             model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
                 model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
