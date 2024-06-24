@@ -20,7 +20,7 @@ from transformers.utils.generic import ContextManagers
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
-from ..utils.bitblas import prepare_model_for_bitblas_load
+from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
@@ -493,6 +493,12 @@ class BaseGPTQModel(nn.Module):
 
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+
+        if quantize_config.format == FORMAT.BITBLAS:
+            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
+            logger.info("Convering model to BitBlas Format...")
+            model = convert_to_bitblas(model, self.qlinear_kernel, quantize_config, quantize_config.sym,
+                                       quantize_config.desc_act, repack=True)
 
         if model_base_name is None:
             model_base_name = (
@@ -1020,6 +1026,9 @@ class BaseGPTQModel(nn.Module):
                 use_marlin=False,
                 use_bitblas=False,
             )
+            print("quant_linear_class",quant_linear_class)
+            # from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
+            # quant_linear_class = ExllamaQuantLinear
 
             # Prepare model for bitblas load.
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.

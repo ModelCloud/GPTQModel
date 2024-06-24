@@ -28,6 +28,14 @@ def prepare_model_for_bitblas_load(
         # if the checkpoint is already in bitblas format, we can load it directly.
         logger.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
+        accelerate.utils.modeling.load_checkpoint_in_model(
+            model,
+            dtype=torch_dtype,
+            checkpoint=model_save_name,
+            device_map=device_map,
+            offload_state_dict=True,
+            offload_buffers=True,
+        )
     else:
         # Loading the GPTQ checkpoint to do the conversion.
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
@@ -61,9 +69,6 @@ def prepare_model_for_bitblas_load(
                         param_name,
                         recurse_getattr(model, param_name).clone(),
                     )
-
-        # # Cache the converted model.
-        # safe_save(model.state_dict(), model_save_name)
     return model
 
 

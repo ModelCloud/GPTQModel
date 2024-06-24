@@ -26,6 +26,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+
 def recurse_getattr(obj, attr: str):
     """
     Recursive `getattr`.
@@ -112,7 +113,7 @@ def make_quant(
     use_cuda_fp16: bool = True,
 
 ):
-    QuantLinear = select_quant_linear(
+    QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -237,6 +238,31 @@ def convert_gptq_v2_to_v1_format(
 
     return model
 
+def select_quant_linear_with_pack(bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    use_triton: bool,
+    disable_exllama: bool,
+    disable_exllamav2: bool ,
+    use_marlin: bool ,
+    use_bitblas: bool,):
+    # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
+    # and the format is converted to BitBLAS in save_quantized().
+    if use_bitblas:
+        use_bitblas = False
+    QuantLinear = select_quant_linear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        use_triton=use_triton,
+        disable_exllama=disable_exllama,
+        disable_exllamav2=disable_exllamav2,
+        use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
+    )
+    return QuantLinear
 
 def pack_model(
     model,
@@ -252,7 +278,7 @@ def pack_model(
     use_marlin: bool = False,
     use_bitblas: bool = False,
 ):
-    QuantLinear = select_quant_linear(
+    QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
