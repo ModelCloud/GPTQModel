@@ -33,10 +33,9 @@ class TestSharded(unittest.TestCase):
             quantize_config=QuantizeConfig(
                 bits=4,
                 group_size=128,
-                format=FORMAT.GPTQ_V2,
             ))
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         cal_data = self.get_wikitext2_data(tokenizer)
 
@@ -60,4 +59,5 @@ class TestSharded(unittest.TestCase):
             tokens = model.generate(**tokenizer("1337", return_tensors="pt").to(model.device), max_new_tokens=20)[0]
             result = tokenizer.decode(tokens)
 
+            print(result)
             self.assertTrue(result == "<s> 1337 \n- 1437 \n- 1537 \n- ")
