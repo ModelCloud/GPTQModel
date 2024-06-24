@@ -548,8 +548,8 @@ class BaseGPTQModel(nn.Module):
             if quantize_config.bits != 4 :
                 from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
                 for name, module in model.named_modules():
-                    if isinstance (module[1], QuantLinear):
-                        module[1].gptqmodel_cuda = None
+                    if isinstance (module, QuantLinear):
+                        module.gptqmodel_cuda = None
             model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
                 model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
