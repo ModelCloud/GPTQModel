@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from os.path import isfile, join
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 
 import accelerate
 import torch
@@ -545,7 +545,7 @@ class BaseGPTQModel(nn.Module):
             # no need to set it back, no calculation below
             from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
             for module in model.named_modules():
-                if len(module) == 2 and isinstance (module[1], QuantLinear):
+                if isinstance (module, Tuple) and isinstance (module[1], QuantLinear):
                     module[1].gptqmodel_cuda = None
             model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
