@@ -116,6 +116,9 @@ class GPTQModel:
         disable_exllama: Optional[bool] = None,
         disable_exllamav2: bool = False,
         use_marlin: bool = False,
+        # verify weight files matches predefined hash during loading
+        # usage: hash_format:hash_value, example: aes256:ugkdh232
+        # supported hash types [ crc, md5, aes128, aes256, aes512 ]
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
