@@ -28,8 +28,8 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
 
         # included in layer 1-59
-        ["mlp.shared_expert.up_proj", "mlp.shared_expert.gate_proj"],
-        ["mlp.shared_expert.down_proj"],
+        ["mlp.shared_experts.up_proj", "mlp.shared_experts.gate_proj"],
+        ["mlp.shared_experts.down_proj"],
 
         # included in layer 1-59, uses dynamic_expert_index
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
