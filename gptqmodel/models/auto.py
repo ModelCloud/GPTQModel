@@ -118,7 +118,7 @@ class GPTQModel:
         use_marlin: bool = False,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
-        # supported hashlib types
+        # supports all hashlib hash methods
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
