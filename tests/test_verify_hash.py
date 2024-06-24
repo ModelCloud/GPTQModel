@@ -1,8 +1,5 @@
 import unittest
-
 from gptqmodel import GPTQModel
-
-
 
 class TestVerifyHashFunction(unittest.TestCase):
     MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -22,6 +19,4 @@ class TestVerifyHashFunction(unittest.TestCase):
                                          verify_hash=self.EXPECTED_SHA256_HASH)
         # Add additional checks to ensure the model is loaded correctly
         self.assertIsNotNone(model)
-        
-if __name__ == '__main__':
-    unittest.main()
+
