@@ -239,10 +239,7 @@ class BaseGPTQModel(nn.Module):
             if pos_ids is not None:
                 position_ids.append(move_to(pos_ids, data_device))
             one_kwargs = {}
-            for (
-                    k,
-                    v,
-            ) in kwargs.items():  # make sure other arguments also be captured
+            for (k, v) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
@@ -652,9 +649,9 @@ class BaseGPTQModel(nn.Module):
         quantize_config.save_pretrained(save_dir)
 
     def save_pretrained(
-            self,
-            save_dir: str,
-            **kwargs,
+        self,
+        save_dir: str,
+        **kwargs,
     ):
         logger.warning("You are using save_pretrained, which will re-direct to save_quantized.")
         self.save_quantized(save_dir=save_dir, **kwargs)
