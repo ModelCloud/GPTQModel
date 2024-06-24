@@ -3,6 +3,9 @@ import json
 import logging
 import os
 import hashlib
+import zlib
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 from logging import getLogger
 from typing import List, Optional, Union
 
@@ -301,20 +304,43 @@ def pack_model(
     return QuantLinear
 
 def verify_model_hash(file_path: str, verify_hash: str):
-    hash_type, hash_value = verify_hash.split(':')
+    if not isinstance(verify_hash, str):
+        raise ValueError("model verify_hash must be a string")
+    if ':' not in verify_hash:
+        raise ValueError("verify_hash must be in the format 'hash_type:hash_value'")
+    hash_type, hash_value = verify_hash.split(':', 1)
     if hash_type not in ['crc', 'md5', 'aes128', 'aes256', 'aes512']:
         raise ValueError(f"Unsupported hash type: {hash_type}")
 
-    hash_func = getattr(hashlib, hash_type, None)
-    if not hash_func:
-        raise ValueError(f"No hash function found for type: {hash_type}")
+    if hash_type == 'crc':
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+            file_hash = format(zlib.crc32(file_data) & 0xFFFFFFFF, '08x')
 
-    with open(file_path, "rb") as f:
-        file_hash = hash_func(f.read()).hexdigest()
+    elif hash_type == 'md5':
+        hash_func = hashlib.md5()
+        with open(file_path, "rb") as f:
+            file_hash = hash_func.update(f.read()).hexdigest()
+
+    elif hash_type in ['aes128', 'aes256', 'aes512']:
+        key_sizes = {'aes128': 16, 'aes256': 32, 'aes512': 64}
+        key = 'gptqmodel_key'
+        key = key.ljust(key_sizes[hash_type], '\0')[:key_sizes[hash_type]]
+        cipher = AES.new(key.encode('utf-8'), AES.MODE_ECB)
+
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+            padded_data = pad(file_data, AES.block_size)
+            encrypted_data = cipher.encrypt(padded_data)
+            file_hash = hashlib.sha256(encrypted_data).hexdigest()
+
     return file_hash == hash_value
 
 
 def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
+    if not isinstance(verify_hash, list):
+        raise ValueError("sharded model verify_hash must be a list")
+
     with open(jsonPath, 'r') as f:
         index_data = json.load(f)
     weight_map = index_data['weight_map']

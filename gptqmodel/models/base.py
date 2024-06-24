@@ -876,10 +876,10 @@ class BaseGPTQModel(nn.Module):
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
         if verify_hash:
             if is_sharded:
-                hash_verified = verify_sharded_model_hashes(model_save_name, verify_hash)
+                verfieid = verify_sharded_model_hashes(model_save_name, verify_hash)
             else:
-                hash_verified = verify_model_hash(model_save_name, verify_hash)
-            if not hash_verified:
+                verfieid = verify_model_hash(model_save_name, verify_hash)
+            if not verfieid:
                 raise ValueError(f"Hash verification failed for {model_save_name}")
             logger.info(f"Hash verification succeeded for {model_save_name}")
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
