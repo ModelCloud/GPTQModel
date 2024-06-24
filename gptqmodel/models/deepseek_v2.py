@@ -3,8 +3,11 @@ from .base import BaseGPTQModel
 
 
 class DeepSeekV2GPTQ(BaseGPTQModel):
-    # qwen2moe requires true_sequential = False
+    # deepseek_v2 requires true_sequential = False
     require_true_sequential = False
+
+    # deepseek_v2 requires custom model code
+    require_trust_remote_code = True
 
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
