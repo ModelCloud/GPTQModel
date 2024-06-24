@@ -123,7 +123,7 @@ class TestQuantization(unittest.TestCase):
             bits=8,
             group_size=128,
             format=FORMAT.GPTQ,
-            desc_act=True
+            # desc_act=True
         )
 
         model = GPTQModel.from_pretrained(
