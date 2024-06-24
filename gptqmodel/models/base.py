@@ -6,7 +6,6 @@ import re
 from os.path import isfile, join
 from typing import Dict, List, Optional, Union
 
-import hashlib
 import accelerate
 import torch
 import torch.nn as nn
