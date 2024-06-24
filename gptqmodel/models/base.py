@@ -73,12 +73,12 @@ class BaseGPTQModel(nn.Module):
     info: Dict[str, str] = {}
 
     def __init__(
-            self,
-            model: PreTrainedModel,
-            quantized: bool,
-            quantize_config: QuantizeConfig,
-            is_triton_backend: bool = False,
-            qlinear_kernel: nn.Module = None,
+        self,
+        model: PreTrainedModel,
+        quantized: bool,
+        quantize_config: QuantizeConfig,
+        is_triton_backend: bool = False,
+        qlinear_kernel: nn.Module = None,
     ):
         super().__init__()
 
@@ -148,13 +148,13 @@ class BaseGPTQModel(nn.Module):
 
     @torch.inference_mode()
     def quantize(
-            self,
-            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-            batch_size: int = 1,
-            use_triton: bool = False,
-            use_cuda_fp16: bool = True,
-            autotune_warmup_after_quantized: bool = False,
-            calibration_enable_gpu_cache: bool = True,
+        self,
+        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        batch_size: int = 1,
+        use_triton: bool = False,
+        use_cuda_fp16: bool = True,
+        autotune_warmup_after_quantized: bool = False,
+        calibration_enable_gpu_cache: bool = True,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -469,13 +469,13 @@ class BaseGPTQModel(nn.Module):
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
     def save_quantized(
-            self,
-            save_dir: str,
-            safetensors_metadata: Optional[Dict[str, str]] = None,
-            format: Optional[FORMAT] = None,
-            use_safetensors: bool = True,
-            max_shard_size: str = "10GB",
-            model_base_name: Optional[str] = None
+        self,
+        save_dir: str,
+        safetensors_metadata: Optional[Dict[str, str]] = None,
+        format: Optional[FORMAT] = None,
+        use_safetensors: bool = True,
+        max_shard_size: str = "10GB",
+        model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -661,13 +661,13 @@ class BaseGPTQModel(nn.Module):
 
     @classmethod
     def from_pretrained(
-            cls,
-            pretrained_model_name_or_path: str,
-            quantize_config: QuantizeConfig,
-            max_memory: Optional[dict] = None,
-            trust_remote_code: bool = False,
-            torch_dtype: [str | torch.dtype] = "auto",
-            **model_init_kwargs,
+        cls,
+        pretrained_model_name_or_path: str,
+        quantize_config: QuantizeConfig,
+        max_memory: Optional[dict] = None,
+        trust_remote_code: bool = False,
+        torch_dtype: [str | torch.dtype] = "auto",
+        **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
 
@@ -750,25 +750,25 @@ class BaseGPTQModel(nn.Module):
 
     @classmethod
     def from_quantized(
-            cls,
-            model_name_or_path: Optional[str],
-            device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-            max_memory: Optional[dict] = None,
-            device: Optional[Union[str, int]] = None,
-            use_triton: bool = True,
-            use_marlin: bool = True,
-            torch_dtype: [str | torch.dtype] = "auto",
-            use_cuda_fp16: bool = True,
-            quantize_config: Optional[QuantizeConfig] = None,
-            model_basename: Optional[str] = None,
-            use_safetensors: bool = True,
-            trust_remote_code: bool = False,
-            warmup_triton: bool = False,
-            disable_exllama: bool = False,
-            disable_exllamav2: bool = False,
-            format: Optional[FORMAT] = None,
-            allow_unsafe_loading: bool = False,
-            **kwargs,
+        cls,
+        model_name_or_path: Optional[str],
+        device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+        max_memory: Optional[dict] = None,
+        device: Optional[Union[str, int]] = None,
+        use_triton: bool = True,
+        use_marlin: bool = True,
+        torch_dtype: [str | torch.dtype] = "auto",
+        use_cuda_fp16: bool = True,
+        quantize_config: Optional[QuantizeConfig] = None,
+        model_basename: Optional[str] = None,
+        use_safetensors: bool = True,
+        trust_remote_code: bool = False,
+        warmup_triton: bool = False,
+        disable_exllama: bool = False,
+        disable_exllamav2: bool = False,
+        format: Optional[FORMAT] = None,
+        allow_unsafe_loading: bool = False,
+        **kwargs,
     ):
         """load quantized model from local disk"""
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
