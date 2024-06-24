@@ -540,13 +540,15 @@ class BaseGPTQModel(nn.Module):
 
         # internal is always gptq v2 but allow users to pass gptq (v1) via config
         if format is None and quantize_config.format == FORMAT.GPTQ:
+            # Model qzeros may be edited in place.
+            # TODO: avoid inplace modification of the weights
             # fix ModelCloud/GPTQModel/issues/47
             # fix gptqmodel_cuda cannot be serialized
             # no need to set it back, no calculation below
             if quantize_config.bits != 4 :
                 from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
-                for module in model.named_modules():
-                    if len(module) == 2 and isinstance (module[1], QuantLinear):
+                for name, module in model.named_modules():
+                    if isinstance (module[1], QuantLinear):
                         module[1].gptqmodel_cuda = None
             model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
