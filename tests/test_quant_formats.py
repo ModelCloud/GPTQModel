@@ -125,6 +125,8 @@ class TestQuantization(unittest.TestCase):
             bits=8,
             group_size=128,
             format=FORMAT.GPTQ,
+            desc_act=True,
+            sym=False,
         )
 
         model = GPTQModel.from_pretrained(
@@ -140,5 +142,6 @@ class TestQuantization(unittest.TestCase):
             try:
                 model.save_quantized(tmpdirname)
             except Exception as e:
+                print(e)
                 err = e
             self.assertTrue(err is None)
