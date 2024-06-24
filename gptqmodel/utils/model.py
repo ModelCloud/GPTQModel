@@ -328,11 +328,6 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
             return False
     return True
 
-def verify_model_or_shards(path, verify_hash: Union[str, List[str]], is_sharded: bool):
-    if is_sharded:
-        return verify_sharded_model_hashes(path, verify_hash)
-    return verify_model_hash(path, verify_hash)
-
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
     if config.model_type not in SUPPORTED_MODELS:
