@@ -37,6 +37,7 @@ SUPPORTED_MODELS = [
     "minicpm",
     "qwen2_moe",
     "dbrx_converted",
+    "deepseek_v2"
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048

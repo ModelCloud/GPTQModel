@@ -34,6 +34,7 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
+from .deepseek_v2 import DeepSeekV2GPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -70,6 +71,7 @@ MODEL_MAP = {
     "qwen2_moe": Qwen2MoeGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
+    "deepseek_v2": DeepSeekV2GPTQ,
 }
 
 
