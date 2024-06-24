@@ -4,6 +4,7 @@ import torch.nn as nn
 class BaseQuantLinear(nn.Module):
     # override me
     QUANT_TYPE = "base"
+
     SUPPORTED_BITS = []
     SUPPORTED_GROUP_SIZE = []
     SUPPORTED_DESC_ACT = [True, False]
@@ -28,3 +29,6 @@ class BaseQuantLinear(nn.Module):
         pass
 
 
+class BaseCudaQuantLinear(BaseQuantLinear):
+    # override me
+    QUANT_TYPE = "base-cuda"

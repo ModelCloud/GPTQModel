@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
@@ -7,6 +7,8 @@ from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
 from .codegen import CodeGenGPTQ
 from .cohere import CohereGPTQ
+from .dbrx import DbrxGPTQ
+from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ
 from .gemma import GemmaGPTQ
 from .gpt2 import GPT2GPTQ
@@ -66,6 +68,8 @@ MODEL_MAP = {
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
+    "dbrx": DbrxGPTQ,
+    "dbrx_converted": DbrxConvertedGPTQ,
 }
 
 
@@ -113,6 +117,10 @@ class GPTQModel:
         disable_exllamav2: bool = False,
         use_marlin: bool = False,
         use_bitblas: bool = False,
+        # verify weight files matches predefined hash during loading
+        # usage: hash_format:hash_value, example: md5:ugkdh232
+        # supports all hashlib hash methods
+        verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
         # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
@@ -141,6 +149,7 @@ class GPTQModel:
             disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
             use_bitblas=use_bitblas,
+            verify_hash=verify_hash,
             **kwargs,
         )
 
