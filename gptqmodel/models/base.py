@@ -543,10 +543,11 @@ class BaseGPTQModel(nn.Module):
             # fix ModelCloud/GPTQModel/issues/47
             # fix gptqmodel_cuda cannot be serialized
             # no need to set it back, no calculation below
-            from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
-            for module in model.named_modules():
-                if len(module) == 2 and isinstance (module[1], QuantLinear):
-                    module[1].gptqmodel_cuda = None
+            if quantize_config.bits != 4 :
+                from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
+                for module in model.named_modules():
+                    if len(module) == 2 and isinstance (module[1], QuantLinear):
+                        module[1].gptqmodel_cuda = None
             model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
                 model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
