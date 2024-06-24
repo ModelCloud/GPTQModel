@@ -27,7 +27,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model)
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, deepcopy_model_with_modules)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -540,8 +540,14 @@ class BaseGPTQModel(nn.Module):
 
         # internal is always gptq v2 but allow users to pass gptq (v1) via config
         if format is None and quantize_config.format == FORMAT.GPTQ:
-            # Model qzeros may be edited in place.
-            # TODO: avoid inplace modification of the weights
+            # fix ModelCloud/GPTQModel/issues/47
+            # fix gptqmodel_cuda cannot be serialized
+            # no need to set it back, no calculation below
+            from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
+            for module in model.named_modules():
+                if len(module) == 2 and isinstance (module[1], QuantLinear):
+                    module[1].gptqmodel_cuda = None
+                    print(module)
             model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
                 model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
