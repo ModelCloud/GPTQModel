@@ -1026,9 +1026,6 @@ class BaseGPTQModel(nn.Module):
                 use_marlin=False,
                 use_bitblas=False,
             )
-            print("quant_linear_class",quant_linear_class)
-            # from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
-            # quant_linear_class = ExllamaQuantLinear
 
             # Prepare model for bitblas load.
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
