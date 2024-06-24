@@ -549,13 +549,13 @@ class BaseGPTQModel(nn.Module):
                 cuda_name_modules = []
                 from gptqmodel.nn_modules.qlinear.qlinear_cuda import QuantLinear
                 for item in model.named_modules():
-                    if len(item) > 1 and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
+                    if isinstance(item, tuple) and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
                         cuda_name_modules.append((item[0], item[1].gptqmodel_cuda))
                         item[1].gptqmodel_cuda = None
                 model = copy.deepcopy(self.model)
 
                 for item in model.named_modules():
-                    if len(item) > 1 and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
+                    if isinstance(item, tuple) and isinstance(item[1], QuantLinear) and hasattr(item[1], "gptqmodel_cuda"):
                         for cuda_name, cuda_module in cuda_name_modules:
                             if item[0] == cuda_name:
                                 item[1].gptqmodel_cuda = cuda_module
