@@ -328,8 +328,8 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
             return False
     return True
 
-def verify_model_or_shards(path, verify_hash: Union[str, List[str]], isSharded: bool):
-    if isSharded:
+def verify_model_or_shards(path, verify_hash: Union[str, List[str]], is_sharded: bool):
+    if is_sharded:
         return verify_sharded_model_hashes(path, verify_hash)
     return verify_model_hash(path, verify_hash)
 
