@@ -27,7 +27,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model)
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
+                           verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -749,6 +750,7 @@ class BaseGPTQModel(nn.Module):
         disable_exllamav2: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
+        verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
         """load quantized model from local disk"""
@@ -873,7 +875,14 @@ class BaseGPTQModel(nn.Module):
         quantize_config.model_file_base_name = true_model_basename
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
-
+        if verify_hash:
+            if is_sharded:
+                verfieid = verify_sharded_model_hashes(model_save_name, verify_hash)
+            else:
+                verfieid = verify_model_hash(model_save_name, verify_hash)
+            if not verfieid:
+                raise ValueError(f"Hash verification failed for {model_save_name}")
+            logger.info(f"Hash verification succeeded for {model_save_name}")
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
             pass
