@@ -48,6 +48,7 @@ jobs:
       - name: Print whl from shared dir
         run: |
           ls -ahl /data/${{ github.run_id }} || true
+          rm /data/${{ github.run_id }}/1234* || true
 
       - name: Install whl from shared dir
         run: |
