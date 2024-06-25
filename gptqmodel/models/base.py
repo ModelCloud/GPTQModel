@@ -27,7 +27,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model)
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
+                           verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -102,9 +103,9 @@ class BaseGPTQModel(nn.Module):
         return getattr(self.model, "hf_device_map", None)
 
     def _prepare_dataset_for_quantization(
-        self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-        batch_size: int = 1,
+            self,
+            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+            batch_size: int = 1,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -138,7 +139,7 @@ class BaseGPTQModel(nn.Module):
             pad_token_id = self.config.eos_token_id
 
         new_calibration_dataset = [
-            collate_data(new_calibration_dataset[start : start + batch_size], pad_token_id)
+            collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
             for start in range(0, len(new_calibration_dataset), batch_size)
         ]
         for new_example in new_calibration_dataset:
@@ -183,7 +184,7 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) < MIN_CALIBRATION_DATASET_SIZE:
             logger.warning(f"Calibration dataset size should be greater than {MIN_CALIBRATION_DATASET_SIZE}. "
-                             f"Current size: {len(calibration_dataset)}.")
+                           f"Current size: {len(calibration_dataset)}.")
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -194,7 +195,7 @@ class BaseGPTQModel(nn.Module):
 
         if avg < MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                             f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
+                           f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
@@ -239,10 +240,7 @@ class BaseGPTQModel(nn.Module):
             if pos_ids is not None:
                 position_ids.append(move_to(pos_ids, data_device))
             one_kwargs = {}
-            for (
-                k,
-                v,
-            ) in kwargs.items():  # make sure other arguments also be captured
+            for (k, v) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
@@ -474,7 +472,8 @@ class BaseGPTQModel(nn.Module):
         safetensors_metadata: Optional[Dict[str, str]] = None,
         format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
-        max_shard_size: str = "10GB",
+        # TODO FIXME default should be None to disable sharding instead of some large value
+        max_shard_size: str = "10000GB",
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
@@ -497,8 +496,8 @@ class BaseGPTQModel(nn.Module):
 
         if model_base_name is None:
             model_base_name = (
-                self.quantize_config.model_file_base_name or
-                f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
+                    self.quantize_config.model_file_base_name or
+                    f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
             )
 
         state_dict = self.model.state_dict()
@@ -542,7 +541,25 @@ class BaseGPTQModel(nn.Module):
         if format is None and quantize_config.format == FORMAT.GPTQ:
             # Model qzeros may be edited in place.
             # TODO: avoid inplace modification of the weights
-            model = copy.deepcopy(self.model)
+            # fix ModelCloud/GPTQModel/issues/47
+            # fix gptqmodel_cuda cannot be serialized
+            # no need to set it back, no calculation below
+            if quantize_config.bits != 4:
+                cuda_name_modules = {}
+                from gptqmodel.nn_modules.qlinear.qlinear_cuda import BaseCudaQuantLinear
+                for name, module in model.named_modules():
+                    if isinstance(module, BaseCudaQuantLinear):
+                        cuda_name_modules[name] = module.gptqmodel_cuda
+                        module.gptqmodel_cuda = None
+                model = copy.deepcopy(self.model)
+
+                for name, modules in model.named_modules():
+                    if isinstance(module, BaseCudaQuantLinear) and name in cuda_name_modules:
+                        module.gptqmodel_cuda = cuda_name_modules[name]
+
+                del cuda_name_modules
+            else:
+                model = copy.deepcopy(self.model)
             model = convert_gptq_v2_to_v1_format(
                 model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
             )
@@ -749,6 +766,7 @@ class BaseGPTQModel(nn.Module):
         disable_exllamav2: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
+        verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
         """load quantized model from local disk"""
@@ -873,7 +891,14 @@ class BaseGPTQModel(nn.Module):
         quantize_config.model_file_base_name = true_model_basename
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
-
+        if verify_hash:
+            if is_sharded:
+                verfieid = verify_sharded_model_hashes(model_save_name, verify_hash)
+            else:
+                verfieid = verify_model_hash(model_save_name, verify_hash)
+            if not verfieid:
+                raise ValueError(f"Hash verification failed for {model_save_name}")
+            logger.info(f"Hash verification succeeded for {model_save_name}")
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
             pass
