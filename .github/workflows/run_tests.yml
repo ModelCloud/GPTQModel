@@ -78,7 +78,7 @@ jobs:
         run: |
           
           echo ${{ github.run_id }}
-          cat /data_2/* || true
+          # cat /data_2/* || true
           ls -ahl /data_1 || true
           ls -ahl /data_2 || true
           
