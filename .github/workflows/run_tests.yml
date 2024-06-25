@@ -18,8 +18,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Compile
-        run: touch dist/xxx
+        run: python setup.py bdist_wheel
 
+      - name: Upload to artifact
       - uses: actions/upload-artifact@v4
         with:
           path: dist
@@ -36,34 +37,77 @@ jobs:
           - gpu_group1
           - gpu_group2
     steps:
-      - name: Download Artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: artifact
           path: dist
 
-      - name: Print dir
+      - name: Install whl from shared dir
         run: |
-          ls . || true
+          pip install dist/*.whl
 
-      - name: Print dir
+      - name: Find suitable GPU
         run: |
-          ls dist || true
+         suitable_gpu=$(nvidia-smi -L | grep "RTX 4090" | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
+          do
+            mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i $gpu_id)
+            mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu_id)
+            mem_used_pct=$((100 * mem_used / mem_total))
+            if [ $mem_used_pct -lt 2 ]; then # 2 -> 98% free
+              echo $gpu_id
+              break
+            fi
+          done)
+          if [ -z "$suitable_gpu" ]; then
+            echo "No suitable GPU found. Exiting with error."
+            exit 1
+          else
+            echo "CUDA_VISIBLE_DEVICES=$suitable_gpu" >> $GITHUB_ENV
+            echo "CUDA_VISIBLE_DEVICES set to $suitable_gpu"
+          fi
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
-        run: |
-          echo ${{ github.run_id }}
-          # cat /data_1/*
+        run: pytest tests/test_perplexity.py
 
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
         shell: bash
         run: |
+          declare -a failed_tests
           
-          echo ${{ github.run_id }}
-          # cat /data_2/* || true
-          ls -ahl /data_1 || true
-          ls -ahl /data_2 || true
+          run_test() {
+              echo -e "\033[1;34mRunning $1...\033[0m"
+              echo "========================================"
+              pytest tests/$1
+              if [ $? -ne 0 ]; then
+                  failed_tests+=($1)
+              fi
+              echo -e "\033[1;32mFinished $1\033[0m"
+              echo -e "========================================\n\n\n"
+          }
           
-        
+          run_test test_lm_head.py
+          run_test test_q4_exallama.py
+          run_test test_q4_exallama_v2.py
+          run_test test_q4_marlin.py
+          run_test test_q4_triton.py
+          run_test test_repacking.py
+          run_test test_serialization.py
+          run_test test_sharded.py
+          run_test test_triton.py
+          run_test test_quant_formats.py
+          run_test test_q4_cuda.py
+          
+          if [ ${#failed_tests[@]} -ne 0 ]; then
+              echo -e "\033[1;31mTests failed:\033[0m"
+              for test in "${failed_tests[@]}"
+              do
+                  echo "$test"
+              done
+              exit 1
+          else
+              echo "All tests passed."
+          fi
+
