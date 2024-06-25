@@ -16,6 +16,9 @@ jobs:
       volumes:
         - /tmp:/data:rw
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+
       - name: Show content
         run: ls -ahl
 
