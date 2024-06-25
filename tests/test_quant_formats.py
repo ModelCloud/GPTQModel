@@ -13,6 +13,18 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantization(unittest.TestCase):
+
+    def setUp(self):
+        self.pretrained_model_dir = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_dir, use_fast=True)
+        self.calibration_dataset = [
+            self.tokenizer(
+                "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+            ),
+            self.tokenizer("Today I am in Paris and it is a wonderful day."),
+        ]
+
     @parameterized.expand(
         [
             (False, True, FORMAT.GPTQ_V2),
@@ -21,16 +33,6 @@ class TestQuantization(unittest.TestCase):
         ]
     )
     def test_quantize(self, use_marlin: bool, sym: bool, format: FORMAT):
-        pretrained_model_dir = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
-
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
-        calibration_dataset = [
-            tokenizer(
-                "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
-            ),
-            tokenizer("Today I am in Paris and it is a wonderful day."),
-        ]
-
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -40,17 +42,15 @@ class TestQuantization(unittest.TestCase):
         )
 
         model = GPTQModel.from_pretrained(
-            pretrained_model_dir,
+            self.pretrained_model_dir,
             quantize_config=quantize_config,
             use_flash_attention_2=False,
         )
 
-        model.quantize(calibration_dataset)
+        model.quantize(self.calibration_dataset)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
-            model.save_pretrained(
-                tmpdirname,
-            )
+            model.save_quantized(tmpdirname)
 
             logging.info(f"Saved config mem: {model.quantize_config}")
 
@@ -117,3 +117,27 @@ class TestQuantization(unittest.TestCase):
                 format=format,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
+
+    def test_gptq_8bit(self):
+        quantize_config = QuantizeConfig(
+            bits=8,
+            group_size=128,
+            format=FORMAT.GPTQ,
+            desc_act=True
+        )
+
+        model = GPTQModel.from_pretrained(
+            self.pretrained_model_dir,
+            quantize_config=quantize_config,
+        )
+
+        model.quantize(self.calibration_dataset)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            err = None
+            try:
+                model.save_quantized(tmpdirname)
+            except Exception as e:
+                print(e)
+                err = e
+            self.assertTrue(err is None)
