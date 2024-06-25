@@ -57,7 +57,7 @@ def unpack_qzeros(qzeros, bits):
         i = col % elems_per_int32
         unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & 0xF
 
-    return unpacked_zeros + 1
+    return unpacked_zeros
 
 
 class QuantLinear(BaseQuantLinear):
