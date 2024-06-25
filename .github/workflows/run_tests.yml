@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: Compile
         run: |
-          mkdir dist
+          mkdir dist || true
           echo 1234 > dist/1234.whl
 
       - name: show dist folder
