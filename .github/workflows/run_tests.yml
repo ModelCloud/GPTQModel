@@ -36,6 +36,7 @@ jobs:
       volumes:
         - /tmp:/data:rw
     strategy:
+      fail-fast: false
       matrix:
         test-group:
           - gpu_group1
