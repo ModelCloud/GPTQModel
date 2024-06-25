@@ -25,10 +25,10 @@ jobs:
       - name: List
         run: ls -ahl /data
 
-      - name: Compile
-        run: |
-          python setup.py bdist_wheel
-          cp dist/*.whl /data
+      # - name: Compile
+      #   run: |
+      #     python setup.py bdist_wheel
+      #     cp dist/*.whl /data
 
       - name: Compile
         run: touch /data/${{ github.run_id }}
