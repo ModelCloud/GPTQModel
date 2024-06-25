@@ -1124,16 +1124,12 @@ class TestsQ4Exllama(unittest.TestCase):
         prompt = "I am in Paris and" * 450
         device = torch.device("cuda:0")
 
-        model_id = "TheBloke/vicuna-13B-1.1-GPTQ-4bit-128g"
-        revision = "actorder"
-        model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
+        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            revision=revision,
             device="cuda:0",
             use_triton=False,
-            model_basename=model_basename,
             disable_exllama=False,
             disable_exllamav2=True,
         )
@@ -1189,18 +1185,14 @@ class TestsQ4Exllama(unittest.TestCase):
         device = torch.device("cuda:0")
 
         # Reference generated with the cuda-old kernel
-        reference_output = "<s> I am in Paris and it is a beautiful day. I am sitting in a café, drinking coffee and writing this book. I am surrounded by the sights and sounds of the city, and I am filled with a sense of contentment and gratitude.\n\nI am grateful for the opportunity to live and"
+        reference_output = "<s> I am in Paris and I am so excited to be here. I am here for the first time in my life and I am so grateful for this opportunity. I am here to learn and to grow and to meet new people and to experience new things. I am here to see the Eiffel Tower and to walk along"
 
-        model_id = "TheBloke/vicuna-13B-1.1-GPTQ-4bit-128g"
-        revision = "actorder"
-        model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
+        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            revision=revision,
             device="cuda:0",
             use_triton=False,
-            model_basename=model_basename,
             disable_exllama=False,
             disable_exllamav2=True,
         )
