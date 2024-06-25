@@ -67,7 +67,14 @@ class TestRepacking(unittest.TestCase):
         group_size = 128
 
         _, linear, s = gen_quant4(k, n, group_size)
-        cuda_old_linear = CudaOldQuantLinear(bits=4, group_size=group_size, infeatures=k, outfeatures=n, bias=False)
+        cuda_old_linear = CudaOldQuantLinear(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=True,
+            infeatures=k,
+            outfeatures=n,
+            bias=False)
 
         zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
 
@@ -92,6 +99,8 @@ class TestRepacking(unittest.TestCase):
         marlin_linear = MarlinQuantLinear(
             bits=4,
             group_size=group_size,
+            sym=True,
+            desc_act=False,
             infeatures=k,
             outfeatures=n,
             bias=False,
