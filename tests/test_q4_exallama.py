@@ -1115,16 +1115,12 @@ class TestsQ4Exllama(unittest.TestCase):
         prompt = "I am in Paris and" * 450
         device = torch.device("cuda:0")
 
-        model_id = "TheBloke/vicuna-13B-1.1-GPTQ-4bit-128g"
-        revision = "actorder"
-        model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
+        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            revision=revision,
             device="cuda:0",
             use_triton=False,
-            model_basename=model_basename,
             disable_exllama=False,
             disable_exllamav2=True,
         )
@@ -1180,18 +1176,14 @@ class TestsQ4Exllama(unittest.TestCase):
         device = torch.device("cuda:0")
 
         # Reference generated with the cuda-old kernel
-        reference_output = "<s> I am in Paris and it is a beautiful day. I am sitting in a café, drinking coffee and writing this book. I am surrounded by the sights and sounds of the city, and I am filled with a sense of contentment and gratitude.\n\nI am grateful for the opportunity to live and"
+        reference_output = "<s> I am in Paris and I am going to the Louvre Museum. What time does it open and what is the best way to get there?\nThe Louvre Museum in Paris is open from 9:00 AM to 6:00 PM every day except for Tuesdays. The best way to get"
 
-        model_id = "TheBloke/vicuna-13B-1.1-GPTQ-4bit-128g"
-        revision = "actorder"
-        model_basename = "vicuna-13B-1.1-GPTQ-4bit-128g.latest"
+        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            revision=revision,
             device="cuda:0",
             use_triton=False,
-            model_basename=model_basename,
             disable_exllama=False,
             disable_exllamav2=True,
         )
