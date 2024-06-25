@@ -16,6 +16,12 @@ jobs:
       volumes:
         - /tmp:/data:rw
     steps:
+      - name: Show content
+        run: ls -ahl
+
+      - name: Show dist content
+        run: ls -ahl dist || true
+
       - name: Compile
         run: python setup.py bdist_wheel
 
