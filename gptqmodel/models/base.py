@@ -500,8 +500,6 @@ class BaseGPTQModel(nn.Module):
                     f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
             )
 
-        state_dict = self.model.state_dict()
-
         if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
             logger.warning(
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
@@ -565,6 +563,8 @@ class BaseGPTQModel(nn.Module):
             )
 
         model.to(CPU)
+
+        state_dict = model.state_dict()
 
         if quantize_config.model_file_base_name is None:
             if use_safetensors:
