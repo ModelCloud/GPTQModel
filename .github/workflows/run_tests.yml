@@ -26,6 +26,11 @@ jobs:
         run: ls -ahl /data
 
       - name: Compile
+        run: |
+          python setup.py bdist_wheel
+          cp dist/*.whl /data
+
+      - name: Compile
         run: touch /data/${{ github.run_id }}
 
       - name: Check whl file
@@ -55,7 +60,7 @@ jobs:
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
-        run: echo ${{ github.run_id }}
+        run: pytest tests/test_perplexity.py
 
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
@@ -74,7 +79,17 @@ jobs:
               echo -e "========================================\n\n\n"
           }
           
-          echo ${{ github.run_id }}
+          run_test test_lm_head.py
+          run_test test_q4_exallama.py
+          run_test test_q4_exallama_v2.py
+          run_test test_q4_marlin.py
+          run_test test_q4_triton.py
+          run_test test_repacking.py
+          run_test test_serialization.py
+          run_test test_sharded.py
+          run_test test_triton.py
+          run_test test_quant_formats.py
+          run_test test_q4_cuda.py
           
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
@@ -86,3 +101,4 @@ jobs:
           else
               echo "All tests passed."
           fi
+
