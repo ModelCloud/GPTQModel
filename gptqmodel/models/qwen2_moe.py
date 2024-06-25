@@ -3,9 +3,6 @@ from .base import BaseGPTQModel
 
 
 class Qwen2MoeGPTQ(BaseGPTQModel):
-    # qwen2moe requires true_sequential = False
-    require_true_sequential = False
-
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"
