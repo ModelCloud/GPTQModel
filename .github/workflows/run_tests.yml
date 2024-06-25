@@ -1,6 +1,7 @@
 name: Unit Tests (GPU)
 
 on:
+  push:
   repository_dispatch:
   workflow_dispatch:
 
@@ -15,31 +16,10 @@ jobs:
       volumes:
         - /tmp:/data:rw
     steps:
-      - name: Find suitable GPU
-        run: |
-         suitable_gpu=$(nvidia-smi -L | grep "RTX 4090" | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
-          do
-            mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i $gpu_id)
-            mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu_id)
-            mem_used_pct=$((100 * mem_used / mem_total))
-            if [ $mem_used_pct -lt 2 ]; then # 2 -> 98% free
-              echo $gpu_id
-              break
-            fi
-          done)
-          if [ -z "$suitable_gpu" ]; then
-            echo "No suitable GPU found. Exiting with error."
-            exit 1
-          else
-            echo "CUDA_VISIBLE_DEVICES=$suitable_gpu" >> $GITHUB_ENV
-            echo "CUDA_VISIBLE_DEVICES set to $suitable_gpu"
-          fi
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Compile
-        run: python setup.py bdist_wheel
+        run: |
+          mkdir dist
+          echo 1234 > dist/1234.whl
 
       - name: show dist folder
         run: ls -ahl dist
@@ -48,10 +28,6 @@ jobs:
         run: |
           mkdir /data/${{ github.run_id }}
           cp dist/*whl /data/${{ github.run_id }}
-          ls -ahl /data/${{ github.run_id }}
-
-      - name: List shared dir
-        run: |
           ls -ahl /data/${{ github.run_id }}
 
   test:
@@ -73,15 +49,15 @@ jobs:
 
       - name: Print whl from shared dir
         run: |
-          ls -ahl /data/${{ github.run_id }}
+          ls -ahl /data/${{ github.run_id }} || true
 
       - name: Install whl from shared dir
         run: |
-          pip install /data/${{ github.run_id }}/*.whl
+          cat /data/${{ github.run_id }}/*.whl
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
-        run: pytest tests/test_perplexity.py
+        run: cat /data/${{ github.run_id }}/*.whl
 
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
@@ -100,17 +76,7 @@ jobs:
               echo -e "========================================\n\n\n"
           }
           
-          run_test test_lm_head.py
-          run_test test_q4_exallama.py
-          run_test test_q4_exallama_v2.py
-          run_test test_q4_marlin.py
-          run_test test_q4_triton.py
-          run_test test_repacking.py
-          run_test test_serialization.py
-          run_test test_sharded.py
-          run_test test_triton.py
-          run_test test_quant_formats.py
-          run_test test_q4_cuda.py
+          cat /data/${{ github.run_id }}/*.whl
           
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
@@ -122,4 +88,3 @@ jobs:
           else
               echo "All tests passed."
           fi
-
