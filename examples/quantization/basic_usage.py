@@ -16,7 +16,6 @@ def main():
     quantize_config = QuantizeConfig(
         bits=4,  # quantize model to 4-bit
         group_size=128,  # it is recommended to set the value to 128
-        desc_act=False,  # set to False can significantly speed up inference but the perplexity may slightly bad
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory

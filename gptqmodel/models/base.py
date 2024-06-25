@@ -479,7 +479,8 @@ class BaseGPTQModel(nn.Module):
         safetensors_metadata: Optional[Dict[str, str]] = None,
         format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
-        max_shard_size: str = "10GB",
+        # TODO FIXME default should be None to disable sharding instead of some large value
+        max_shard_size: str = "10000GB",
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
@@ -511,8 +512,6 @@ class BaseGPTQModel(nn.Module):
                     self.quantize_config.model_file_base_name or
                     f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
             )
-
-        state_dict = self.model.state_dict()
 
         if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
             logger.warning(
@@ -577,6 +576,8 @@ class BaseGPTQModel(nn.Module):
             )
 
         model.to(CPU)
+
+        state_dict = model.state_dict()
 
         if quantize_config.model_file_base_name is None:
             if use_safetensors:

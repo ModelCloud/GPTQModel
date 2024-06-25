@@ -16,7 +16,7 @@ jobs:
           - gpu_group1
           - gpu_group2
     container:
-      image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+      image: modelcloud/gptqmodel:github-ci-v1
 
     steps:
       - name: Find suitable GPU
@@ -47,20 +47,26 @@ jobs:
           pip install -U pytest ninja parameterized protobuf
           pip install -v --no-build-isolation .
 
-      - name: Run tests
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_perplexity.py
-      - name: Run tests
+      - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
+        run: pytest tests/test_perplexity.py
+      - name: Run tests group 2
+        if: matrix.test-group == 'gpu_group2'
+        shell: bash
         run: |
+          declare -a failed_tests
+          
           run_test() {
-              echo "\033[1;34mRunning $1...\033[0m"
+              echo -e "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
               pytest tests/$1
-              echo "\033[1;32mFinished $1\033[0m"
-              echo "========================================\n\n\n"
+              if [ $? -ne 0 ]; then
+                  failed_tests+=($1)
+              fi
+              echo -e "\033[1;32mFinished $1\033[0m"
+              echo -e "========================================\n\n\n"
           }
-
+          
           run_test test_lm_head.py
           run_test test_q4_exallama.py
           run_test test_q4_exallama_v2.py
@@ -72,3 +78,16 @@ jobs:
           run_test test_triton.py
           run_test test_quant_formats.py
           run_test test_q4_cuda.py
+          
+          if [ ${#failed_tests[@]} -ne 0 ]; then
+              echo -e "\033[1;31mTests failed:\033[0m"
+              for test in "${failed_tests[@]}"
+              do
+                  echo "$test"
+              done
+              exit 1
+          else
+              echo "All tests passed."
+          fi
+
+
