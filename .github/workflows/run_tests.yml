@@ -52,19 +52,21 @@ jobs:
         run: pytest tests/test_perplexity.py
       - name: Run tests
         if: matrix.test-group == 'gpu_group1'
+      - shell: bash
         run: |
-          failed_tests=()
+          declare -a failed_tests
           
           run_test() {
-              echo "\033[1;34mRunning $1...\033[0m"
+              echo -e "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
               pytest tests/$1
               if [ $? -ne 0 ]; then
                   failed_tests+=($1)
               fi
-              echo "\033[1;32mFinished $1\033[0m"
+              echo -e "\033[1;32mFinished $1\033[0m"
               echo "========================================\n\n\n"
           }
+          
           run_test test_lm_head.py
           run_test test_q4_exallama.py
           run_test test_q4_exallama_v2.py
@@ -76,3 +78,16 @@ jobs:
           run_test test_triton.py
           run_test test_quant_formats.py
           run_test test_q4_cuda.py
+          
+          if [ ${#failed_tests[@]} -ne 0 ]; then
+              echo -e "\033[1;31mTests failed:\033[0m"
+              for test in "${failed_tests[@]}"
+              do
+                  echo "$test"
+              done
+              exit 1
+          else
+              echo "All tests passed."
+          fi
+
+
