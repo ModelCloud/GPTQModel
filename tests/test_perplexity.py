@@ -7,7 +7,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile
 import unittest
 
-import torch
 from gptqmodel import GPTQModel
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils import Perplexity

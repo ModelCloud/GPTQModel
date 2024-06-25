@@ -1,6 +1,3 @@
-# Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
-# LICENSE ModelCloud/LICENSES/LICENSE.apache
-
 import ctypes
 import operator
 import os
@@ -13,20 +10,9 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
-try:
-    import bitblas
-except ImportError as e:
-    bitblas_import_exception = e
-
-    def error_raiser_bitblas(*args, **kwargs):
-        raise ValueError(
-            f"Trying to use the bitblas backend, but could not import dependencies with the following error: {bitblas_import_exception}"
-        )
-
-    autogptq_bitblas_cuda = bitblas_import_exception
-
 from typing import List, Union
 
+import bitblas
 from bitblas import Matmul, MatmulConfig
 from bitblas.cache import get_database_path, global_operator_cache
 from bitblas.quantization.utils import general_compress
@@ -42,6 +28,7 @@ BITBLAS_TARGET = auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVI
 logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
 BITBLAS_DATABASE_PATH = get_database_path()
 BITBLAS_PROPAGATE_WEIGHTS = False
+
 
 def unpack_qzeros(qzeros, bits):
     qzeros = qzeros.view(torch.int32)
