@@ -47,11 +47,11 @@ jobs:
           pip install -U pytest ninja parameterized protobuf
           pip install -v --no-build-isolation .
 
-      - name: Run tests
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_perplexity.py
-      - name: Run tests
+      - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
+        run: pytest tests/test_perplexity.py
+      - name: Run tests group 2
+        if: matrix.test-group == 'gpu_group2'
         shell: bash
         run: |
           declare -a failed_tests
