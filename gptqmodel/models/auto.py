@@ -116,6 +116,7 @@ class GPTQModel:
         disable_exllama: Optional[bool] = None,
         disable_exllamav2: bool = False,
         use_marlin: bool = False,
+        use_bitblas: bool = False,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
         # supports all hashlib hash methods
@@ -147,6 +148,7 @@ class GPTQModel:
             disable_exllama=disable_exllama,
             disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
+            use_bitblas=use_bitblas,
             verify_hash=verify_hash,
             **kwargs,
         )

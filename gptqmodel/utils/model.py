@@ -27,6 +27,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+
 def recurse_getattr(obj, attr: str):
     """
     Recursive `getattr`.
@@ -101,21 +102,26 @@ def get_module_by_name_suffix(model, module_name: str):
 def make_quant(
     module,
     names,
-    bits,
-    group_size,
+    bits: int,
+    group_size: int,
+    desc_act: bool = False,
+    sym: bool = True,
     use_triton: bool = False,
     use_marlin: bool = False,
+    use_bitblas: bool = False,
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
-    desc_act: bool = False,
+
 ):
-    QuantLinear = select_quant_linear(
-        use_triton=use_triton,
-        desc_act=desc_act,
-        group_size=group_size,
+    QuantLinear = select_quant_linear_with_pack(
         bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        use_triton=use_triton,
         use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
         disable_exllama=disable_exllama,
         disable_exllamav2=disable_exllamav2,
     )
@@ -136,24 +142,31 @@ def make_quant(
             elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
                 in_features = submodule.weight.shape[0]
                 out_features = submodule.weight.shape[1]
+            else:
+                raise NotImplementedError(f"Unsupported module {submodule}")
+
             bias = submodule.bias is not None
             if (not (desc_act) or group_size == -1) and not use_triton:
                 new_layer = QuantLinear(
-                    bits,
-                    group_size,
-                    in_features,
-                    out_features,
-                    bias,
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    infeatures=in_features,
+                    outfeatures=out_features,
+                    bias=bias,
                     use_cuda_fp16=use_cuda_fp16,
                     weight_dtype=submodule.weight.dtype,
                 )
             else:
                 new_layer = QuantLinear(
-                    bits,
-                    group_size,
-                    in_features,
-                    out_features,
-                    bias,
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    infeatures=in_features,
+                    outfeatures=out_features,
+                    bias=bias,
                     weight_dtype=submodule.weight.dtype,
                 )
             new_layer.device = ori_layer_device
@@ -226,27 +239,56 @@ def convert_gptq_v2_to_v1_format(
 
     return model
 
+def select_quant_linear_with_pack(bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    use_triton: bool,
+    disable_exllama: bool,
+    disable_exllamav2: bool ,
+    use_marlin: bool ,
+    use_bitblas: bool,):
+    # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
+    # and the format is converted to BitBLAS in save_quantized().
+    if use_bitblas:
+        use_bitblas = False
+    QuantLinear = select_quant_linear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        use_triton=use_triton,
+        disable_exllama=disable_exllama,
+        disable_exllamav2=disable_exllamav2,
+        use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
+    )
+    return QuantLinear
 
 def pack_model(
     model,
     quantizers,
     bits,
     group_size,
+    desc_act=False,
+    sym: bool = True,
     use_triton=False,
     use_cuda_fp16=True,
-    desc_act=False,
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
+    use_bitblas: bool = False,
 ):
-    QuantLinear = select_quant_linear(
-        use_triton=use_triton,
-        desc_act=desc_act,
-        group_size=group_size,
+    QuantLinear = select_quant_linear_with_pack(
         bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        use_triton=use_triton,
         disable_exllama=False,
         disable_exllamav2=True,
         use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
     )
 
     if force_layer_back_to_cpu:
@@ -266,6 +308,7 @@ def pack_model(
         disable_exllama=False,
         disable_exllamav2=True,
         use_marlin=use_marlin,
+        use_bitblas=use_bitblas,
     )
     qlayers = find_layers(model, [QuantLinear])
 
@@ -382,7 +425,12 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
+
+    # post init for bitblas backend.
     device_to_buffers_size = {}
+    for _, submodule in model.named_modules():
+        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "bitblas":
+            submodule.post_init()
 
     model_uses_exllama = False
     for name, submodule in model.named_modules():

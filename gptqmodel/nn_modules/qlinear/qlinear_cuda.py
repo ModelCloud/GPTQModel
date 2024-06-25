@@ -14,20 +14,23 @@ logger = getLogger(__name__)
 
 class QuantLinear(BaseCudaQuantLinear):
     QUANT_TYPE = "cuda"
+    SUPPORTED_BITS = [2, 3, 4, 8]
 
     def __init__(
         self,
-        bits,
-        group_size,
-        infeatures,
-        outfeatures,
-        bias,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        infeatures: int,
+        outfeatures: int,
+        bias: bool,
         kernel_switch_threshold=128,
         weight_dtype=torch.float16,
+        **kwargs,
     ):
         super().__init__()
-        if bits not in [2, 3, 4, 8]:
-            raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
@@ -144,8 +147,6 @@ class QuantLinear(BaseCudaQuantLinear):
                     qweight[row] |= intweight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -179,8 +180,6 @@ class QuantLinear(BaseCudaQuantLinear):
                     qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
                 i += 10
                 col += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -230,8 +229,6 @@ class QuantLinear(BaseCudaQuantLinear):
                     self.qzeros,
                     self.g_idx,
                 )
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         else:
             if self.wf.device != self.qzeros.device:
                 self.wf = self.wf.to(self.qzeros.device)
@@ -273,8 +270,6 @@ class QuantLinear(BaseCudaQuantLinear):
                 weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
                 weight = weight & 0x7
                 weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
             num_itr = self.g_idx.shape[0] // x.shape[-1]

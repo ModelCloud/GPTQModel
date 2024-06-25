@@ -20,6 +20,7 @@ from transformers.utils.generic import ContextManagers
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
@@ -78,6 +79,7 @@ class BaseGPTQModel(nn.Module):
         model: PreTrainedModel,
         quantized: bool,
         quantize_config: QuantizeConfig,
+        # TODO: remove is_triton_backend arg..why? doesn't pass smell test @ZX-ModelCloud
         is_triton_backend: bool = False,
         qlinear_kernel: nn.Module = None,
     ):
@@ -152,8 +154,11 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
+
+        # TODO: remove use_triton and use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
         use_triton: bool = False,
         use_cuda_fp16: bool = True,
+
         autotune_warmup_after_quantized: bool = False,
         calibration_enable_gpu_cache: bool = True,
     ):
@@ -179,12 +184,12 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
-        MIN_CALIBRATION_DATASET_SIZE = 256
-        MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH = 256
+        min_calibration_dataset_size = 256
+        min_calibration_dataset_input_ids_avg_length = 256
 
-        if len(calibration_dataset) < MIN_CALIBRATION_DATASET_SIZE:
-            logger.warning(f"Calibration dataset size should be greater than {MIN_CALIBRATION_DATASET_SIZE}. "
-                           f"Current size: {len(calibration_dataset)}.")
+        if len(calibration_dataset) < min_calibration_dataset_size:
+            logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
+                             f"Current size: {len(calibration_dataset)}.")
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -193,9 +198,10 @@ class BaseGPTQModel(nn.Module):
             total_input_ids_length += input_ids_length
         avg = total_input_ids_length / len(calibration_dataset)
 
-        if avg < MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH:
+        if avg < min_calibration_dataset_input_ids_avg_length:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                           f"{MIN_CALIBRATION_DATASET_INPUT_IDS_AVG_LENGTH}! Current AVG is {avg}.")
+                             f"{min_calibration_dataset_input_ids_avg_length}! Current AVG is {avg}.")
+
 
         device_map = self.hf_device_map
         if device_map:
@@ -430,6 +436,7 @@ class BaseGPTQModel(nn.Module):
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             use_marlin=self.quantize_config.format == FORMAT.MARLIN,
+            use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
         )
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
@@ -472,8 +479,7 @@ class BaseGPTQModel(nn.Module):
         safetensors_metadata: Optional[Dict[str, str]] = None,
         format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
-        # TODO FIXME default should be None to disable sharding instead of some large value
-        max_shard_size: str = "10000GB",
+        max_shard_size: Optional[str] = None,
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
@@ -492,7 +498,13 @@ class BaseGPTQModel(nn.Module):
         model = self.model
 
         if not self.quantized:
-            raise EnvironmentError("can only save quantized model, please execute .quantize first.")
+            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+
+        if quantize_config.format == FORMAT.BITBLAS:
+            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
+            logger.info("Converting model to BitBlas Format...")
+            model = convert_to_bitblas(model, self.qlinear_kernel, quantize_config, quantize_config.sym,
+                                       quantize_config.desc_act, repack=True)
 
         if model_base_name is None:
             model_base_name = (
@@ -579,27 +591,8 @@ class BaseGPTQModel(nn.Module):
             model_save_name = model_base_name + ".safetensors"
         else:
             model_save_name = model_base_name + ".bin"
-            # Shard checkpoint
-        shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
 
-        # Clean the folder from a previous save
-        for filename in os.listdir(save_dir):
-            full_filename = join(save_dir, filename)
-
-            # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
-            filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
-            reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
-
-            if (
-                    filename.startswith(model_base_name)
-                    and isfile(full_filename)
-                    and filename not in shards.keys()
-                    and reg.fullmatch(filename_no_suffix) is not None
-            ):
-                os.remove(full_filename)
-
-        # Save the model
-        for shard_file, shard in shards.items():
+        if max_shard_size is None:
             if use_safetensors:
                 if safetensors_metadata is None:
                     safetensors_metadata = {}
@@ -617,31 +610,91 @@ class BaseGPTQModel(nn.Module):
                                 new_value = str(value)
                             except Exception as e:
                                 raise TypeError(
-                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
+                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
+                                )
                             if new_key in new_safetensors_metadata:
                                 logger.warning(
-                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
+                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
+                                )
                             new_safetensors_metadata[new_key] = new_value
                     safetensors_metadata = new_safetensors_metadata
                     if converted_keys:
                         logger.debug(
-                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
+                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
+                        )
 
                 # Format is required to enable Accelerate to load the metadata
                 # otherwise it raises an OSError
                 safetensors_metadata["format"] = "pt"
-
-                safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
+                safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
             else:
-                torch.save(shard, join(save_dir, shard_file))
+                logger.warning(
+                    "We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
+                torch.save(model.state_dict(), join(save_dir, model_save_name))
+        else:
+            # Shard checkpoint
+            shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
 
-        if index is not None:
-            index_save_name = model_save_name + ".index.json"
-            index_save_path = join(save_dir, index_save_name)
-            # Save the index as well
-            with open(index_save_path, "w", encoding="utf-8") as f:
-                content = json.dumps(index, indent=2, sort_keys=True) + "\n"
-                f.write(content)
+            # Clean the folder from a previous save
+            for filename in os.listdir(save_dir):
+                full_filename = join(save_dir, filename)
+
+                # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
+                filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
+                reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
+
+                if (
+                        filename.startswith(model_base_name)
+                        and isfile(full_filename)
+                        and filename not in shards.keys()
+                        and reg.fullmatch(filename_no_suffix) is not None
+                ):
+                    os.remove(full_filename)
+
+            # Save the model
+            for shard_file, shard in shards.items():
+                if use_safetensors:
+                    if safetensors_metadata is None:
+                        safetensors_metadata = {}
+                    elif not isinstance(safetensors_metadata, dict):
+                        raise TypeError("safetensors_metadata must be a dictionary.")
+                    else:
+                        logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                        new_safetensors_metadata = {}
+                        converted_keys = False
+                        for key, value in safetensors_metadata.items():
+                            if not isinstance(key, str) or not isinstance(value, str):
+                                converted_keys = True
+                                try:
+                                    new_key = str(key)
+                                    new_value = str(value)
+                                except Exception as e:
+                                    raise TypeError(
+                                        f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
+                                if new_key in new_safetensors_metadata:
+                                    logger.warning(
+                                        f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
+                                new_safetensors_metadata[new_key] = new_value
+                        safetensors_metadata = new_safetensors_metadata
+                        if converted_keys:
+                            logger.debug(
+                                f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
+
+                    # Format is required to enable Accelerate to load the metadata
+                    # otherwise it raises an OSError
+                    safetensors_metadata["format"] = "pt"
+
+                    safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
+                else:
+                    torch.save(shard, join(save_dir, shard_file))
+
+            if index is not None:
+                index_save_name = model_save_name + ".index.json"
+                index_save_path = join(save_dir, index_save_name)
+                # Save the index as well
+                with open(index_save_path, "w", encoding="utf-8") as f:
+                    content = json.dumps(index, indent=2, sort_keys=True) + "\n"
+                    f.write(content)
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
 
@@ -753,8 +806,16 @@ class BaseGPTQModel(nn.Module):
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
+
+        # TODO: refract this bewildering amount of ugly args @ZX-ModelCloud
+        # combine into Backend.ENUM class of Backend.AUTO, Backend.TRITON, Backend.MARLIN
+        # single arp of backend: Backend = Backend.AUTO (default to auto)
         use_triton: bool = True,
         use_marlin: bool = True,
+        use_bitblas: bool = False,
+        disable_exllama: bool = False,
+        disable_exllamav2: bool = False,
+
         torch_dtype: [str | torch.dtype] = "auto",
         use_cuda_fp16: bool = True,
         quantize_config: Optional[QuantizeConfig] = None,
@@ -762,8 +823,6 @@ class BaseGPTQModel(nn.Module):
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         warmup_triton: bool = False,
-        disable_exllama: bool = False,
-        disable_exllamav2: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
         verify_hash: Optional[Union[str, List[str]]] = None,
@@ -848,6 +907,10 @@ class BaseGPTQModel(nn.Module):
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
                 )
 
+        if quantize_config.format == FORMAT.BITBLAS:
+            # format bitblas requires bitblas kernel
+            use_bitblas = True
+
         if model_basename is None:
             if quantize_config.model_file_base_name:
                 possible_model_basenames = [quantize_config.model_file_base_name]
@@ -884,7 +947,7 @@ class BaseGPTQModel(nn.Module):
                     "There are security risks when loading tensors from .bin files. Make sure you are loading model only from a trusted source."
                 )
             else:
-                raise RuntimeError(
+                raise ValueError(
                     "Loading of unsafe .bin files are not allowed by default. Pass allow_unsafe_loading=True to bypass."
                 )
 
@@ -952,6 +1015,7 @@ class BaseGPTQModel(nn.Module):
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
                 use_marlin=quantize_config.format == FORMAT.MARLIN,
+                use_bitblas=quantize_config.format == FORMAT.BITBLAS,
             )
             model.tie_weights()
 
@@ -1008,17 +1072,19 @@ class BaseGPTQModel(nn.Module):
             # Load the quant linear type we need.
             # TODO: load marlin directly with the right quantlinear class.
             quant_linear_class = select_quant_linear(
-                use_triton=use_triton,
-                desc_act=quantize_config.desc_act,
-                group_size=quantize_config.group_size,
                 bits=quantize_config.bits,
+                group_size=quantize_config.group_size,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
+                use_triton=use_triton,
                 disable_exllama=disable_exllama,
                 disable_exllamav2=disable_exllamav2,
                 use_marlin=False,
+                use_bitblas=False,
             )
 
             # Prepare model for marlin load.
-            # If is marlin serialized load then load directly. Otherwise convert to marlin.
+            # If is marlin serialized load then load directly. Otherwise, convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
@@ -1026,28 +1092,67 @@ class BaseGPTQModel(nn.Module):
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
                 device_map=device_map,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
             )
 
-        accelerate.utils.modeling.load_checkpoint_in_model(
-            model,
-            dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=model_save_name,
-            device_map=device_map,
-            offload_state_dict=True,
-            offload_buffers=True,
-        )
+        if use_bitblas:
+            if is_sharded:
+                raise ValueError(
+                    "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
+
+            # Load the quant linear type we need.
+            # TODO: load directy bitblas with the right quantlinear class.
+            quant_linear_class = select_quant_linear(
+                bits=quantize_config.bits,
+                group_size=quantize_config.group_size,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
+                use_triton=use_triton,
+                disable_exllama=disable_exllama,
+                disable_exllamav2=disable_exllamav2,
+                use_marlin=False,
+                use_bitblas=False,
+            )
+
+            # Prepare model for bitblas load.
+            # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
+            model = prepare_model_for_bitblas_load(
+                model=model,
+                quantize_config=quantize_config,
+                quant_linear_class=quant_linear_class,
+                torch_dtype=torch_dtype,
+                model_save_name=model_save_name,
+                device_map=device_map,
+                desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
+            )
+
+        # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
+        # and we no longer need to call load_checkpoint_in_model()
+        if not (use_marlin or use_bitblas):
+            accelerate.utils.modeling.load_checkpoint_in_model(
+                model,
+                dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                checkpoint=model_save_name,
+                device_map=device_map,
+                offload_state_dict=True,
+                offload_buffers=True,
+            )
 
         # TODO: Why are we using this custom function and not dispatch_model?
         model = simple_dispatch_model(model, device_map)
 
         qlinear_kernel = select_quant_linear(
-            use_triton=use_triton,
-            desc_act=quantize_config.desc_act,
-            group_size=quantize_config.group_size,
             bits=quantize_config.bits,
+            group_size=quantize_config.group_size,
+            desc_act=quantize_config.desc_act,
+            sym=quantize_config.sym,
+            use_triton=use_triton,
             disable_exllama=disable_exllama,
             disable_exllamav2=disable_exllamav2,
             use_marlin=use_marlin,
+            use_bitblas=use_bitblas,
         )
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
@@ -1055,7 +1160,7 @@ class BaseGPTQModel(nn.Module):
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
             if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
                 raise ValueError(
-                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by autogptq version >= {MIN_VERSION_WITH_V2}"
+                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
             logger.info(f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
