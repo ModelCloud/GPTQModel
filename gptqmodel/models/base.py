@@ -472,8 +472,7 @@ class BaseGPTQModel(nn.Module):
         safetensors_metadata: Optional[Dict[str, str]] = None,
         format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
-        # TODO FIXME default should be None to disable sharding instead of some large value
-        max_shard_size: str = "10000GB",
+        max_shard_size: Optional[str] = None,
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
