@@ -21,7 +21,7 @@ jobs:
         run: python setup.py bdist_wheel
 
       - name: Upload to artifact
-      - uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           path: dist
 
