@@ -39,17 +39,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Compile
-        run: |
-          # python setup.py bdist_wheel
-          mkdir dist
-          touch dist/123.whl
+        run: python setup.py bdist_wheel
+
+      - name: show dist folder
+        run: ls -ahl dist
 
       - name: Copy whl to shared dir
         run: |
-          mkdir -p /data/${{ github.run_id }}
+          mkdir /data/${{ github.run_id }}
           cp dist/*whl /data/${{ github.run_id }}
-          ls /data
-          ls /data/${{ github.run_id }}
+          ls -ahl /data/${{ github.run_id }}
 
   test:
     needs: build
@@ -66,16 +65,14 @@ jobs:
     steps:
       - name: Print whl from shared dir
         run: |
-          ls /data
+          ls -ahl /data
 
       - name: Print whl from shared dir
         run: |
-          ls /data/${{ github.run_id }}
+          ls -ahl /data/${{ github.run_id }}
 
       - name: Install whl from shared dir
         run: |
-          ls /data
-          ls /data/${{ github.run_id }}
           pip install /data/${{ github.run_id }}/*.whl
 
       - name: Run tests group 1
