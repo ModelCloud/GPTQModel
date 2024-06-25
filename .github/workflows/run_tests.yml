@@ -38,8 +38,8 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp/${{ github.run_id }}_1:/data_1:rw
-        - /tmp/${{ github.run_id }}_2:/data_2:rw
+        - /tmp/${{ github.run_id }}_1:/data_1:r
+        - /tmp/${{ github.run_id }}_2:/data_2:r
     strategy:
       fail-fast: false
       matrix:
