@@ -40,12 +40,16 @@ jobs:
 
       - name: Compile
         run: |
-          python setup.py bdist_wheel
+          # python setup.py bdist_wheel
+          mkdir dist
+          touch dist/123.whl
 
       - name: Copy whl to shared dir
         run: |
           mkdir -p /data/${{ github.run_id }}
           cp dist/*whl /data/${{ github.run_id }}
+          ls /data
+          ls /data/${{ github.run_id }}
 
   test:
     needs: build
@@ -60,6 +64,14 @@ jobs:
           - gpu_group1
           - gpu_group2
     steps:
+      - name: Print whl from shared dir
+        run: |
+          ls /data
+
+      - name: Print whl from shared dir
+        run: |
+          ls /data/${{ github.run_id }}
+
       - name: Install whl from shared dir
         run: |
           ls /data
