@@ -39,6 +39,7 @@ class FORMAT:
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
     MARLIN = "marlin"
+    BITBLAS = "bitblas"
 
 
 # quant methods
@@ -51,6 +52,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
+        FORMAT.BITBLAS,
     },
 }
 
@@ -161,8 +163,7 @@ class QuantizeConfig():
     @classmethod
     # normalize quant config for compat and also performs validation
     def from_quant_config(cls, quantize_cfg, format: str = None):
-        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN}
-
+        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}
         format_auto_inferred = False
         # compat: format can be passed in via from_quantized() if field missing from json
         if format:
@@ -191,15 +192,17 @@ class QuantizeConfig():
             if key == FORMAT_FIELD_JSON:
                 val = val.lower()
 
-                if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN}:
-                    normalized[FORMAT_FIELD_CODE] = val
+                if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}:
+                    normalized[key] = val
                 else:
                     raise ValueError(f"Unknown quantization format: {val}.")
             elif key == QUANT_METHOD_FIELD:
                 val = val.lower()
-                # compat: some hf models use quant_method=marlin
+                # compat: some hf models use quant_method=marlin or bitblas
                 if val == FORMAT.MARLIN:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
+                elif val == FORMAT.BITBLAS:
+                    normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
                 elif val not in {QUANT_METHOD.GPTQ}:
                     raise ValueError(f"Unknown quantization method: {val}.")
                 else:
@@ -213,6 +216,10 @@ class QuantizeConfig():
 
         if format_auto_inferred:
             logger.info(f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
+
+        if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
+            # AWQ and Marlin do not reorder the rows.
+            normalized["desc_act"] = False
 
         if "sym" not in normalized:
             logger.warning(

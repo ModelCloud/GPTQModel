@@ -14,21 +14,24 @@ logger = getLogger(__name__)
 
 class QuantLinear(BaseCudaQuantLinear):
     QUANT_TYPE = "cuda-old"
+    SUPPORTED_BITS = [2, 3, 4, 8]
 
     def __init__(
         self,
-        bits,
-        group_size,
-        infeatures,
-        outfeatures,
-        bias,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        infeatures: int ,
+        outfeatures: int,
+        bias: bool,
         use_cuda_fp16=True,
         kernel_switch_threshold=128,
         weight_dtype=torch.float16,
+        **kwargs,
     ):
         super().__init__()
-        if bits not in [2, 3, 4, 8]:
-            raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
@@ -143,8 +146,6 @@ class QuantLinear(BaseCudaQuantLinear):
                     qweight[row] |= intweight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -178,8 +179,6 @@ class QuantLinear(BaseCudaQuantLinear):
                     qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
                 i += 10
                 col += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -229,9 +228,6 @@ class QuantLinear(BaseCudaQuantLinear):
                         self.group_size,
                         self.half_indim,
                     )
-
-                else:
-                    raise NotImplementedError("Only 2,3,4 bits are supported.")
             else:
                 x = x.to(torch.float32)  # This is required for autocast compatibility.
                 if self.bits == 2:
@@ -270,8 +266,6 @@ class QuantLinear(BaseCudaQuantLinear):
                         self.qzeros,
                         self.group_size,
                     )
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         else:
             if self.wf.device != self.qzeros.device:
                 self.wf = self.wf.to(self.qzeros.device)
@@ -324,8 +318,6 @@ class QuantLinear(BaseCudaQuantLinear):
                 weight = weight & 0x7
                 weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
                 weight = weight.reshape(-1, self.group_size, weight.shape[2])
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
             weight = scales * (weight - zeros)
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
