@@ -43,7 +43,7 @@ jobs:
           name: artifact
           path: dist
 
-      - name: Install whl from shared dir
+      - name: Install wheel
         run: |
           pip install dist/*.whl
 
