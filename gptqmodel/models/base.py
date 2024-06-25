@@ -58,9 +58,6 @@ class BaseGPTQModel(nn.Module):
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
 
-    # some models may only be quantizable under specific gptq property
-    require_true_sequential: Optional[bool] = None
-
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
 
@@ -177,10 +174,6 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.lm_head:
             raise ValueError("lm_head quantization is currently inference only and not applicable for quantization. Please set `lm_head=False`.")
 
-        # TODO: we need to move all the validation into a helper method
-        if self.require_true_sequential is not None and self.quantize_config.true_sequential != self.require_true_sequential:
-            raise ValueError(f"This model requires `true_sequential == {self.require_true_sequential}: actual true_sequential = {self.quantize_config.true_sequential}")
-
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
@@ -294,10 +287,10 @@ class BaseGPTQModel(nn.Module):
         if not self.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
-            # dynamic expert layer index for model defs
-            if self.dynamic_expert_index is not None:
-                num_experts = getattr(self.model.config, self.dynamic_expert_index)
-                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+        # dynamic expert layer index for model defs
+        if self.dynamic_expert_index is not None:
+            num_experts = getattr(self.model.config, self.dynamic_expert_index)
+            layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
                                                       num_experts=num_experts)
 
         quantizers = {}
