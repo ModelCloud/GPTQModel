@@ -52,7 +52,7 @@ jobs:
         run: pytest tests/test_perplexity.py
       - name: Run tests
         if: matrix.test-group == 'gpu_group1'
-      - shell: bash
+        shell: bash
         run: |
           declare -a failed_tests
           
