@@ -10,14 +10,10 @@ env:
 jobs:
   build:
     runs-on: self-hosted
-    strategy:
-      matrix:
-        test-group:
-          - gpu_group1
-          - gpu_group2
     container:
       image: modelcloud/gptqmodel:github-ci-v1
-
+      volumes:
+        - /tmp:/data/:rw
     steps:
       - name: Find suitable GPU
         run: |
@@ -44,12 +40,33 @@ jobs:
 
       - name: Compile
         run: |
-          pip install -U pytest ninja parameterized protobuf
-          pip install -v --no-build-isolation .
+          python setup.py bdist_wheel
+
+      - name: Copy whl to shared dir
+        run: |
+          cp dist/*whl /data
+
+  test:
+    needs: build
+    runs-on: self-hosted
+    container:
+      image: modelcloud/gptqmodel:github-ci-v1
+      volumes:
+        - /tmp:/data/:rw
+    strategy:
+      matrix:
+        test-group:
+          - gpu_group1
+          - gpu_group2
+    steps:
+      - name: Install whl from shared dir
+        run: |
+          pip install /data/*.whl
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
         run: pytest tests/test_perplexity.py
+
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
         shell: bash
@@ -89,5 +106,4 @@ jobs:
           else
               echo "All tests passed."
           fi
-
 
