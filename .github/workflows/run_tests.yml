@@ -64,7 +64,7 @@ jobs:
                   failed_tests+=($1)
               fi
               echo -e "\033[1;32mFinished $1\033[0m"
-              echo "========================================\n\n\n"
+              echo -e "========================================\n\n\n"
           }
           
           run_test test_lm_head.py
