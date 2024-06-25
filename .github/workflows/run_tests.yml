@@ -70,7 +70,7 @@ jobs:
         if: matrix.test-group == 'gpu_group1'
         run: |
           echo ${{ github.run_id }}
-          cat /data_1/*
+          # cat /data_1/*
 
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
