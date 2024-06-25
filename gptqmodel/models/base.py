@@ -472,8 +472,7 @@ class BaseGPTQModel(nn.Module):
         safetensors_metadata: Optional[Dict[str, str]] = None,
         format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
-        # TODO FIXME default should be None to disable sharding instead of some large value
-        max_shard_size: str = "10000GB",
+        max_shard_size: Optional[str] = None,
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
@@ -579,27 +578,8 @@ class BaseGPTQModel(nn.Module):
             model_save_name = model_base_name + ".safetensors"
         else:
             model_save_name = model_base_name + ".bin"
-            # Shard checkpoint
-        shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
 
-        # Clean the folder from a previous save
-        for filename in os.listdir(save_dir):
-            full_filename = join(save_dir, filename)
-
-            # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
-            filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
-            reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
-
-            if (
-                    filename.startswith(model_base_name)
-                    and isfile(full_filename)
-                    and filename not in shards.keys()
-                    and reg.fullmatch(filename_no_suffix) is not None
-            ):
-                os.remove(full_filename)
-
-        # Save the model
-        for shard_file, shard in shards.items():
+        if max_shard_size is None:
             if use_safetensors:
                 if safetensors_metadata is None:
                     safetensors_metadata = {}
@@ -617,31 +597,91 @@ class BaseGPTQModel(nn.Module):
                                 new_value = str(value)
                             except Exception as e:
                                 raise TypeError(
-                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
+                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
+                                )
                             if new_key in new_safetensors_metadata:
                                 logger.warning(
-                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
+                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
+                                )
                             new_safetensors_metadata[new_key] = new_value
                     safetensors_metadata = new_safetensors_metadata
                     if converted_keys:
                         logger.debug(
-                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
+                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
+                        )
 
                 # Format is required to enable Accelerate to load the metadata
                 # otherwise it raises an OSError
                 safetensors_metadata["format"] = "pt"
-
-                safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
+                safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
             else:
-                torch.save(shard, join(save_dir, shard_file))
+                logger.warning(
+                    "We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
+                torch.save(model.state_dict(), join(save_dir, model_save_name))
+        else:
+            # Shard checkpoint
+            shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
 
-        if index is not None:
-            index_save_name = model_save_name + ".index.json"
-            index_save_path = join(save_dir, index_save_name)
-            # Save the index as well
-            with open(index_save_path, "w", encoding="utf-8") as f:
-                content = json.dumps(index, indent=2, sort_keys=True) + "\n"
-                f.write(content)
+            # Clean the folder from a previous save
+            for filename in os.listdir(save_dir):
+                full_filename = join(save_dir, filename)
+
+                # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
+                filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
+                reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
+
+                if (
+                        filename.startswith(model_base_name)
+                        and isfile(full_filename)
+                        and filename not in shards.keys()
+                        and reg.fullmatch(filename_no_suffix) is not None
+                ):
+                    os.remove(full_filename)
+
+            # Save the model
+            for shard_file, shard in shards.items():
+                if use_safetensors:
+                    if safetensors_metadata is None:
+                        safetensors_metadata = {}
+                    elif not isinstance(safetensors_metadata, dict):
+                        raise TypeError("safetensors_metadata must be a dictionary.")
+                    else:
+                        logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                        new_safetensors_metadata = {}
+                        converted_keys = False
+                        for key, value in safetensors_metadata.items():
+                            if not isinstance(key, str) or not isinstance(value, str):
+                                converted_keys = True
+                                try:
+                                    new_key = str(key)
+                                    new_value = str(value)
+                                except Exception as e:
+                                    raise TypeError(
+                                        f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
+                                if new_key in new_safetensors_metadata:
+                                    logger.warning(
+                                        f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
+                                new_safetensors_metadata[new_key] = new_value
+                        safetensors_metadata = new_safetensors_metadata
+                        if converted_keys:
+                            logger.debug(
+                                f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
+
+                    # Format is required to enable Accelerate to load the metadata
+                    # otherwise it raises an OSError
+                    safetensors_metadata["format"] = "pt"
+
+                    safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
+                else:
+                    torch.save(shard, join(save_dir, shard_file))
+
+            if index is not None:
+                index_save_name = model_save_name + ".index.json"
+                index_save_path = join(save_dir, index_save_name)
+                # Save the index as well
+                with open(index_save_path, "w", encoding="utf-8") as f:
+                    content = json.dumps(index, indent=2, sort_keys=True) + "\n"
+                    f.write(content)
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
 
