@@ -1176,7 +1176,7 @@ class TestsQ4Exllama(unittest.TestCase):
         device = torch.device("cuda:0")
 
         # Reference generated with the cuda-old kernel
-        reference_output = "<s> I am in Paris and I am going to the Louvre Museum. What time does it open and what is the best way to get there?\nThe Louvre Museum in Paris is open from 9:00 AM to 6:00 PM every day except for Tuesdays. The best way to get"
+        reference_output = "<s> I am in Paris and I am so excited to be here. I am here for the first time in my life and I am so grateful for this opportunity. I am here to learn and to grow and to meet new people and to experience new things. I am here to see the Eiffel Tower and to walk along"
 
         model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
 
