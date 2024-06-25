@@ -47,7 +47,6 @@ class TestPerplexity(unittest.TestCase):
         model = AutoModelForCausalLM.from_pretrained(
             self.NATIVE_MODEL_ID,
             device_map="auto",
-            torch_dtype=torch.float16,
         )
 
         self.native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
@@ -89,6 +88,7 @@ class TestPerplexity(unittest.TestCase):
             bits=4,
             group_size=128,
             format=format,
+            desc_act=False if format == FORMAT.MARLIN else True
         )
 
         model = GPTQModel.from_pretrained(
@@ -115,5 +115,5 @@ class TestPerplexity(unittest.TestCase):
             print(f"Format {format}, Quantized PPL: {quantized_ppl}")
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
-            # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 8.7954, FORMAT.MARLIN ppl == 8.9865
+            # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 8.7863, FORMAT.MARLIN ppl == 9.0036
             assert abs(quantized_ppl - self.native_ppl) < 0.6
