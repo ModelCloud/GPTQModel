@@ -13,7 +13,7 @@ def select_quant_linear(
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_marlin: bool = False,
-    use_bitblas: bool = True,
+    use_bitblas: bool = False,
 ):
     if use_triton:
         logger.info("Using tritonv2 for GPTQ")
