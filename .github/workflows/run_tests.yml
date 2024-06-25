@@ -75,7 +75,7 @@ jobs:
           }
           
           echo ${{ github.run_id }}
-          cat /data/*
+          # cat /data/*
           
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
