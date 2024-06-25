@@ -14,7 +14,8 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp/${{ github.run_id }}:/data:rw
+        - /tmp/${{ github.run_id }}_1:/data_1:rw
+        - /tmp/${{ github.run_id }}_2:/data_2:rw
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -26,7 +27,7 @@ jobs:
         run: ls -ahl /data
 
       - name: Compile
-        run: touch /data/${{ github.run_id }}
+        run: touch /data_1/${{ github.run_id }} && touch /data_2/${{ github.run_id }}
 
       - name: Check whl file
         run: ls -ahl /data
@@ -37,7 +38,8 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp/${{ github.run_id }}:/data:rw
+        - /tmp/${{ github.run_id }}_1:/data_1:rw
+        - /tmp/${{ github.run_id }}_2:/data_2:rw
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +57,7 @@ jobs:
         if: matrix.test-group == 'gpu_group1'
         run: |
           echo ${{ github.run_id }}
-          cat /data/*
+          cat /data_1/*
 
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
@@ -75,7 +77,7 @@ jobs:
           }
           
           echo ${{ github.run_id }}
-          # cat /data/*
+          cat /data_2/*
           
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
