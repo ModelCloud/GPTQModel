@@ -86,6 +86,7 @@ class TestPerplexity(unittest.TestCase):
             FORMAT.GPTQ_V2,
             FORMAT.GPTQ,
             FORMAT.MARLIN,
+            FORMAT.BITBLAS,
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
