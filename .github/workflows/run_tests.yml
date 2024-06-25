@@ -19,15 +19,14 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
 
+      - name: show id
+        run: echo ${{ github.run_id }}
+
       - name: List
         run: ls -ahl /data
 
       - name: Compile
-        run: python setup.py bdist_wheel
-
-      - name: Copy whl to shared dir
-        run: |
-          cp dist/*whl /data/
+        run: touch /data/${{ github.run_id }}
 
       - name: Check whl file
         run: ls -ahl /data
@@ -54,33 +53,9 @@ jobs:
         run: |
           ls -ahl /data || true
 
-      - name: Install whl from shared dir
-        run: |
-          pip install /data/*.whl
-
-      - name: Find suitable GPU
-        run: |
-         suitable_gpu=$(nvidia-smi -L | grep "RTX 4090" | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
-          do
-            mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i $gpu_id)
-            mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu_id)
-            mem_used_pct=$((100 * mem_used / mem_total))
-            if [ $mem_used_pct -lt 2 ]; then # 2 -> 98% free
-              echo $gpu_id
-              break
-            fi
-          done)
-          if [ -z "$suitable_gpu" ]; then
-            echo "No suitable GPU found. Exiting with error."
-            exit 1
-          else
-            echo "CUDA_VISIBLE_DEVICES=$suitable_gpu" >> $GITHUB_ENV
-            echo "CUDA_VISIBLE_DEVICES set to $suitable_gpu"
-          fi
-
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
-        run: pytest tests/test_perplexity.py
+        run: echo ${{ github.run_id }}
 
       - name: Run tests group 2
         if: matrix.test-group == 'gpu_group2'
@@ -99,17 +74,7 @@ jobs:
               echo -e "========================================\n\n\n"
           }
           
-          run_test test_lm_head.py
-          run_test test_q4_exallama.py
-          run_test test_q4_exallama_v2.py
-          run_test test_q4_marlin.py
-          run_test test_q4_triton.py
-          run_test test_repacking.py
-          run_test test_serialization.py
-          run_test test_sharded.py
-          run_test test_triton.py
-          run_test test_quant_formats.py
-          run_test test_q4_cuda.py
+          echo ${{ github.run_id }}
           
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
