@@ -23,14 +23,18 @@ jobs:
       - name: show id
         run: echo ${{ github.run_id }}
 
-      - name: List
-        run: ls -ahl /data
+      - name: List /
+        run: ls -ahl /
 
       - name: Compile
         run: touch /data_1/${{ github.run_id }} && touch /data_2/${{ github.run_id }}
 
-      - name: Check whl file
-        run: ls -ahl /data
+
+      - name: List data_1
+        run: ls -ahl /data_1
+
+      - name: List data_1
+        run: ls -ahl /data_2
 
   test:
     needs: build
@@ -59,6 +63,7 @@ jobs:
       - name: Print whl from shared dir
         if: matrix.test-group == 'gpu_group2'
         run: |
+          ls -ahl /data_1 || true
           ls -ahl /data_2 || true
 
       - name: Run tests group 1
@@ -71,29 +76,10 @@ jobs:
         if: matrix.test-group == 'gpu_group2'
         shell: bash
         run: |
-          declare -a failed_tests
-          
-          run_test() {
-              echo -e "\033[1;34mRunning $1...\033[0m"
-              echo "========================================"
-              pytest tests/$1
-              if [ $? -ne 0 ]; then
-                  failed_tests+=($1)
-              fi
-              echo -e "\033[1;32mFinished $1\033[0m"
-              echo -e "========================================\n\n\n"
-          }
           
           echo ${{ github.run_id }}
-          cat /data_2/*
+          cat /data_2/* || true
+          ls -ahl /data_1 || true
+          ls -ahl /data_2 || true
           
-          if [ ${#failed_tests[@]} -ne 0 ]; then
-              echo -e "\033[1;31mTests failed:\033[0m"
-              for test in "${failed_tests[@]}"
-              do
-                  echo "$test"
-              done
-              exit 1
-          else
-              echo "All tests passed."
-          fi
+        
