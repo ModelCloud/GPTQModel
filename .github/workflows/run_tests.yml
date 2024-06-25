@@ -13,37 +13,22 @@ jobs:
     runs-on: self-hosted
     container:
       image: modelcloud/gptqmodel:github-ci-v1
-      volumes:
-        - /tmp/${{ github.run_id }}_1:/data_1:rw
-        - /tmp/${{ github.run_id }}_2:/data_2:rw
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
 
-      - name: show id
-        run: echo ${{ github.run_id }}
-
-      - name: List /
-        run: ls -ahl /
-
       - name: Compile
-        run: touch /data_1/${{ github.run_id }} && touch /data_2/${{ github.run_id }}
+        run: touch dist/xxx
 
-
-      - name: List data_1
-        run: ls -ahl /data_1
-
-      - name: List data_1
-        run: ls -ahl /data_2
+      - uses: actions/upload-artifact@v4
+        with:
+          path: dist
 
   test:
     needs: build
     runs-on: self-hosted
     container:
       image: modelcloud/gptqmodel:github-ci-v1
-      volumes:
-        - /tmp/${{ github.run_id }}_1:/data_1:r
-        - /tmp/${{ github.run_id }}_2:/data_2:r
     strategy:
       fail-fast: false
       matrix:
@@ -51,20 +36,19 @@ jobs:
           - gpu_group1
           - gpu_group2
     steps:
-      - name: Print whl from shared dir
-        run: |
-          ls -ahl / || true
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: artifact
+          path: dist
 
-      - name: Print whl from shared dir
-        if: matrix.test-group == 'gpu_group1'
+      - name: Print dir
         run: |
-          ls -ahl /data_1 || true
+          ls . || true
 
-      - name: Print whl from shared dir
-        if: matrix.test-group == 'gpu_group2'
+      - name: Print dir
         run: |
-          ls -ahl /data_1 || true
-          ls -ahl /data_2 || true
+          ls dist || true
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
