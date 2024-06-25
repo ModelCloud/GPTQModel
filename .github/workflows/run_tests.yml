@@ -14,28 +14,23 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp:/data:rw
+        - /tmp/${{ github.run_id }}:/data:rw
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
 
-      - name: Show content
-        run: ls -ahl
-
-      - name: Show dist content
-        run: ls -ahl dist || true
+      - name: List
+        run: ls -ahl /data
 
       - name: Compile
         run: python setup.py bdist_wheel
 
-      - name: show dist folder
-        run: ls -ahl dist
-
       - name: Copy whl to shared dir
         run: |
-          mkdir /data/${{ github.run_id }}
-          cp dist/*whl /data/${{ github.run_id }}
-          ls -ahl /data/${{ github.run_id }}
+          cp dist/*whl /data/
+
+      - name: Check whl file
+        run: ls -ahl /data
 
   test:
     needs: build
@@ -43,7 +38,7 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp:/data:rw
+        - /tmp/${{ github.run_id }}:/data:rw
     strategy:
       fail-fast: false
       matrix:
@@ -57,12 +52,11 @@ jobs:
 
       - name: Print whl from shared dir
         run: |
-          ls -ahl /data/${{ github.run_id }} || true
-          rm /data/${{ github.run_id }}/1234* || true
+          ls -ahl /data || true
 
       - name: Install whl from shared dir
         run: |
-          pip install /data/${{ github.run_id }}/*.whl
+          pip install /data/*.whl
 
       - name: Find suitable GPU
         run: |
