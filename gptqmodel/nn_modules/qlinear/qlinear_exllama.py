@@ -35,15 +35,14 @@ def ext_q4_matmul(x, q4, q4_width):
 
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllama"
+    SUPPORTED_BITS = [4]
+
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):
+    def __init__(self, bits: int, group_size: int , sym:bool, desc_act: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
         super().__init__()
-        if bits != 4:
-            raise ValueError(
-                f"Exllama kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
-            )
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self.padding = -outfeatures % 32
         self.outfeatures = outfeatures + self.padding
@@ -135,13 +134,10 @@ class QuantLinear(BaseQuantLinear):
         row = 0
         qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
         while row < qweight.shape[0]:
-            if self.bits in [4]:
-                for j in range(i, i + (32 // self.bits)):
-                    qweight[row] |= intweight[j] << (self.bits * (j - i))
-                i += 32 // self.bits
-                row += 1
-            else:
-                raise NotImplementedError("Only 4 bits are supported.")
+            for j in range(i, i + (32 // self.bits)):
+                qweight[row] |= intweight[j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            row += 1
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -151,13 +147,11 @@ class QuantLinear(BaseQuantLinear):
         i = 0
         col = 0
         while col < qzeros.shape[1]:
-            if self.bits in [4]:
-                for j in range(i, i + (32 // self.bits)):
-                    qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-                i += 32 // self.bits
-                col += 1
-            else:
-                raise NotImplementedError("Only 4 bits are supported.")
+            for j in range(i, i + (32 // self.bits)):
+                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            col += 1
+
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)

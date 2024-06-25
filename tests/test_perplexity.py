@@ -1,3 +1,9 @@
+# -- do not touch
+import os
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
 import tempfile
 import unittest
 
@@ -79,6 +85,7 @@ class TestPerplexity(unittest.TestCase):
             FORMAT.GPTQ_V2,
             FORMAT.GPTQ,
             FORMAT.MARLIN,
+            FORMAT.BITBLAS,
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
@@ -90,6 +97,10 @@ class TestPerplexity(unittest.TestCase):
             format=format,
             desc_act=False if format == FORMAT.MARLIN else True
         )
+
+        if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
+            # MARLIN and BITBLAS Only supported when desc_act is False.
+            quantize_config.desc_act = False
 
         model = GPTQModel.from_pretrained(
             self.NATIVE_MODEL_ID,

@@ -63,9 +63,15 @@ _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "marlin"
+    SUPPORTED_BITS = [4]
+    SUPPORTED_GROUP_SIZE = [128, -1]
+    SUPPORTED_DESC_ACT = [False]
+    SUPPORTED_SYM = [True]
 
-    def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs):
+    def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool, infeatures: int, outfeatures: int,
+                 bias: bool, **kwargs):
         super().__init__()
+        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(
@@ -74,8 +80,6 @@ class QuantLinear(BaseQuantLinear):
 
         if infeatures % 128 != 0 or outfeatures % 256 != 0:
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
-        if bits not in [4]:
-            raise NotImplementedError("Only 4 bits are supported.")
         if group_size not in [-1, 128] and group_size != infeatures:
             raise ValueError("Only group_size -1 and 128 are supported.")
         if infeatures % group_size != 0:
@@ -103,8 +107,6 @@ class QuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
-    def post_init(self):
-        pass
 
     def pack(self, linear, scales):
         """Pack a fake-quantized linear layer into this actual Marlin representation.

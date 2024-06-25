@@ -1,3 +1,9 @@
+# -- do not touch
+import os
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
 import os
 import tempfile
 import unittest

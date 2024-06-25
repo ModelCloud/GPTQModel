@@ -150,6 +150,7 @@ def load_model_tokenizer(
     quantize_config: Optional[str] = None,
     trust_remote_code: bool = False,
     use_triton: bool = False,
+    use_bitblas: bool = False,
     use_safetensors: bool = True,
     use_fast_tokenizer: bool = False,
     disable_exllama: bool = False,
@@ -174,6 +175,7 @@ def load_model_tokenizer(
             model_name_or_path,
             max_memory=max_memory,
             use_triton=use_triton,
+            use_bitblas=use_bitblas,
             use_cuda_fp16=True,
             quantize_config=quantize_config,
             model_basename=model_basename,
@@ -224,7 +226,6 @@ def benchmark_generation_speed(model, tokenizer, examples, generation_config):
         f"generation speed: {total_tokens / total_seconds:.3f} tokens/s"
     )
 
-
 def main():
     parser = ArgumentParser()
     parser.add_argument("--model_name_or_path", type=str)
@@ -234,6 +235,7 @@ def main():
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--use_triton", action="store_true")
+    parser.add_argument("--use_bitblas", action="store_true")
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--disable_exllama", action="store_true")
@@ -276,6 +278,7 @@ def main():
         quantize_config=quantize_config,
         trust_remote_code=args.trust_remote_code,
         use_triton=args.use_triton,
+        use_bitblas=args.use_bitblas,
         use_safetensors=True,
         use_fast_tokenizer=args.use_fast_tokenizer,
         disable_exllama=args.disable_exllama,
@@ -309,7 +312,6 @@ def main():
 
     logger.info("benchmark generation speed")
     benchmark_generation_speed(model, tokenizer, examples, generation_config)
-
 
 if __name__ == "__main__":
     logging.basicConfig(
