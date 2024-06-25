@@ -13,7 +13,7 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp:/data/:rw
+        - /tmp:/data:rw
     steps:
       - name: Find suitable GPU
         run: |
@@ -44,7 +44,8 @@ jobs:
 
       - name: Copy whl to shared dir
         run: |
-          cp dist/*whl /data
+          mkdir -p /data/${{ github.run_id }}
+          cp dist/*whl /data/${{ github.run_id }}
 
   test:
     needs: build
@@ -52,7 +53,7 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
       volumes:
-        - /tmp:/data/:rw
+        - /tmp:/data:rw
     strategy:
       matrix:
         test-group:
@@ -61,7 +62,9 @@ jobs:
     steps:
       - name: Install whl from shared dir
         run: |
-          pip install /data/*.whl
+          ls /data
+          ls /data/${{ github.run_id }}
+          pip install /data/${{ github.run_id }}/*.whl
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
