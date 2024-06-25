@@ -50,6 +50,10 @@ jobs:
           cp dist/*whl /data/${{ github.run_id }}
           ls -ahl /data/${{ github.run_id }}
 
+      - name: List shared dir
+        run: |
+          ls -ahl /data/${{ github.run_id }}
+
   test:
     needs: build
     runs-on: self-hosted
