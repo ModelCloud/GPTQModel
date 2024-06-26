@@ -53,8 +53,7 @@ if BUILD_CUDA_EXT:
             "is installed without CUDA support."
         )
         sys.exit(1)
-
-    if CUDA_VERSION:
+    else:
         major, minor = map(int, CUDA_VERSION.split('.'))
         if major < 12 or (major == 12 and minor < 1):
             print(
