@@ -584,7 +584,7 @@ class BaseGPTQModel(nn.Module):
             model_save_name = model_base_name + ".safetensors"
         else:
             model_save_name = model_base_name + ".bin"
-        logger.info(f"pzs-----{self.qlinear_kernel},===== {self.qlinear_kernel.SUPPORTS_SHARDED}")
+        
         if not self.qlinear_kernel.SUPPORTS_SHARDED and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
