@@ -7,29 +7,29 @@ from typing import List, Union
 
 import torch
 import torch.nn as nn
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 
 logger = getLogger(__name__)
 
-cuda_version = torch.version.cuda
+try:
+    import bitblas  # noqa: E402
+except Exception as e:
+    print(f'eeeeeeeeeeee {type(e)}')
+    cuda_version = torch.version.cuda
+    if cuda_version:
+        major, minor = map(int, cuda_version.split('.'))
+        if major < 12 or (major == 12 and minor < 1):
+            raise EnvironmentError(
+                "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source\n"
+                "to ensure compatibility. Please follow the detailed instructions available at:\n"
+                "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source")
 
-if cuda_version:
-    major, minor = map(int, cuda_version.split('.'))
-    if major < 12 or (major == 12 and minor < 1):
-        logger.warning(
-            "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source\n"
-            "to ensure compatibility. Please follow the detailed instructions available at:\n"
-            "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source"
-        )
-
-import bitblas # noqa: E402
-from bitblas import Matmul, MatmulConfig # noqa: E402
-from bitblas.cache import get_database_path, global_operator_cache # noqa: E402
-from bitblas.quantization.utils import general_compress # noqa: E402
-from .bitblas_target_detector import corrected_auto_detect_nvidia_target # noqa: E402
+from bitblas import Matmul, MatmulConfig  # noqa: E402
+from bitblas.cache import get_database_path, global_operator_cache  # noqa: E402
+from bitblas.quantization.utils import general_compress  # noqa: E402
+from .bitblas_target_detector import corrected_auto_detect_nvidia_target  # noqa: E402
 
 bitblas.set_log_level("INFO")
 BITBLAS_TARGET = corrected_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
