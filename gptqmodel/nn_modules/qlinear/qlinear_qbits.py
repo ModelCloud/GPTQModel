@@ -4,9 +4,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from ...utils.import_utils import QBITS_AVAILABLE
 from logging import getLogger
 
+from gptqmodel.utils.importer import QBITS_AVAILABLE
 
 logger = getLogger(__name__)
 

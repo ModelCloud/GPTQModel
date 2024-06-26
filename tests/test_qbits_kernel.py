@@ -6,16 +6,11 @@ import unittest
 import torch
 from torch import nn
 
-from auto_gptq.nn_modules.qlinear.qlinear_qbits import (
-    BITS_DTYPE_MAPPING,
-    QuantLinear,
-    convert_dtype_torch2str,
-    dequantize_weight,
-    unpack_to_8bit_signed
-)
+
 from intel_extension_for_transformers import qbits
 from parameterized import parameterized
 
+from gptqmodel.nn_modules.qlinear.qlinear_qbits import BITS_DTYPE_MAPPING, convert_dtype_torch2str, QuantLinear, dequantize_weight, unpack_to_8bit_signed
 
 in_features = 256
 out_features = 128
