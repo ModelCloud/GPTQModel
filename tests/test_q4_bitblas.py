@@ -10,9 +10,9 @@ import torch  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear  # noqa: E402
 
 try:
-    from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
+    from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
 except ImportError as e:
-    print(f"[WARNING] Could not load exllama_kernels: {e}")
+    print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
 
 from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402

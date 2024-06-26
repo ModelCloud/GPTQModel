@@ -3,23 +3,20 @@ import operator
 import os
 from functools import reduce
 from logging import getLogger
-
-import torch
-import torch.nn as nn
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-
-logger = getLogger(__name__)
-
 from typing import List, Union
 
 import bitblas
+import torch
+import torch.nn as nn
 from bitblas import Matmul, MatmulConfig
 from bitblas.cache import get_database_path, global_operator_cache
 from bitblas.quantization.utils import general_compress
-from bitblas.utils import auto_detect_nvidia_target
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
+
+logger = getLogger(__name__)
 
 auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
 

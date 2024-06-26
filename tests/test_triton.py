@@ -4,13 +4,13 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import os
-import unittest
+import os  # noqa: E402
+import unittest  # noqa: E402
 
-import torch
-import torch.utils.benchmark as benchmark
-from gptqmodel import GPTQModel
-from transformers import AutoTokenizer
+import torch  # noqa: E402
+import torch.utils.benchmark as benchmark  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 MODEL_ID = "TheBloke/Llama-7B-GPTQ"
 DATASET_ID = "timdettmers/openassistant-guanaco"

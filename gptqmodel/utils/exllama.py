@@ -14,7 +14,7 @@ def exllama_set_max_input_length(model, max_input_length: int):
     """
 
     # The import is set here to avoid a global import. Arguably this is quite ugly, it would be better to have lazy loading.
-    from exllama_kernels import cleanup_buffers_cuda, prepare_buffers
+    from gptqmodel_exllama_kernels import cleanup_buffers_cuda, prepare_buffers
 
     if not model.quantize_config.desc_act:
         raise ValueError(
