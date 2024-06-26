@@ -138,7 +138,7 @@ class BaseGPTQModel(nn.Module):
             pad_token_id = self.config.eos_token_id
 
         if pad_token_id is None:
-            raise ValueError("pad_token and eos_token shouldn't be none.")
+            raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
 
         new_calibration_dataset_batched = [
             collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
