@@ -14,9 +14,9 @@ from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init
 
 try:
-    from exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
+    from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
 except ImportError as e:
-    print(f"[WARNING] Could not load exllama_kernels: {e}")
+    print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
 
 from test_q4_cuda import get_diff
 from transformers import AutoTokenizer  # noqa: E402
