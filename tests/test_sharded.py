@@ -106,7 +106,7 @@ class TestSharded(unittest.TestCase):
             self.assertTrue(len(result) > 0)
 
     def test_save_and_load_unsupports_shard(self):
-        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        model_name = "facebook/opt-125m"
 
         model = GPTQModel.from_pretrained(
             model_name,

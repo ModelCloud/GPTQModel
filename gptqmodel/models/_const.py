@@ -3,7 +3,7 @@ from torch import device
 CPU = device("cpu")
 CUDA_0 = device("cuda:0")
 
-SUPPORTS_MODELS = [
+SUPPORTED_MODELS = [
     "bloom",
     "gptj",
     "gpt2",

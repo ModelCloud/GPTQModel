@@ -31,7 +31,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
                            verify_sharded_model_hashes)
 from ..version import __version__
-from ._const import CPU, CUDA_0, SUPPORTS_MODELS
+from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -751,7 +751,7 @@ class BaseGPTQModel(nn.Module):
         # enforce some values despite user specified
         model_init_kwargs["torch_dtype"] = torch_dtype
 
-        if config.model_type not in SUPPORTS_MODELS:
+        if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         if max_memory:
@@ -880,7 +880,7 @@ class BaseGPTQModel(nn.Module):
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
 
-        if config.model_type not in SUPPORTS_MODELS:
+        if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         if quantize_config is None:
