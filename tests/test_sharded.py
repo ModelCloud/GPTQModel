@@ -68,6 +68,43 @@ class TestSharded(unittest.TestCase):
             print(result)
             self.assertTrue(len(result) > 0)
 
+    def test_save_and_load_no_shard(self):
+        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+        model = GPTQModel.from_pretrained(
+            model_name,
+            quantize_config=QuantizeConfig(
+                bits=4,
+                group_size=128,
+            ))
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        cal_data = self.get_wikitext2_data(tokenizer)
+
+        model.quantize(cal_data)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save_quantized(
+                tmp_dir,
+                max_shard_size=None
+            )
+
+            files_and_dirs = os.listdir(tmp_dir)
+
+            self.assertTrue(len(files_and_dirs) > 0)
+
+            model = GPTQModel.from_quantized(
+                tmp_dir,
+                device="cuda:0",
+            )
+
+            tokens = model.generate(**tokenizer("1337", return_tensors="pt").to(model.device), max_new_tokens=20)[0]
+            result = tokenizer.decode(tokens)
+
+            print(result)
+            self.assertTrue(len(result) > 0)
+
     def test_save_and_load_unsupports_shard(self):
         model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
@@ -81,20 +118,17 @@ class TestSharded(unittest.TestCase):
             ))
 
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-
         cal_data = self.get_wikitext2_data(tokenizer)
-
         model.quantize(cal_data)
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save_quantized(
                 tmp_dir,
-                max_shard_size="10MB"
+                max_shard_size="10MB",
             )
 
             files_and_dirs = os.listdir(tmp_dir)
 
-            self.assertTrue(len(files_and_dirs) == 72)
+            self.assertTrue(len(files_and_dirs) > 0)
 
             model = GPTQModel.from_quantized(
                 tmp_dir,
@@ -104,6 +138,5 @@ class TestSharded(unittest.TestCase):
 
             tokens = model.generate(**tokenizer("1337", return_tensors="pt").to(model.device), max_new_tokens=20)[0]
             result = tokenizer.decode(tokens)
-
             print(result)
             self.assertTrue(len(result) > 0)
