@@ -109,6 +109,7 @@ def make_quant(
     use_triton: bool = False,
     use_marlin: bool = False,
     use_bitblas: bool = False,
+    use_qbits: bool = False,
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
@@ -122,6 +123,7 @@ def make_quant(
         use_triton=use_triton,
         use_marlin=use_marlin,
         use_bitblas=use_bitblas,
+        use_qbits=use_qbits,
         disable_exllama=disable_exllama,
         disable_exllamav2=disable_exllamav2,
     )
@@ -146,7 +148,7 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
-            if (not (desc_act) or group_size == -1) and not use_triton:
+            if (not (desc_act) or group_size == -1) and not use_triton and not use_qbits:
                 new_layer = QuantLinear(
                     bits=bits,
                     group_size=group_size,
@@ -239,7 +241,8 @@ def convert_gptq_v2_to_v1_format(
 
     return model
 
-def select_quant_linear_with_pack(bits: int,
+def select_quant_linear_with_pack(
+    bits: int,
     group_size: int,
     desc_act: bool,
     sym: bool,
@@ -247,7 +250,9 @@ def select_quant_linear_with_pack(bits: int,
     disable_exllama: bool,
     disable_exllamav2: bool ,
     use_marlin: bool ,
-    use_bitblas: bool,):
+    use_bitblas: bool,
+    use_qbits: bool,
+):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
     if use_bitblas:
@@ -262,6 +267,7 @@ def select_quant_linear_with_pack(bits: int,
         disable_exllamav2=disable_exllamav2,
         use_marlin=use_marlin,
         use_bitblas=use_bitblas,
+        use_qbits=use_qbits,
     )
     return QuantLinear
 
@@ -278,6 +284,7 @@ def pack_model(
     force_layer_back_to_cpu: bool = False,
     use_marlin: bool = False,
     use_bitblas: bool = False,
+    use_qbits: bool = False,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
@@ -289,6 +296,7 @@ def pack_model(
         disable_exllamav2=True,
         use_marlin=use_marlin,
         use_bitblas=use_bitblas,
+        use_qbits=use_qbits,
     )
 
     if force_layer_back_to_cpu:
@@ -309,6 +317,7 @@ def pack_model(
         disable_exllamav2=True,
         use_marlin=use_marlin,
         use_bitblas=use_bitblas,
+        use_qbits=use_qbits,
     )
     qlayers = find_layers(model, [QuantLinear])
 
@@ -433,8 +442,12 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
             submodule.post_init()
 
     model_uses_exllama = False
+    model_uses_qbits = False
     for name, submodule in model.named_modules():
-        if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllama":
+        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "qbits":
+            model_uses_qbits = True
+            submodule.post_init()
+        elif isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllama":
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -554,7 +567,8 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
             if isinstance(submodule, BaseQuantLinear) and submodule.QUANT_TYPE == "exllamav2":
                 device = submodule.qweight.device
                 submodule.post_init(temp_dq=model.device_tensors[device])
-    torch.cuda.empty_cache()
+    if not model_uses_qbits:
+        torch.cuda.empty_cache()
 
     return model
 
