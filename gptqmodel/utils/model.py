@@ -21,6 +21,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
 from .importer import select_quant_linear
 
+
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
 formatter = logging.Formatter("%(levelname)s - %(message)s")
@@ -139,7 +140,7 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
-            if (not (desc_act) or group_size == -1) and backend != Backend.TRITON_V2:
+            if (not (desc_act) or group_size == -1) and backend != Backend.TRITON:
                 new_layer = QuantLinear(
                     bits=bits,
                     group_size=group_size,
@@ -311,7 +312,7 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if backend != Backend.TRITON_V2 and warmup_triton:
+    if backend != Backend.TRITON and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )

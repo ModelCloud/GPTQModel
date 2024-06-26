@@ -18,21 +18,45 @@ from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
-                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+from ..quantization.config import (
+    FORMAT,
+    FORMAT_FIELD_JSON,
+    META_FIELD_QUANTIZER,
+    META_QUANTIZER_GPTQMODEL,
+    MIN_VERSION_WITH_V2,
+    QUANTIZE_BLACK_LIST,
+)
 from ..utils.backend import Backend
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
-from ..utils.marlin import (_validate_marlin_compatibility,
-                            _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
-                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
-                           verify_sharded_model_hashes)
+from ..utils.marlin import (
+    _validate_marlin_compatibility,
+    _validate_marlin_device_support,
+    prepare_model_for_marlin_load,
+)
+from ..utils.model import (
+    auto_dtype_from_config,
+    convert_gptq_v1_to_v2_format,
+    convert_gptq_v2_to_v1_format,
+    find_layers,
+    get_checkpoints,
+    get_device,
+    get_module_by_name_prefix,
+    get_module_by_name_suffix,
+    get_moe_layer_modules,
+    gptqmodel_post_init,
+    make_quant,
+    move_to,
+    nested_move_to,
+    pack_model,
+    simple_dispatch_model,
+    verify_model_hash,
+    verify_sharded_model_hashes,
+)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
+
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -1152,7 +1176,7 @@ class BaseGPTQModel(nn.Module):
         model.eval()
 
         # == step6: (optional) warmup triton == #
-        if backend != Backend.TRITON_V2 and warmup_triton:
+        if backend != Backend.TRITON and warmup_triton:
             from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
 
             QuantLinear.warmup(model, seqlen=model.seqlen)

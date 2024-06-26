@@ -5,7 +5,7 @@ class Backend(Enum):
     AUTO = 0  # choose the fastest one based on quant model compatibility
     CUDA_OLD = 1
     CUDA = 2
-    TRITON_V2 = 3
+    TRITON = 3
     EXLLAMA = 4
     EXLLAMA_V2 = 5
     MARLIN = 6

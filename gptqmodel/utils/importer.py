@@ -2,6 +2,7 @@ from logging import getLogger
 
 from .backend import Backend
 
+
 logger = getLogger(__name__)
 
 
@@ -14,7 +15,7 @@ def select_quant_linear(
     backend: Backend,
 ):
     # TODO handle AUTO
-    if backend == Backend.TRITON_V2:
+    if backend == Backend.TRITON:
         logger.info("Using tritonv2 for GPTQ")
         from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
     else:

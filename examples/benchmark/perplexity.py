@@ -2,8 +2,10 @@ import argparse
 import os
 
 import torch
-from gptqmodel.utils import Perplexity, get_backend
 from transformers import AutoTokenizer
+
+from gptqmodel.utils import Perplexity, get_backend
+
 
 if __name__ == "__main__":
     """
@@ -51,7 +53,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use_fast_tokenizer", action="store_true", help="Wheter to use fast tokenizer")
     parser.add_argument("--trust_remote_code", action="store_true", help="Whether to use remote code")
-    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON_V2', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'], help="Whether to use Backend format")
+    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'], help="Whether to use Backend format")
     args = parser.parse_args()
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
