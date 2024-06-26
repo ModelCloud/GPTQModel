@@ -110,6 +110,7 @@ def make_quant(
     desc_act: bool = False,
     sym: bool = True,
     use_cuda_fp16: bool = True,
+    pack: bool = False,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
@@ -118,6 +119,7 @@ def make_quant(
         sym=sym,
         backend=backend,
         format=format,
+        pack=pack,
     )
 
     if isinstance(module, QuantLinear):
@@ -237,7 +239,7 @@ def select_quant_linear_with_pack(bits: int,
     group_size: int,
     desc_act: bool,
     sym: bool,
-    backend: Backend, format: str):
+    backend: Backend, format: str, pack: bool):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
     if backend == Backend.BITBLAS:
@@ -249,7 +251,7 @@ def select_quant_linear_with_pack(bits: int,
         sym=sym,
         backend=backend,
         format=format,
-        pack=True,
+        pack=pack,
     )
     return QuantLinear
 
@@ -273,6 +275,7 @@ def pack_model(
         sym=sym,
         backend=backend,
         format=format,
+        pack=True,
     )
 
     if force_layer_back_to_cpu:
@@ -290,6 +293,7 @@ def pack_model(
         format=format,
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
+        pack=True,
     )
     qlayers = find_layers(model, [QuantLinear])
 
