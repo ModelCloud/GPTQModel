@@ -16,10 +16,9 @@ logger = getLogger(__name__)
 try:
     import bitblas
 except Exception as e:
-    cuda_version = torch.version.cuda
+    cuda_version = "".join(torch.version.cuda.split("."))
     if cuda_version and isinstance(e, OSError):
-        major, minor = map(int, cuda_version.split('.'))
-        if major < 12 or (major == 12 and minor < 1):
+        if int(cuda_version) < 1210:
             raise EnvironmentError(
                 "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source\n"
                 "to ensure compatibility. Please follow the detailed instructions available at:\n"
