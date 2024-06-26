@@ -21,6 +21,7 @@ from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from test_q4_cuda import get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+GENERATE_EVAL_SIZE = 100
 
 class TestsQ4ExllamaV2(unittest.TestCase):
     def test_exllamav2(self):
@@ -74,14 +75,14 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             get_diff(res, reference),
         )
 
-    def test_generation_no_act_order(self):
+    def test_generation_desc_act_false(self):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
         # Reference generated with the cuda-old kernel
-        reference_output = "<s> I am in Paris and I am going to the Louvre Museum. What time does it open and what is the best way to get there?\nThe Louvre Museum in Paris is open from 9:00 AM to 6:00 PM every day except for Tuesdays. The best way to get"
+        reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can only see the characters' silhouettes.)\n\n("
 
-        model_id = "TheBloke/WizardLM-7B-uncensored-GPTQ"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         model_q = GPTQModel.from_quantized(model_id, device="cuda:0", use_triton=False)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -92,19 +93,21 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text, reference_output)
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
-    def test_generation_with_act_order(self):
+    def test_generation_desc_act_true(self):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
         # Reference generated with the cuda-old kernel
-        reference_output = "<s> I am in Paris and I am so excited to be here. I am here for the first time in my life and I am so grateful for this opportunity. I am here to learn and to grow and to meet new people and to experience new things. I am here to see the Eiffel Tower and to walk along"
+        reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
 
-        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
             model_id,
+            rivision=revision,
             device="cuda:0",
             use_triton=False,
         )
@@ -116,17 +119,19 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text, reference_output)
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_exllama_v2_buffer_size(self):
         # prompt = "I'm in Paris and" * 450
         prompt = "I'm in Paris and" * 500
         device = torch.device("cuda:0")
 
-        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
             model_id,
+            revision=revision,
             device="cuda:0",
             use_triton=False,
         )

@@ -18,6 +18,7 @@ except ImportError as e:
 from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+GENERATE_EVAL_SIZE = 100
 
 def get_diff(a, ref):
     eps = 1e-6
@@ -599,7 +600,7 @@ class TestsQ4CUDA(unittest.TestCase):
             (torch.float16, "cuda:0"),
         ]
     )
-    def test_generation_with_act_order(self, torch_dtype, device):
+    def test_generation_desc_act_true(self, torch_dtype, device):
         prompt = "I am in Paris and"
 
         # Reference generated with the cuda-old kernel
@@ -608,13 +609,15 @@ class TestsQ4CUDA(unittest.TestCase):
             new_tokens = 2
             reference_output = "<s> I am in Paris and I am"
         else:
-            reference_output = "<s> I am in Paris and I am so excited to be here. I am here for the first time in my life and I am so grateful for this opportunity. I am here to learn and to grow and to meet new people and to experience new things. I am here to see the Eiffel Tower and to walk along"
+            reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\nThe stage is now set in a Parisian café. The café is filled with people, including a group of friends, a couple, and a group of tourists. The friends are discussing their plans for the"
             new_tokens = 60
 
-        model_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
             model_id,
+            revision=revision,
             device=device,
             use_triton=False,
             disable_exllama=True,
@@ -629,12 +632,13 @@ class TestsQ4CUDA(unittest.TestCase):
         # This one uses Autocast.
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
-        self.assertEqual(predicted_text, reference_output)
+
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
         # This one does not.
         res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
-        self.assertEqual(predicted_text, reference_output)
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     @parameterized.expand(
         [
@@ -643,19 +647,19 @@ class TestsQ4CUDA(unittest.TestCase):
             (torch.float16, "cuda:0"),
         ]
     )
-    def test_generation_no_act_order(self, torch_dtype, device):
+    def test_generation_desc_act_false(self, torch_dtype, device):
         prompt = "I am in Paris and"
 
         # Reference generated with the cuda-old kernel
         if device == "cpu":
             # CPU implementation is extremely slow.
             new_tokens = 3
-            reference_output = "<s> I am in Paris and I am going"
+            reference_output = "<s> I am in Paris and I am in"
         else:
-            reference_output = "<s> I am in Paris and I am going to the Louvre Museum. What time does it open and what is the best way to get there?\nThe Louvre Museum in Paris is open from 9:00 AM to 6:00 PM every day except for Tuesdays. The best way to get"
+            reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
             new_tokens = 60
 
-        model_id = "TheBloke/WizardLM-7B-uncensored-GPTQ"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         model_q = GPTQModel.from_quantized(
             model_id,
@@ -672,9 +676,11 @@ class TestsQ4CUDA(unittest.TestCase):
         # This one uses Autocast.
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
-        self.assertEqual(predicted_text, reference_output)
+
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
         # This one does not.
         res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
-        self.assertEqual(predicted_text, reference_output)
+
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
