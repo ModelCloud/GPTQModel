@@ -4,27 +4,44 @@ import os
 from functools import reduce
 from logging import getLogger
 from typing import List, Union
-
-import bitblas
 import torch
 import torch.nn as nn
-from bitblas import Matmul, MatmulConfig
-from bitblas.cache import get_database_path, global_operator_cache
-from bitblas.quantization.utils import general_compress
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-
-from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 
 logger = getLogger(__name__)
 
-auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
-
-bitblas.set_log_level("INFO")
-BITBLAS_TARGET = auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
-BITBLAS_DATABASE_PATH = get_database_path()
+BITBLAS_TARGET = None
+BITBLAS_DATABASE_PATH = None
 BITBLAS_PROPAGATE_WEIGHTS = False
+
+
+def import_bitblas():
+    global BITBLAS_DATABASE_PATH, BITBLAS_TARGET
+
+    # guard against bitblas pip whl incompatible env
+    try:
+        import bitblas
+    except Exception as e:
+        cuda_version = "".join(torch.version.cuda.split("."))
+        if cuda_version and int(cuda_version) < 1210:
+            raise EnvironmentError(
+                "Bitblas must be manually compiled for CUDA version < 12.1. Please follow the source compile instructions at:\n"
+                "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source")
+        else:
+            raise e
+
+    bitblas.set_log_level("INFO")
+
+    from .bitblas_target_detector import patched_auto_detect_nvidia_target
+    from bitblas import Matmul, MatmulConfig  # noqa: F401
+    from bitblas.cache import get_database_path, global_operator_cache  # noqa: F401
+    from bitblas.quantization.utils import general_compress  # noqa: F401
+
+    BITBLAS_TARGET = patched_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
+    logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
+
+    BITBLAS_DATABASE_PATH = get_database_path()
 
 
 def unpack_qzeros(qzeros, bits):
@@ -79,6 +96,10 @@ class QuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         super().__init__()
+
+        # TODO: remove delayed import after bitblas whl support for 11.7, 11.8, 12.0 are added
+        import_bitblas()
+
         self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self._validate_parameters(group_size, infeatures, outfeatures)
