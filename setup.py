@@ -54,8 +54,8 @@ if BUILD_CUDA_EXT:
         )
         sys.exit(1)
     else:
-        major, minor = map(int, CUDA_VERSION.split('.'))
-        if major < 12 or (major == 12 and minor < 1):
+        cuda_version = int(CUDA_VERSION)
+        if cuda_version < 121:
             print(
                 "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source "
                 "to ensure compatibility. Please follow the detailed instructions available at: "
