@@ -13,13 +13,15 @@ except Exception as e:
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-    use_triton: bool,
-    desc_act: bool,
-    group_size: int,
     bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    use_triton: bool,
     disable_exllama: bool = False,
     disable_exllamav2: bool = False,
     use_marlin: bool = False,
+    use_bitblas: bool = False,
     use_qbits: bool = False,
 ):
     if use_triton:
@@ -32,7 +34,9 @@ def select_quant_linear(
                     f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`."
                 )
             from ..nn_modules.qlinear.qlinear_qbits import QuantLinear
-        if bits == 4 and use_marlin:
+        elif use_bitblas:
+            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear
+        elif bits == 4 and sym and not desc_act and use_marlin:
             from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
         elif bits == 4 and not disable_exllamav2:
             from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear
@@ -44,3 +48,4 @@ def select_quant_linear(
             from ..nn_modules.qlinear.qlinear_cuda import QuantLinear
 
     return QuantLinear
+

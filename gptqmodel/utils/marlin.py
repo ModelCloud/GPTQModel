@@ -21,12 +21,22 @@ def prepare_model_for_marlin_load(
     torch_dtype,
     current_model_save_name,
     device_map,
+    sym: bool,
+    desc_act: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the Marlin format, load it directly.
     if quantize_config.format == FORMAT.MARLIN:
         model_save_name = current_model_save_name
         logger.info(f"Loading a GPTQ model, detected Marlin serialized format at {model_save_name}.")
-        model = convert_to_marlin(model, quant_linear_class, quantize_config, repack=False)
+        model = convert_to_marlin(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
+        accelerate.utils.modeling.load_checkpoint_in_model(
+            model,
+            dtype=torch_dtype,
+            checkpoint=model_save_name,
+            device_map=device_map,
+            offload_state_dict=True,
+            offload_buffers=True,
+        )
     else:
         # Loading the GPTQ checkpoint to do the conversion.
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
@@ -41,7 +51,7 @@ def prepare_model_for_marlin_load(
             offload_buffers=True,
         )
         # Convert model to marlin, repacking weights into Marlin format.
-        model = convert_to_marlin(model, quant_linear_class, quantize_config, repack=True)
+        model = convert_to_marlin(model, quant_linear_class, quantize_config, sym, desc_act, repack=True)
 
         # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
         tied_params = find_tied_parameters(model)
@@ -96,7 +106,7 @@ def _validate_marlin_compatibility(cfg: QuantizeConfig, throwError: bool = False
 
 @torch.no_grad()
 def convert_to_marlin(
-    model, model_quantlinear, quantization_config: QuantizeConfig, repack: bool, strict: bool = False
+    model, model_quantlinear, quantization_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool, strict: bool = False
 ):
     """
     Converts GPTQ-packed weights to the Marlin format. This assumes that the model already meets Marlin kernel constraints.
@@ -124,6 +134,8 @@ def convert_to_marlin(
             new_module = MarlinQuantLinear(
                 bits=4,
                 group_size=module.group_size,
+                sym=sym,
+                desc_act=desc_act,
                 infeatures=module.infeatures,
                 outfeatures=module.outfeatures,
                 bias=module.bias is not None,

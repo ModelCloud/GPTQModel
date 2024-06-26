@@ -2,8 +2,6 @@ from .base import BaseGPTQModel
 
 
 class DbrxConvertedGPTQ(BaseGPTQModel):
-    # dbrx_converted requires true_sequential = False
-    require_true_sequential = False
     # dbrx_converted requires custom model code
     require_trust_remote_code = True
 
