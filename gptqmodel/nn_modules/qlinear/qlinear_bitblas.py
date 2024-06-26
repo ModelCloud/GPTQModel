@@ -10,7 +10,6 @@ import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 
 logger = getLogger(__name__)
@@ -30,6 +29,7 @@ import bitblas # noqa: E402
 from bitblas import Matmul, MatmulConfig # noqa: E402
 from bitblas.cache import get_database_path, global_operator_cache # noqa: E402
 from bitblas.quantization.utils import general_compress # noqa: E402
+from .bitblas_target_detector import corrected_auto_detect_nvidia_target # noqa: E402
 
 bitblas.set_log_level("INFO")
 BITBLAS_TARGET = corrected_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
