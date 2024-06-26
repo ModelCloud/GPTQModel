@@ -14,17 +14,20 @@ from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 logger = getLogger(__name__)
 
 try:
-    import bitblas  # noqa: E402
+    import bitblas
 except Exception as e:
-    print(f'eeeeeeeeeeee {type(e)}')
     cuda_version = torch.version.cuda
-    if cuda_version:
+    if cuda_version and isinstance(e, OSError):
         major, minor = map(int, cuda_version.split('.'))
         if major < 12 or (major == 12 and minor < 1):
             raise EnvironmentError(
                 "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source\n"
                 "to ensure compatibility. Please follow the detailed instructions available at:\n"
                 "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source")
+        else:
+            raise e
+    else:
+        raise e
 
 from bitblas import Matmul, MatmulConfig  # noqa: E402
 from bitblas.cache import get_database_path, global_operator_cache  # noqa: E402
