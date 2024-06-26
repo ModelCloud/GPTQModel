@@ -1,7 +1,6 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -10,10 +9,8 @@ import unittest
 
 import torch
 import torch.utils.benchmark as benchmark
-from transformers import AutoTokenizer
-
 from gptqmodel import Backend, GPTQModel
-
+from transformers import AutoTokenizer
 
 MODEL_ID = "TheBloke/Llama-7B-GPTQ"
 DATASET_ID = "timdettmers/openassistant-guanaco"

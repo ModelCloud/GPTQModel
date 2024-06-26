@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional, Union
 
-from .. import Backend
+from ..utils import Backend
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
 from .base import BaseGPTQModel, QuantizeConfig

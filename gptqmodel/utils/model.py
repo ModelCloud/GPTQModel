@@ -15,12 +15,11 @@ from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from .. import Backend
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
+from .backend import Backend
 from .importer import select_quant_linear
-
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -107,10 +106,10 @@ def make_quant(
     bits: int,
     group_size: int,
     backend: Backend,
+    format: str,
     desc_act: bool = False,
     sym: bool = True,
     use_cuda_fp16: bool = True,
-
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
@@ -118,6 +117,7 @@ def make_quant(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
+        format=format,
     )
 
     if isinstance(module, QuantLinear):
@@ -237,7 +237,7 @@ def select_quant_linear_with_pack(bits: int,
     group_size: int,
     desc_act: bool,
     sym: bool,
-    backend: Backend,):
+    backend: Backend, format: str):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
     if backend == Backend.BITBLAS:
@@ -248,6 +248,8 @@ def select_quant_linear_with_pack(bits: int,
         desc_act=desc_act,
         sym=sym,
         backend=backend,
+        format=format,
+        pack=True,
     )
     return QuantLinear
 
@@ -257,6 +259,7 @@ def pack_model(
     bits,
     group_size,
     backend: Backend,
+    format: str,
     desc_act=False,
     sym: bool = True,
     use_cuda_fp16=True,
@@ -269,6 +272,7 @@ def pack_model(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
+        format=format,
     )
 
     if force_layer_back_to_cpu:
@@ -283,6 +287,7 @@ def pack_model(
         bits,
         group_size,
         backend=backend,
+        format=format,
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
     )

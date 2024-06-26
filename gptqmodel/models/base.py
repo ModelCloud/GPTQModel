@@ -18,45 +18,21 @@ from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (
-    FORMAT,
-    FORMAT_FIELD_JSON,
-    META_FIELD_QUANTIZER,
-    META_QUANTIZER_GPTQMODEL,
-    MIN_VERSION_WITH_V2,
-    QUANTIZE_BLACK_LIST,
-)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
+                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.backend import Backend
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
-from ..utils.marlin import (
-    _validate_marlin_compatibility,
-    _validate_marlin_device_support,
-    prepare_model_for_marlin_load,
-)
-from ..utils.model import (
-    auto_dtype_from_config,
-    convert_gptq_v1_to_v2_format,
-    convert_gptq_v2_to_v1_format,
-    find_layers,
-    get_checkpoints,
-    get_device,
-    get_module_by_name_prefix,
-    get_module_by_name_suffix,
-    get_moe_layer_modules,
-    gptqmodel_post_init,
-    make_quant,
-    move_to,
-    nested_move_to,
-    pack_model,
-    simple_dispatch_model,
-    verify_model_hash,
-    verify_sharded_model_hashes,
-)
+from ..utils.marlin import (_validate_marlin_compatibility,
+                            _validate_marlin_device_support, prepare_model_for_marlin_load)
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
+                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
+                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
+                           verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
-
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -438,22 +414,17 @@ class BaseGPTQModel(nn.Module):
         for module_log in quant_log:
             logger.info(module_log)
 
-        backend = Backend.AUTO
-        if self.quantize_config.format == FORMAT.MARLIN:
-            backend = Backend.MARLIN
-        elif self.quantize_config.format == FORMAT.BITBLAS:
-            backend = Backend.BITBLAS
-
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=backend,
+            backend=Backend.AUTO,
             use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
+            format=self.quantize_config.format,
         )
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
@@ -824,9 +795,6 @@ class BaseGPTQModel(nn.Module):
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
 
-        # TODO: refract this bewildering amount of ugly args @ZX-ModelCloud
-        # combine into Backend.ENUM class of Backend.AUTO, Backend.TRITON, Backend.MARLIN
-        # single arp of backend: Backend = Backend.AUTO (default to auto)
         backend: Backend = Backend.AUTO,
 
         torch_dtype: [str | torch.dtype] = "auto",
@@ -1009,7 +977,8 @@ class BaseGPTQModel(nn.Module):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend,
+                backend=Backend.AUTO,
+                format=quantize_config.format,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
             )
@@ -1072,7 +1041,8 @@ class BaseGPTQModel(nn.Module):
                 group_size=quantize_config.group_size,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
-                backend=Backend.EXLLAMA_V2,
+                backend=Backend.AUTO,
+                format=quantize_config.format,
             )
 
             # Prepare model for marlin load.
@@ -1100,7 +1070,8 @@ class BaseGPTQModel(nn.Module):
                 group_size=quantize_config.group_size,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
-                backend=Backend.EXLLAMA_V2,
+                backend=Backend.AUTO,
+                format=quantize_config.format,
             )
 
             # Prepare model for bitblas load.
@@ -1137,6 +1108,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=quantize_config.desc_act,
             sym=quantize_config.sym,
             backend=backend,
+            format=quantize_config.format,
         )
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
