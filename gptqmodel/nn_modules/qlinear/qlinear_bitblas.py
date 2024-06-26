@@ -49,9 +49,9 @@ def unpack_qzeros(qzeros, bits):
 
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "bitblas"
-    SUPPORTS_BITS = [1, 2, 4]
-    SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SHARDED = False
+    SUPPORTED_BITS = [1, 2, 4]
+    SUPPORTED_DESC_ACT = [False]
+    SUPPORTED_SHARDED = False
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"

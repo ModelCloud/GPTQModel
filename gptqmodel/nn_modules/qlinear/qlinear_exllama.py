@@ -35,7 +35,7 @@ def ext_q4_matmul(x, q4, q4_width):
 
 class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllama"
-    SUPPORTS_BITS = [4]
+    SUPPORTED_BITS = [4]
 
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
