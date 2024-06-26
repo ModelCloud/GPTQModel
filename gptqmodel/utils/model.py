@@ -473,12 +473,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
     if model_uses_exllama:
         # To be honest this is quite ugly, not proud of this.
-        try:
-            from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
-        except ImportError as e:
-            raise ImportError(
-                f"Could not import exllama backend dependencies prepare_buffers, set_tuning_params with the following error: {e}"
-            )
+        from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
 
         device_to_buffers = {}
 

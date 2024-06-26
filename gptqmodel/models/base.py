@@ -499,6 +499,7 @@ class BaseGPTQModel(nn.Module):
 
         if quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
+
             # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
             logger.info("Converting model to BitBlas Format...")
             model = convert_to_bitblas(model, self.qlinear_kernel, quantize_config, quantize_config.sym,

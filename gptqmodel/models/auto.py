@@ -10,6 +10,7 @@ from .cohere import CohereGPTQ
 from .dbrx import DbrxGPTQ
 from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ
+from .deepseek_v2 import DeepSeekV2GPTQ
 from .gemma import GemmaGPTQ
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
@@ -34,7 +35,6 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .deepseek_v2 import DeepSeekV2GPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
