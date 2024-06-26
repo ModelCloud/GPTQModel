@@ -23,8 +23,8 @@ def import_bitblas():
     try:
         import bitblas
     except Exception as e:
-        cuda_version = "".join(torch.version.cuda.split("."))
-        if cuda_version and int(cuda_version) < 1210:
+        from packaging import version
+        if version.parse(torch.version.cuda) < version.parse("12.1"):
             raise EnvironmentError(
                 "Bitblas must be manually compiled for CUDA version < 12.1. Please follow the source compile instructions at:\n"
                 "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source")
