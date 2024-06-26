@@ -9,6 +9,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTED_GROUP_SIZE = []
     SUPPORTED_DESC_ACT = [True, False]
     SUPPORTED_SYM = [True, False]
+    SUPPORTED_SHARDS: bool = True
 
     def validate(self, bits: int, group_size: int, desc_act: bool, sym: bool):
         if self.SUPPORTED_BITS and bits not in self.SUPPORTED_BITS:
