@@ -494,11 +494,11 @@ class BaseGPTQModel(nn.Module):
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
         if quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
             # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
             logger.info("Converting model to BitBlas Format...")
             model = convert_to_bitblas(model, self.qlinear_kernel, quantize_config, quantize_config.sym,
                                        quantize_config.desc_act, repack=True)
-            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
             self.qlinear_kernel = BitBLASQuantLinear
         if model_base_name is None:
             model_base_name = (
@@ -585,6 +585,7 @@ class BaseGPTQModel(nn.Module):
             model_save_name = model_base_name + ".safetensors"
         else:
             model_save_name = model_base_name + ".bin"
+
         if not self.qlinear_kernel.SUPPORTED_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None

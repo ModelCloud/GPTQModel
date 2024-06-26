@@ -10,6 +10,7 @@ import unittest
 
 from gptqmodel import GPTQModel
 from gptqmodel.quantization import QuantizeConfig
+from gptqmodel.quantization.config import FORMAT
 from transformers import AutoTokenizer
 
 
@@ -113,7 +114,7 @@ class TestSharded(unittest.TestCase):
             quantize_config=QuantizeConfig(
                 bits=4,
                 group_size=128,
-                format="bitblas",
+                format=FORMAT.BITBLAS,
                 desc_act=False,
             ))
 
