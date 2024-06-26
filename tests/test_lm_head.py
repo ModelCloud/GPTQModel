@@ -4,13 +4,13 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import random
-import unittest
+import random  # noqa: E402
+import unittest  # noqa: E402
 
-import numpy
-import torch
-from gptqmodel import GPTQModel
-from transformers import AutoTokenizer
+import numpy  # noqa: E402
+import torch  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestLmHead(unittest.TestCase):
@@ -19,7 +19,7 @@ class TestLmHead(unittest.TestCase):
 
     def setup(self):
         seed = 898
-        # stabilize generation
+       # stabilize generation
         torch.manual_seed(seed)
         numpy.random.seed(seed)
         random.seed(seed)
@@ -33,7 +33,7 @@ class TestLmHead(unittest.TestCase):
 
         model = GPTQModel.from_quantized(self.MODEL_ID, use_safetensors=True, device=self.DEVICE)
 
-        # validate lm_head is loaded as quantized layer
+       # validate lm_head is loaded as quantized layer
         assert model.model.lm_head.__class__.__name__ == "QuantLinear"
 
         res = model.model.generate(
@@ -44,5 +44,5 @@ class TestLmHead(unittest.TestCase):
         print(f"prompt: {prompt}")
         print(f"result: {res_str}")
 
-        # validated on 4090 and a100 + cuda 12.4 + torch 2.2.2 + transformers 4.40.1
+       # validated on 4090 and a100 + cuda 12.4 + torch 2.2.2 + transformers 4.40.1
         assert "My name is Lewis and I like to play football." in res_str

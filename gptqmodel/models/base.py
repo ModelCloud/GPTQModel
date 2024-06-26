@@ -137,14 +137,18 @@ class BaseGPTQModel(nn.Module):
         if not pad_token_id:
             pad_token_id = self.config.eos_token_id
 
-        new_calibration_dataset = [
+        if pad_token_id is None:
+            raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
+
+        new_calibration_dataset_batched = [
             collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
             for start in range(0, len(new_calibration_dataset), batch_size)
         ]
-        for new_example in new_calibration_dataset:
+
+        for new_example in new_calibration_dataset_batched:
             del new_example["labels"]
 
-        return new_calibration_dataset
+        return new_calibration_dataset_batched
 
     @torch.inference_mode()
     def quantize(

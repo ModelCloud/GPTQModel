@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from exllama_kernels import make_q4, q4_matmul
+from gptqmodel_exllama_kernels import make_q4, q4_matmul
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)

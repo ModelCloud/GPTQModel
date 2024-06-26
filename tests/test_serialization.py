@@ -4,13 +4,13 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import json
-import os
-import tempfile
-import unittest
+import json  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
 
-from gptqmodel import GPTQModel
-from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON, QUANT_CONFIG_FILENAME
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON, QUANT_CONFIG_FILENAME  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
