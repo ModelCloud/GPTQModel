@@ -33,8 +33,10 @@ from bitblas.cache import get_database_path, global_operator_cache  # noqa: E402
 from bitblas.quantization.utils import general_compress  # noqa: E402
 from .bitblas_target_detector import corrected_auto_detect_nvidia_target  # noqa: E402
 
+auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
+
 bitblas.set_log_level("INFO")
-BITBLAS_TARGET = corrected_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
+BITBLAS_TARGET = auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
 logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
 BITBLAS_DATABASE_PATH = get_database_path()
 BITBLAS_PROPAGATE_WEIGHTS = False
