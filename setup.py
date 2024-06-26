@@ -54,6 +54,15 @@ if BUILD_CUDA_EXT:
         )
         sys.exit(1)
 
+    if CUDA_VERSION:
+        major, minor = map(int, CUDA_VERSION.split('.'))
+        if major < 12 or (major == 12 and minor < 1):
+            print(
+                "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source "
+                "to ensure compatibility. Please follow the detailed instructions available at: "
+                "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source"
+            )
+
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if not PYPI_RELEASE:
         common_setup_kwargs["version"] += f"+cu{CUDA_VERSION}"
