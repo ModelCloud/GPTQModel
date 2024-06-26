@@ -4,17 +4,17 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import copy
-import unittest
+import copy  # noqa: E402
+import unittest  # noqa: E402
 
 # isort: off
-import torch
-import torch.nn as nn
-import gptqmodel_marlin_cuda
+import torch # noqa: E402
+import torch.nn as nn # noqa: E402
+import gptqmodel_marlin_cuda # noqa: E402
 # isort: on
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight
+from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight  # noqa: E402
 
 
 def gen_quant4(k, n, groupsize=-1):

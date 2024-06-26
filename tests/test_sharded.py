@@ -4,13 +4,13 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import os
-import tempfile
-import unittest
+import os  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
 
-from gptqmodel import GPTQModel
-from gptqmodel.quantization import QuantizeConfig
-from transformers import AutoTokenizer
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.quantization import QuantizeConfig  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestSharded(unittest.TestCase):

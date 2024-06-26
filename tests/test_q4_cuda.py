@@ -7,7 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearCudaOld
+from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearCudaOld  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 try:
