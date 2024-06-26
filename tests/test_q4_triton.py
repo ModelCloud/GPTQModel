@@ -17,7 +17,7 @@ except ImportError as e:
 from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-size = 100
+GENERATE_EVAL_SIZE = 100
 
 class TestsQ4Triton(unittest.TestCase):
     def test_generation_desc_act_false(self):
@@ -50,13 +50,13 @@ class TestsQ4Triton(unittest.TestCase):
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
         # This one does not.
         res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_generation_desc_act_true(self):
         prompt = "I am in Paris and"
@@ -90,4 +90,4 @@ class TestsQ4Triton(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])

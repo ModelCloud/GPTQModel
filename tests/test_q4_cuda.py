@@ -18,7 +18,7 @@ except ImportError as e:
 from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-size = 100
+GENERATE_EVAL_SIZE = 100
 
 def get_diff(a, ref):
     eps = 1e-6
@@ -633,12 +633,12 @@ class TestsQ4CUDA(unittest.TestCase):
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
         # This one does not.
         res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     @parameterized.expand(
         [
@@ -677,10 +677,10 @@ class TestsQ4CUDA(unittest.TestCase):
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
         # This one does not.
         res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])

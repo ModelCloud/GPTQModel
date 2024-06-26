@@ -1053,7 +1053,7 @@ CUDA_OLD_REFERENCE = torch.Tensor(
     ]
 ).to(torch.float16)
 
-size = 100
+GENERATE_EVAL_SIZE = 100
 
 
 class TestsQ4Exllama(unittest.TestCase):
@@ -1185,7 +1185,7 @@ class TestsQ4Exllama(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_generation_desc_act_true(self):
         prompt = "I am in Paris and"
@@ -1213,7 +1213,7 @@ class TestsQ4Exllama(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_multigpu(self):
         # TODO

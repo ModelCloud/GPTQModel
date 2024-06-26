@@ -21,7 +21,7 @@ from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from test_q4_cuda import get_diff
 from transformers import AutoTokenizer  # noqa: E402
 
-size = 100
+GENERATE_EVAL_SIZE = 100
 
 class TestsQ4ExllamaV2(unittest.TestCase):
     def test_exllamav2(self):
@@ -93,7 +93,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_generation_desc_act_true(self):
         prompt = "I am in Paris and"
@@ -119,7 +119,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text[:size], reference_output[:size])
+        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
     def test_exllama_v2_buffer_size(self):
         # prompt = "I'm in Paris and" * 450
