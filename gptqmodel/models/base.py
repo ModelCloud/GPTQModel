@@ -20,6 +20,7 @@ from transformers.utils.generic import ContextManagers
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+from ..utils.backend import Backend
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
@@ -76,8 +77,6 @@ class BaseGPTQModel(nn.Module):
         model: PreTrainedModel,
         quantized: bool,
         quantize_config: QuantizeConfig,
-        # TODO: remove is_triton_backend arg..why? doesn't pass smell test @ZX-ModelCloud
-        is_triton_backend: bool = False,
         qlinear_kernel: nn.Module = None,
     ):
         super().__init__()
@@ -87,8 +86,6 @@ class BaseGPTQModel(nn.Module):
         self._quantized = quantized
         self.quantize_config = quantize_config
         self.config = self.model.config
-
-        self.is_triton_backend = is_triton_backend
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
@@ -152,8 +149,8 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
 
-        # TODO: remove use_triton and use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
-        use_triton: bool = False,
+        # TODO: remove use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
+        backend: Backend = Backend.EXLLAMA,
         use_cuda_fp16: bool = True,
 
         autotune_warmup_after_quantized: bool = False,
@@ -423,13 +420,14 @@ class BaseGPTQModel(nn.Module):
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            use_triton=use_triton,
+            backend=backend,
             use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
-            use_marlin=self.quantize_config.format == FORMAT.MARLIN,
-            use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
+            # TODO There is confusion between backend and quant_config.format.
+            # use_marlin=self.quantize_config.format == FORMAT.MARLIN,
+            # use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
         )
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
@@ -803,11 +801,7 @@ class BaseGPTQModel(nn.Module):
         # TODO: refract this bewildering amount of ugly args @ZX-ModelCloud
         # combine into Backend.ENUM class of Backend.AUTO, Backend.TRITON, Backend.MARLIN
         # single arp of backend: Backend = Backend.AUTO (default to auto)
-        use_triton: bool = True,
-        use_marlin: bool = True,
-        use_bitblas: bool = False,
-        disable_exllama: bool = False,
-        disable_exllamav2: bool = False,
+        backend: Backend = Backend.AUTO,
 
         torch_dtype: [str | torch.dtype] = "auto",
         use_cuda_fp16: bool = True,
@@ -822,13 +816,6 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         """load quantized model from local disk"""
-        # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
-        if disable_exllama is None:
-            if disable_exllamav2:
-                disable_exllama = False
-            else:
-                disable_exllama = True
-
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
@@ -858,12 +845,6 @@ class BaseGPTQModel(nn.Module):
             "_commit_hash": commit_hash,
         }
 
-        if not disable_exllamav2 and not disable_exllama:
-            logger.warning(
-                "You have activated both exllama and exllamav2 kernel. Setting disable_exllama to True and keeping disable_exllamav2 to False"
-            )
-            disable_exllama = True
-
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
             model_name_or_path,
@@ -889,20 +870,20 @@ class BaseGPTQModel(nn.Module):
 
         if quantize_config.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            use_marlin = True
+            backend = Backend.MARLIN
 
         marlin_compatible = _validate_marlin_device_support()
 
-        if not use_marlin:
+        if backend != Backend.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)
             if unsupported is None and marlin_compatible:
                 logger.info(
-                    "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but use_marlin is False. We recommend using `use_marlin=True` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., use_marlin=True)`."
+                    "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but backend is not Backend.MARLIN. We recommend using `backend=Backend.MARLIN` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., backend=Backend.MARLIN)`."
                 )
 
         if quantize_config.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            use_bitblas = True
+            backend = Backend.BITBLAS
 
         if model_basename is None:
             if quantize_config.model_file_base_name:
@@ -1002,13 +983,12 @@ class BaseGPTQModel(nn.Module):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                use_triton=use_triton,
-                disable_exllama=disable_exllama,
-                disable_exllamav2=disable_exllamav2,
+                backend=backend,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
-                use_marlin=quantize_config.format == FORMAT.MARLIN,
-                use_bitblas=quantize_config.format == FORMAT.BITBLAS,
+                # TODO There is confusion between backend and quant_config.format.
+                # use_marlin=self.quantize_config.format == FORMAT.MARLIN,
+                # use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
             )
             model.tie_weights()
 
@@ -1046,14 +1026,14 @@ class BaseGPTQModel(nn.Module):
                 no_split_module_classes=[cls.layer_type],
             )
 
-        if use_marlin:
+        if backend == Backend.MARLIN:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `use_marlin=True`.'
+                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=Backend.MARLIN`.'
                 )
 
             # Validate the model can run in Marlin.
@@ -1069,11 +1049,7 @@ class BaseGPTQModel(nn.Module):
                 group_size=quantize_config.group_size,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
-                use_triton=use_triton,
-                disable_exllama=disable_exllama,
-                disable_exllamav2=disable_exllamav2,
-                use_marlin=False,
-                use_bitblas=False,
+                backend=Backend.EXLLAMA_V2,
             )
 
             # Prepare model for marlin load.
@@ -1089,7 +1065,7 @@ class BaseGPTQModel(nn.Module):
                 sym=quantize_config.sym,
             )
 
-        if use_bitblas:
+        if backend == Backend.BITBLAS:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
@@ -1101,11 +1077,7 @@ class BaseGPTQModel(nn.Module):
                 group_size=quantize_config.group_size,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
-                use_triton=use_triton,
-                disable_exllama=disable_exllama,
-                disable_exllamav2=disable_exllamav2,
-                use_marlin=False,
-                use_bitblas=False,
+                backend=Backend.EXLLAMA_V2,
             )
 
             # Prepare model for bitblas load.
@@ -1123,7 +1095,7 @@ class BaseGPTQModel(nn.Module):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if not (use_marlin or use_bitblas):
+        if backend != Backend.MARLIN or backend != Backend.BITBLAS:
             accelerate.utils.modeling.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
@@ -1141,11 +1113,7 @@ class BaseGPTQModel(nn.Module):
             group_size=quantize_config.group_size,
             desc_act=quantize_config.desc_act,
             sym=quantize_config.sym,
-            use_triton=use_triton,
-            disable_exllama=disable_exllama,
-            disable_exllamav2=disable_exllamav2,
-            use_marlin=use_marlin,
-            use_bitblas=use_bitblas,
+            backend=backend,
         )
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
@@ -1184,7 +1152,7 @@ class BaseGPTQModel(nn.Module):
         model.eval()
 
         # == step6: (optional) warmup triton == #
-        if use_triton and warmup_triton:
+        if backend != Backend.TRITON_V2 and warmup_triton:
             from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
 
             QuantLinear.warmup(model, seqlen=model.seqlen)
@@ -1193,7 +1161,6 @@ class BaseGPTQModel(nn.Module):
             model,
             quantized=True,
             quantize_config=quantize_config,
-            is_triton_backend=use_triton,
             qlinear_kernel=qlinear_kernel,
         )
 

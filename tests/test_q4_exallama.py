@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel import Backend
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -1065,9 +1067,7 @@ class TestsQ4Exllama(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            use_triton=False,
-            disable_exllama=False,
-            disable_exllamav2=True,
+            backend=Backend.EXLLAMA,
         )
 
         linear = linear_class(
@@ -1129,9 +1129,7 @@ class TestsQ4Exllama(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=False,
-            disable_exllama=False,
-            disable_exllamav2=True,
+            backend=Backend.EXLLAMA,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1166,9 +1164,7 @@ class TestsQ4Exllama(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=False,
-            disable_exllama=False,
-            disable_exllamav2=True,
+            backend=Backend.EXLLAMA,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1192,9 +1188,7 @@ class TestsQ4Exllama(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=False,
-            disable_exllama=False,
-            disable_exllamav2=True,
+            backend=Backend.EXLLAMA,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 

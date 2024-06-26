@@ -16,7 +16,7 @@ try:
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import Backend, GPTQModel  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from test_q4_cuda import get_diff
 from transformers import AutoTokenizer  # noqa: E402
@@ -36,7 +36,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            use_triton=False,
+            backend=Backend.EXLLAMA_V2,
         )
 
         linear = linear_class(
@@ -83,7 +83,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         model_id = "TheBloke/WizardLM-7B-uncensored-GPTQ"
 
-        model_q = GPTQModel.from_quantized(model_id, device="cuda:0", use_triton=False)
+        model_q = GPTQModel.from_quantized(model_id, device="cuda:0")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
@@ -106,7 +106,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=False,
+            backend=Backend.EXLLAMA_V2,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -128,7 +128,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=False,
+            backend=Backend.EXLLAMA_V2,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)

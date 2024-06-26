@@ -65,7 +65,7 @@ def main():
 
     # quantize model, the calibration_dataset should be list of dict whose keys contains "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
-    model.quantize(traindataset, use_triton=False)
+    model.quantize(traindataset)
 
     # save quantized model
     model.save_quantized(quantized_model_dir)
@@ -74,7 +74,7 @@ def main():
     model.save_quantized(quantized_model_dir, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0", use_triton=False)
+    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))

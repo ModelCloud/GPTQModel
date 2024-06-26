@@ -1,5 +1,7 @@
 from logging import getLogger
 
+from .backend import Backend
+
 logger = getLogger(__name__)
 
 
@@ -9,23 +11,20 @@ def select_quant_linear(
     group_size: int,
     desc_act: bool,
     sym: bool,
-    use_triton: bool,
-    disable_exllama: bool = False,
-    disable_exllamav2: bool = False,
-    use_marlin: bool = False,
-    use_bitblas: bool = False,
+    backend: Backend,
 ):
-    if use_triton:
+    # TODO handle AUTO
+    if backend == Backend.TRITON_V2:
         logger.info("Using tritonv2 for GPTQ")
         from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
     else:
-        if use_bitblas:
+        if backend == Backend.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear
-        elif bits == 4 and sym and not desc_act and use_marlin:
+        elif bits == 4 and sym and not desc_act and backend == Backend.MARLIN:
             from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
-        elif bits == 4 and not disable_exllamav2:
+        elif bits == 4 and backend == Backend.EXLLAMA_V2:
             from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear
-        elif bits == 4 and not disable_exllama:
+        elif bits == 4 and backend == Backend.EXLLAMA:
             from ..nn_modules.qlinear.qlinear_exllama import QuantLinear
         elif not desc_act or group_size == -1:
             from ..nn_modules.qlinear.qlinear_cuda_old import QuantLinear

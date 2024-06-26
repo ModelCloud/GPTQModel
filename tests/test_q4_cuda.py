@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel import Backend
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -616,9 +618,7 @@ class TestsQ4CUDA(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device=device,
-            use_triton=False,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.CUDA,
             torch_dtype=torch_dtype,
         )
 
@@ -660,9 +660,7 @@ class TestsQ4CUDA(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device=device,
-            use_triton=False,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.CUDA,
             torch_dtype=torch_dtype,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)

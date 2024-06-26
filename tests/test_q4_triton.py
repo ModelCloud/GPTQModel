@@ -14,7 +14,7 @@ try:
 except ImportError as e:
     print(f"[WARNING] Could not load exllama_kernels: {e}")
 
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import Backend, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
@@ -30,9 +30,7 @@ class TestsQ4Triton(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=True,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.TRITON_V2,
             torch_dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
@@ -67,9 +65,7 @@ class TestsQ4Triton(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=True,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.TRITON_V2,
         )
         for _, submodule in model_q.named_modules():
             if isinstance(submodule, TritonV2QuantLinear):
