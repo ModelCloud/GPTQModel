@@ -20,8 +20,8 @@ if cuda_version:
     major, minor = map(int, cuda_version.split('.'))
     if major < 12 or (major == 12 and minor < 1):
         logger.warning(
-            "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source "
-            "to ensure compatibility. Please follow the detailed instructions available at: "
+            "You are running bitblas with CUDA version lower than 12.1. It is recommended to build bitblas from source\n"
+            "to ensure compatibility. Please follow the detailed instructions available at:\n"
             "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source"
         )
 
