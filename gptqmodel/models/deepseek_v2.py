@@ -16,19 +16,18 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
     layer_type = "DeepseekV2DecoderLayer"
     layer_modules = [
         # included in layer 0-59
-        ["self_attn.q_a_proj", "self_attn.q_b_proj"],
-        ["self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
 
         # included in layer 0
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
 
-        # included in layer 1-59
-        ["mlp.shared_experts.up_proj", "mlp.shared_experts.gate_proj"],
-        ["mlp.shared_experts.down_proj"],
-
         # included in layer 1-59, uses dynamic_expert_index
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
+
+        # included in layer 1-59
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
     ]
