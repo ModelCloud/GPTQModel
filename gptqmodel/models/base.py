@@ -174,7 +174,6 @@ class BaseGPTQModel(nn.Module):
         batch_size: int = 1,
 
         # TODO: remove use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
-        backend: Backend = Backend.EXLLAMA,
         use_cuda_fp16: bool = True,
 
         autotune_warmup_after_quantized: bool = False,
@@ -439,6 +438,12 @@ class BaseGPTQModel(nn.Module):
         for module_log in quant_log:
             logger.info(module_log)
 
+        backend = Backend.AUTO
+        if self.quantize_config.format == FORMAT.MARLIN:
+            backend = Backend.MARLIN
+        elif self.quantize_config.format == FORMAT.BITBLAS:
+            backend = Backend.BITBLAS
+
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
@@ -449,9 +454,6 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
-            # TODO There is confusion between backend and quant_config.format.
-            # use_marlin=self.quantize_config.format == FORMAT.MARLIN,
-            # use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
         )
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
@@ -1010,9 +1012,6 @@ class BaseGPTQModel(nn.Module):
                 backend=backend,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
-                # TODO There is confusion between backend and quant_config.format.
-                # use_marlin=self.quantize_config.format == FORMAT.MARLIN,
-                # use_bitblas=self.quantize_config.format == FORMAT.BITBLAS,
             )
             model.tie_weights()
 
