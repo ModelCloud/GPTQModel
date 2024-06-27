@@ -61,7 +61,7 @@ class TestPerplexity(unittest.TestCase):
         print(f"Native PPL: {self.native_ppl}")
 
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790
-        assert self.native_ppl < 9.0
+        assert self.native_ppl < 8.5
 
     def get_wikitext2_data(self, n_samples=1024):
         from datasets import load_dataset
@@ -126,4 +126,4 @@ class TestPerplexity(unittest.TestCase):
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 8.7863, FORMAT.MARLIN ppl == 9.0036
-            assert abs(quantized_ppl - self.native_ppl) < 1
+            assert abs(quantized_ppl - self.native_ppl) < 0.6
