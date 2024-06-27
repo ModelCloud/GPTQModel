@@ -7,8 +7,13 @@ from setuptools import find_packages, setup
 os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
 
+version_vars = {}
+exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
+gptqmodel_version = version_vars['version']
+
+
 common_setup_kwargs = {
-    "version": "0.9.1",
+    "version": gptqmodel_version,
     "name": "gptqmodel",
     "author": "ModelCloud",
     "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",

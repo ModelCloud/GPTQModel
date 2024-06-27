@@ -19,6 +19,9 @@ jobs:
       - name: Compile
         run: python setup.py bdist_wheel
 
+      - name: Show dist folder
+        run: ls -alh dist
+
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -43,10 +46,13 @@ jobs:
           name: artifact
           path: dist
 
+      - name: Show dist folder
+        run: ls -alh dist
+
       - name: Install wheel
         run: |
           # install only the last version
-          pip install dist/*VERSION.whl
+          pip install dist/*.whl
 
       - name: Find suitable GPU
         run: |
