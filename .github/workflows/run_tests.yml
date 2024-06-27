@@ -77,14 +77,64 @@ jobs:
 
       - name: Run tests group 1
         if: matrix.test-group == 'gpu_group1'
-        run: ls tests/test_perplexity.py
+        run: pytest tests/test_perplexity.py
 
       - name: Run test_lm_head.py
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: ls tests/asdasdead.py
+        run: pytest tests/test_lm_head.py
 
       - name: Run test_q4_exallama.py
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: ls tests/test_q4_exallama.py
+        run: pytest tests/test_q4_exallama.py
+
+      - name: Run test_q4_exallama_v2.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_exallama_v2.py
+
+      - name: Run test_q4_marlin.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_marlin.py
+
+      - name: Run test_q4_triton.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_triton.py
+
+      - name: Run test_repacking.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_repacking.py
+
+      - name: Run test_serialization.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_serialization.py
+
+      - name: Run test_sharded.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_sharded.py
+
+      - name: Run test_triton.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_triton.py
+
+      - name: Run test_quant_formats.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_quant_formats.py
+
+      - name: Run test_q4_cuda.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_cuda.py
+
+      - name: Run test_q4_bitblas.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_bitblas.py
