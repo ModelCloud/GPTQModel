@@ -83,27 +83,29 @@ jobs:
         if: matrix.test-group == 'gpu_group2'
         shell: bash
         run: |
-          declare -a failed_tests
-          declare -A test_durations
-
+          run_log_success=()
+          run_log_fail=()
+          
           run_test() {
-              local start_time=$(date +%s)
+              start_time=$(date +%s)
               echo -e "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
-              pytest tests/$1
-              local test_result=$?
-              local end_time=$(date +%s)
-              local duration=$((end_time - start_time))
-              if [ $test_result -ne 0 ]; then
-                  failed_tests+=($1)
-                  test_durations[$1]="\033[1;31m${duration}\033[0m"
-              else
-                  test_durations[$1]="\033[1;32m${duration}\033[0m"
-              fi
-              echo -e "Finished $1 in ${test_durations[$1]} seconds."
+          
+              ls tests/$1
+              result=$?
+          
+              end_time=$(date +%s)
+              duration=$((end_time - start_time))
+          
               echo -e "========================================\n\n\n"
+              log_entry="$1,$duration,$result"
+              if [ "$result" -eq 0 ]; then
+                  run_log_success+=("$log_entry")
+              else
+                  run_log_fail+=("$log_entry")
+              fi
           }
-
+          
           run_test test_lm_head.py
           run_test test_q4_exallama.py
           run_test test_q4_exallama_v2.py
@@ -113,26 +115,42 @@ jobs:
           run_test test_serialization.py
           run_test test_sharded.py
           run_test test_triton.py
+          run_test 123213123
           run_test test_quant_formats.py
           run_test test_q4_cuda.py
           run_test test_q4_bitblas.py
-
-          if [ ${#failed_tests[@]} -ne 0 ]; then
-              echo -e "\033[1;31mTests failed:\033[0m"
-              for test in "${failed_tests[@]}"
-              do
-                  echo "$test"
-              done
-              exit 1
-          else
-              echo "All tests passed."
-          fi
-
-          echo "Test durations:"
-          for test in "${!test_durations[@]}"
-          do
-              echo -e "$test: ${test_durations[$test]} seconds"
+          
+          max_length=0
+          for log in "${run_log_success[@]}" "${run_log_fail[@]}"; do
+              IFS=',' read -r test_name duration result <<< "$log"
+              length=${#test_name}
+              if [[ $length -gt $max_length ]]; then
+                  max_length=$length
+              fi
           done
+          
+          save_log() {
+              for log in "$@"; do
+                  IFS=',' read -r test_name duration result <<< "$log"
+                  color_code="\033[0;32m"
+                  result_text="Succeed"
+                  if [ "$result" -ne 0 ]; then
+                      color_code="\033[0;31m"
+                      result_text="Failed"
+                  fi
+                  printf "$color_code%-*s\tDuration: %4ds\tResult: $result_text\033[0m\n" $((max_length + 4)) "$test_name" $duration >> log.log
+              done
+          }
+          
+          # Save to log file
+          save_log "${run_log_success[@]}"
+          save_log "${run_log_fail[@]}"
 
+      - name: Print log
+        if: matrix.test-group == 'gpu_group2'
+        shell: bash
+        run: |
+          echo -e "\nTest Results:"
+          cat log.log
 
 
