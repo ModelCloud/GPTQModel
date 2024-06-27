@@ -14,12 +14,13 @@ jobs:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
       - name: Checkout Codes
+        id: check
         uses: actions/checkout@v4
 
       - name: Print results1
-        continue-on-error: true
         run: |
-          echo ${{ steps }}
+          name=check
+          echo ${{ steps[$name].outcome }}
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -161,4 +162,12 @@ jobs:
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
         run: |
-          echo $steps
+          steps=(test_perplexity test_lm_head test_q4_exallama test_q4_exallama_v2 test_q4_marlin test_q4_triton test_repacking test_serialization test_sharded test_triton test_quant_formats test_q4_cuda test_q4_bitblas)
+          for step in "${steps[@]}"; do
+            outcome="${{ steps.$step.outcome }}"
+            if [ "$outcome" == "success" ]; then
+              echo -e "\e[32m${step} Result: $outcome\e[0m"
+            else
+              echo -e "\e[31m${step} Result: $outcome\e[0m"
+            fi
+          done
