@@ -14,6 +14,7 @@ jobs:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
       - name: test
+        shell: bash
         run: |
           ls tests/asdsad
           result=$?
