@@ -75,46 +75,122 @@ jobs:
           fi
 
       - name: Run tests group 1
+        id: test_perplexity
         if: matrix.test-group == 'gpu_group1'
         run: pytest tests/test_perplexity.py
 
-      - name: Run tests group 2
+      - name: Run test_lm_head.py
+        id: test_lm_head
+        continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        shell: bash
-        run: |
-          declare -a failed_tests
-          
-          run_test() {
-              echo -e "\033[1;34mRunning $1...\033[0m"
-              echo "========================================"
-              pytest tests/$1
-              if [ $? -ne 0 ]; then
-                  failed_tests+=($1)
-              fi
-              echo -e "\033[1;32mFinished $1\033[0m"
-              echo -e "========================================\n\n\n"
-          }
-          
-          run_test test_lm_head.py
-          run_test test_q4_exallama.py
-          run_test test_q4_exallama_v2.py
-          run_test test_q4_marlin.py
-          run_test test_q4_triton.py
-          run_test test_repacking.py
-          run_test test_serialization.py
-          run_test test_sharded.py
-          run_test test_triton.py
-          run_test test_quant_formats.py
-          run_test test_q4_cuda.py
-          
-          if [ ${#failed_tests[@]} -ne 0 ]; then
-              echo -e "\033[1;31mTests failed:\033[0m"
-              for test in "${failed_tests[@]}"
-              do
-                  echo "$test"
-              done
-              exit 1
-          else
-              echo "All tests passed."
-          fi
+        run: pytest tests/test_lm_head.py
 
+      - name: Run test_q4_exallama.py
+        id: test_q4_exallama
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_exallama.py
+
+      - name: Run test_q4_exallama_v2.py
+        id: test_q4_exallama_v2
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_exallama_v2.py
+
+      - name: Run test_q4_marlin.py
+        id: test_q4_marlin
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_marlin.py
+
+      - name: Run test_q4_triton.py
+        id: test_q4_triton
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_triton.py
+
+      - name: Run test_repacking.py
+        id: test_repacking
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_repacking.py
+
+      - name: Run test_serialization.py
+        id: test_serialization
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_serialization.py
+
+      - name: Run test_sharded.py
+        id: test_sharded
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_sharded.py
+
+      - name: Run test_triton.py
+        id: test_triton
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_triton.py
+
+      - name: Run test_quant_formats.py
+        id: test_quant_formats
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_quant_formats.py
+
+      - name: Run test_q4_cuda.py
+        id: test_q4_cuda
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_cuda.py
+
+      - name: Run test_q4_bitblas.py
+        id: test_q4_bitblas
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_bitblas.py
+
+      - name: Print results
+        continue-on-error: true
+        shell: bash
+        if: matrix.test-group == 'gpu_group2'
+        run: |
+          declare -A step_outcomes
+          step_outcomes=(
+            [test_lm_head]="${{ steps.test_lm_head.outcome }}"
+            [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
+            [test_q4_exallama_v2]="${{ steps.test_q4_exallama_v2.outcome }}"
+            [test_q4_marlin]="${{ steps.test_q4_marlin.outcome }}"
+            [test_q4_triton]="${{ steps.test_q4_triton.outcome }}"
+            [test_repacking]="${{ steps.test_repacking.outcome }}"
+            [test_serialization]="${{ steps.test_serialization.outcome }}"
+            [test_sharded]="${{ steps.test_sharded.outcome }}"
+            [test_triton]="${{ steps.test_triton.outcome }}"
+            [test_quant_formats]="${{ steps.test_quant_formats.outcome }}"
+            [test_q4_cuda]="${{ steps.test_q4_cuda.outcome }}"
+            [test_q4_bitblas]="${{ steps.test_q4_bitblas.outcome }}"
+          )
+  
+          max_length=0
+          for step in "${!step_outcomes[@]}"; do
+            length=${#step}
+            if [[ $length -gt $max_length ]]; then
+              max_length=$length
+            fi
+          done
+
+          error_occurred=0
+          for step in "${!step_outcomes[@]}"; do
+            outcome="${step_outcomes[$step]}"
+            if [ "$outcome" == "success" ]; then
+              printf "\e[32m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
+            else
+              printf "\e[31m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
+              error_occurred=1
+            fi
+          done
+          
+          if [ $error_occurred -eq 1 ]; then
+            exit 1
+          fi
