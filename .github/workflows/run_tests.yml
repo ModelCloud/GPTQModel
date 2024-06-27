@@ -158,19 +158,19 @@ jobs:
         run: |
           declare -A step_outcomes
           step_outcomes=(
-            [test_perplexity]="{{ steps.test_perplexity.outcome }}"
-            [test_lm_head]="{{ steps.test_lm_head.outcome }}"
-            [test_q4_exallama]="{{ steps.test_q4_exallama.outcome }}"
-            [test_q4_exallama_v2]="{{ steps.test_q4_exallama_v2.outcome }}"
-            [test_q4_marlin]="{{ steps.test_q4_marlin.outcome }}"
-            [test_q4_triton]="{{ steps.test_q4_triton.outcome }}"
-            [test_repacking]="{{ steps.test_repacking.outcome }}"
-            [test_serialization]="{{ steps.test_serialization.outcome }}"
-            [test_sharded]="{{ steps.test_sharded.outcome }}"
-            [test_triton]="{{ steps.test_triton.outcome }}"
-            [test_quant_formats]="{{ steps.test_quant_formats.outcome }}"
-            [test_q4_cuda]="{{ steps.test_q4_cuda.outcome }}"
-            [test_q4_bitblas]="{{ steps.test_q4_bitblas.outcome }}"
+            [test_perplexity]="${{ steps.test_perplexity.outcome }}"
+            [test_lm_head]="${{ steps.test_lm_head.outcome }}"
+            [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
+            [test_q4_exallama_v2]="${{ steps.test_q4_exallama_v2.outcome }}"
+            [test_q4_marlin]="${{ steps.test_q4_marlin.outcome }}"
+            [test_q4_triton]="${{ steps.test_q4_triton.outcome }}"
+            [test_repacking]="${{ steps.test_repacking.outcome }}"
+            [test_serialization]="${{ steps.test_serialization.outcome }}"
+            [test_sharded]="${{ steps.test_sharded.outcome }}"
+            [test_triton]="${{ steps.test_triton.outcome }}"
+            [test_quant_formats]="${{ steps.test_quant_formats.outcome }}"
+            [test_q4_cuda]="${{ steps.test_q4_cuda.outcome }}"
+            [test_q4_bitblas]="${{ steps.test_q4_bitblas.outcome }}"
           )
   
           max_length=0
