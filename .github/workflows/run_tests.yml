@@ -160,12 +160,18 @@ jobs:
               max_length=$length
             fi
           done
-          
+
+          error_occurred=0
           for step in "${!step_outcomes[@]}"; do
             outcome="${step_outcomes[$step]}"
             if [ "$outcome" == "success" ]; then
               printf "\e[32m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
             else
               printf "\e[31m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
+              error_occurred=1
             fi
           done
+          
+          if [ $error_occurred -eq 1 ]; then
+            exit 1
+          fi
