@@ -34,9 +34,9 @@ jobs:
         run: |
           declare -A step_outcomes
           step_outcomes=(
-            [test_perplexity]="{{ steps.test_perplexity.outcome }}"
-            [test_lm_head]="{{ steps.test_lm_head.outcome }}"
-            [test_q4_exallama]="{{ steps.test_q4_exallama.outcome }}"
+            [test_perplexity]="${{ steps.test_perplexity.outcome }}"
+            [test_lm_head]="${{ steps.test_lm_head.outcome }}"
+            [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
           )
   
           for step in "${!step_outcomes[@]}"; do
