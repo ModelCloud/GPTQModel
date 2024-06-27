@@ -13,6 +13,12 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
+      - name: test
+        run: |
+          ls tests/asdsad
+          result=$?
+          echo aaaaaaaaaaaaaaa $result
+
       - name: Checkout Codes
         uses: actions/checkout@v4
 
