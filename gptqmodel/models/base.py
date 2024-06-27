@@ -469,7 +469,6 @@ class BaseGPTQModel(nn.Module):
         self,
         save_dir: str,
         safetensors_metadata: Optional[Dict[str, str]] = None,
-        format: Optional[FORMAT] = None,
         use_safetensors: bool = True,
         max_shard_size: Optional[str] = None,
         model_base_name: Optional[str] = None
@@ -506,43 +505,13 @@ class BaseGPTQModel(nn.Module):
                     f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
             )
 
-        if format == FORMAT.GPTQ_V2 or (format is None and quantize_config.format == FORMAT.GPTQ_V2):
+        if quantize_config.format == FORMAT.GPTQ_V2:
             logger.warning(
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        if format is not None and quantize_config.format != format:
-            # Model qzeros may be edited in place.
-            # TODO: avoid inplace modification of the weights
-            model = copy.deepcopy(self.model)
-
-            if format == FORMAT.GPTQ_V2:
-                if quantize_config.format != FORMAT.GPTQ:
-                    raise NotImplementedError(
-                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported."
-                    )
-
-                model = convert_gptq_v1_to_v2_format(
-                    model,
-                    quantize_config=quantize_config,
-                    qlinear_kernel=self.qlinear_kernel,
-                )
-
-                quantize_config.format = FORMAT.GPTQ_V2
-            elif format == FORMAT.GPTQ:
-                if quantize_config.format != FORMAT.GPTQ_V2:
-                    raise NotImplementedError(
-                        f"Asked to serialize a model with `format={format}` but the model format is {quantize_config.format}. This is not supported."
-                    )
-
-                model = convert_gptq_v2_to_v1_format(
-                    model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
-                )
-
-                quantize_config.format = FORMAT.GPTQ
-
         # internal is always gptq v2 but allow users to pass gptq (v1) via config
-        if format is None and quantize_config.format == FORMAT.GPTQ:
+        if quantize_config.format == FORMAT.GPTQ:
             # Model qzeros may be edited in place.
             # TODO: avoid inplace modification of the weights
             # fix ModelCloud/GPTQModel/issues/47
