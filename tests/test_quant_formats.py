@@ -21,7 +21,8 @@ from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_G
 
 class TestQuantization(unittest.TestCase):
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(self):
         self.pretrained_model_dir = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_dir, use_fast=True)

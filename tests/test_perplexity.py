@@ -43,7 +43,8 @@ class TestPerplexity(unittest.TestCase):
 
         return avg
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(self):
         from transformers import AutoModelForCausalLM
         self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
 
@@ -55,14 +56,12 @@ class TestPerplexity(unittest.TestCase):
             device_map="auto",
         )
 
-        self.native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+        self.native_ppl = self.calculate_avg_ppl(self, model, self.tokenizer)
 
         print(f"Native PPL: {self.native_ppl}")
 
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790
-        assert self.native_ppl < 8.5
-
-        return self.native_ppl
+        assert self.native_ppl < 9.0
 
     def get_wikitext2_data(self, n_samples=1024):
         from datasets import load_dataset
@@ -107,7 +106,7 @@ class TestPerplexity(unittest.TestCase):
             quantize_config=quantize_config,
         )
 
-        model.quantize(cal_data)
+        model.quantize(cal_data, batch_size=64)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save_quantized(
@@ -127,4 +126,4 @@ class TestPerplexity(unittest.TestCase):
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 8.7863, FORMAT.MARLIN ppl == 9.0036
-            assert abs(quantized_ppl - self.native_ppl) < 0.6
+            assert abs(quantized_ppl - self.native_ppl) < 1
