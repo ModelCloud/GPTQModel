@@ -52,7 +52,7 @@ jobs:
       - name: Install wheel
         run: |
           # install only the last version
-          pip install dist/*VERSION.whl
+          pip install dist/*.whl
 
       - name: Find suitable GPU
         run: |
