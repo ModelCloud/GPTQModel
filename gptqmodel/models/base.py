@@ -844,7 +844,7 @@ class BaseGPTQModel(nn.Module):
         if quantize_config.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
             if backend != Backend.MARLIN and backend != Backend.AUTO:
-                raise TypeError(f"format marlin requires Backend.AUTO or Backend.MARLIN instead of {backend}")
+                raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
             backend = Backend.MARLIN
 
         marlin_compatible = _validate_marlin_device_support()
@@ -859,7 +859,7 @@ class BaseGPTQModel(nn.Module):
         if quantize_config.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
             if backend != Backend.BITBLAS and backend != Backend.AUTO:
-                raise TypeError(f"format bitblas requires Backend.AUTO or Backend.BITBLAS instead of {backend}")
+                raise TypeError(f"FORMAT.BITBLAS requires Backend.AUTO or Backend.BITBLAS: actual = `{backend}`.")
             backend = Backend.BITBLAS
 
         if model_basename is None:
