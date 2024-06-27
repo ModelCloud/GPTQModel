@@ -39,14 +39,6 @@ from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
 
-at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-
-if not at_least_one_cuda_v6:
-    raise EnvironmentError(
-        "GPTQModel requires at least one gpu device with CUDA compute capability >= `6.0`."
-
-
-
 MODEL_MAP = {
     "bloom": BloomGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
@@ -84,6 +76,11 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
 }
+
+at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+if not at_least_one_cuda_v6:
+    raise EnvironmentError("GPTQModel requires at least one gpu device with CUDA compute capability >= `6.0`.")
 
 
 class GPTQModel:
