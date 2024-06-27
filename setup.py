@@ -10,7 +10,7 @@ at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in 
 
 if not at_least_one_cuda_v6:
     raise EnvironmentError(
-        "At least one device must have CUDA version >= 6.0\nExiting setup..."
+        "At least one device must have CUDA capability >= 6.0\nExiting setup..."
     )
 
 os.environ["CC"] = "g++"
