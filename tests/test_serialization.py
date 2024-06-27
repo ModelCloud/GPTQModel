@@ -9,7 +9,7 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import GPTQModel, Backend  # noqa: E402
+from gptqmodel import Backend, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON, QUANT_CONFIG_FILENAME  # noqa: E402
 
 

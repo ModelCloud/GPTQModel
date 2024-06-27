@@ -13,7 +13,6 @@ from transformers.generation.logits_process import LogitsProcessor
 
 from gptqmodel import Backend, GPTQModel, QuantizeConfig, get_backend
 
-
 logger = logging.getLogger(__name__)
 
 random.seed(0)
