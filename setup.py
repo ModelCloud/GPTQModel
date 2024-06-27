@@ -4,6 +4,15 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
+import torch
+
+at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+if not at_least_one_cuda_v6:
+    raise EnvironmentError(
+        "At least one device must have CUDA version >= 6.0\nExiting setup..."
+    )
+
 os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
 

@@ -37,6 +37,16 @@ from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
 
+import torch
+
+at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+if not at_least_one_cuda_v6:
+    raise EnvironmentError(
+        "At least one device must have CUDA version >= 6.0\nPlease check your environment."
+    )
+
+
 MODEL_MAP = {
     "bloom": BloomGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
