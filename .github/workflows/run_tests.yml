@@ -24,21 +24,6 @@ jobs:
         with:
           path: dist
 
-      - name: Extract Version
-        with:
-          verion = $(python -c "
-          import re
-          with open('setup.py', 'r') as f:
-            setup_py = f.read()
-            version_match = re.search(r'\"version\"\:\s*\"([0-9\.]+)\"', setup_py, re.MULTILINE)
-            if version_match:
-              #print(version_match)
-              print(version_match.group(1))
-          ")
-          
-          # save to env
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-  
 
   test:
     needs: build
