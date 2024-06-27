@@ -95,6 +95,7 @@ jobs:
       - name: Print results
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
+        shell: bash
         run: |
           declare -A step_outcomes
           step_outcomes=(
