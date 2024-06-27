@@ -872,9 +872,9 @@ class BaseGPTQModel(nn.Module):
             if not isinstance(quantize_config, QuantizeConfig):
                 quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
 
-        if quantize_config.format == FORMAT.MARLIN:
+        if quantize_config.format == FORMAT.MARLIN and (backend != Backend.MARLIN or backend != Backend.AUTO):
             # format marlin requires marlin kernel
-            backend = Backend.MARLIN
+            raise TypeError(f"format marlin requires Backend.AUTO or Backend.MARLIN instead of {backend}")
 
         marlin_compatible = _validate_marlin_device_support()
 
@@ -885,9 +885,9 @@ class BaseGPTQModel(nn.Module):
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but backend is not Backend.MARLIN. We recommend using `backend=Backend.MARLIN` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., backend=Backend.MARLIN)`."
                 )
 
-        if quantize_config.format == FORMAT.BITBLAS:
+        if quantize_config.format == FORMAT.BITBLAS and (backend != Backend.BITBLAS or backend != Backend.AUTO):
             # format bitblas requires bitblas kernel
-            backend = Backend.BITBLAS
+            raise TypeError(f"format bitblas requires Backend.AUTO or Backend.BITBLAS instead of {backend}")
 
         if model_basename is None:
             if quantize_config.model_file_base_name:
