@@ -10,8 +10,8 @@ import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import FORMAT  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
-from gptqmodel.quantization.config import FORMAT # noqa: E402
 
 
 class TestSharded(unittest.TestCase):

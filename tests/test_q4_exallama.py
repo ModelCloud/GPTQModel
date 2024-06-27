@@ -1,7 +1,4 @@
 # -- do not touch
-import numpy
-import random
-
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -15,12 +12,7 @@ from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E4
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
-
-try:
-    from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
-except ImportError as e:
-    print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
-
+from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
 from test_q4_cuda import get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 

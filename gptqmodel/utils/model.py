@@ -421,6 +421,10 @@ def simple_dispatch_model(model, device_map):
     return model
 
 
+# TODO: refractor. very strange post_init has to re-determine qlinear type again
+# when qliear type is selected, it should auto-override the model post_init method and
+# not have to go about looping over modules to match qlinear type a second time as it is
+# very prone to bugs
 def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[int] = None):
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
@@ -473,12 +477,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
     if model_uses_exllama:
         # To be honest this is quite ugly, not proud of this.
-        try:
-            from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
-        except ImportError as e:
-            raise ImportError(
-                f"Could not import exllama backend dependencies prepare_buffers, set_tuning_params with the following error: {e}"
-            )
+        from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
 
         device_to_buffers = {}
 
