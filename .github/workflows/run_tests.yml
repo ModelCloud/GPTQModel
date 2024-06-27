@@ -19,6 +19,9 @@ jobs:
       - name: Compile
         run: python setup.py bdist_wheel
 
+      - name: Show dist folder
+        run: ls -alh dist
+
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -42,6 +45,9 @@ jobs:
         with:
           name: artifact
           path: dist
+
+      - name: Show dist folder
+        run: ls -alh dist
 
       - name: Install wheel
         run: |
