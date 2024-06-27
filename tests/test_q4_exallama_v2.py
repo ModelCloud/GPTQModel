@@ -7,14 +7,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from test_q4_cuda import get_diff  # noqa: E402
-from test_q4_exallama import CUDA_OLD_REFERENCE  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
 from gptqmodel import Backend, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
+from test_q4_cuda import get_diff  # noqa: E402
+from test_q4_exallama import CUDA_OLD_REFERENCE  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 

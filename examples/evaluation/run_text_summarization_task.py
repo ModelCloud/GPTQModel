@@ -3,10 +3,9 @@ from argparse import ArgumentParser
 
 import datasets
 import torch
-from transformers import AutoTokenizer, GenerationConfig
-
 from gptqmodel import GPTQModel, QuantizeConfig, get_backend
 from gptqmodel.eval_tasks import TextSummarizationTask
+from transformers import AutoTokenizer, GenerationConfig
 
 os.system("pip install py7zr")
 

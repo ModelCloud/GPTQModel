@@ -3,10 +3,9 @@ from functools import partial
 
 import datasets
 import torch
-from transformers import AutoTokenizer
-
 from gptqmodel import GPTQModel, QuantizeConfig, get_backend
 from gptqmodel.eval_tasks import SequenceClassificationTask
+from transformers import AutoTokenizer
 
 DATASET = "cardiffnlp/tweet_sentiment_multilingual"
 TEMPLATE = "Question:What's the sentiment of the given text? Choices are {labels}.\nText: {text}\nAnswer:"
