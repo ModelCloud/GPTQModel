@@ -25,6 +25,7 @@ jobs:
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
+          name: dist
           path: dist
 
 
@@ -43,7 +44,7 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: artifact
+          name: dist
           path: dist
 
       - name: Show dist folder
