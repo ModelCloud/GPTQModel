@@ -43,8 +43,8 @@ at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in 
 
 if not at_least_one_cuda_v6:
     raise EnvironmentError(
-        "At least one device must have CUDA capability >= 6.0\nPlease check your environment."
-    )
+        "GPTQModel requires at least one gpu device with CUDA compute capability >= `6.0`."
+
 
 
 MODEL_MAP = {
@@ -89,9 +89,9 @@ MODEL_MAP = {
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
-            "ModelGPTQ is designed to be instantiated\n"
-            "using `ModelGPTQ.from_pretrained` if want to quantize a pretrained model.\n"
-            "using `ModelGPTQ.from_quantized` if want to inference with quantized model."
+            "ModelGPTQ is not designed to be instantiated\n"
+            "use `ModelGPTQ.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
+            "use `ModelGPTQ.from_quantized` to inference with post-quantized model."
         )
 
     @classmethod
