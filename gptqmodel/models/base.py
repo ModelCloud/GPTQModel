@@ -149,6 +149,7 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
 
+        backend: Backend = Backend.AUTO,
         # TODO: remove use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
         use_cuda_fp16: bool = True,
 
@@ -419,7 +420,7 @@ class BaseGPTQModel(nn.Module):
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=Backend.AUTO,
+            backend=backend,
             use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
@@ -1089,7 +1090,7 @@ class BaseGPTQModel(nn.Module):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if backend != Backend.MARLIN or backend != Backend.BITBLAS:
+        if backend != Backend.MARLIN and backend != Backend.BITBLAS:
             accelerate.utils.modeling.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
