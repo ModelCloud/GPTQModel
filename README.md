@@ -11,7 +11,8 @@
 
 ## News
 
-- 2024-06-20 ✨ GPTQModel 0.9.0 released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
+- 2024-06-27 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1) released. With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
+- 2024-06-20 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0) released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## Mission Statement
 
@@ -21,20 +22,26 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
 
+We will backport bug fixes to AutoGPTQ on a case-by-case basis.
+
 ## Major Changes (Advantages) vs AutoGPTQ
 
-* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* 🚀`lm_head` module quant inference support for further VRAM reduction. 
-* 🚀 Faster quantization: Up to 6% faster for TinyLlama + A100.
-* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
+* 🚀 Added `DeepSeek-V2` Model Support
+* 🚀 Added `DeepSeek-V2-Lite` Model Support
 * 🚀 Added `ChatGLM` Model Support
 * 🚀 Added `MiniCPM` Model Support
 * 🚀 Added `Phi-3` Model Support
 * 🚀 Added `Qwen2MoE` Model Support
+* 🚀 Added `DBRX` Model Support (Converted Model)
+* 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
+* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
+* 🚀`lm_head` module quant inference support for further VRAM reduction. 
+* 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
+* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
+* 🚀 Model weights sharding support
+* 🚀 Security: hash check of model weights on load
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
-* 👾 Fixed packing Performance regression on high core-count systems.
-* 👾 Fixed crash on H100.
 * ✨ Many thousands of lines of refactor/cleanup.
 * ✨ Added CI workflow for validation of future PRs and prevent code regressions.
 * ✨ Added perplexity unit-test to prevent against model quant quality regressions.
@@ -55,24 +62,28 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 ## Model Support ( 🚀 GPTQModel only )
 
-| Model          |    |                   |    |           |    |            |    |
-|----------------|----|-------------------|----|-----------|----|------------|----|
-| Baichuan       | ✅  | DeepSeek-V2-Licte | 🚀 | LongLLaMA | ✅  | Phi-3      | 🚀 |
-| Bloom          | ✅  | Falon             | ✅  | MiniCPM   | 🚀 | Qwen       | ✅  |
-| ChatGLM        | 🚀 | GPTBigCod         | ✅  | Mistral   | ✅  | Qwen2MoE   | 🚀 |
-| CodeGen        | ✅  | GPTNeoX           | ✅  | Mixtral   | ✅  | RefinedWeb | ✅  |
-| Cohere         | ✅  | GPT-2             | ✅  | MOSS      | ✅  | StableLM   | ✅  |
-| DBRX Converted | 🚀 | GPT-J             | ✅  | MPT       | ✅  | StarCoder2 | ✅  |
-| Deci           | ✅  | InternLM          | ✅  | OPT       | ✅  | XVERSE     | ✅  |
-| DeepSeek-V2    | 🚀 | Llama             | ✅  | Phi       | ✅  | Yi         | ✅  |
+| Model          |    |                  |    |           |    |            |    |
+|----------------|----|------------------|----|-----------|----|------------|----|
+| Baichuan       | ✅  | DeepSeek-V2-Lite | 🚀 | LongLLaMA | ✅  | Phi-3      | 🚀 |
+| Bloom          | ✅  | Falon            | ✅  | MiniCPM   | 🚀 | Qwen       | ✅  |
+| ChatGLM        | 🚀 | GPTBigCod        | ✅  | Mistral   | ✅  | Qwen2MoE   | 🚀 |
+| CodeGen        | ✅  | GPTNeoX          | ✅  | Mixtral   | ✅  | RefinedWeb | ✅  |
+| Cohere         | ✅  | GPT-2            | ✅  | MOSS      | ✅  | StableLM   | ✅  |
+| DBRX Converted | 🚀 | GPT-J            | ✅  | MPT       | ✅  | StarCoder2 | ✅  |
+| Deci           | ✅  | InternLM         | ✅  | OPT       | ✅  | XVERSE     | ✅  |
+| DeepSeek-V2    | 🚀 | Llama            | ✅  | Phi       | ✅  | Yi         | ✅  |
 
 ## Compatiblity 
 
 We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case basis. 
 
-## Platform
+## Platform/GPU Requirements
 
-GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
+GPTQModel is currently Linux only and requires CUDA capability >= 6.0 Nvidia GPU. 
+
+WSL on Windows should work as well. 
+
+ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
 
 ## Install
 
