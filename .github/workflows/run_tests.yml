@@ -42,17 +42,16 @@ jobs:
           max_length=0
           for step in "${!step_outcomes[@]}"; do
             length=${#step}
-            if (( length > max_length )); then
-              max_length=length
+            if [[ $length -gt $max_length ]]; then
+              max_length=$length
             fi
           done
           
           for step in "${!step_outcomes[@]}"; do
             outcome="${step_outcomes[$step]}"
             if [ "$outcome" == "success" ]; then
-              color_code="\e[32m"
+              printf "\e[32m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
             else
-              color_code="\e[31m"
+              printf "\e[31m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
             fi
-            printf "$color_code%-*s Result: $outcome\e[0m\n" $max_length "$step"
           done
