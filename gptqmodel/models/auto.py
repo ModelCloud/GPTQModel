@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional, Union
 
+import torch
+
 from ..utils import Backend
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
@@ -36,8 +38,6 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-
-import torch
 
 at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
 
