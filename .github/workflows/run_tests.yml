@@ -13,13 +13,6 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
-      - name: test
-        shell: bash
-        run: |
-          ls tests/asdsad
-          result=$?
-          echo aaaaaaaaaaaaaaa $result
-
       - name: Checkout Codes
         uses: actions/checkout@v4
 
@@ -98,7 +91,7 @@ jobs:
               echo -e "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
           
-              ls tests/$1
+              pytest tests/$1
               result=$?
           
               end_time=$(date +%s)
@@ -136,20 +129,22 @@ jobs:
               fi
           done
           
+          echo "" > success.log
+          echo "" > fail.log
           save_log() {
               for log in "$@"; do
                   IFS=',' read -r test_name duration result <<< "$log"
-                  color_code="\033[0;32m"
-                  result_text="Succeed"
-                  if [ "$result" -ne 0 ]; then
+                  if [ "$result" -eq 0 ]; then
+                      color_code="\033[0;32m"
+                      printf "$color_code%-*s\tDuration: %4ds\t\033[0m\n" $((max_length + 4)) "$test_name" $duration >> success.log
+                  else
                       color_code="\033[0;31m"
-                      result_text="Failed"
+                      printf "$color_code%-*s\tDuration: %4ds\t\033[0m\n" $((max_length + 4)) "$test_name" $duration >> fail.log
                   fi
-                  printf "$color_code%-*s\tDuration: %4ds\tResult: $result_text\033[0m\n" $((max_length + 4)) "$test_name" $duration >> log.log
               done
           }
           
-          # Save to log file
+          # Save logs to respective files
           save_log "${run_log_success[@]}"
           save_log "${run_log_fail[@]}"
 
@@ -158,6 +153,8 @@ jobs:
         shell: bash
         run: |
           echo -e "\nTest Results:"
-          cat log.log
-
-
+          cat success.log
+          if [ -s fail_log.log ]; then
+              cat fail.log
+              exit 1
+          fi
