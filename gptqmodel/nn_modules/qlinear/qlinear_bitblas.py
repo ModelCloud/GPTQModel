@@ -35,10 +35,7 @@ def import_bitblas():
 
     bitblas.set_log_level("INFO")
 
-    from bitblas import Matmul, MatmulConfig  # noqa: F401
-    from bitblas.cache import get_database_path, global_operator_cache  # noqa: F401
-    from bitblas.quantization.utils import general_compress  # noqa: F401
-
+    from bitblas.cache import get_database_path
     from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
     BITBLAS_TARGET = patched_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
@@ -169,6 +166,8 @@ class QuantLinear(BaseQuantLinear):
     def _configure_bitblas_matmul(
         self, enable_tuning: bool, fast_decoding: bool, bias: bool, propagate_b, layout, bits: int
     ):
+        from bitblas import MatmulConfig
+
         # Assuming MatmulWeightOnlyDequantizeConfig and MatmulWeightOnlyDequantize are defined elsewhere
         bitblas_dtype = self.BITBLAS_DTYPES[self.TORCH_DTYPE]
         W_dtype = f"uint{bits}"
@@ -193,6 +192,9 @@ class QuantLinear(BaseQuantLinear):
         )
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
+        from bitblas import Matmul
+        from bitblas.cache import global_operator_cache
+
         if global_operator_cache.size() == 0:
             global_operator_cache.load_from_database(
                 BITBLAS_DATABASE_PATH, BITBLAS_TARGET
@@ -239,6 +241,8 @@ class QuantLinear(BaseQuantLinear):
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
 
     def repack_from_gptq(self, gptq_module: QuantLinearOld):
+        from bitblas.quantization.utils import general_compress
+
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
         qweight = gptq_module.qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
         if self.bitblas_matmul.weight_transform is not None:
