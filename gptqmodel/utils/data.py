@@ -140,7 +140,7 @@ def make_data_block(
 
 def collate_data(blocks: List[Dict[str, List[List[int]]]], pad_token_id: int) -> Dict[str, LongTensor]:
     def pad_block(block, pads):
-        return torch.cat((pads.to(block.device), block), dim=-1)
+        return torch.cat((block, pads.to(block.device)), dim=-1)
 
     input_ids_blocks = [LongTensor(block["input_ids"]) for block in blocks]
     attention_mask_blocks = [LongTensor(block["attention_mask"]) for block in blocks]

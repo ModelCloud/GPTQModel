@@ -7,8 +7,13 @@ from setuptools import find_packages, setup
 os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
 
+version_vars = {}
+exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
+gptqmodel_version = version_vars['version']
+
+
 common_setup_kwargs = {
-    "version": "0.9.0",
+    "version": gptqmodel_version,
     "name": "gptqmodel",
     "author": "ModelCloud",
     "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",
@@ -133,7 +138,7 @@ if BUILD_CUDA_EXT:
 
     extensions.append(
         cpp_ext.CUDAExtension(
-            "exllama_kernels",
+            "gptqmodel_exllama_kernels",
             [
                 "gptqmodel_ext/exllama/exllama_ext.cpp",
                 "gptqmodel_ext/exllama/cuda_buffers.cu",
@@ -147,7 +152,7 @@ if BUILD_CUDA_EXT:
     )
     extensions.append(
         cpp_ext.CUDAExtension(
-            "exllamav2_kernels",
+            "gptqmodel_exllamav2_kernels",
             [
                 "gptqmodel_ext/exllamav2/ext.cpp",
                 "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",

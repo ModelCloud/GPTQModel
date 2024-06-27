@@ -70,7 +70,7 @@ def get_all_nvidia_targets() -> List[str]:
     return [tag for tag in all_tags if "nvidia" in tag]
 
 
-def corrected_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
+def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
     """
     Automatically detects the NVIDIA GPU architecture to set the appropriate TVM target.
 

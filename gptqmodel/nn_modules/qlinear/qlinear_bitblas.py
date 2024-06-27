@@ -3,31 +3,45 @@ import operator
 import os
 from functools import reduce
 from logging import getLogger
+from typing import List, Union
 
 import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-logger = getLogger(__name__)
-
-from typing import List, Union
-
-import bitblas
-from bitblas import Matmul, MatmulConfig
-from bitblas.cache import get_database_path, global_operator_cache
-from bitblas.quantization.utils import general_compress
-from bitblas.utils import auto_detect_nvidia_target
-
-from .bitblas_target_detector import corrected_auto_detect_nvidia_target
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
 
-auto_detect_nvidia_target = corrected_auto_detect_nvidia_target
+logger = getLogger(__name__)
 
-bitblas.set_log_level("INFO")
-BITBLAS_TARGET = auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
-BITBLAS_DATABASE_PATH = get_database_path()
+BITBLAS_TARGET = None
+BITBLAS_DATABASE_PATH = None
 BITBLAS_PROPAGATE_WEIGHTS = False
+
+
+def import_bitblas():
+    global BITBLAS_DATABASE_PATH, BITBLAS_TARGET
+
+    # guard against bitblas pip whl incompatible env
+    try:
+        import bitblas
+    except Exception as e:
+        from packaging import version
+        if version.parse(torch.version.cuda) < version.parse("12.1"):
+            raise EnvironmentError(
+                "Bitblas must be manually compiled for CUDA version < 12.1. Please follow the source compile instructions at:\n"
+                "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source")
+        else:
+            raise e
+
+    bitblas.set_log_level("INFO")
+
+    from bitblas.cache import get_database_path
+    from .bitblas_target_detector import patched_auto_detect_nvidia_target
+
+    BITBLAS_TARGET = patched_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
+    logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
+
+    BITBLAS_DATABASE_PATH = get_database_path()
 
 
 def unpack_qzeros(qzeros, bits):
@@ -51,6 +65,7 @@ class QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "bitblas"
     SUPPORTED_BITS = [1, 2, 4]
     SUPPORTED_DESC_ACT = [False]
+    SUPPORTED_SHARDS = False
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -81,6 +96,10 @@ class QuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         super().__init__()
+
+        # TODO: remove delayed import after bitblas whl support for 11.7, 11.8, 12.0 are added
+        import_bitblas()
+
         self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self._validate_parameters(group_size, infeatures, outfeatures)
@@ -147,6 +166,8 @@ class QuantLinear(BaseQuantLinear):
     def _configure_bitblas_matmul(
         self, enable_tuning: bool, fast_decoding: bool, bias: bool, propagate_b, layout, bits: int
     ):
+        from bitblas import MatmulConfig
+
         # Assuming MatmulWeightOnlyDequantizeConfig and MatmulWeightOnlyDequantize are defined elsewhere
         bitblas_dtype = self.BITBLAS_DTYPES[self.TORCH_DTYPE]
         W_dtype = f"uint{bits}"
@@ -171,6 +192,9 @@ class QuantLinear(BaseQuantLinear):
         )
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
+        from bitblas import Matmul
+        from bitblas.cache import global_operator_cache
+
         if global_operator_cache.size() == 0:
             global_operator_cache.load_from_database(
                 BITBLAS_DATABASE_PATH, BITBLAS_TARGET
@@ -217,6 +241,8 @@ class QuantLinear(BaseQuantLinear):
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
 
     def repack_from_gptq(self, gptq_module: QuantLinearOld):
+        from bitblas.quantization.utils import general_compress
+
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
         qweight = gptq_module.qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
         if self.bitblas_matmul.weight_transform is not None:

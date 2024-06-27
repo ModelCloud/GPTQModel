@@ -11,6 +11,7 @@ from .cohere import CohereGPTQ
 from .dbrx import DbrxGPTQ
 from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ
+from .deepseek_v2 import DeepSeekV2GPTQ
 from .gemma import GemmaGPTQ
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
@@ -71,6 +72,7 @@ MODEL_MAP = {
     "qwen2_moe": Qwen2MoeGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
+    "deepseek_v2": DeepSeekV2GPTQ,
 }
 
 
