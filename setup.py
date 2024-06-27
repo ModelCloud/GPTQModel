@@ -8,7 +8,7 @@ os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
 
 common_setup_kwargs = {
-    "version": "0.9.0",
+    "version": "0.9.1",
     "name": "gptqmodel",
     "author": "ModelCloud",
     "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",
