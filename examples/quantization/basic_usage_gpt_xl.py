@@ -3,9 +3,8 @@ import random
 import numpy as np
 import torch
 from datasets import load_dataset
-from transformers import TextGenerationPipeline
-
 from gptqmodel import GPTQModel, QuantizeConfig
+from transformers import TextGenerationPipeline
 
 pretrained_model_dir = "gpt2-xl"
 quantized_model_dir = "gpt2-large-4bit-128g"
@@ -66,7 +65,7 @@ def main():
 
     # quantize model, the calibration_dataset should be list of dict whose keys contains "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
-    model.quantize(traindataset)
+    model.quantize(traindataset, use_triton=False)
 
     # save quantized model
     model.save_quantized(quantized_model_dir)
@@ -75,7 +74,7 @@ def main():
     model.save_quantized(quantized_model_dir, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
+    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0", use_triton=False)
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))

@@ -7,7 +7,6 @@ from typing import List, Union
 
 import torch
 import torch.nn as nn
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from .qlinear_cuda_old import QuantLinear as QuantLinearOld
@@ -37,7 +36,6 @@ def import_bitblas():
     bitblas.set_log_level("INFO")
 
     from bitblas.cache import get_database_path
-
     from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
     BITBLAS_TARGET = patched_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))

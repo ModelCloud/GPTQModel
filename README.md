@@ -1,203 +1,147 @@
-<h1 align="center">AutoGPTQ</h1>
-<p align="center">An easy-to-use LLM quantization package with user-friendly APIs, based on GPTQ algorithm (weight-only quantization).</p>
+<h1 align="center">GPTQModel</h1>
+<p align="center">An easy-to-use LLM quantization and inference toolkit based on GPTQ algorithm (weight-only quantization).</p>
 <p align="center">
-    <a href="https://github.com/PanQiWei/AutoGPTQ/releases">
-        <img alt="GitHub release" src="https://img.shields.io/github/release/PanQiWei/AutoGPTQ.svg">
+    <a href="https://github.com/ModelCloud/GPTQModel/releases">
+        <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
     </a>
-    <a href="https://pypi.org/project/auto-gptq/">
-        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/auto-gptq">
+    <a href="https://pypi.org/project/model-gptq/">
+        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptq-model">
     </a>
 </p>
-<h4 align="center">
-    <p>
-        <b>English</b> |
-        <a href="https://github.com/PanQiWei/AutoGPTQ/blob/main/README_zh.md">中文</a>
-    </p>
-</h4>
 
-## News or Update
+## News
 
-- 2024-02-15 - (News) - AutoGPTQ 0.7.0 is released, with [Marlin](https://github.com/IST-DASLab/marlin) int4*fp16 matrix multiplication kernel support, with the argument `use_marlin=True` when loading models.
-- 2023-08-23 - (News) - 🤗 Transformers, optimum and peft have integrated `auto-gptq`, so now running and training GPTQ models can be more available to everyone! See [this blog](https://huggingface.co/blog/gptq-integration) and it's resources for more details!
+- 2024-06-20 ✨ GPTQModel 0.9.0 released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
-*For more histories please turn to [here](docs/NEWS_OR_UPDATE.md)*
+## Mission Statement
 
-## Performance Comparison
+We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
 
-### Inference Speed
-> The result is generated using [this script](examples/benchmark/generation_speed.py), batch size of input is 1, decode strategy is beam search and enforce the model to generate 512 tokens, speed metric is tokens/s (the larger, the better).
->
-> The quantized model is loaded using the setup that can gain the fastest inference speed.
+## How is GPTQModel different from AutoGPTQ?
 
-| model         | GPU           | num_beams | fp16  | gptq-int4 |
-|---------------|---------------|-----------|-------|-----------|
-| llama-7b      | 1xA100-40G    | 1         | 18.87 | 25.53     |
-| llama-7b      | 1xA100-40G    | 4         | 68.79 | 91.30     |
-| moss-moon 16b | 1xA100-40G    | 1         | 12.48 | 15.25     |
-| moss-moon 16b | 1xA100-40G    | 4         | OOM   | 42.67     |
-| moss-moon 16b | 2xA100-40G    | 1         | 06.83 | 06.78     |
-| moss-moon 16b | 2xA100-40G    | 4         | 13.10 | 10.80     |
-| gpt-j 6b      | 1xRTX3060-12G | 1         | OOM   | 29.55     |
-| gpt-j 6b      | 1xRTX3060-12G | 4         | OOM   | 47.36     |
+GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+
+## Major Changes (Advantages) vs AutoGPTQ
+
+* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
+* 🚀`lm_head` module quant inference support for further VRAM reduction. 
+* 🚀 Faster quantization: Up to 6% faster for TinyLlama + A100.
+* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama + A100)
+* 🚀 Added `ChatGLM` Model Support
+* 🚀 Added `MiniCPM` Model Support
+* 🚀 Added `Phi-3` Model Support
+* 🚀 Added `Qwen2MoE` Model Support
+* ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
+* 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
+* 👾 Fixed packing Performance regression on high core-count systems.
+* 👾 Fixed crash on H100.
+* ✨ Many thousands of lines of refactor/cleanup.
+* ✨ Added CI workflow for validation of future PRs and prevent code regressions.
+* ✨ Added perplexity unit-test to prevent against model quant quality regressions.
+* 👾 De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
+* 👾 De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
+* ✨ Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
+* ✨ Everything that did not pass unit-tests have been removed from repo.
+
+## Roadmap (Target Date: July 2024):
+
+* `lm_head` quantization support by integrating with Intel/AutoRound.
+* Customizable callback in Per-Layer quantization.
+* Add Qbits (cpu inference) support from Intel/Qbits.
+* Add back ROCM/AMD support once everything is validated.
+* Store quant loss stat and apply diffs to new quant for quality control.
+* Add Tests for every single supported model.
 
 
-### Perplexity
-For perplexity comparison, you can turn to [here](https://github.com/qwopqwop200/GPTQ-for-LLaMa#result) and [here](https://github.com/qwopqwop200/GPTQ-for-LLaMa#gptq-vs-bitsandbytes)
+## Model Support ( 🚀 GPTQModel only )
 
-## Installation
+| Model     |    |           |    |          |    |                  |   |
+|-----------|----|-----------|----|----------|----|------------------|---|
+| Baichuan  | ✅  | GPTNeoX   | ✅  | Mixtral  | ✅  | RefinedWeb       | ✅ |
+| Bloom     | ✅  | GPT-2     | ✅  | MOSS     | ✅  | StableLM         | ✅ |
+| ChatGLM   | 🚀 | GPT-J     | ✅  | MPT      | ✅  | StarCoder2       | ✅ |
+| CodeGen   | ✅  | InternLM  | ✅  | OPT      | ✅  | XVERSE           | ✅ |
+| Cohere    | ✅  | Llama     | ✅  | Phi      | ✅  | Yi               | ✅ |
+| Deci      | ✅  | LongLLaMA | ✅  | Phi-3    | 🚀 | DBRX Converted   | 🚀 |
+| Falcon    | ✅  | MiniCPM   | 🚀 | Qwen     | ✅  | DeepSeek-V2      | 🚀 |
+| GPTBigCod | ✅  | Mistral   | ✅  | Qwen2MoE | 🚀 | DeepSeek-V2-Lite | 🚀  |
 
-AutoGPTQ is available on Linux and Windows only. You can install the latest stable release of AutoGPTQ from pip with pre-built wheels:
+## Compatiblity 
 
-| CUDA/ROCm version | Installation                                                                                      | Built against PyTorch |
-|-------------------|---------------------------------------------------------------------------------------------------|-----------------------|
-| CUDA 11.8         | `pip install auto-gptq --no-build-isolation --extra-index-url https://huggingface.github.io/autogptq-index/whl/cu118/`   | 2.2.1+cu118           |
-| CUDA 12.1         | `pip install auto-gptq --no-build-isolation`                                                                            | 2.2.1+cu121           |
-| ROCm 5.7          | `pip install auto-gptq --no-build-isolation --extra-index-url https://huggingface.github.io/autogptq-index/whl/rocm573/` | 2.2.1+rocm5.7               |
+We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case basis. 
 
-AutoGPTQ can be installed with the Triton dependency with `pip install auto-gptq[triton] --no-build-isolation` in order to be able to use the Triton backend (currently only supports linux, no 3-bits quantization).
+## Platform
 
-AutoGPTQ also support CPU device now and requires the installation of QBits nernel dependency with `pip install intel-extension-for-transformers`. Or you can install auto-gptq with `pip install auto-gptq[qbits]`. 
+GPTQModel is currently Linux only and requires Torch/Cuda capable GPU from NVIDIA. WSL on Windows should work as well. ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
 
-For older AutoGPTQ, please refer to [the previous releases installation table](docs/INSTALLATION.md).
-
-On NVIDIA systems, AutoGPTQ does not support [Maxwell or lower](https://qiita.com/uyuni/items/733a93b975b524f89f46) GPUs.
+## Install
 
 ### Install from source
 
-Clone the source code:
 ```bash
-git clone https://github.com/PanQiWei/AutoGPTQ.git && cd AutoGPTQ
+# clone repo
+git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
+
+# compile and install
+pip install -vvv --no-build-isolation .
 ```
 
-A few packages are required in order to build from source: `pip install numpy gekko pandas`.
-
-Then, install locally from source:
-```bash
-pip install -vvv --no-build-isolation -e .
-```
-You can set `BUILD_CUDA_EXT=0` to disable pytorch extension building, but this is **strongly discouraged** as AutoGPTQ then falls back on a slow python implementation.
-
-As a last resort, if the above command fails, you can try `python setup.py install`.
-
-#### On ROCm systems
-
-To install from source for AMD GPUs supporting ROCm, please specify the `ROCM_VERSION` environment variable. Example:
+### PIP (PENDING RELEASE) 
 
 ```bash
-ROCM_VERSION=5.6 pip install -vvv --no-build-isolation -e .
+pip install gptq-model --no-build-isolation
 ```
-
-The compilation can be speeded up by specifying the `PYTORCH_ROCM_ARCH` variable ([reference](https://github.com/pytorch/pytorch/blob/7b73b1e8a73a1777ebe8d2cd4487eb13da55b3ba/setup.py#L132)) in order to build for a single target device, for example `gfx90a` for MI200 series devices.
-
-For ROCm systems, the packages `rocsparse-dev`, `hipsparse-dev`, `rocthrust-dev`, `rocblas-dev` and `hipblas-dev` are required to build.
-
-## Quick Tour
 
 ### Quantization and Inference
-> warning: this is just a showcase of the usage of basic apis in AutoGPTQ, which uses only one sample to quantize a much small model, quality of quantized model using such little samples may not good.
 
-Below is an example for the simplest use of `auto_gptq` to quantize a model and inference after quantization:
-```python
-from transformers import AutoTokenizer, TextGenerationPipeline
-from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-import logging
+> warning: this is just a showcase of the usage of basic apis in GPTQModel, which uses only one sample to quantize a much small model, quality of quantized model using such little samples may not good.
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s", level=logging.INFO, datefmt="%Y-%m-%d %H:%M:%S"
-)
+Below is an example for the simplest use of `gptqmodel` to quantize a model and inference after quantization:
+
+```py
+from transformers import AutoTokenizer
+from gptqmodel import GPTQModel, QuantizeConfig
 
 pretrained_model_dir = "facebook/opt-125m"
-quantized_model_dir = "opt-125m-4bit"
+quant_output_dir = "opt-125m-4bit"
 
 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
-examples = [
+calibration_dataset = [
     tokenizer(
-        "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+        "The world is a wonderful place full of beauty and love."
     )
 ]
 
-quantize_config = BaseQuantizeConfig(
-    bits=4,  # quantize model to 4-bit
-    group_size=128,  # it is recommended to set the value to 128
-    desc_act=False,  # set to False can significantly speed up inference but the perplexity may slightly bad
+quant_config = QuantizeConfig(
+    bits=4,  # 4-bit
+    group_size=128,  # 128 is good balance between quality and performance
 )
 
 # load un-quantized model, by default, the model will always be loaded into CPU memory
-model = AutoGPTQForCausalLM.from_pretrained(pretrained_model_dir, quantize_config)
+model = GPTQModel.from_pretrained(pretrained_model_dir, quant_config)
 
-# quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
-model.quantize(examples)
+# quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
+model.quantize(calibration_dataset)
 
 # save quantized model
-model.save_quantized(quantized_model_dir)
-
-# save quantized model using safetensors
-model.save_quantized(quantized_model_dir, use_safetensors=True)
-
-# push quantized model to Hugging Face Hub.
-# to use use_auth_token=True, Login first via huggingface-cli login.
-# or pass explcit token with: use_auth_token="hf_xxxxxxx"
-# (uncomment the following three lines to enable this feature)
-# repo_id = f"YourUserName/{quantized_model_dir}"
-# commit_message = f"AutoGPTQ model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
-# model.push_to_hub(repo_id, commit_message=commit_message, use_auth_token=True)
-
-# alternatively you can save and push at the same time
-# (uncomment the following three lines to enable this feature)
-# repo_id = f"YourUserName/{quantized_model_dir}"
-# commit_message = f"AutoGPTQ model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
-# model.push_to_hub(repo_id, save_dir=quantized_model_dir, use_safetensors=True, commit_message=commit_message, use_auth_token=True)
+model.save_quantized(quant_output_dir)
 
 # load quantized model to the first GPU
-model = AutoGPTQForCausalLM.from_quantized(quantized_model_dir, device="cuda:0")
-
-# download quantized model from Hugging Face Hub and load to the first GPU
-# model = AutoGPTQForCausalLM.from_quantized(repo_id, device="cuda:0", use_safetensors=True, use_triton=False)
+model = GPTQModel.from_quantized(quant_output_dir)
 
 # inference with model.generate
-print(tokenizer.decode(model.generate(**tokenizer("auto_gptq is", return_tensors="pt").to(model.device))[0]))
-
-# or you can also use pipeline
-pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-print(pipeline("auto-gptq is")[0]["generated_text"])
+print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
 ```
 
 For more advanced features of model quantization, please reference to [this script](examples/quantization/quant_with_alpaca.py)
 
-### Customize Model
-<details>
+### How to Add Support for a New Model
 
-<summary>Below is an example to extend `auto_gptq` to support `OPT` model, as you will see, it's very easy:</summary>
-
-```python
-from auto_gptq.modeling import BaseGPTQForCausalLM
-
-
-class OPTGPTQForCausalLM(BaseGPTQForCausalLM):
-    # chained attribute name of transformer layer block
-    layers_block_name = "model.decoder.layers"
-    # chained attribute names of other nn modules that in the same level as the transformer layer block
-    outside_layer_modules = [
-        "model.decoder.embed_tokens", "model.decoder.embed_positions", "model.decoder.project_out",
-        "model.decoder.project_in", "model.decoder.final_layer_norm"
-    ]
-    # chained attribute names of linear layers in transformer layer module
-    # normally, there are four sub lists, for each one the modules in it can be seen as one operation,
-    # and the order should be the order when they are truly executed, in this case (and usually in most cases),
-    # they are: attention q_k_v projection, attention output projection, MLP project input, MLP project output
-    inside_layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.out_proj"],
-        ["fc1"],
-        ["fc2"]
-    ]
-```
-After this, you can use `OPTGPTQForCausalLM.from_pretrained` and other methods as shown in Basic.
-
-</details>
+Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
 
 ### Evaluation on Downstream Tasks
-You can use tasks defined in `auto_gptq.eval_tasks` to evaluate model's performance on specific down-stream task before and after quantization.
+
+You can use tasks defined in `gptqmodel.eval_tasks` to evaluate model's performance on specific down-stream task before and after quantization.
 
 The predefined tasks support all causal-language-models implemented in [🤗 transformers](https://github.com/huggingface/transformers) and in this project.
 
@@ -210,10 +154,8 @@ from functools import partial
 
 import datasets
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-
-from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-from auto_gptq.eval_tasks import SequenceClassificationTask
-
+from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel.eval_tasks import SequenceClassificationTask
 
 MODEL = "EleutherAI/gpt-j-6b"
 DATASET = "cardiffnlp/tweet_sentiment_multilingual"
@@ -240,30 +182,30 @@ def ds_refactor_fn(samples):
 
 
 #  model = AutoModelForCausalLM.from_pretrained(MODEL).eval().half().to("cuda:0")
-model = AutoGPTQForCausalLM.from_pretrained(MODEL, BaseQuantizeConfig())
+model = GPTQModel.from_pretrained(MODEL, QuantizeConfig())
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 task = SequenceClassificationTask(
-        model=model,
-        tokenizer=tokenizer,
-        classes=LABELS,
-        data_name_or_path=DATASET,
-        prompt_col_name="prompt",
-        label_col_name="label",
-        **{
-            "num_samples": 1000,  # how many samples will be sampled to evaluation
-            "sample_max_len": 1024,  # max tokens for each sample
-            "block_max_len": 2048,  # max tokens for each data block
-            # function to load dataset, one must only accept data_name_or_path as input
-            # and return datasets.Dataset
-            "load_fn": partial(datasets.load_dataset, name="english"),
-            # function to preprocess dataset, which is used for datasets.Dataset.map,
-            # must return Dict[str, list] with only two keys: [prompt_col_name, label_col_name]
-            "preprocess_fn": ds_refactor_fn,
-            # truncate label when sample's length exceed sample_max_len
-            "truncate_prompt": False
-        }
-    )
+    model=model,
+    tokenizer=tokenizer,
+    classes=LABELS,
+    data_name_or_path=DATASET,
+    prompt_col_name="prompt",
+    label_col_name="label",
+    **{
+        "num_samples": 1000,  # how many samples will be sampled to evaluation
+        "sample_max_len": 1024,  # max tokens for each sample
+        "block_max_len": 2048,  # max tokens for each data block
+        # function to load dataset, one must only accept data_name_or_path as input
+        # and return datasets.Dataset
+        "load_fn": partial(datasets.load_dataset, name="english"),
+        # function to preprocess dataset, which is used for datasets.Dataset.map,
+        # must return Dict[str, list] with only two keys: [prompt_col_name, label_col_name]
+        "preprocess_fn": ds_refactor_fn,
+        # truncate label when sample's length exceed sample_max_len
+        "truncate_prompt": False
+    }
+)
 
 # note that max_new_tokens will be automatically specified internally based on given classes
 print(task.run())
@@ -283,51 +225,24 @@ print(
 </details>
 
 ## Learn More
-[tutorials](docs/tutorial) provide step-by-step guidance to integrate `auto_gptq` with your own project and some best practice principles.
 
-[examples](examples/README.md) provide plenty of example scripts to use `auto_gptq` in different ways.
+[tutorials](docs/tutorial) provide step-by-step guidance to integrate `gptqmodel` with your own project and some best practice principles.
 
-## Supported Models
-
-> you can use `model.config.model_type` to compare with the table below to check whether the model you use is supported by `auto_gptq`.
->
-> for example, model_type of `WizardLM`, `vicuna` and `gpt4all` are all `llama`, hence they are all supported by `auto_gptq`.
-
-| model type                         | quantization | inference | peft-lora | peft-ada-lora | peft-adaption_prompt                                                                            |
-|------------------------------------|--------------|-----------|-----------|---------------|-------------------------------------------------------------------------------------------------|
-| bloom                              | ✅            | ✅         | ✅         | ✅             |                                                                                                 |
-| gpt2                               | ✅            | ✅         | ✅         | ✅             |                                                                                                 |
-| gpt_neox                           | ✅            | ✅         | ✅         | ✅             | ✅[requires this peft branch](https://github.com/PanQiWei/peft/tree/multi_modal_adaption_prompt) |
-| gptj                               | ✅            | ✅         | ✅         | ✅             | ✅[requires this peft branch](https://github.com/PanQiWei/peft/tree/multi_modal_adaption_prompt) |
-| llama                              | ✅            | ✅         | ✅         | ✅             | ✅                                                                                               |
-| moss                               | ✅            | ✅         | ✅         | ✅             | ✅[requires this peft branch](https://github.com/PanQiWei/peft/tree/multi_modal_adaption_prompt) |
-| opt                                | ✅            | ✅         | ✅         | ✅             |                                                                                                 |
-| gpt_bigcode                        | ✅            | ✅         | ✅         | ✅             |                                                                                                 |
-| codegen                            | ✅            | ✅         | ✅         | ✅             |                                                                                                 |
-| falcon(RefinedWebModel/RefinedWeb) | ✅            | ✅         | ✅         | ✅             |                                                                                                 |
+[examples](examples/README.md) provide plenty of example scripts to use `gptqmodel` in different ways.
 
 ## Supported Evaluation Tasks
-Currently, `auto_gptq` supports: `LanguageModelingTask`, `SequenceClassificationTask` and `TextSummarizationTask`; more Tasks will come soon!
 
-## Running tests
-
-Tests can be run with:
-
-```
-pytest tests/ -s
-```
-
-## FAQ
+Currently, `gptqmodel` supports: `LanguageModelingTask`, `SequenceClassificationTask` and `TextSummarizationTask`; more Tasks will come soon!
 
 ### Which kernel is used by default?
 
-AutoGPTQ defaults to using exllamav2 int4*fp16 kernel for matrix multiplication.
+GPTQModel will use Marlin, Exllama v2, Triton/CUDA kernels in that order for maximum inference performance.
 
-### How to use Marlin kernel?
+# Acknowledgements
 
-Marlin is an optimized int4 * fp16 kernel was recently proposed at https://github.com/IST-DASLab/marlin. This is integrated in AutoGPTQ when loading a model with `use_marlin=True`. This kernel is available only on devices with compute capability 8.0 or 8.6 (Ampere GPUs).
-
-## Acknowledgement
-- Special thanks **Elias Frantar**, **Saleh Ashkboos**, **Torsten Hoefler** and **Dan Alistarh** for proposing **GPTQ** algorithm and open source the [code](https://github.com/IST-DASLab/gptq), and for releasing [Marlin kernel](https://github.com/IST-DASLab/marlin) for mixed precision computation.
-- Special thanks **qwopqwop200**, for code in this project that relevant to quantization are mainly referenced from [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda).
-- Special thanks to **turboderp**, for releasing [Exllama](https://github.com/turboderp/exllama) and [Exllama v2](https://github.com/turboderp/exllamav2) libraries with efficient mixed precision kernels.
+* **Elias Frantar**, **Saleh Ashkboos**, **Torsten Hoefler** and **Dan Alistarh**: for creating [GPTQ](https://github.com/IST-DASLab/gptq) and [Marlin](https://github.com/IST-DASLab/marlin).
+* **PanQiWei**: for creation of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ) which this project code is based upon.
+* **FXMarty**: for maintaining and support of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ).
+* **Qwopqwop200**: for quantization code used in this project adapted from [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda).
+* **Turboderp**: for releasing [Exllama v1](https://github.com/turboderp/exllama) and [Exllama v2](https://github.com/turboderp/exllamav2) kernels adapted for use in this project.
+* **FpgaMiner**: for [GPTQ-Triton](https://github.com/fpgaminer/GPTQ-triton) kernels used in [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda) which is adapted into this project.

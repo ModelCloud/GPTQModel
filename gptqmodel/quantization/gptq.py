@@ -1,3 +1,6 @@
+# License: GPTQModel/licenses/LICENSE.mit
+# adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
+
 import math
 import os
 import time
@@ -8,7 +11,6 @@ import torch.nn as nn
 import transformers
 
 from .quantizer import Quantizer
-
 
 logger = getLogger(__name__)
 
@@ -168,8 +170,8 @@ class GPTQ:
 
         if self.dev != torch.device("cpu"):
             torch.cuda.synchronize()
-        logger.info(f"duration: {(time.time() - tick)}")
-        logger.info(f"avg loss: {torch.sum(Losses).item() / self.nsamples}")
+        duration = time.time() - tick
+        avg_loss = torch.sum(Losses).item() / self.nsamples
 
         group_size = group_size if group_size != -1 else self.columns
         if static_groups and actorder:
@@ -192,7 +194,7 @@ class GPTQ:
             zero.append(self.quantizer.zero)
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
-        return scale, zero, g_idx
+        return scale, zero, g_idx, duration, avg_loss
 
     def free(self):
         if os.environ.get("DEBUG"):

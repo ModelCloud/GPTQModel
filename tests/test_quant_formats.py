@@ -11,12 +11,11 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import Backend, GPTQModel, __version__  # noqa: E402
+from gptqmodel import GPTQModel, __version__  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantization(unittest.TestCase):
@@ -39,7 +38,7 @@ class TestQuantization(unittest.TestCase):
             (True, True, FORMAT.MARLIN),
         ]
     )
-    def test_quantize(self, backend: Backend, sym: bool, format: FORMAT):
+    def test_quantize(self, use_marlin: bool, sym: bool, format: FORMAT):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -74,7 +73,7 @@ class TestQuantization(unittest.TestCase):
             model = GPTQModel.from_quantized(
                 tmpdirname,
                 device="cuda:0",
-                backend=Backend,
+                use_marlin=use_marlin,
             )
 
             logging.info(f"Loaded config: {model.quantize_config}")
@@ -95,7 +94,7 @@ class TestQuantization(unittest.TestCase):
                 "group_size": 128,
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,
-                "is_marlin_format": backend == Backend.MARLIN,
+                "is_marlin_format": use_marlin,
             }
 
             model = GPTQModel.from_quantized(

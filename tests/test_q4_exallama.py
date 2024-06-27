@@ -1,23 +1,20 @@
 # -- do not touch
 import os
 
-from gptqmodel import Backend
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
-from test_q4_cuda import get_diff  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
 from gptqmodel import GPTQModel, exllama_set_max_input_length  # noqa: E402
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
+from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
+from test_q4_cuda import get_diff  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 CUDA_OLD_REFERENCE = torch.Tensor(
     [
@@ -1065,7 +1062,9 @@ class TestsQ4Exllama(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            backend=Backend.EXLLAMA,
+            use_triton=False,
+            disable_exllama=False,
+            disable_exllamav2=True,
         )
 
         linear = linear_class(
@@ -1129,7 +1128,9 @@ class TestsQ4Exllama(unittest.TestCase):
             model_id,
             revision=revision,
             device="cuda:0",
-            backend=Backend.EXLLAMA,
+            use_triton=False,
+            disable_exllama=False,
+            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1164,7 +1165,9 @@ class TestsQ4Exllama(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            backend=Backend.EXLLAMA,
+            use_triton=False,
+            disable_exllama=False,
+            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1190,7 +1193,9 @@ class TestsQ4Exllama(unittest.TestCase):
             model_id,
             revision=revision,
             device="cuda:0",
-            backend=Backend.EXLLAMA,
+            use_triton=False,
+            disable_exllama=False,
+            disable_exllamav2=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
