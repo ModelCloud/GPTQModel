@@ -33,9 +33,9 @@ class TestQuantization(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (False, True, FORMAT.GPTQ_V2),
-            (False, False, FORMAT.GPTQ),
-            (True, True, FORMAT.MARLIN),
+            (Backend.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
+            (Backend.EXLLAMA_V2, False, FORMAT.GPTQ),
+            (Backend.MARLIN, True, FORMAT.MARLIN),
         ]
     )
     def test_quantize(self, backend: Backend, sym: bool, format: FORMAT):
@@ -73,7 +73,7 @@ class TestQuantization(unittest.TestCase):
             model = GPTQModel.from_quantized(
                 tmpdirname,
                 device="cuda:0",
-                backend=Backend,
+                backend=backend,
             )
 
             logging.info(f"Loaded config: {model.quantize_config}")

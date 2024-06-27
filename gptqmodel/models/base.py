@@ -841,7 +841,7 @@ class BaseGPTQModel(nn.Module):
             if not isinstance(quantize_config, QuantizeConfig):
                 quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
 
-        if quantize_config.format == FORMAT.MARLIN and (backend != Backend.MARLIN or backend != Backend.AUTO):
+        if quantize_config.format == FORMAT.MARLIN and (backend != Backend.MARLIN and backend != Backend.AUTO):
             # format marlin requires marlin kernel
             raise TypeError(f"format marlin requires Backend.AUTO or Backend.MARLIN instead of {backend}")
 
