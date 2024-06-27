@@ -15,25 +15,21 @@ jobs:
     steps:
       - name: Run tests group 1
         id: test_perplexity
-        if: matrix.test-group == 'gpu_group1'
         run: ls tests/test_perplexity.py
 
       - name: Run test_lm_head.py
         id: test_lm_head
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
         run: ls tests/1213m_head.py
 
       - name: Run test_q4_exallama.py
         id: test_q4_exallama
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
         run: ls tests/test_q4_exallama.py
 
 
       - name: Print results
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
         shell: bash
         run: |
           declare -A step_outcomes
