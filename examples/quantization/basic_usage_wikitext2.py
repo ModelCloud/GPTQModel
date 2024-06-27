@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+
 from gptqmodel import GPTQModel, QuantizeConfig
 
 pretrained_model_dir = "facebook/opt-125m"
@@ -145,7 +146,7 @@ def main():
 
     # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
-    model.quantize(traindataset, use_triton=False)
+    model.quantize(traindataset)
 
     # save quantized model
     model.save_quantized(quantized_model_dir)
@@ -154,7 +155,7 @@ def main():
     model.save_quantized(quantized_model_dir, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0", use_triton=False)
+    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
 
     opt_eval(model.model, testenc, "cuda:0")
 

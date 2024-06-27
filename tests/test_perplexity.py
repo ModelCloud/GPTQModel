@@ -7,11 +7,12 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
+
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):

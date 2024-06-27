@@ -1,22 +1,26 @@
 # -- do not touch
 import os
 
+from gptqmodel import Backend
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearCudaOld  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+
+from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearCudaOld  # noqa: E402
 
 try:
     from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
 except ImportError as e:
     print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
 
-from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
@@ -619,9 +623,7 @@ class TestsQ4CUDA(unittest.TestCase):
             model_id,
             revision=revision,
             device=device,
-            use_triton=False,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.CUDA,
             torch_dtype=torch_dtype,
         )
 
@@ -664,9 +666,7 @@ class TestsQ4CUDA(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device=device,
-            use_triton=False,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.CUDA,
             torch_dtype=torch_dtype,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)

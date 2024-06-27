@@ -2,9 +2,10 @@ from argparse import ArgumentParser
 
 import datasets
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig
-from gptqmodel.eval_tasks import LanguageModelingTask
 from transformers import AutoTokenizer
+
+from gptqmodel import GPTQModel, QuantizeConfig, get_backend
+from gptqmodel.eval_tasks import LanguageModelingTask
 
 DATASET = "tatsu-lab/alpaca"
 WITH_INPUT_TEMPLATE = "Instruction:\n{instruction}\n\nInput:\n{input}\n\nOutput:\n"
@@ -40,7 +41,7 @@ def main():
     )
     parser.add_argument("--sample_max_len", type=int, default=1024, help="max tokens for each sample")
     parser.add_argument("--block_max_len", type=int, default=2048, help="max tokens for each data block")
-    parser.add_argument("--use_triton", action="store_true")
+    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
@@ -70,7 +71,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    model = GPTQModel.from_quantized(args.quantized_model_dir, device="cuda:0", use_triton=args.use_triton)
+    model = GPTQModel.from_quantized(args.quantized_model_dir, device="cuda:0", backend=get_backend(args.backend))
     task.model = model
     task.device = model.device
     print(f"eval result for quantized model: {task.run()}")

@@ -1,13 +1,14 @@
 import torch
-from gptqmodel import GPTQModel
-from gptqmodel.quantization import QuantizeConfig
 from transformers import AutoTokenizer, TextGenerationPipeline
 
-use_bitblas = True
+from gptqmodel import Backend, GPTQModel
+from gptqmodel.quantization import QuantizeConfig
+
+backend = Backend.BITBLAS
 pretrained_model_dir = "facebook/opt-125m"
 quantized_model_dir = "./facebook/opt-125m-4bit-128g"
 
-if use_bitblas:
+if backend == Backend.BITBLAS:
     quantized_model_dir += "-bitblas"
 
 def main():
@@ -52,11 +53,11 @@ def main():
 
     # load quantized model to the first GPU
     model = GPTQModel.from_quantized(
-        quantized_model_dir, device="cuda:0", use_bitblas=use_bitblas
+        quantized_model_dir, device="cuda:0", backend=backend,
     )
 
     # download quantized model from Hugging Face Hub and load to the first GPU
-    # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True, use_triton=False)
+    # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True)
 
     # -- simple token evaluate --
     input_ids = torch.ones((1, 1), dtype=torch.long, device="cuda:0")

@@ -7,10 +7,10 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import QuantLinear as TritonV2QuantLinear  # noqa: E402
-from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import QuantLinear as TritonV2QuantLinear  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
@@ -26,9 +26,7 @@ class TestsQ4Triton(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            use_triton=True,
-            disable_exllama=True,
-            disable_exllamav2=True,
+            backend=Backend.TRITON,
             torch_dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
@@ -66,10 +64,9 @@ class TestsQ4Triton(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
+            backend=Backend.TRITON,
             revision=revision,
-            use_triton=True,
-            disable_exllama=True,
-            disable_exllamav2=True,
+
         )
         for _, submodule in model_q.named_modules():
             if isinstance(submodule, TritonV2QuantLinear):

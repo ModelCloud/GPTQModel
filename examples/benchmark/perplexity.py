@@ -2,8 +2,9 @@ import argparse
 import os
 
 import torch
-from gptqmodel.utils import Perplexity
 from transformers import AutoTokenizer
+
+from gptqmodel.utils import Perplexity, get_backend
 
 if __name__ == "__main__":
     """
@@ -42,7 +43,7 @@ if __name__ == "__main__":
         default=None,
         help="Max memory used in each GPU.",
     )
-    parser.add_argument("--cpu_max_memory", type=int, default=None, help="Mx memory used in CPU.")
+    parser.add_argument("--cpu_max_memory", type=int, default=None, help="Max memory used in CPU.")
     parser.add_argument("--is_quantized", action="store_true", help="Is the model GPTQ quantized?")
     parser.add_argument(
         "--use_safetensors",
@@ -51,11 +52,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use_fast_tokenizer", action="store_true", help="Wheter to use fast tokenizer")
     parser.add_argument("--trust_remote_code", action="store_true", help="Whether to use remote code")
-    parser.add_argument(
-        "--disable_exllama",
-        action="store_true",
-        help="Whether to use disable exllama kernel",
-    )
+    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'], help="Whether to use Backend format")
     args = parser.parse_args()
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -88,7 +85,7 @@ if __name__ == "__main__":
             model_basename=args.model_basename,
             use_safetensors=True,
             trust_remote_code=args.trust_remote_code,
-            disable_exllama=args.disable_exllama,
+            backend=get_backend(args.backend),
         )
     else:
         from transformers import AutoModelForCausalLM

@@ -7,14 +7,14 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
-from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
-from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
-from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
 from test_q4_cuda import get_diff  # noqa: E402
 from test_q4_exallama import CUDA_OLD_REFERENCE  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
+from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
+from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
@@ -32,7 +32,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            use_triton=False,
+            backend=Backend.EXLLAMA_V2,
         )
 
         linear = linear_class(
@@ -79,7 +79,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
-        model_q = GPTQModel.from_quantized(model_id, device="cuda:0", use_triton=False)
+        model_q = GPTQModel.from_quantized(model_id, device="cuda:0")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
@@ -104,7 +104,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             model_id,
             rivision=revision,
             device="cuda:0",
-            use_triton=False,
+            backend=Backend.EXLLAMA_V2,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -128,7 +128,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             model_id,
             revision=revision,
             device="cuda:0",
-            use_triton=False,
+            backend=Backend.EXLLAMA_V2,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)

@@ -7,6 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
+
 from gptqmodel.nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear  # noqa: E402
 
 try:
@@ -14,8 +15,9 @@ try:
 except ImportError as e:
     print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
 
-from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import Backend, GPTQModel  # noqa: E402
 
 
 class TestQ4BitBLAS(unittest.TestCase):
@@ -29,7 +31,7 @@ class TestQ4BitBLAS(unittest.TestCase):
         model_id = "TheBloke/Llama-2-7B-Chat-GPTQ"
 
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", use_bitblas=True)
+            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.BITBLAS)
         except ValueError as e:
             raise e
 
@@ -54,7 +56,7 @@ class TestQ4BitBLAS(unittest.TestCase):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "s3nh/starcoderbase-1b-GPTQ"
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", use_bitblas=True)
+            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.BITBLAS)
         except ValueError as e:
             raise e
 
