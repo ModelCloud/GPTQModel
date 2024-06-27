@@ -841,9 +841,11 @@ class BaseGPTQModel(nn.Module):
             if not isinstance(quantize_config, QuantizeConfig):
                 quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
 
-        if quantize_config.format == FORMAT.MARLIN and (backend != Backend.MARLIN and backend != Backend.AUTO):
+        if quantize_config.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            raise TypeError(f"format marlin requires Backend.AUTO or Backend.MARLIN instead of {backend}")
+            if backend != Backend.MARLIN and backend != Backend.AUTO:
+                raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
+            backend = Backend.MARLIN
 
         marlin_compatible = _validate_marlin_device_support()
 
@@ -854,9 +856,11 @@ class BaseGPTQModel(nn.Module):
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but backend is not Backend.MARLIN. We recommend using `backend=Backend.MARLIN` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., backend=Backend.MARLIN)`."
                 )
 
-        if quantize_config.format == FORMAT.BITBLAS and (backend != Backend.BITBLAS and backend != Backend.AUTO):
+        if quantize_config.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            raise TypeError(f"format bitblas requires Backend.AUTO or Backend.BITBLAS instead of {backend}")
+            if backend != Backend.BITBLAS and backend != Backend.AUTO:
+                raise TypeError(f"FORMAT.BITBLAS requires Backend.AUTO or Backend.BITBLAS: actual = `{backend}`.")
+            backend = Backend.BITBLAS
 
         if model_basename is None:
             if quantize_config.model_file_base_name:
@@ -956,8 +960,8 @@ class BaseGPTQModel(nn.Module):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=Backend.AUTO,
-                format=quantize_config.format,
+                backend=backend.AUTO if backend == Backend.MARLIN or backend == Backend.BITBLAS else backend,
+                format=FORMAT.GPTQ_V2,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
             )
@@ -997,7 +1001,7 @@ class BaseGPTQModel(nn.Module):
                 no_split_module_classes=[cls.layer_type],
             )
 
-        converted_gptq_v1_to_v2 = False
+        load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if quantize_config.format == FORMAT.GPTQ:
             accelerate.load_checkpoint_in_model(
@@ -1022,7 +1026,7 @@ class BaseGPTQModel(nn.Module):
                 quantize_config=quantize_config,
                 qlinear_kernel=preload_qlinear_kernel,
             )
-            converted_gptq_v1_to_v2 = True
+            load_checkpoint_in_model = True
             quantize_config.format = FORMAT.GPTQ_V2
 
         if backend == Backend.MARLIN:
@@ -1041,29 +1045,18 @@ class BaseGPTQModel(nn.Module):
 
             _validate_marlin_compatibility(quantize_config, throwError=True)
 
-            # Load the quant linear type we need.
-            # TODO: load marlin directly with the right quantlinear class.
-            quant_linear_class = select_quant_linear(
-                bits=quantize_config.bits,
-                group_size=quantize_config.group_size,
-                desc_act=quantize_config.desc_act,
-                sym=quantize_config.sym,
-                backend=Backend.AUTO,
-                format=quantize_config.format,
-            )
-
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise, convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
                 quantize_config=quantize_config,
-                quant_linear_class=quant_linear_class,
+                quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
                 device_map=device_map,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
-                converted_gptq_v1_to_v2=converted_gptq_v1_to_v2,
+                load_checkpoint_in_model=load_checkpoint_in_model,
             )
 
         if backend == Backend.BITBLAS:
@@ -1071,34 +1064,23 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(
                     "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
 
-            # Load the quant linear type we need.
-            # TODO: load directy bitblas with the right quantlinear class.
-            quant_linear_class = select_quant_linear(
-                bits=quantize_config.bits,
-                group_size=quantize_config.group_size,
-                desc_act=quantize_config.desc_act,
-                sym=quantize_config.sym,
-                backend=Backend.AUTO,
-                format=quantize_config.format,
-            )
-
             # Prepare model for bitblas load.
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
                 model=model,
                 quantize_config=quantize_config,
-                quant_linear_class=quant_linear_class,
+                quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 model_save_name=model_save_name,
                 device_map=device_map,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
-                converted_gptq_v1_to_v2=converted_gptq_v1_to_v2,
+                load_checkpoint_in_model=load_checkpoint_in_model,
             )
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if backend != Backend.MARLIN and backend != Backend.BITBLAS:
+        if not load_checkpoint_in_model and backend != Backend.MARLIN and backend != Backend.BITBLAS:
             accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292

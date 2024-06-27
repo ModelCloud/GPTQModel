@@ -17,7 +17,7 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..quantization import QuantizeConfig
+from ..quantization import QuantizeConfig, FORMAT
 from .backend import Backend
 from .importer import select_quant_linear
 
@@ -112,7 +112,8 @@ def make_quant(
     use_cuda_fp16: bool = True,
     pack: bool = False,
 ) -> BaseQuantLinear:
-    QuantLinear = select_quant_linear_with_pack(
+    select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
+    QuantLinear = select_quant_linear_func(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -243,8 +244,10 @@ def select_quant_linear_with_pack(bits: int,
     backend: Backend, format: str, pack: bool):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
-    if backend == Backend.BITBLAS:
+    if format == FORMAT.BITBLAS:
         backend = Backend.AUTO
+        format = FORMAT.GPTQ_V2
+
     QuantLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
