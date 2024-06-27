@@ -16,6 +16,17 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
 
+      - name: Compile
+        run: python setup.py bdist_wheel
+
+      - name: Show dist folder
+        run: ls -alh dist
+
+      - name: Upload to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: dist
+
 
   test:
     needs: build
@@ -29,11 +40,19 @@ jobs:
           - gpu_group1
           - gpu_group2
     steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: artifact
+          path: dist
+
+      - name: Show dist folder
+        run: ls -alh dist
 
       - name: Install wheel
         run: |
           # install only the last version
-#          pip install dist/*.whl
+          pip install dist/*.whl
 
       - name: Find suitable GPU
         run: |
