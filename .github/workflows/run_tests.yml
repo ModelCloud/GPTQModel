@@ -14,13 +14,7 @@ jobs:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
       - name: Checkout Codes
-        id: check
         uses: actions/checkout@v4
-
-      - name: Print results1
-        run: |
-          name=check
-          echo ${{ steps[$name].outcome }}
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -33,7 +27,6 @@ jobs:
         with:
           name: dist
           path: dist
-
 
   test:
     needs: build
@@ -162,9 +155,25 @@ jobs:
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
         run: |
-          steps=(test_perplexity test_lm_head test_q4_exallama test_q4_exallama_v2 test_q4_marlin test_q4_triton test_repacking test_serialization test_sharded test_triton test_quant_formats test_q4_cuda test_q4_bitblas)
-          for step in "${steps[@]}"; do
-            outcome="${{ steps.$step.outcome }}"
+          declare -A step_outcomes
+          step_outcomes=(
+            [test_perplexity]="{{ steps.test_perplexity.outcome }}"
+            [test_lm_head]="{{ steps.test_lm_head.outcome }}"
+            [test_q4_exallama]="{{ steps.test_q4_exallama.outcome }}"
+            [test_q4_exallama_v2]="{{ steps.test_q4_exallama_v2.outcome }}"
+            [test_q4_marlin]="{{ steps.test_q4_marlin.outcome }}"
+            [test_q4_triton]="{{ steps.test_q4_triton.outcome }}"
+            [test_repacking]="{{ steps.test_repacking.outcome }}"
+            [test_serialization]="{{ steps.test_serialization.outcome }}"
+            [test_sharded]="{{ steps.test_sharded.outcome }}"
+            [test_triton]="{{ steps.test_triton.outcome }}"
+            [test_quant_formats]="{{ steps.test_quant_formats.outcome }}"
+            [test_q4_cuda]="{{ steps.test_q4_cuda.outcome }}"
+            [test_q4_bitblas]="{{ steps.test_q4_bitblas.outcome }}"
+          )
+  
+          for step in "${!step_outcomes[@]}"; do
+            outcome="${step_outcomes[$step]}"
             if [ "$outcome" == "success" ]; then
               echo -e "\e[32m${step} Result: $outcome\e[0m"
             else
