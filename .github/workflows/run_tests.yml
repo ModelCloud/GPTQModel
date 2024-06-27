@@ -114,6 +114,7 @@ jobs:
           run_test test_triton.py
           run_test test_quant_formats.py
           run_test test_q4_cuda.py
+          run_test test_q4_bitblas.py
 
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
