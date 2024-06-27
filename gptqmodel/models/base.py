@@ -153,7 +153,6 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
 
-        backend: Backend = Backend.AUTO,
         # TODO: remove use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
         use_cuda_fp16: bool = True,
 
@@ -424,7 +423,7 @@ class BaseGPTQModel(nn.Module):
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=backend,
+            backend=Backend.AUTO,
             use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
