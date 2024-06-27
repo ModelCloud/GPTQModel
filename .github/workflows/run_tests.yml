@@ -84,7 +84,7 @@ jobs:
         run: |
           declare -a failed_tests
           declare -A test_durations
-          
+
           run_test() {
               local start_time=$(date +%s)
               echo -e "\033[1;34mRunning $1...\033[0m"
@@ -93,14 +93,16 @@ jobs:
               local test_result=$?
               local end_time=$(date +%s)
               local duration=$((end_time - start_time))
-              test_durations[$1]=$duration  # 存储时长到关联数组
               if [ $test_result -ne 0 ]; then
                   failed_tests+=($1)
+                  test_durations[$1]="\033[1;31m${duration}\033[0m"
+              else
+                  test_durations[$1]="\033[1;32m${duration}\033[0m"
               fi
-              echo -e "\033[1;32mFinished $1 in ${duration} seconds.\033[0m"
+              echo -e "Finished $1 in ${test_durations[$1]} seconds."
               echo -e "========================================\n\n\n"
           }
-          
+
           run_test test_lm_head.py
           run_test test_q4_exallama.py
           run_test test_q4_exallama_v2.py
@@ -112,7 +114,7 @@ jobs:
           run_test test_triton.py
           run_test test_quant_formats.py
           run_test test_q4_cuda.py
-          
+
           if [ ${#failed_tests[@]} -ne 0 ]; then
               echo -e "\033[1;31mTests failed:\033[0m"
               for test in "${failed_tests[@]}"
@@ -123,11 +125,12 @@ jobs:
           else
               echo "All tests passed."
           fi
-          
+
           echo "Test durations:"
           for test in "${!test_durations[@]}"
           do
-              echo "$test: ${test_durations[$test]} seconds"
+              echo -e "$test: ${test_durations[$test]} seconds"
           done
+
 
 
