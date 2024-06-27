@@ -1,6 +1,6 @@
 import unittest
 
-from gptqmodel import GPTQModel
+from gptqmodel import Backend, GPTQModel
 
 
 class TestVerifyHashFunction(unittest.TestCase):
@@ -11,13 +11,13 @@ class TestVerifyHashFunction(unittest.TestCase):
 
     def test_verify_md5_hash_function(self):
         # Load the model with MD5 verify_hash parameter
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", use_marlin=True,
+        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=Backend.MARLIN,
                                          verify_hash=self.EXPECTED_MD5_HASH)
         self.assertIsNotNone(model)
 
     def test_verify_sha256_hash_function(self):
         # Load the model with SHA-256 verify_hash parameter
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", use_marlin=True,
+        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=Backend.MARLIN,
                                          verify_hash=self.EXPECTED_SHA256_HASH)
         # Add additional checks to ensure the model is loaded correctly
         self.assertIsNotNone(model)
