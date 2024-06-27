@@ -854,7 +854,7 @@ class BaseGPTQModel(nn.Module):
                     "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but backend is not Backend.MARLIN. We recommend using `backend=Backend.MARLIN` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., backend=Backend.MARLIN)`."
                 )
 
-        if quantize_config.format == FORMAT.BITBLAS and (backend != Backend.BITBLAS or backend != Backend.AUTO):
+        if quantize_config.format == FORMAT.BITBLAS and (backend != Backend.BITBLAS and backend != Backend.AUTO):
             # format bitblas requires bitblas kernel
             raise TypeError(f"format bitblas requires Backend.AUTO or Backend.BITBLAS instead of {backend}")
 
