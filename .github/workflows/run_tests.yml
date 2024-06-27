@@ -39,11 +39,20 @@ jobs:
             [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
           )
   
+          max_length=0
+          for step in "${!step_outcomes[@]}"; do
+            length=${#step}
+            if (( length > max_length )); then
+              max_length=length
+            fi
+          done
+          
           for step in "${!step_outcomes[@]}"; do
             outcome="${step_outcomes[$step]}"
             if [ "$outcome" == "success" ]; then
-              echo -e "\e[32m${step} Result: $outcome\e[0m"
+              color_code="\e[32m"
             else
-              echo -e "\e[31m${step} Result: $outcome\e[0m"
+              color_code="\e[31m"
             fi
+            printf "$color_code%-*s Result: $outcome\e[0m\n" $max_length "$step"
           done
