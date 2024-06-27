@@ -9,8 +9,9 @@ import unittest  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
 
 
 class TestLmHead(unittest.TestCase):

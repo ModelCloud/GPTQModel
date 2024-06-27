@@ -18,6 +18,7 @@ from transformers.utils.hub import cached_file
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import QuantizeConfig
+from .backend import Backend
 from .importer import select_quant_linear
 
 logger = getLogger(__name__)
@@ -104,26 +105,21 @@ def make_quant(
     names,
     bits: int,
     group_size: int,
+    backend: Backend,
+    format: str,
     desc_act: bool = False,
     sym: bool = True,
-    use_triton: bool = False,
-    use_marlin: bool = False,
-    use_bitblas: bool = False,
-    disable_exllama: bool = False,
-    disable_exllamav2: bool = False,
     use_cuda_fp16: bool = True,
-
+    pack: bool = False,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
-        use_triton=use_triton,
-        use_marlin=use_marlin,
-        use_bitblas=use_bitblas,
-        disable_exllama=disable_exllama,
-        disable_exllamav2=disable_exllamav2,
+        backend=backend,
+        format=format,
+        pack=pack,
     )
 
     if isinstance(module, QuantLinear):
@@ -146,7 +142,7 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
-            if (not (desc_act) or group_size == -1) and not use_triton:
+            if (not (desc_act) or group_size == -1) and backend != Backend.TRITON:
                 new_layer = QuantLinear(
                     bits=bits,
                     group_size=group_size,
@@ -243,25 +239,19 @@ def select_quant_linear_with_pack(bits: int,
     group_size: int,
     desc_act: bool,
     sym: bool,
-    use_triton: bool,
-    disable_exllama: bool,
-    disable_exllamav2: bool ,
-    use_marlin: bool ,
-    use_bitblas: bool,):
+    backend: Backend, format: str, pack: bool):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
-    if use_bitblas:
-        use_bitblas = False
+    if backend == Backend.BITBLAS:
+        backend = Backend.AUTO
     QuantLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
-        use_triton=use_triton,
-        disable_exllama=disable_exllama,
-        disable_exllamav2=disable_exllamav2,
-        use_marlin=use_marlin,
-        use_bitblas=use_bitblas,
+        backend=backend,
+        format=format,
+        pack=pack,
     )
     return QuantLinear
 
@@ -270,25 +260,22 @@ def pack_model(
     quantizers,
     bits,
     group_size,
+    backend: Backend,
+    format: str,
     desc_act=False,
     sym: bool = True,
-    use_triton=False,
     use_cuda_fp16=True,
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
-    use_marlin: bool = False,
-    use_bitblas: bool = False,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
-        use_triton=use_triton,
-        disable_exllama=False,
-        disable_exllamav2=True,
-        use_marlin=use_marlin,
-        use_bitblas=use_bitblas,
+        backend=backend,
+        format=format,
+        pack=True,
     )
 
     if force_layer_back_to_cpu:
@@ -302,13 +289,11 @@ def pack_model(
         quantizers,
         bits,
         group_size,
-        use_triton=use_triton,
+        backend=backend,
+        format=format,
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
-        disable_exllama=False,
-        disable_exllamav2=True,
-        use_marlin=use_marlin,
-        use_bitblas=use_bitblas,
+        pack=True,
     )
     qlayers = find_layers(model, [QuantLinear])
 
@@ -336,7 +321,7 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if use_triton and warmup_triton:
+    if backend != Backend.TRITON and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )

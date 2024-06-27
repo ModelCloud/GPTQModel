@@ -7,10 +7,11 @@ from typing import Dict, List, Optional
 
 import torch
 from datasets import Dataset, load_dataset
-from gptqmodel import GPTQModel, QuantizeConfig
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
+
+from gptqmodel import Backend, GPTQModel, QuantizeConfig, get_backend
 
 logger = logging.getLogger(__name__)
 
@@ -143,17 +144,15 @@ def load_data(tokenizer, n_samples, max_new_tokens):
 
 def load_model_tokenizer(
     model_name_or_path: str,
+    backend: Backend,
     tokenizer_name_or_path: Optional[str] = None,
     from_pretrained: bool = False,
     max_memory: Optional[dict] = None,
     model_basename: Optional[str] = None,
     quantize_config: Optional[str] = None,
     trust_remote_code: bool = False,
-    use_triton: bool = False,
-    use_bitblas: bool = False,
     use_safetensors: bool = True,
     use_fast_tokenizer: bool = False,
-    disable_exllama: bool = False,
 ):
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=tokenizer_name_or_path or model_name_or_path,
@@ -174,15 +173,13 @@ def load_model_tokenizer(
         model = GPTQModel.from_quantized(
             model_name_or_path,
             max_memory=max_memory,
-            use_triton=use_triton,
-            use_bitblas=use_bitblas,
             use_cuda_fp16=True,
             quantize_config=quantize_config,
             model_basename=model_basename,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
             warmup_triton=False,
-            disable_exllama=disable_exllama,
+            backend=backend,
         )
 
     return model, tokenizer
@@ -234,11 +231,9 @@ def main():
     parser.add_argument("--model_basename", type=str, default=None)
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--use_triton", action="store_true")
-    parser.add_argument("--use_bitblas", action="store_true")
+    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
-    parser.add_argument("--disable_exllama", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
     parser.add_argument("--per_gpu_max_memory", type=int, default=None)
     parser.add_argument("--cpu_max_memory", type=int, default=None)
@@ -277,11 +272,9 @@ def main():
         model_basename=args.model_basename,
         quantize_config=quantize_config,
         trust_remote_code=args.trust_remote_code,
-        use_triton=args.use_triton,
-        use_bitblas=args.use_bitblas,
         use_safetensors=True,
         use_fast_tokenizer=args.use_fast_tokenizer,
-        disable_exllama=args.disable_exllama,
+        backend=get_backend(args.backend),
     )
     end = time.time()
     logger.info(f"model and tokenizer loading time: {end - start:.4f}s")
@@ -289,7 +282,7 @@ def main():
     logger.info(f"quantize config: {model.quantize_config.to_dict()}")
     logger.info(f"model device map: {model.hf_device_map}")
 
-    if args.use_triton:
+    if args.backend == Backend.TRITON:
         logger.info("warmup triton, this may take a while.")
         model.warmup_triton()
 
