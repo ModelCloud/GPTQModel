@@ -83,15 +83,21 @@ jobs:
         shell: bash
         run: |
           declare -a failed_tests
+          declare -A test_durations
           
           run_test() {
+              local start_time=$(date +%s)
               echo -e "\033[1;34mRunning $1...\033[0m"
               echo "========================================"
               pytest tests/$1
-              if [ $? -ne 0 ]; then
+              local test_result=$?
+              local end_time=$(date +%s)
+              local duration=$((end_time - start_time))
+              test_durations[$1]=$duration  # 存储时长到关联数组
+              if [ $test_result -ne 0 ]; then
                   failed_tests+=($1)
               fi
-              echo -e "\033[1;32mFinished $1\033[0m"
+              echo -e "\033[1;32mFinished $1 in ${duration} seconds.\033[0m"
               echo -e "========================================\n\n\n"
           }
           
@@ -117,4 +123,11 @@ jobs:
           else
               echo "All tests passed."
           fi
+          
+          echo "Test durations:"
+          for test in "${!test_durations[@]}"
+          do
+              echo "$test: ${test_durations[$test]} seconds"
+          done
+
 
