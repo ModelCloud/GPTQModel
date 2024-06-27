@@ -951,7 +951,7 @@ class BaseGPTQModel(nn.Module):
                         logger.info(f"The layer {name} is not quantized.")
                     del layers[name]
 
-            make_quant(
+            preload_qlinear_kernel = make_quant(
                 model,
                 layers,
                 quantize_config.bits,
@@ -997,6 +997,34 @@ class BaseGPTQModel(nn.Module):
                 no_split_module_classes=[cls.layer_type],
             )
 
+        converted_gptq_v1_to_v2 = False
+        # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
+        if quantize_config.format == FORMAT.GPTQ:
+            accelerate.load_checkpoint_in_model(
+                model,
+                dtype=torch_dtype,
+                # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                checkpoint=model_save_name,
+                device_map=device_map,
+                offload_state_dict=True,
+                offload_buffers=True,
+            )
+            # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
+            if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
+                raise ValueError(
+                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
+                )
+
+            logger.info(
+                f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            model = convert_gptq_v1_to_v2_format(
+                model,
+                quantize_config=quantize_config,
+                qlinear_kernel=preload_qlinear_kernel,
+            )
+            converted_gptq_v1_to_v2 = True
+            quantize_config.format = FORMAT.GPTQ_V2
+
         if backend == Backend.MARLIN:
             if is_sharded:
                 raise ValueError(
@@ -1035,6 +1063,7 @@ class BaseGPTQModel(nn.Module):
                 device_map=device_map,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
+                converted_gptq_v1_to_v2=converted_gptq_v1_to_v2,
             )
 
         if backend == Backend.BITBLAS:
@@ -1064,12 +1093,13 @@ class BaseGPTQModel(nn.Module):
                 device_map=device_map,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
+                converted_gptq_v1_to_v2=converted_gptq_v1_to_v2,
             )
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
         if backend != Backend.MARLIN and backend != Backend.BITBLAS:
-            accelerate.utils.modeling.load_checkpoint_in_model(
+            accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
@@ -1089,24 +1119,6 @@ class BaseGPTQModel(nn.Module):
             backend=backend,
             format=quantize_config.format,
         )
-
-        # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if quantize_config.format == FORMAT.GPTQ:
-            # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-            if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
-                raise ValueError(
-                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
-                )
-
-            logger.info(f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
-
-            model = convert_gptq_v1_to_v2_format(
-                model,
-                quantize_config=quantize_config,
-                qlinear_kernel=qlinear_kernel,
-            )
-
-            quantize_config.format = FORMAT.GPTQ_V2
 
         # == step4: set seqlen == #
         model_config = model.config.to_dict()

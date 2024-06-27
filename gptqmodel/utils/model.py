@@ -111,7 +111,7 @@ def make_quant(
     sym: bool = True,
     use_cuda_fp16: bool = True,
     pack: bool = False,
-):
+) -> BaseQuantLinear:
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         group_size=group_size,
@@ -123,7 +123,7 @@ def make_quant(
     )
 
     if isinstance(module, QuantLinear):
-        return
+        return QuantLinear
 
     for name, submodule in module.named_modules():
         if name in names:
@@ -168,6 +168,7 @@ def make_quant(
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
+    return QuantLinear
 
 def convert_gptq_v1_to_v2_format(
     model,
