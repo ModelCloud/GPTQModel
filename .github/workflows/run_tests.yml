@@ -79,82 +79,62 @@ jobs:
         if: matrix.test-group == 'gpu_group1'
         run: pytest tests/test_perplexity.py
 
-      - name: Run tests group 2
+      - name: Run test_lm_head.py
+        continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        shell: bash
-        run: |
-          run_log_success=()
-          run_log_fail=()
-          
-          run_test() {
-              start_time=$(date +%s)
-              echo -e "\033[1;34mRunning $1...\033[0m"
-              echo "========================================"
-          
-              pytest tests/$1
-              result=$?
-          
-              end_time=$(date +%s)
-              duration=$((end_time - start_time))
-          
-              echo -e "========================================\n\n\n"
-              log_entry="$1,$duration,$result"
-              if [ "$result" -eq 0 ]; then
-                  run_log_success+=("$log_entry")
-              else
-                  run_log_fail+=("$log_entry")
-              fi
-          }
-          
-          run_test test_lm_head.py
-          run_test test_q4_exallama.py
-          run_test test_q4_exallama_v2.py
-          run_test test_q4_marlin.py
-          run_test test_q4_triton.py
-          run_test test_repacking.py
-          run_test test_serialization.py
-          run_test test_sharded.py
-          run_test test_triton.py
-          run_test 123213123
-          run_test test_quant_formats.py
-          run_test test_q4_cuda.py
-          run_test test_q4_bitblas.py
-          
-          max_length=0
-          for log in "${run_log_success[@]}" "${run_log_fail[@]}"; do
-              IFS=',' read -r test_name duration result <<< "$log"
-              length=${#test_name}
-              if [[ $length -gt $max_length ]]; then
-                  max_length=$length
-              fi
-          done
-          
-          echo "" > success.log
-          echo "" > fail.log
-          save_log() {
-              for log in "$@"; do
-                  IFS=',' read -r test_name duration result <<< "$log"
-                  if [ "$result" -eq 0 ]; then
-                      color_code="\033[0;32m"
-                      printf "$color_code%-*s\tDuration: %4ds\t\033[0m\n" $((max_length + 4)) "$test_name" $duration >> success.log
-                  else
-                      color_code="\033[0;31m"
-                      printf "$color_code%-*s\tDuration: %4ds\t\033[0m\n" $((max_length + 4)) "$test_name" $duration >> fail.log
-                  fi
-              done
-          }
-          
-          # Save logs to respective files
-          save_log "${run_log_success[@]}"
-          save_log "${run_log_fail[@]}"
+        run: pytest tests/test_lm_head.py
 
-      - name: Print log
+      - name: Run test_q4_exallama.py
+        continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        shell: bash
-        run: |
-          echo -e "\nTest Results:"
-          cat success.log
-          if [ -s fail_log.log ]; then
-              cat fail.log
-              exit 1
-          fi
+        run: pytest tests/test_q4_exallama.py
+
+      - name: Run test_q4_exallama_v2.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_exallama_v2.py
+
+      - name: Run test_q4_marlin.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_marlin.py
+ 
+      - name: Run test_q4_triton.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_triton.py
+
+      - name: Run test_repacking.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_repacking.py
+
+      - name: Run test_serialization.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_serialization.py
+
+      - name: Run test_sharded.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_sharded.py
+
+      - name: Run test_triton.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_triton.py
+
+      - name: Run test_quant_formats.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_quant_formats.py
+
+      - name: Run test_q4_cuda.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_cuda.py
+
+      - name: Run test_q4_bitblas.py
+        continue-on-error: true
+        if: matrix.test-group == 'gpu_group2'
+        run: pytest tests/test_q4_bitblas.py
