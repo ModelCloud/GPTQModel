@@ -55,16 +55,16 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 
 ## Model Support ( 🚀 GPTQModel only )
 
-| Model     |    |           |    |          |    |                  |   |
-|-----------|----|-----------|----|----------|----|------------------|---|
-| Baichuan  | ✅  | GPTNeoX   | ✅  | Mixtral  | ✅  | RefinedWeb       | ✅ |
-| Bloom     | ✅  | GPT-2     | ✅  | MOSS     | ✅  | StableLM         | ✅ |
-| ChatGLM   | 🚀 | GPT-J     | ✅  | MPT      | ✅  | StarCoder2       | ✅ |
-| CodeGen   | ✅  | InternLM  | ✅  | OPT      | ✅  | XVERSE           | ✅ |
-| Cohere    | ✅  | Llama     | ✅  | Phi      | ✅  | Yi               | ✅ |
-| Deci      | ✅  | LongLLaMA | ✅  | Phi-3    | 🚀 | DBRX Converted   | 🚀 |
-| Falcon    | ✅  | MiniCPM   | 🚀 | Qwen     | ✅  | DeepSeek-V2      | 🚀 |
-| GPTBigCod | ✅  | Mistral   | ✅  | Qwen2MoE | 🚀 | DeepSeek-V2-Lite | 🚀  |
+| Model          |    |                   |    |           |    |            |    |
+|----------------|----|-------------------|----|-----------|----|------------|----|
+| Baichuan       | ✅  | DeepSeek-V2-Licte | 🚀 | LongLLaMA | ✅  | Phi-3      | 🚀 |
+| Bloom          | ✅  | Falon             | ✅  | MiniCPM   | 🚀 | Qwen       | ✅  |
+| ChatGLM        | 🚀 | GPTBigCod         | ✅  | Mistral   | ✅  | Qwen2MoE   | 🚀 |
+| CodeGen        | ✅  | GPTNeoX           | ✅  | Mixtral   | ✅  | RefinedWeb | ✅  |
+| Cohere         | ✅  | GPT-2             | ✅  | MOSS      | ✅  | StableLM   | ✅  |
+| DBRX Converted | 🚀 | GPT-J             | ✅  | MPT       | ✅  | StarCoder2 | ✅  |
+| Deci           | ✅  | InternLM          | ✅  | OPT       | ✅  | XVERSE     | ✅  |
+| DeepSeek-V2    | 🚀 | Llama             | ✅  | Phi       | ✅  | Yi         | ✅  |
 
 ## Compatiblity 
 
