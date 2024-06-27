@@ -1,16 +1,14 @@
 import itertools
-import numpy as np
 import random
 import unittest
 
+import numpy as np
 import torch
-from torch import nn
-
-
+from gptqmodel.nn_modules.qlinear.qlinear_qbits import (BITS_DTYPE_MAPPING, QuantLinear, convert_dtype_torch2str,
+                                                        dequantize_weight, unpack_to_8bit_signed)
 from intel_extension_for_transformers import qbits
 from parameterized import parameterized
-
-from gptqmodel.nn_modules.qlinear.qlinear_qbits import BITS_DTYPE_MAPPING, convert_dtype_torch2str, QuantLinear, dequantize_weight, unpack_to_8bit_signed
+from torch import nn
 
 in_features = 256
 out_features = 128

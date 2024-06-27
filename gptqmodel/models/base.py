@@ -22,7 +22,7 @@ from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZ
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
-from ..utils.importer import select_quant_linear, QBITS_AVAILABLE, QBITS_EXCEPTION
+from ..utils.importer import QBITS_AVAILABLE, QBITS_EXCEPTION, select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
