@@ -1,11 +1,6 @@
 from collections import OrderedDict
 from logging import getLogger
 
-from ..quantization import FORMAT
-from .backend import Backend
-
-logger = getLogger(__name__)
-
 from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import QuantLinear as CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
@@ -13,6 +8,8 @@ from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLine
 from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear as TritonV2QuantLinear
+from ..quantization import FORMAT
+from .backend import Backend
 
 backend_dict = OrderedDict({
     Backend.MARLIN: MarlinQuantLinear,
@@ -31,6 +28,7 @@ format_dict = {
     FORMAT.BITBLAS: [Backend.BITBLAS],
 }
 
+logger = getLogger(__name__)
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
