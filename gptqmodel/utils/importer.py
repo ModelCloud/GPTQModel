@@ -30,6 +30,7 @@ format_dict = {
 
 logger = getLogger(__name__)
 
+
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
         bits: int,
@@ -37,7 +38,7 @@ def select_quant_linear(
         desc_act: bool,
         sym: bool,
         backend: Backend,
-        format: str,
+        format: FORMAT,
         pack: bool = False,
 ):
     # Handle the case where backend is AUTO.

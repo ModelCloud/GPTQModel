@@ -4,7 +4,6 @@ import math
 from logging import getLogger
 
 import torch
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
 
