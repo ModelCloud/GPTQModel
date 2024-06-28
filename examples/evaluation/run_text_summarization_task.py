@@ -3,7 +3,7 @@ from argparse import ArgumentParser
 
 import datasets
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig, get_backend
 from gptqmodel.eval_tasks import TextSummarizationTask
 from transformers import AutoTokenizer, GenerationConfig
 
@@ -37,7 +37,7 @@ def main():
     )
     parser.add_argument("--sample_max_len", type=int, default=1024, help="max tokens for each sample")
     parser.add_argument("--block_max_len", type=int, default=2048, help="max tokens for each data block")
-    parser.add_argument("--use_triton", action="store_true")
+    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
@@ -67,7 +67,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    model = GPTQModel.from_quantized(args.quantized_model_dir, device="cuda:0", use_triton=args.use_triton)
+    model = GPTQModel.from_quantized(args.quantized_model_dir, device="cuda:0", backend=get_backend(args.backend))
     task.model = model
     task.device = model.device
     print(f"eval result for quantized model: {task.run(generation_config=GenerationConfig(max_new_tokens=32))}")

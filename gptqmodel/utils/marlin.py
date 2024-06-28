@@ -23,6 +23,7 @@ def prepare_model_for_marlin_load(
     device_map,
     sym: bool,
     desc_act: bool,
+    converted_gptq_v1_to_v2: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the Marlin format, load it directly.
     if quantize_config.format == FORMAT.MARLIN:
@@ -42,14 +43,15 @@ def prepare_model_for_marlin_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # Marlin ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        accelerate.utils.modeling.load_checkpoint_in_model(
-            model,
-            dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=current_model_save_name,
-            device_map=device_map,
-            offload_state_dict=True,
-            offload_buffers=True,
-        )
+        if converted_gptq_v1_to_v2:
+            accelerate.load_checkpoint_in_model(
+                model,
+                dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                checkpoint=current_model_save_name,
+                device_map=device_map,
+                offload_state_dict=True,
+                offload_buffers=True,
+            )
         # Convert model to marlin, repacking weights into Marlin format.
         model = convert_to_marlin(model, quant_linear_class, quantize_config, sym, desc_act, repack=True)
 

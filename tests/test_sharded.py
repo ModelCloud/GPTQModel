@@ -8,7 +8,8 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import GPTQModel  # noqa: E402
+
+from gptqmodel import Backend, GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import FORMAT  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -134,7 +135,7 @@ class TestSharded(unittest.TestCase):
             model = GPTQModel.from_quantized(
                 tmp_dir,
                 device="cuda:0",
-                use_bitblas=True,
+                backend=Backend.BITBLAS,
             )
 
             tokens = model.generate(**tokenizer("1337", return_tensors="pt").to(model.device), max_new_tokens=20)[0]
