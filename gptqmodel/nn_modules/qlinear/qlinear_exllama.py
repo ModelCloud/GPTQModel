@@ -129,7 +129,7 @@ class QuantLinear(BaseQuantLinear):
             self.bias = linear.bias.clone().half()
 
         intweight = []
-        for idx in range(self.infeatures):
+        for idx in range(self.original_infeatures):
             intweight.append(
                 torch.round((W[:, idx] + scale_zeros[self.g_idx[idx]]) / self.scales[self.g_idx[idx]]).to(torch.int)[
                     :, None
