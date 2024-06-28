@@ -118,16 +118,9 @@ class QuantLinear(BaseQuantLinear):
         # backup original values
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
-
-        # code bug prevention
-        del infeatures
-        del outfeatures
-        del group_size
-
         self.maxq = 2**self.bits - 1
 
         assert self.infeatures % 32 == 0
-        assert self.infeatures % self.group_size == 0
         assert self.outfeatures % 32 == 0
 
         # I need to register the tensors, otherwise, we won't be able to load them easily using transformers ...
