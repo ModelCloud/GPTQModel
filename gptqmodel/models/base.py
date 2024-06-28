@@ -1030,10 +1030,6 @@ class BaseGPTQModel(nn.Module):
             quantize_config.format = FORMAT.GPTQ_V2
 
         if backend == Backend.MARLIN:
-            if is_sharded:
-                raise ValueError(
-                    "The loading of sharded checkpoints with Marlin is currently not supported."
-                )
             if not _validate_marlin_device_support():
                 raise ValueError(
                     f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=Backend.MARLIN`.'
