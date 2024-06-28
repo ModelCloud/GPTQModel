@@ -1107,7 +1107,7 @@ class BaseGPTQModel(nn.Module):
         model.eval()
 
         # == step6: (optional) warmup triton == #
-        if backend != Backend.TRITON and warmup_triton:
+        if backend == Backend.TRITON and warmup_triton:
             from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
 
             QuantLinear.warmup(model, seqlen=model.seqlen)

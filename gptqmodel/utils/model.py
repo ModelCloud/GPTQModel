@@ -309,7 +309,7 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if backend != Backend.TRITON and warmup_triton:
+    if backend == Backend.TRITON and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )
