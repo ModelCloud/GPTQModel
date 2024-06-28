@@ -8,7 +8,6 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-
 from gptqmodel import Backend, GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import FORMAT  # noqa: E402

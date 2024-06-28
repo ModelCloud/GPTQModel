@@ -22,7 +22,7 @@ def prepare_model_for_bitblas_load(
         device_map,
         sym: bool,
         desc_act: bool,
-        converted_gptq_v1_to_v2: bool,
+        load_checkpoint_in_model: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
     if quantize_config.format == FORMAT.BITBLAS:
@@ -42,7 +42,7 @@ def prepare_model_for_bitblas_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # BitBLAS ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        if not converted_gptq_v1_to_v2:
+        if not load_checkpoint_in_model:
             accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,
