@@ -17,7 +17,8 @@ class TestLmHead(unittest.TestCase):
     MODEL_ID = "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
     DEVICE = "cuda:0"
 
-    def setup(self):
+    @classmethod
+    def setUpClass(cls):
         seed = 898
        # stabilize generation
         torch.manual_seed(seed)
