@@ -44,13 +44,13 @@ class QuantLinear(BaseQuantLinear):
         super().__init__()
         self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
-        self.padding = -outfeatures % 32
-        self.outfeatures = outfeatures + self.padding
-        outfeatures = self.outfeatures
-
-        self.infeatures = infeatures
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
+
+        # auto pad
+        self.outfeatures = outfeatures + (-outfeatures % 32)
+        self.infeatures = infeatures + (-infeatures % self.group_size)
+
         self.maxq = 2**self.bits - 1
 
         assert infeatures % 32 == 0
