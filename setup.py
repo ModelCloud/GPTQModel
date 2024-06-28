@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,6 +67,17 @@ if BUILD_CUDA_EXT:
 
 with open('requirements.txt') as f:
     requirements = f.read().splitlines()
+
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+
+import torch  # noqa: E402
+
+at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+if not at_least_one_cuda_v6:
+    raise EnvironmentError(
+       "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
+    )
 
 extras_require = {
     "test": ["pytest>=8.2.2", "parameterized"],

@@ -94,6 +94,6 @@ def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
     if gpu_model in ["NVIDIA PG506-230", "NVIDIA PG506-232"]:
         gpu_model = "NVIDIA A100"
 
-    print("GPU_model",gpu_model)
+    # print("GPU_model",gpu_model)
     target = find_best_match(nvidia_tags, gpu_model) if gpu_model else "cuda"
     return target
