@@ -82,8 +82,13 @@ class QuantLinear(BaseQuantLinear):
         if self.group_size not in [-1, 128]:
             raise ValueError("Only group_size -1 and 128 are supported.")
 
+        # auto pad
         self.infeatures = infeatures + (-outfeatures % self.group_size)
         self.outfeatures = outfeatures + (-outfeatures % 256)
+
+        # backup original values
+        self.original_outfeatures = outfeatures
+        self.original_infeatures = infeatures
 
         if infeatures % 128 != 0 or outfeatures % 256 != 0:
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")

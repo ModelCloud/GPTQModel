@@ -115,6 +115,10 @@ class QuantLinear(BaseQuantLinear):
         self.outfeatures = outfeatures + (-outfeatures % 32)
         self.infeatures = infeatures + (-infeatures % self.group_size)
 
+        # backup original values
+        self.original_outfeatures = outfeatures
+        self.original_infeatures = infeatures
+
         self.maxq = 2**self.bits - 1
 
         assert infeatures % 32 == 0
