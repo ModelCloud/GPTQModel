@@ -297,11 +297,7 @@ def pack_model(
         format=format,
         use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
-        disable_exllama=False,
-        disable_exllamav2=True,
-        use_marlin=use_marlin,
-        use_bitblas=use_bitblas,
-        use_qbits=use_qbits,
+        pack=True,
     )
     qlayers = find_layers(model, [QuantLinear])
 
@@ -329,7 +325,7 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if backend != Backend.TRITON and warmup_triton:
+    if backend == Backend.TRITON and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )

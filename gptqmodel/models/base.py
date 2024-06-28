@@ -789,15 +789,7 @@ class BaseGPTQModel(nn.Module):
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
 
-        # TODO: refract this bewildering amount of ugly args @ZX-ModelCloud
-        # combine into Backend.ENUM class of Backend.AUTO, Backend.TRITON, Backend.MARLIN
-        # single arp of backend: Backend = Backend.AUTO (default to auto)
-        use_triton: bool = True,
-        use_marlin: bool = True,
-        use_bitblas: bool = False,
-        use_qbits: bool = False,
-        disable_exllama: bool = False,
-        disable_exllamav2: bool = False,
+        backend: Backend = Backend.AUTO,
 
         torch_dtype: [str | torch.dtype] = "auto",
         use_cuda_fp16: bool = True,
@@ -812,10 +804,10 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
 
-        if not torch.cuda.is_available() or device == "cpu":
-            use_qbits = True
+        if (not torch.cuda.is_available() or device == "cpu") and backend == Backend.AUTO:
+            backend = Backend.QBITS
 
-        if use_qbits:
+        if backend == Backend.QBITS:
             if not QBITS_AVAILABLE:
                 raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
             if torch_dtype is None:
@@ -824,13 +816,6 @@ class BaseGPTQModel(nn.Module):
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         """load quantized model from local disk"""
-        # If disable_exllamav2 is True, we want to fall back on the exllama kernel and not the cuda/cuda_old ones.
-        if disable_exllama is None:
-            if disable_exllamav2:
-                disable_exllama = False
-            else:
-                disable_exllama = True
-
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
@@ -889,7 +874,7 @@ class BaseGPTQModel(nn.Module):
                 raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
             backend = Backend.MARLIN
 
-        marlin_compatible = False if use_qbits else _validate_marlin_device_support()
+        marlin_compatible = False if backend != Backend.QBITS else _validate_marlin_device_support()
 
         if backend != Backend.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)

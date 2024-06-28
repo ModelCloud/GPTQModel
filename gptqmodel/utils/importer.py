@@ -74,7 +74,7 @@ def select_quant_linear(
         from ..nn_modules.qlinear.qlinear_exllama import QuantLinear
     elif not desc_act or group_size == -1:
         from ..nn_modules.qlinear.qlinear_cuda_old import QuantLinear
-    elif (bits == 4 or bits == 8) and use_qbits:
+    elif (bits == 4 or bits == 8) and backend == Backend.QBITS:
         if not QBITS_AVAILABLE:
             raise ValueError(
                 f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`."
