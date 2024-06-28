@@ -78,16 +78,21 @@ class QuantLinear(BaseQuantLinear):
                 f'Can not use Marlin int4*fp16 kernel with a device of compute capability {torch.cuda.get_device_capability()}, the minimum compute capability is 8.0 for Marlin kernel. Please do not use `backend=Backend.MARLIN`, or please upgrade your GPU ("The more you buy, the more you save." - Taiwanese proverb).'
             )
 
+        self.group_size = group_size if group_size != -1 else infeatures
+        if self.group_size not in [-1, 128]:
+            raise ValueError("Only group_size -1 and 128 are supported.")
+
+        self.infeatures = infeatures + (-outfeatures % self.group_size)
+        self.outfeatures = outfeatures + (-outfeatures % 256)
+
         if infeatures % 128 != 0 or outfeatures % 256 != 0:
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
-        if group_size not in [-1, 128] and group_size != infeatures:
-            raise ValueError("Only group_size -1 and 128 are supported.")
-        if infeatures % group_size != 0:
-            raise ValueError("`infeatures` must be divisible by `group_size`.")
 
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.group_size = group_size if group_size != -1 else infeatures
+        #TODO: why is this condition here? => and group_size != infeatures
+        if infeatures % group_size != 0:
+             raise ValueError("`infeatures` must be divisible by `group_size`.")
+
+
         self.register_buffer(
             "B",
             torch.empty((self.infeatures // 16, self.outfeatures * 16 // 8), dtype=torch.int),
