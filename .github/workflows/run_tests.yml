@@ -25,8 +25,8 @@ jobs:
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
+          name: dist
           path: dist
-
 
   test:
     needs: build
@@ -43,7 +43,7 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: artifact
+          name: dist
           path: dist
 
       - name: Show dist folder
@@ -152,7 +152,6 @@ jobs:
         run: pytest tests/test_q4_bitblas.py
 
       - name: Print results
-        continue-on-error: true
         shell: bash
         if: matrix.test-group == 'gpu_group2'
         run: |
