@@ -44,9 +44,10 @@ class TestSerialization(unittest.TestCase):
 
     def test_gptq_v1_serialization(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
+        model.quantize_config.format = FORMAT.GPTQ
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            model.save_quantized(tmpdir, format="gptq")
+            model.save_quantized(tmpdir)
 
             with open(os.path.join(tmpdir, "quantize_config.json"), "r") as f:
                 quantize_config = json.load(f)

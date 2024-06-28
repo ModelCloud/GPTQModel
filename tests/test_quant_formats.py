@@ -11,6 +11,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
+from datasets import load_dataset  # noqa: E402
 from gptqmodel import Backend, GPTQModel, __version__  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL  # noqa: E402
@@ -20,16 +21,13 @@ from transformers import AutoTokenizer  # noqa: E402
 
 class TestQuantization(unittest.TestCase):
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(self):
         self.pretrained_model_dir = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_dir, use_fast=True)
-        self.calibration_dataset = [
-            self.tokenizer(
-                "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
-            ),
-            self.tokenizer("Today I am in Paris and it is a wonderful day."),
-        ]
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     @parameterized.expand(
         [
@@ -53,7 +51,7 @@ class TestQuantization(unittest.TestCase):
             use_flash_attention_2=False,
         )
 
-        model.quantize(self.calibration_dataset)
+        model.quantize(self.calibration_dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save_quantized(tmpdirname)
@@ -137,7 +135,7 @@ class TestQuantization(unittest.TestCase):
             quantize_config=quantize_config,
         )
 
-        model.quantize(self.calibration_dataset)
+        model.quantize(self.calibration_dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             err = None
