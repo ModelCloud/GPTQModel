@@ -3,6 +3,11 @@ name: Unit Tests (GPU)
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      repo:
+        description: 'GitHub repo {owner}/{repo}'
+        required: true
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -15,6 +20,8 @@ jobs:
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
 
       - name: Compile
         run: python setup.py bdist_wheel
