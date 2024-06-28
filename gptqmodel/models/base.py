@@ -434,6 +434,15 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
+
+            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
+            logger.info("Converting model to BitBlas Format...")
+            self.model = convert_to_bitblas(self.model, self.qlinear_kernel, self.quantize_config, self.quantize_config.sym,
+                                       self.quantize_config.desc_act, repack=True)
+            self.qlinear_kernel = BitBLASQuantLinear
+
         return quant_log
 
     @property
@@ -486,14 +495,6 @@ class BaseGPTQModel(nn.Module):
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
-        if quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
-
-            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
-            logger.info("Converting model to BitBlas Format...")
-            model = convert_to_bitblas(model, self.qlinear_kernel, quantize_config, quantize_config.sym,
-                                       quantize_config.desc_act, repack=True)
-            self.qlinear_kernel = BitBLASQuantLinear
         if model_base_name is None:
             model_base_name = (
                     self.quantize_config.model_file_base_name or
