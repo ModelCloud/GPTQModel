@@ -75,7 +75,7 @@ def prepare_model_for_bitblas_load(
 
 
 @torch.no_grad()
-def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool,
+def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool,
                        strict: bool = False):
     """
     Converts GPTQ-packed weights to the Bitblas format.
@@ -101,8 +101,8 @@ def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeCo
         # from checkpoints holding zero bias.
         with torch.device("meta"):
             bitblas_module = BitBLASQuantLinear(
-                bits=quantization_config.bits,
-                group_size=quantization_config.group_size,
+                bits=quant_config.bits,
+                group_size=quant_config.group_size,
                 sym=sym,
                 desc_act=desc_act,
                 infeatures=module.infeatures,
@@ -124,6 +124,6 @@ def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeCo
         gc.collect()
 
     # Set quantization config to be BitBLAS.
-    quantization_config.format = FORMAT.BITBLAS
+    quant_config.format = FORMAT.BITBLAS
 
     return model
