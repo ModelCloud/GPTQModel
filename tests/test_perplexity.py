@@ -6,7 +6,8 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
-from datasets import load_dataset # noqa: E402
+
+from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
