@@ -2,11 +2,10 @@ import gc
 from logging import getLogger
 
 import accelerate
+import threadpoolctl as tctl
 import torch
 from accelerate.utils import find_tied_parameters
 from tqdm import tqdm
-import threadpoolctl as tctl
-
 
 from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
