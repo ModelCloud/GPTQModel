@@ -21,12 +21,12 @@ from transformers import AutoTokenizer  # noqa: E402
 class TestQ4BitBLAS(unittest.TestCase):
     def test_generation(self):
         # Reference generated with the cuda-old kernel and TheBloke/Llama-2-7B-Chat-GPTQ
-        reference_output = "<s> I am in Paris and I am feeling very sad and lonely. everybody I know is busy and I don't have any friends here. I am staying in a small apartment in the 11th arrondissement and I am feeling very isolated. I miss my friends and family back home and I don'"
+        reference_output = "</s>I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
 
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        model_id = "TheBloke/Llama-2-7B-Chat-GPTQ"
+        model_id = "LnL-AI/opt-125M-autoround-lm_head-false-symTrue"
 
         try:
             model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.BITBLAS)
@@ -75,5 +75,4 @@ class TestQ4BitBLAS(unittest.TestCase):
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
 
         predicted_text = tokenizer.decode(res[0])
-
-        self.assertTrue(predicted_text.startswith("Today I am in Paris and I am a student of the Master's"))
+        self.assertTrue(predicted_text.startswith("Today I am in Paris and I am a student of the University of Paris"))
