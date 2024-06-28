@@ -77,79 +77,79 @@ jobs:
       - name: Run tests group 1
         id: test_perplexity
         if: matrix.test-group == 'gpu_group1'
-        run: pytest tests/test_perplexity.py
+        run: pytest --durations=0 tests/test_perplexity.py
 
       - name: Run test_lm_head.py
         id: test_lm_head
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_lm_head.py
+        run: pytest --durations=0 tests/test_lm_head.py
 
       - name: Run test_q4_exallama.py
         id: test_q4_exallama
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_exallama.py
+        run: pytest --durations=0 tests/test_q4_exallama.py
 
       - name: Run test_q4_exallama_v2.py
         id: test_q4_exallama_v2
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_exallama_v2.py
+        run: pytest --durations=0 tests/test_q4_exallama_v2.py
 
       - name: Run test_q4_marlin.py
         id: test_q4_marlin
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_marlin.py
+        run: pytest --durations=0 tests/test_q4_marlin.py
 
       - name: Run test_q4_triton.py
         id: test_q4_triton
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_triton.py
+        run: pytest --durations=0 tests/test_q4_triton.py
 
       - name: Run test_repacking.py
         id: test_repacking
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_repacking.py
+        run: pytest --durations=0 tests/test_repacking.py
 
       - name: Run test_serialization.py
         id: test_serialization
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_serialization.py
+        run: pytest --durations=0 tests/test_serialization.py
 
       - name: Run test_sharded.py
         id: test_sharded
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_sharded.py
+        run: pytest --durations=0 tests/test_sharded.py
 
       - name: Run test_triton.py
         id: test_triton
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_triton.py
+        run: pytest --durations=0 tests/test_triton.py
 
       - name: Run test_quant_formats.py
         id: test_quant_formats
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_quant_formats.py
+        run: pytest --durations=0 tests/test_quant_formats.py
 
       - name: Run test_q4_cuda.py
         id: test_q4_cuda
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_cuda.py
+        run: pytest --durations=0 tests/test_q4_cuda.py
 
       - name: Run test_q4_bitblas.py
         id: test_q4_bitblas
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_bitblas.py
+        run: pytest --durations=0 tests/test_q4_bitblas.py
 
       - name: Print results
         shell: bash
