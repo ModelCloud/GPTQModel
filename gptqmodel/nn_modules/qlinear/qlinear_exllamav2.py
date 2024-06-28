@@ -126,14 +126,14 @@ class QuantLinear(BaseQuantLinear):
         # I need to register the tensors, otherwise, we won't be able to load them easily using transformers ...
         self.register_buffer(
             "qweight",
-            torch.zeros((self.infeatures // 32 * self.bits, self.outfeatures), dtype=torch.int32),
+            torch.zeros((self.original_infeatures // 32 * self.bits, self.original_outfeatures), dtype=torch.int32),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
-                    math.ceil(self.infeatures / self.group_size),
-                    self.outfeatures // 32 * self.bits,
+                    math.ceil(self.original_infeatures / self.group_size),
+                    self.original_outfeatures // 32 * self.bits,
                 ),
                 dtype=torch.int32,
             ),
@@ -141,23 +141,36 @@ class QuantLinear(BaseQuantLinear):
         self.register_buffer(
             "scales",
             torch.zeros(
-                (math.ceil(self.infeatures / self.group_size), self.outfeatures),
+                (math.ceil(self.original_infeatures / self.group_size), self.original_outfeatures),
                 dtype=torch.float16,
             ),
         )
         self.register_buffer(
             "g_idx",
-            torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32),
+            torch.tensor([i // self.group_size for i in range(self.original_infeatures)], dtype=torch.int32),
         )
 
         if bias:
-            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.original_outfeatures), dtype=torch.float16))
         else:
             self.bias = None
 
     def post_init(self, temp_dq):
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
+
+        # resize due to padding after model weights have been loaded
+        if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
+            self.qweight.resize_(self.infeatures // 32 * self.bits, self.outfeatures)
+            self.qzeros.resize_(
+                math.ceil(self.infeatures / self.group_size),
+                self.outfeatures // 32 * self.bits
+            )
+            self.scales.resize_(math.ceil(self.infeatures / self.group_size), self.outfeatures)
+            self.g_idx.resize_(i // self.group_size for i in range(self.infeatures))
+            if self.bias is not None:
+                self.bias.resize_(self.outfeatures)
+
         self.q_tensors = {
             "qweight": self.qweight,
             "qzeros": self.qzeros,
