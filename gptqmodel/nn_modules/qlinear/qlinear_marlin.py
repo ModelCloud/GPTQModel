@@ -90,11 +90,16 @@ class QuantLinear(BaseQuantLinear):
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
 
-        if infeatures % 128 != 0 or outfeatures % 256 != 0:
+        # code bug prevention
+        del infeatures
+        del outfeatures
+        del group_size
+
+        if self.infeatures % 128 != 0 or self.outfeatures % 256 != 0:
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
 
         #TODO: why is this condition here? => and group_size != infeatures
-        if infeatures % group_size != 0:
+        if self.infeatures % self.group_size != 0:
              raise ValueError("`infeatures` must be divisible by `group_size`.")
 
 
@@ -104,7 +109,7 @@ class QuantLinear(BaseQuantLinear):
         )
         self.register_buffer(
             "s",
-            torch.empty((self.infeatures // group_size, self.outfeatures), dtype=torch.half),
+            torch.empty((self.infeatures // self.group_size, self.outfeatures), dtype=torch.half),
         )
         # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
         self.register_buffer(
@@ -113,7 +118,7 @@ class QuantLinear(BaseQuantLinear):
             persistent=False,
         )
         if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.half))
+            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
         else:
             self.bias = None
 

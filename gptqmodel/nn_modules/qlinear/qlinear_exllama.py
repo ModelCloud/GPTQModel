@@ -55,22 +55,27 @@ class QuantLinear(BaseQuantLinear):
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
 
+        # code bug prevention
+        del infeatures
+        del outfeatures
+        del group_size
+
         self.maxq = 2**self.bits - 1
 
-        assert infeatures % 32 == 0
-        assert infeatures % self.group_size == 0
-        assert outfeatures % 32 == 0
+        assert self.infeatures % 32 == 0
+        assert self.infeatures % self.group_size == 0
+        assert self.outfeatures % 32 == 0
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32),
+            torch.zeros((self.infeatures // 32 * self.bits, self.outfeatures), dtype=torch.int32),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // 32 * self.bits,
+                    math.ceil(self.infeatures / self.group_size),
+                    self.outfeatures // 32 * self.bits,
                 ),
                 dtype=torch.int32,
             ),
@@ -78,17 +83,17 @@ class QuantLinear(BaseQuantLinear):
         self.register_buffer(
             "scales",
             torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
+                (math.ceil(self.infeatures / self.group_size), self.outfeatures),
                 dtype=torch.float16,
             ),
         )
         self.register_buffer(
             "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
+            torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32),
         )
 
         if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros(self.outfeatures, dtype=torch.float16))
         else:
             self.bias = None
 
