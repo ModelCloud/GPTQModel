@@ -152,10 +152,6 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
-
-        # TODO: remove use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
-        use_cuda_fp16: bool = True,
-
         autotune_warmup_after_quantized: bool = False,
         calibration_enable_gpu_cache: bool = True,
     ):
@@ -424,7 +420,6 @@ class BaseGPTQModel(nn.Module):
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
             backend=Backend.AUTO,
-            use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
@@ -773,11 +768,8 @@ class BaseGPTQModel(nn.Module):
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
-
         backend: Backend = Backend.AUTO,
-
         torch_dtype: [str | torch.dtype] = "auto",
-        use_cuda_fp16: bool = True,
         quantize_config: Optional[QuantizeConfig] = None,
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,
@@ -917,10 +909,6 @@ class BaseGPTQModel(nn.Module):
         def skip(*args, **kwargs):
             pass
 
-        if torch_dtype != torch.float16:
-            logger.warning("Overriding use_cuda_fp16 to False since torch_dtype is not torch.float16.")
-            use_cuda_fp16 = False
-
         torch.nn.init.kaiming_uniform_ = skip
         torch.nn.init.uniform_ = skip
         torch.nn.init.normal_ = skip
@@ -962,7 +950,6 @@ class BaseGPTQModel(nn.Module):
                 quantize_config.group_size,
                 backend=backend.AUTO if backend == Backend.MARLIN or backend == Backend.BITBLAS else backend,
                 format=FORMAT.GPTQ_V2,
-                use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
             )
             model.tie_weights()
