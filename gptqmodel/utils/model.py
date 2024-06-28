@@ -431,11 +431,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
                         "max_dq_buffer_size": 1,
                         "max_inner_outer_dim": 1,
                     }
-
-                if not use_act_order:
-                    submodule._use_act_order = False
-                else:
-                    submodule._use_act_order = True
+                submodule._use_act_order = True if use_act_order else False
 
                 # Disable this heuristic for detecting act_order, but it could be used instead of the config.
                 """
