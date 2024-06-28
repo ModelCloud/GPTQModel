@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: 'GPTQModel repository'
+        description: 'GitHub repo {owner}/{repo}'
         required: true
         default: ''
 
