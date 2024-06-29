@@ -6,6 +6,7 @@ from logging import getLogger
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel_exllama_kernels import make_q4, q4_matmul
@@ -179,6 +180,10 @@ class QuantLinear(BaseQuantLinear):
             )
 
             x = x.half()
+
+        # If we padding infeatures, we also need to padding the x that passes in forward
+        if x.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
+            x = F.pad(x, (0, self.infeatures - self.original_infeatures))
 
         out = ext_q4_matmul(x, self.q4, self.width)
 

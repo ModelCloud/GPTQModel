@@ -4,6 +4,7 @@ import math
 from logging import getLogger
 
 import torch
+import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
 
@@ -187,6 +188,10 @@ class QuantLinear(BaseQuantLinear):
             )
 
             x = x.half()
+
+        # If we padding infeatures, we also need to padding the x that passes in forward
+        if x.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
+            x = F.pad(x, (0, self.infeatures - self.original_infeatures))
 
         output = ext_gemm_half_q_half(x, self.q_handle, self.outfeatures, force_cuda)
 
