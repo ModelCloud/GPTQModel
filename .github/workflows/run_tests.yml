@@ -62,7 +62,7 @@ jobs:
 
       - name: Find suitable GPU
         run: |
-         suitable_gpu=$(nvidia-smi -L | grep "RTX 4090" | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
+         suitable_gpu=$(nvidia-smi -L | grep -E 'PG506-[230|232]' | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
           do
             mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i $gpu_id)
             mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu_id)
