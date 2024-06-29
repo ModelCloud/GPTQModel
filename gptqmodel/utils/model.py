@@ -17,8 +17,8 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as QuantLinearExllama
-from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as QuantLinearExllamav2
+from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
+from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import Backend
 from .importer import select_quant_linear
@@ -408,7 +408,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, QuantLinearExllama):
+        if isinstance(submodule, ExllamaQuantLinear):
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -440,7 +440,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
                     submodule.infeatures,
                     submodule.outfeatures,
                 )
-        elif isinstance(submodule, QuantLinearExllamav2):
+        elif isinstance(submodule, ExllamaV2QuantLinear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -506,7 +506,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
-        if isinstance(submodule, QuantLinearExllamav2):
+        if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
         elif isinstance(submodule, BaseQuantLinear):
