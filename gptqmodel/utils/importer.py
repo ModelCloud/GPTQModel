@@ -1,13 +1,13 @@
 from collections import OrderedDict
 from logging import getLogger
 
-from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
-from ..nn_modules.qlinear.qlinear_cuda import QuantLinear as CudaQuantLinear
-from ..nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear as TritonV2QuantLinear
+from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
+from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+from ..nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT
 from .backend import Backend
 
@@ -55,18 +55,23 @@ def select_quant_linear(
     # Handle the case where backend is not AUTO.
     if backend == Backend.TRITON:
         logger.info("Using tritonv2 for GPTQ")
-        from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
+        from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
+        return TritonV2QuantLinear
     elif backend == Backend.BITBLAS:
-        from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear
+        from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
+        return BitBLASQuantLinear
     elif bits == 4 and sym and not desc_act and backend == Backend.MARLIN:
-        from ..nn_modules.qlinear.qlinear_marlin import QuantLinear
+        from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+        return MarlinQuantLinear
     elif bits == 4 and backend == Backend.EXLLAMA_V2:
-        from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear
+        from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
+        return ExllamaV2QuantLinear
     elif bits == 4 and backend == Backend.EXLLAMA:
-        from ..nn_modules.qlinear.qlinear_exllama import QuantLinear
+        from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
+        return ExllamaQuantLinear
     elif not desc_act or group_size == -1:
-        from ..nn_modules.qlinear.qlinear_cuda_old import QuantLinear
+        from ..nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
+        return CudaOldQuantLinear
     else:
-        from ..nn_modules.qlinear.qlinear_cuda import QuantLinear
-
-    return QuantLinear
+        from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+        return CudaQuantLinear

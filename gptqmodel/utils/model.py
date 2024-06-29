@@ -17,8 +17,9 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as ExllamaV2QuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import Backend
 from .importer import select_quant_linear
@@ -303,7 +304,7 @@ def pack_model(
                 zero.to(CPU),
                 g_idx.to(CPU),
             )
-            if QuantLinear.QUANT_TYPE == "marlin":
+            if QuantLinear is MarlinQuantLinear:
                 qlayers[name].pack(layers[name], scale)
             else:
                 qlayers[name].pack(layers[name], scale, zero, g_idx)

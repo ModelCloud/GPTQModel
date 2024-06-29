@@ -61,8 +61,7 @@ def _get_perms():
 _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 
-class QuantLinear(BaseQuantLinear):
-    QUANT_TYPE = "marlin"
+class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [4]
     SUPPORTED_GROUP_SIZE = [128, -1]
     SUPPORTED_DESC_ACT = [False]

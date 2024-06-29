@@ -2,7 +2,7 @@ import gc
 
 import torch
 
-from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 
 
 def exllama_set_max_input_length(model, max_input_length: int):
