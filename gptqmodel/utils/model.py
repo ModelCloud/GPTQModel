@@ -17,6 +17,8 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import QuantLinear as QuantLinearExllama
+from ..nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as QuantLinearExllamav2
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import Backend
 from .importer import select_quant_linear
@@ -406,44 +408,45 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, BaseQuantLinear):
-            if submodule.QUANT_TYPE == "exllama":
-                model_uses_exllama = True
-                device = submodule.qweight.device
-                if device not in device_to_buffers_size:
-                    device_to_buffers_size[device] = {
-                        "max_dq_buffer_size": 1,
-                        "max_inner_outer_dim": 1,
-                    }
-                submodule._use_act_order = True if use_act_order else False
+        if isinstance(submodule, QuantLinearExllama):
+            print(f"pzs------22222-{submodule.QUANT_TYPE}")
+            model_uses_exllama = True
+            device = submodule.qweight.device
+            if device not in device_to_buffers_size:
+                device_to_buffers_size[device] = {
+                    "max_dq_buffer_size": 1,
+                    "max_inner_outer_dim": 1,
+                }
+            submodule._use_act_order = True if use_act_order else False
 
-                # Disable this heuristic for detecting act_order, but it could be used instead of the config.
-                """
-                if submodule.g_idx is None:
-                    submodule.act_order = False
-                elif submodule.g_idx is not None and ((submodule.g_idx == 0).all() or torch.equal(submodule.g_idx.cpu(), torch.tensor([i // submodule.group_size for i in range(submodule.g_idx.shape[0])], dtype=torch.int32))):
-                    submodule.g_idx = None
-                    submodule.act_order = False
-                else:
-                    submodule.act_order = True
-                """
+            # Disable this heuristic for detecting act_order, but it could be used instead of the config.
+            """
+            if submodule.g_idx is None:
+                submodule.act_order = False
+            elif submodule.g_idx is not None and ((submodule.g_idx == 0).all() or torch.equal(submodule.g_idx.cpu(), torch.tensor([i // submodule.group_size for i in range(submodule.g_idx.shape[0])], dtype=torch.int32))):
+                submodule.g_idx = None
+                submodule.act_order = False
+            else:
+                submodule.act_order = True
+            """
 
-                device_to_buffers_size[device]["max_dq_buffer_size"] = max(
-                    device_to_buffers_size[device]["max_dq_buffer_size"],
-                    submodule.qweight.numel() * 8,
+            device_to_buffers_size[device]["max_dq_buffer_size"] = max(
+                device_to_buffers_size[device]["max_dq_buffer_size"],
+                submodule.qweight.numel() * 8,
+            )
+
+            if use_act_order:
+                device_to_buffers_size[device]["max_inner_outer_dim"] = max(
+                    device_to_buffers_size[device]["max_inner_outer_dim"],
+                    submodule.infeatures,
+                    submodule.outfeatures,
                 )
-
-                if use_act_order:
-                    device_to_buffers_size[device]["max_inner_outer_dim"] = max(
-                        device_to_buffers_size[device]["max_inner_outer_dim"],
-                        submodule.infeatures,
-                        submodule.outfeatures,
-                    )
-            elif submodule.QUANT_TYPE == "exllamav2":
-                model_uses_exllamav2 = True
-                device = submodule.qweight.device
-                scratch_fixed = submodule.scratch_space_fixed()
-                fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
+        elif isinstance(submodule, QuantLinearExllamav2):
+            print(f"pzs-------33333{submodule.QUANT_TYPE}")
+            model_uses_exllamav2 = True
+            device = submodule.qweight.device
+            scratch_fixed = submodule.scratch_space_fixed()
+            fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
 
     if model_uses_exllama:
         # To be honest this is quite ugly, not proud of this.
@@ -505,12 +508,13 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
-        if isinstance(submodule, BaseQuantLinear):
-            if submodule.QUANT_TYPE == "exllamav2":
-                device = submodule.qweight.device
-                submodule.post_init(temp_dq=model.device_tensors[device])
-            else:
-                submodule.post_init()
+        if isinstance(submodule, QuantLinearExllamav2):
+            print(f"pzs-------{submodule.QUANT_TYPE}")
+            device = submodule.qweight.device
+            submodule.post_init(temp_dq=model.device_tensors[device])
+        elif isinstance(submodule, BaseQuantLinear):
+            print(f"pzs------1111-{submodule.QUANT_TYPE}")
+            submodule.post_init()
 
     torch.cuda.empty_cache()
 
