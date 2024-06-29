@@ -167,7 +167,7 @@ class QuantLinear(BaseQuantLinear):
                 self.outfeatures // 32 * self.bits
             )
             self.scales.resize_(math.ceil(self.infeatures / self.group_size), self.outfeatures)
-            self.g_idx.resize_(i // self.group_size for i in range(self.infeatures))
+            self.g_idx = torch.tensor((i // self.group_size for i in range(self.infeatures)), dtype=torch.int32, device=self.g_idx.device)
             if self.bias is not None:
                 self.bias.resize_(self.outfeatures)
 
