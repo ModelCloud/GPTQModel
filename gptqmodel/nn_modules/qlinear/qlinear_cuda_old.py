@@ -25,7 +25,6 @@ class QuantLinear(BaseCudaQuantLinear):
         infeatures: int ,
         outfeatures: int,
         bias: bool,
-        use_cuda_fp16=True,
         kernel_switch_threshold=128,
         weight_dtype=torch.float16,
         **kwargs,
@@ -71,7 +70,7 @@ class QuantLinear(BaseCudaQuantLinear):
             self.bias = None
         self.half_indim = self.infeatures // 2
 
-        self.use_cuda_fp16 = use_cuda_fp16 if bits != 8 else False
+        self.use_cuda_fp16 = weight_dtype == torch.float16 if bits != 8 else False
 
         # is performed by unpacking the weights and using torch.matmul
         if self.bits in [2, 4, 8]:
@@ -195,7 +194,7 @@ class QuantLinear(BaseCudaQuantLinear):
             if self.use_cuda_fp16:
                 if x_dtype != torch.float16:
                     logger.warning_once(
-                        f"The cuda-old kernel for GPTQ with use_cuda_fp16=True requires a float16 input activation, while {x_dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+                        f"The cuda-old kernel for GPTQ requires a float16 input activation, while {x_dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
                     )
 
                 if self.bits == 2:

@@ -152,10 +152,6 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
-
-        # TODO: remove use_cuda_fp16 arg..why? doesn't pass smell test @ZX-ModelCloud
-        use_cuda_fp16: bool = True,
-
         autotune_warmup_after_quantized: bool = False,
         calibration_enable_gpu_cache: bool = True,
     ):
@@ -424,7 +420,6 @@ class BaseGPTQModel(nn.Module):
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
             backend=Backend.AUTO,
-            use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
@@ -438,6 +433,15 @@ class BaseGPTQModel(nn.Module):
         self._quantized = True
 
         torch.cuda.empty_cache()
+
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
+
+            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
+            logger.info("Converting model to BitBlas Format...")
+            self.model = convert_to_bitblas(self.model, self.qlinear_kernel, self.quantize_config, self.quantize_config.sym,
+                                       self.quantize_config.desc_act, repack=True)
+            self.qlinear_kernel = BitBLASQuantLinear
 
         return quant_log
 
@@ -491,14 +495,6 @@ class BaseGPTQModel(nn.Module):
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
-        if quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
-
-            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
-            logger.info("Converting model to BitBlas Format...")
-            model = convert_to_bitblas(model, self.qlinear_kernel, quantize_config, quantize_config.sym,
-                                       quantize_config.desc_act, repack=True)
-            self.qlinear_kernel = BitBLASQuantLinear
         if model_base_name is None:
             model_base_name = (
                     self.quantize_config.model_file_base_name or
@@ -773,11 +769,8 @@ class BaseGPTQModel(nn.Module):
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
-
         backend: Backend = Backend.AUTO,
-
         torch_dtype: [str | torch.dtype] = "auto",
-        use_cuda_fp16: bool = True,
         quantize_config: Optional[QuantizeConfig] = None,
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,
@@ -917,10 +910,6 @@ class BaseGPTQModel(nn.Module):
         def skip(*args, **kwargs):
             pass
 
-        if torch_dtype != torch.float16:
-            logger.warning("Overriding use_cuda_fp16 to False since torch_dtype is not torch.float16.")
-            use_cuda_fp16 = False
-
         torch.nn.init.kaiming_uniform_ = skip
         torch.nn.init.uniform_ = skip
         torch.nn.init.normal_ = skip
@@ -962,7 +951,6 @@ class BaseGPTQModel(nn.Module):
                 quantize_config.group_size,
                 backend=backend.AUTO if backend == Backend.MARLIN or backend == Backend.BITBLAS else backend,
                 format=FORMAT.GPTQ_V2,
-                use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
             )
             model.tie_weights()
@@ -1120,7 +1108,7 @@ class BaseGPTQModel(nn.Module):
         model.eval()
 
         # == step6: (optional) warmup triton == #
-        if backend != Backend.TRITON and warmup_triton:
+        if backend == Backend.TRITON and warmup_triton:
             from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
 
             QuantLinear.warmup(model, seqlen=model.seqlen)
