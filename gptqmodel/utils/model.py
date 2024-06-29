@@ -409,7 +409,6 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
 
     for name, submodule in model.named_modules():
         if isinstance(submodule, QuantLinearExllama):
-            print(f"pzs------22222-{submodule.QUANT_TYPE}")
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -442,7 +441,6 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
                     submodule.outfeatures,
                 )
         elif isinstance(submodule, QuantLinearExllamav2):
-            print(f"pzs-------33333{submodule.QUANT_TYPE}")
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -509,11 +507,9 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
         if isinstance(submodule, QuantLinearExllamav2):
-            print(f"pzs-------{submodule.QUANT_TYPE}")
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
         elif isinstance(submodule, BaseQuantLinear):
-            print(f"pzs------1111-{submodule.QUANT_TYPE}")
             submodule.post_init()
 
     torch.cuda.empty_cache()
