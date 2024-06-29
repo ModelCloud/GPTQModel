@@ -6,6 +6,7 @@ from logging import getLogger
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel_exllama_kernels import make_q4, q4_matmul
@@ -14,12 +15,12 @@ logger = getLogger(__name__)
 
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-none_tensor = torch.empty((1, 1), device="meta")
+NON_TENSOR = torch.empty((1, 1), device="meta")
 
 
 def ext_make_q4(qweight, qzeros, scales, g_idx, device):
     """Construct Q4Matrix, return handle"""
-    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else none_tensor, device)
+    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NON_TENSOR, device)
 
 
 def ext_q4_matmul(x, q4, q4_width):
@@ -44,29 +45,32 @@ class QuantLinear(BaseQuantLinear):
         super().__init__()
         self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
-        self.padding = -outfeatures % 32
-        self.outfeatures = outfeatures + self.padding
-        outfeatures = self.outfeatures
-
-        self.infeatures = infeatures
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
+
+        # auto pad
+        self.outfeatures = outfeatures + (-outfeatures % 32)
+        self.infeatures = infeatures + (-infeatures % self.group_size)
+
+        # backup original values
+        self.original_outfeatures = outfeatures
+        self.original_infeatures = infeatures
+
         self.maxq = 2**self.bits - 1
 
-        assert infeatures % 32 == 0
-        assert infeatures % self.group_size == 0
-        assert outfeatures % 32 == 0
+        assert self.infeatures % 32 == 0
+        assert self.outfeatures % 32 == 0
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32),
+            torch.zeros((self.original_infeatures // 32 * self.bits, self.original_outfeatures), dtype=torch.int32),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // 32 * self.bits,
+                    math.ceil(self.original_infeatures / self.group_size),
+                    self.original_outfeatures // 32 * self.bits,
                 ),
                 dtype=torch.int32,
             ),
@@ -74,23 +78,36 @@ class QuantLinear(BaseQuantLinear):
         self.register_buffer(
             "scales",
             torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
+                (math.ceil(self.original_infeatures / self.group_size), self.original_outfeatures),
                 dtype=torch.float16,
             ),
         )
         self.register_buffer(
             "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
+            torch.tensor([i // self.group_size for i in range(self.original_infeatures)], dtype=torch.int32),
         )
 
         if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros(self.original_outfeatures, dtype=torch.float16))
         else:
             self.bias = None
 
     def post_init(self):
         assert self.qweight.device.type == "cuda"
         assert self.qweight.device.index is not None
+
+        # resize due to padding after model weights have been loaded
+        if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
+            self.qweight.resize_(self.infeatures // 32 * self.bits, self.outfeatures)
+            self.qzeros.resize_(
+                math.ceil(self.infeatures / self.group_size),
+                self.outfeatures // 32 * self.bits
+            )
+            self.scales.resize_((math.ceil(self.infeatures / self.group_size), self.outfeatures),)
+            self.g_idx = torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32, device=self.g_idx.device)
+            if self.bias is not None:
+                self.bias.resize_(self.outfeatures)
+
 
         self.width = self.qweight.shape[1]
 
@@ -120,7 +137,7 @@ class QuantLinear(BaseQuantLinear):
             self.bias = linear.bias.clone().half()
 
         intweight = []
-        for idx in range(self.infeatures):
+        for idx in range(self.original_infeatures):
             intweight.append(
                 torch.round((W[:, idx] + scale_zeros[self.g_idx[idx]]) / self.scales[self.g_idx[idx]]).to(torch.int)[
                     :, None
@@ -163,6 +180,11 @@ class QuantLinear(BaseQuantLinear):
             )
 
             x = x.half()
+
+        # TODO: need to run checks to make sure there is no performance regression padding with F.pad
+        # if infeatures is padded, we need to pad the input as well
+        if x.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
+            x = F.pad(x, (0, self.infeatures - self.original_infeatures))
 
         out = ext_q4_matmul(x, self.q4, self.width)
 

@@ -2,6 +2,7 @@ import gc
 from logging import getLogger
 
 import accelerate
+import threadpoolctl as tctl
 import torch
 from accelerate.utils import find_tied_parameters
 from tqdm import tqdm
@@ -75,7 +76,7 @@ def prepare_model_for_bitblas_load(
 
 
 @torch.no_grad()
-def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool,
+def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool,
                        strict: bool = False):
     """
     Converts GPTQ-packed weights to the Bitblas format.
@@ -90,40 +91,42 @@ def convert_to_bitblas(model, model_quantlinear, quantization_config: QuantizeCo
         # TODO: load directly BitBLAS QuantLinear.
         message = "Overriding QuantLinear layers to use BitBLAS's QuantLinear..."
 
-    for name, module in tqdm(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
-        if not isinstance(module, model_quantlinear):
-            continue
+    # TODO: need to benchmark to see multiple threads help with bitblas/tvm compilation and runtime
+    with tctl.threadpool_limits(limits=1):
+        for name, module in tqdm(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
+            if not isinstance(module, model_quantlinear):
+                continue
 
-        parent_name = ".".join(name.split(".")[:-1])
-        layer_name = name[len(parent_name) + 1:]
+            parent_name = ".".join(name.split(".")[:-1])
+            layer_name = name[len(parent_name) + 1:]
 
-        # We could use `torch.count_nonzero(module.bias) > 0` here to discard zero bias, but this has issues when loading weights
-        # from checkpoints holding zero bias.
-        with torch.device("meta"):
-            bitblas_module = BitBLASQuantLinear(
-                bits=quantization_config.bits,
-                group_size=quantization_config.group_size,
-                sym=sym,
-                desc_act=desc_act,
-                infeatures=module.infeatures,
-                outfeatures=module.outfeatures,
-                bias=module.bias is not None,
-                enable_tuning=True
-            )
+            # We could use `torch.count_nonzero(module.bias) > 0` here to discard zero bias, but this has issues when loading weights
+            # from checkpoints holding zero bias.
+            with torch.device("meta"):
+                bitblas_module = BitBLASQuantLinear(
+                    bits=quant_config.bits,
+                    group_size=quant_config.group_size,
+                    sym=sym,
+                    desc_act=desc_act,
+                    infeatures=module.infeatures,
+                    outfeatures=module.outfeatures,
+                    bias=module.bias is not None,
+                    enable_tuning=True
+                )
 
-        # Dequantize the weight.
-        if repack:
-            bitblas_module.repack_from_gptq(module)
+            # Dequantize the weight.
+            if repack:
+                bitblas_module.repack_from_gptq(module)
 
-        # Save to parent.
-        parent_module = model.get_submodule(parent_name)
-        setattr(parent_module, layer_name, bitblas_module)
+            # Save to parent.
+            parent_module = model.get_submodule(parent_name)
+            setattr(parent_module, layer_name, bitblas_module)
 
-        # Free cuda memory.
-        del module
-        gc.collect()
+            # Free cuda memory.
+            del module
+            gc.collect()
 
     # Set quantization config to be BitBLAS.
-    quantization_config.format = FORMAT.BITBLAS
+    quant_config.format = FORMAT.BITBLAS
 
     return model

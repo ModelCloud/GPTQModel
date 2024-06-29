@@ -82,6 +82,7 @@ class QuantLinear(BaseQuantLinear):
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
         if group_size not in [-1, 128] and group_size != infeatures:
             raise ValueError("Only group_size -1 and 128 are supported.")
+        # Marlin groups infeatures according to group_size, so infeatures must be an integer multiple of group_size.
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
 
