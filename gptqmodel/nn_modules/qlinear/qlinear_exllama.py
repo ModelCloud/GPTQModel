@@ -182,7 +182,7 @@ class QuantLinear(BaseQuantLinear):
             x = x.half()
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
-        # if infeatures is padded, we need to pad the the input as well
+        # if infeatures is padded, we need to pad the input as well
         if x.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
             x = F.pad(x, (0, self.infeatures - self.original_infeatures))
 
