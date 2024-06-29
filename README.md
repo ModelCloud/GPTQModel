@@ -97,6 +97,14 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # compile and install
 pip install -vvv --no-build-isolation .
+
+# If you have nv package version 0.1.16 or higher, you can use nv pip for potentially better dependency management
+uv pip install -vvv --no-build-isolation .
+```
+
+### Script installation  
+```bash
+bash install.sh
 ```
 
 ### PIP (PENDING RELEASE) 
