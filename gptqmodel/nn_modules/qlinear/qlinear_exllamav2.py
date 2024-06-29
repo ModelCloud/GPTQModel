@@ -12,7 +12,7 @@ logger = getLogger(__name__)
 
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-none_tensor = torch.empty((1, 1), device="meta")
+NONE_TENSOR = torch.empty((1, 1), device="meta")
 
 
 def _torch_device(idx):
@@ -47,9 +47,9 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
             w["q_scale"],
             w["q_scale_max"],
             w["q_groups"],
-            none_tensor,
-            none_tensor,
-            none_tensor,
+            NONE_TENSOR,
+            NONE_TENSOR,
+            NONE_TENSOR,
             temp_dq,
         )
     # GPTQ
@@ -70,9 +70,9 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
                 w["qweight"],
                 w["q_perm"],
                 w["q_invperm"],
-                none_tensor,
-                none_tensor,
-                none_tensor,
+                NONE_TENSOR,
+                NONE_TENSOR,
+                NONE_TENSOR,
                 w["qzeros"],
                 w["scales"],
                 w["g_idx"].cpu(),
@@ -82,14 +82,14 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
         else:
             return make_q_matrix(
                 w["qweight"],
-                none_tensor,
-                none_tensor,
-                none_tensor,
-                none_tensor,
-                none_tensor,
+                NONE_TENSOR,
+                NONE_TENSOR,
+                NONE_TENSOR,
+                NONE_TENSOR,
+                NONE_TENSOR,
                 w["qzeros"],
                 w["scales"],
-                none_tensor,
+                NONE_TENSOR,
                 temp_dq,
             )
 

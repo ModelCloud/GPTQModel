@@ -14,12 +14,12 @@ logger = getLogger(__name__)
 
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-none_tensor = torch.empty((1, 1), device="meta")
+NON_TENSOR = torch.empty((1, 1), device="meta")
 
 
 def ext_make_q4(qweight, qzeros, scales, g_idx, device):
     """Construct Q4Matrix, return handle"""
-    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else none_tensor, device)
+    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NON_TENSOR, device)
 
 
 def ext_q4_matmul(x, q4, q4_width):
