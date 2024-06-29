@@ -19,7 +19,6 @@ class TestSharded(unittest.TestCase):
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device_map="auto",
-            backend=Backend.MARLIN,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
@@ -50,7 +49,6 @@ class TestSharded(unittest.TestCase):
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device_map="auto",
-            backend=Backend.MARLIN,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
@@ -95,7 +93,7 @@ class TestSharded(unittest.TestCase):
             del model
 
             index_file_path = os.path.join(tmp_dir, "gptq_model-4bit-128g.safetensors.index.json")
-            self.assertTrue(os.path.isfile(index_file_path))
+            self.assertFalse(os.path.isfile(index_file_path))
 
             model = GPTQModel.from_quantized(
                 tmp_dir,

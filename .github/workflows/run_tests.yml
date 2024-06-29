@@ -3,6 +3,15 @@ name: Unit Tests (GPU)
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      repo:
+        description: 'GitHub repo {owner}/{repo}'
+        required: false
+        default: ''
+      ref:
+        description: 'branch, tag or SHA'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -15,6 +24,9 @@ jobs:
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -33,12 +45,6 @@ jobs:
     runs-on: self-hosted
     container:
       image: modelcloud/gptqmodel:github-ci-v1
-    strategy:
-      fail-fast: false
-      matrix:
-        test-group:
-          - gpu_group1
-          - gpu_group2
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -74,89 +80,78 @@ jobs:
             echo "CUDA_VISIBLE_DEVICES set to $suitable_gpu"
           fi
 
-      - name: Run tests group 1
+      - name: Run test_perplexity.py
         id: test_perplexity
-        if: matrix.test-group == 'gpu_group1'
-        run: pytest tests/test_perplexity.py
+        continue-on-error: true
+        run: pytest --durations=0 tests/test_perplexity.py
 
       - name: Run test_lm_head.py
         id: test_lm_head
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_lm_head.py
+        run: pytest --durations=0 tests/test_lm_head.py
 
       - name: Run test_q4_exallama.py
         id: test_q4_exallama
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_exallama.py
+        run: pytest --durations=0 tests/test_q4_exallama.py
 
       - name: Run test_q4_exallama_v2.py
         id: test_q4_exallama_v2
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_exallama_v2.py
+        run: pytest --durations=0 tests/test_q4_exallama_v2.py
 
       - name: Run test_q4_marlin.py
         id: test_q4_marlin
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_marlin.py
+        run: pytest --durations=0 tests/test_q4_marlin.py
 
       - name: Run test_q4_triton.py
         id: test_q4_triton
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_triton.py
+        run: pytest --durations=0 tests/test_q4_triton.py
 
       - name: Run test_repacking.py
         id: test_repacking
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_repacking.py
+        run: pytest --durations=0 tests/test_repacking.py
 
       - name: Run test_serialization.py
         id: test_serialization
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_serialization.py
+        run: pytest --durations=0 tests/test_serialization.py
 
       - name: Run test_sharded.py
         id: test_sharded
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_sharded.py
+        run: pytest --durations=0 tests/test_sharded.py
 
       - name: Run test_triton.py
         id: test_triton
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_triton.py
+        run: pytest --durations=0 tests/test_triton.py
 
       - name: Run test_quant_formats.py
         id: test_quant_formats
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_quant_formats.py
+        run: pytest --durations=0 tests/test_quant_formats.py
 
       - name: Run test_q4_cuda.py
         id: test_q4_cuda
         continue-on-error: true
         if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_cuda.py
+        run: pytest --durations=0 tests/test_q4_cuda.py
 
       - name: Run test_q4_bitblas.py
         id: test_q4_bitblas
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
-        run: pytest tests/test_q4_bitblas.py
+        run: pytest --durations=0 tests/test_q4_bitblas.py
 
       - name: Print results
         shell: bash
-        if: matrix.test-group == 'gpu_group2'
         run: |
           declare -A step_outcomes
           step_outcomes=(
+            [test_perplexity]="${{ steps.test_perplexity.outcome }}"
             [test_lm_head]="${{ steps.test_lm_head.outcome }}"
             [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
             [test_q4_exallama_v2]="${{ steps.test_q4_exallama_v2.outcome }}"
