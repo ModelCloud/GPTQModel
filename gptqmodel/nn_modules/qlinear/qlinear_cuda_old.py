@@ -327,4 +327,4 @@ class CudaOldQuantLinear(BaseQuantLinear):
         return out
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["CudaOldQuantLinear"]
