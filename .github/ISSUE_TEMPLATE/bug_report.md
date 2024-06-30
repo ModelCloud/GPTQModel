@@ -19,7 +19,7 @@ Show output of:
 nvidia-smi
 ```
 
-**Softwarwe Info**
+**Software Info**
 
 Operation System/Version + Python Version
 
@@ -27,6 +27,8 @@ Show output of:
 ```
 pip show gptqmodel torch transformers accelerate triton
 ```
+
+**If you are reporting an inference bug of a post-quantized model, please post the content of `config.json` and `quantize_config.json`.**
 
 **To Reproduce**
 
