@@ -46,7 +46,13 @@ def import_bitblas():
 
     if BITBLAS_DATABASE_PATH is None:
         from bitblas.cache import get_database_path
-        BITBLAS_DATABASE_PATH = get_database_path()
+        from importlib.metadata import version
+
+        bitblas_version = version(distribution_name="bitblas")
+        gptqmodel_version = version(distribution_name="gptqmodel")
+
+        # for stability, tvm compiled caches are stored keyed by bot bitblas and gptqmodel version
+        BITBLAS_DATABASE_PATH = f"{get_database_path()}_v{bitblas_version}_gptqmodel_v{gptqmodel_version}"
 
 
 def unpack_qzeros(qzeros, bits):
