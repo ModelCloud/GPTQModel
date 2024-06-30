@@ -1,4 +1,5 @@
 import gc
+import os
 from logging import getLogger
 
 import accelerate
@@ -93,6 +94,10 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
 
     # TODO: need to benchmark to see multiple threads help with bitblas/tvm compilation and runtime
     with tctl.threadpool_limits(limits=1):
+        os.environ["NUMEXPR_MAX_THREADS"] = "1"
+
+        # Note that due to tvm compilation of per layer modules shapes, the first layer loop is
+        # relatively much slower if caching is not available. As such tqdm time remaining is highly inaccurate
         for name, module in tqdm(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
             if not isinstance(module, model_quantlinear):
                 continue

@@ -36,16 +36,17 @@ def import_bitblas():
     bitblas.set_log_level("INFO")
 
     import bitblas
-    from bitblas.cache import get_database_path
 
-    from .bitblas_target_detector import patched_auto_detect_nvidia_target
+    if BITBLAS_TARGET is None:
+        from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
-    bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
+        bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
+        BITBLAS_TARGET = bitblas.auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
+        logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
 
-    BITBLAS_TARGET = bitblas.auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-    logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
-
-    BITBLAS_DATABASE_PATH = get_database_path()
+    if BITBLAS_DATABASE_PATH is None:
+        from bitblas.cache import get_database_path
+        BITBLAS_DATABASE_PATH = get_database_path()
 
 
 def unpack_qzeros(qzeros, bits):
