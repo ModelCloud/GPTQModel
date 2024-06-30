@@ -186,4 +186,4 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         del kn_values
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["TritonV2QuantLinear"]

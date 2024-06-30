@@ -293,4 +293,4 @@ class BitBLASQuantLinear(BaseQuantLinear):
         return C
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["BitBLASQuantLinear"]

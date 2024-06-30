@@ -237,4 +237,4 @@ def dequantize_qzeros(layer):
     return unpacked_qzeros
 
 
-__all__ = ["QuantLinear", "dequantize_weight"]
+__all__ = ["MarlinQuantLinear", "dequantize_weight"]
