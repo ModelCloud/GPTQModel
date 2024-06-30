@@ -804,7 +804,7 @@ int marlin_cuda(
   int4* C_ptr = (int4*) C;
   const int4* s_ptr = (const int4*) s;
 
-  int cols = prob_n / thread_n;
+  // int cols = prob_n / thread_n;
   int* locks = (int*) workspace;
 
   int ret = 0;
