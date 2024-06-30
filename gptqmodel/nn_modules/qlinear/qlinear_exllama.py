@@ -34,7 +34,7 @@ def ext_q4_matmul(x, q4, q4_width):
     return output.view(outshape)
 
 
-class CudaOldQuantLinear(BaseQuantLinear):
+class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [4]
 
 
