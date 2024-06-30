@@ -8,6 +8,8 @@ from setuptools import find_packages, setup
 os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
 
+TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
+
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
@@ -46,7 +48,6 @@ common_setup_kwargs = {
 PYPI_RELEASE = os.environ.get("PYPI_RELEASE", None)
 BUILD_CUDA_EXT = True
 COMPILE_MARLIN = True
-UNSUPPORTED_COMPUTE_CAPABILITIES = ["3.5", "3.7", "5.0", "5.2", "5.3"]
 
 if BUILD_CUDA_EXT:
     import torch
@@ -72,7 +73,10 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requiremen
 
 import torch  # noqa: E402
 
-at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+if TORCH_CUDA_ARCH_LIST is None:
+    at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+else:
+    at_least_one_cuda_v6 = True
 
 if not at_least_one_cuda_v6:
     raise EnvironmentError(
@@ -112,6 +116,7 @@ if BUILD_CUDA_EXT:
             "2",
             "-Xfatbin",
             "-compress-all",
+            "-diag-suppress=179,39",
         ],
     }
 
