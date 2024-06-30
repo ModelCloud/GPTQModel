@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from .qlinear_cuda_old import QuantLinear as QuantLinearOld
+from .qlinear_cuda_old import CudaOldQuantLinear
 
 logger = getLogger(__name__)
 
@@ -66,8 +66,7 @@ def unpack_qzeros(qzeros, bits):
     return unpacked_zeros
 
 
-class QuantLinear(BaseQuantLinear):
-    QUANT_TYPE = "bitblas"
+class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [1, 2, 4]
     SUPPORTED_DESC_ACT = [False]
     SUPPORTED_SHARDS = False
@@ -245,7 +244,7 @@ class QuantLinear(BaseQuantLinear):
             param_list.append(self.bias)
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
 
-    def repack_from_gptq(self, gptq_module: QuantLinearOld):
+    def repack_from_gptq(self, gptq_module: CudaOldQuantLinear):
         from bitblas.quantization.utils import general_compress
 
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.

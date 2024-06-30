@@ -435,7 +435,7 @@ class BaseGPTQModel(nn.Module):
         torch.cuda.empty_cache()
 
         if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
+            from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 
             # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
             logger.info("Converting model to BitBlas Format...")
@@ -515,15 +515,15 @@ class BaseGPTQModel(nn.Module):
             # no need to set it back, no calculation below
             if quantize_config.bits != 4:
                 cuda_name_modules = {}
-                from gptqmodel.nn_modules.qlinear.qlinear_cuda import BaseCudaQuantLinear
+                from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
                 for name, module in model.named_modules():
-                    if isinstance(module, BaseCudaQuantLinear):
+                    if isinstance(module, CudaQuantLinear):
                         cuda_name_modules[name] = module.gptqmodel_cuda
                         module.gptqmodel_cuda = None
                 model = copy.deepcopy(self.model)
 
                 for name, modules in model.named_modules():
-                    if isinstance(module, BaseCudaQuantLinear) and name in cuda_name_modules:
+                    if isinstance(module, CudaQuantLinear) and name in cuda_name_modules:
                         module.gptqmodel_cuda = cuda_name_modules[name]
 
                 del cuda_name_modules
@@ -1109,9 +1109,9 @@ class BaseGPTQModel(nn.Module):
 
         # == step6: (optional) warmup triton == #
         if backend == Backend.TRITON and warmup_triton:
-            from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
+            from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 
-            QuantLinear.warmup(model, seqlen=model.seqlen)
+            TritonV2QuantLinear.warmup(model, seqlen=model.seqlen)
 
         return cls(
             model,
@@ -1124,9 +1124,9 @@ class BaseGPTQModel(nn.Module):
         if not enabled:
             return
 
-        from ..nn_modules.qlinear.qlinear_tritonv2 import QuantLinear
+        from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 
-        QuantLinear.warmup(self.model, seqlen=self.model.seqlen)
+        TritonV2QuantLinear.warmup(self.model, seqlen=self.model.seqlen)
 
     def __getattr__(self, item):
         try:

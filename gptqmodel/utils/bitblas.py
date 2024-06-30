@@ -8,7 +8,7 @@ import torch
 from accelerate.utils import find_tied_parameters
 from tqdm import tqdm
 
-from ..nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear
+from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .model import recurse_getattr, recurse_setattr
 
