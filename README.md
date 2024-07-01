@@ -11,8 +11,12 @@
 
 ## News
 
-- 2024-06-29 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1) released. With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
-- 2024-06-20 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0) released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
+* 06/30/2024 🚀 [v0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2) released. Added auto-padding of model in/out-features for exllama, exllama v2, marlin. 
+Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepSeek V2-Lite.
+
+* 06/29/2024 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1) released. With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
+
+* 06/20/2924 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0) released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## Mission Statement
 
@@ -41,6 +45,8 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Model weights sharding support
 * 🚀 Security: hash check of model weights on load
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
+* ✨ Increased compatiblity with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2, Marlin ] backends.
+* 👾 Fixed OPT quantization. Original OPT model code resulted in unusable quantized models. 
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * 👾 <del>Fixed packing Performance regression on high core-count systems.</del> Backported to AutoGPTQ
 * 👾 <del>Fixed crash on H100.</del> Backported to AutoGPTQ
@@ -97,6 +103,14 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # compile and install
 pip install -vvv --no-build-isolation .
+
+# If you have `uv` package version 0.1.16 or higher, you can use `uv pip` for potentially better dependency management
+uv pip install -vvv --no-build-isolation .
+```
+
+### Script installation  
+```bash
+bash install.sh
 ```
 
 ### PIP (PENDING RELEASE) 

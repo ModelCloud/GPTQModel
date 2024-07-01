@@ -61,8 +61,7 @@ def _get_perms():
 _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 
-class QuantLinear(BaseQuantLinear):
-    QUANT_TYPE = "marlin"
+class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [4]
     SUPPORTED_GROUP_SIZE = [128, -1]
     SUPPORTED_DESC_ACT = [False]
@@ -82,6 +81,7 @@ class QuantLinear(BaseQuantLinear):
             raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
         if group_size not in [-1, 128] and group_size != infeatures:
             raise ValueError("Only group_size -1 and 128 are supported.")
+        # Marlin groups infeatures according to group_size, so infeatures must be an integer multiple of group_size.
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
 
@@ -238,4 +238,4 @@ def dequantize_qzeros(layer):
     return unpacked_qzeros
 
 
-__all__ = ["QuantLinear", "dequantize_weight"]
+__all__ = ["MarlinQuantLinear", "dequantize_weight"]

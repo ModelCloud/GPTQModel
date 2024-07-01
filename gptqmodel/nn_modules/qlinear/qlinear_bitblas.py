@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from .qlinear_cuda_old import QuantLinear as QuantLinearOld
+from .qlinear_cuda_old import CudaOldQuantLinear
 
 logger = getLogger(__name__)
 
@@ -36,16 +36,23 @@ def import_bitblas():
     bitblas.set_log_level("INFO")
 
     import bitblas
-    from bitblas.cache import get_database_path
 
-    from .bitblas_target_detector import patched_auto_detect_nvidia_target
+    if BITBLAS_TARGET is None:
+        from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
-    bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
+        bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
+        BITBLAS_TARGET = bitblas.auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
+        logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
 
-    BITBLAS_TARGET = bitblas.auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-    logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
+    if BITBLAS_DATABASE_PATH is None:
+        from bitblas.cache import get_database_path
+        from importlib.metadata import version
 
-    BITBLAS_DATABASE_PATH = get_database_path()
+        bitblas_version = version(distribution_name="bitblas")
+        gptqmodel_version = version(distribution_name="gptqmodel")
+
+        # for stability, tvm compiled caches are stored keyed by bot bitblas and gptqmodel version
+        BITBLAS_DATABASE_PATH = f"{get_database_path()}_v{bitblas_version}_gptqmodel_v{gptqmodel_version}"
 
 
 def unpack_qzeros(qzeros, bits):
@@ -65,8 +72,7 @@ def unpack_qzeros(qzeros, bits):
     return unpacked_zeros
 
 
-class QuantLinear(BaseQuantLinear):
-    QUANT_TYPE = "bitblas"
+class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [1, 2, 4]
     SUPPORTED_DESC_ACT = [False]
     SUPPORTED_SHARDS = False
@@ -244,7 +250,7 @@ class QuantLinear(BaseQuantLinear):
             param_list.append(self.bias)
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
 
-    def repack_from_gptq(self, gptq_module: QuantLinearOld):
+    def repack_from_gptq(self, gptq_module: CudaOldQuantLinear):
         from bitblas.quantization.utils import general_compress
 
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
@@ -293,4 +299,4 @@ class QuantLinear(BaseQuantLinear):
         return C
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["BitBLASQuantLinear"]

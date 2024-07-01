@@ -15,6 +15,6 @@ class OPTGPTQ(BaseGPTQModel):
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.out_proj"],
-        ["fc1"],
-        ["fc2"],
+        # ["fc1"], disabled: not a good candidate for quantization
+        # ["fc2"], disabled: not a good candidate for quantization
     ]

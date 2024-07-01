@@ -1,4 +1,4 @@
-name: Build AutoGPTQ Wheels with CUDA for Linux
+name: Build GPTQModel Wheels with CUDA for Linux
 
 on: workflow_dispatch
 

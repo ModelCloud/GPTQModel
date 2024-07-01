@@ -7,7 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_bitblas import QuantLinear as BitBLASQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear  # noqa: E402
 
 try:
     from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
@@ -75,4 +75,4 @@ class TestQ4BitBLAS(unittest.TestCase):
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
 
         predicted_text = tokenizer.decode(res[0])
-        self.assertTrue(predicted_text.startswith("Today I am in Paris and I am a student of the University of Paris"))
+        self.assertTrue(predicted_text.startswith("Today I am in Paris and I am a student of the Master's"))

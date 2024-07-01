@@ -7,13 +7,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.nn_modules.qlinear import BaseCudaQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
 
-class QuantLinear(BaseCudaQuantLinear):
-    QUANT_TYPE = "cuda-old"
+class CudaOldQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [2, 3, 4, 8]
 
     def __init__(
@@ -328,4 +327,4 @@ class QuantLinear(BaseCudaQuantLinear):
         return out
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["CudaOldQuantLinear"]

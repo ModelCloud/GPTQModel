@@ -13,7 +13,7 @@ from . import BaseQuantLinear
 logger = getLogger(__name__)
 
 
-class QuantLinear(BaseQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     """
     Triton v2 quantized linear layer.
 
@@ -21,8 +21,6 @@ class QuantLinear(BaseQuantLinear, TritonModuleMixin):
     torch.matmul to compute the output whereas original `triton` quantized linear layer fused
     dequant and matmul into single kernel.add()
     """
-
-    QUANT_TYPE = "tritonv2"
 
     def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs,):
         super().__init__()
@@ -188,4 +186,4 @@ class QuantLinear(BaseQuantLinear, TritonModuleMixin):
         del kn_values
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["TritonV2QuantLinear"]

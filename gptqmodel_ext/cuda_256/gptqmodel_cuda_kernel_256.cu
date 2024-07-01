@@ -270,8 +270,8 @@ void vecquant2matmul_cuda(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant2matmul_cuda", ([&] {
       VecQuant2MatMulKernel<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(), g_idx.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(), g_idx.data_ptr<int>(),
         batch, vec_height, height, width, zero_width
       );
     })
@@ -358,8 +358,8 @@ void vecquant3matmul_cuda(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant3matmul_cuda", ([&] {
       VecQuant3MatMulKernel<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(), g_idx.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(), g_idx.data_ptr<int>(),
         batch, vec_height, height, width, zero_width
       );
     })
@@ -503,8 +503,8 @@ void vecquant4matmul_cuda(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant4matmul_cuda", ([&] {
       VecQuant4MatMulKernel<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(), g_idx.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(), g_idx.data_ptr<int>(),
         batch, vec_height, height, width, zero_width
       );
     })
@@ -591,8 +591,8 @@ void vecquant8matmul_cuda(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant8matmul_cuda", ([&] {
       VecQuant8MatMulKernel<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(), g_idx.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(), g_idx.data_ptr<int>(),
         batch, vec_height, height, width, zero_width
       );
     })
@@ -680,8 +680,8 @@ void vecquant2matmul_cuda_old(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant2matmul_cuda_old", ([&] {
       VecQuant2MatMulKernel_old<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(),
         batch, vec_height, height, width, zero_width, groupsize
       );
     })
@@ -775,8 +775,8 @@ void vecquant3matmul_cuda_old(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant3matmul_cuda_old", ([&] {
       VecQuant3MatMulKernel_old<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(),
         batch, vec_height, height, width, zero_width, groupsize
       );
     })
@@ -934,8 +934,8 @@ void vecquant4matmul_cuda_old(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant4matmul_cuda_old", ([&] {
       VecQuant4MatMulKernel_old<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(),
         batch, vec_height, height, width, zero_width, groupsize
       );
     })
@@ -1021,8 +1021,8 @@ void vecquant8matmul_cuda_old(
   AT_DISPATCH_FLOATING_TYPES(
     vec.type(), "vecquant8matmul_cuda_old", ([&] {
       VecQuant8MatMulKernel_old<<<blocks, threads>>>(
-        vec.data<scalar_t>(), mat.data<int>(), mul.data<scalar_t>(),
-        scales.data<scalar_t>(), zeros.data<int>(),
+        vec.data_ptr<scalar_t>(), mat.data_ptr<int>(), mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(), zeros.data_ptr<int>(),
         batch, vec_height, height, width, zero_width, groupsize
       );
     })
