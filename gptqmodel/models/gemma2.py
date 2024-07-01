@@ -12,3 +12,14 @@ class Gemma2GPTQ(BaseGPTQModel):
         ["mlp.up_proj", "mlp.gate_proj"],
         ["mlp.down_proj"],
     ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # There is an issue with duplicate outputs in the quantized gemma-2 model 27b.
+        # Until this issue is fixed, quantize gemma-2 27b model is not supported.
+        num_hidden_layers = getattr(self.model.config, "num_hidden_layers")
+        # The gemma-2 model 9b has 42 hidden layers, while the gemma-2 model 27b has 46 hidden layers.
+        if num_hidden_layers > 42:
+            raise ValueError("gemma-2 model 27b is not supported")
+
