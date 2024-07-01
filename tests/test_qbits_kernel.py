@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 import torch
-from gptqmodel.nn_modules.qlinear.qlinear_qbits import (BITS_DTYPE_MAPPING, QuantLinear, convert_dtype_torch2str,
+from gptqmodel.nn_modules.qlinear.qlinear_qbits import (BITS_DTYPE_MAPPING, QBitsQuantLinear, convert_dtype_torch2str,
                                                         dequantize_weight, unpack_to_8bit_signed)
 from intel_extension_for_transformers import qbits
 from parameterized import parameterized
@@ -84,7 +84,7 @@ class TestArcWeightOnly(unittest.TestCase):
         torch.random.manual_seed(10)
         with torch.no_grad():
             _, linear, scales, qzeros = gen_quant(in_features, out_features, bits, group_size, sym=sym)
-            qbits_linear = QuantLinear(bits=bits, group_size=group_size, infeatures=in_features, outfeatures=out_features, bias=False)
+            qbits_linear = QBitsQuantLinear(bits=bits, group_size=group_size, infeatures=in_features, outfeatures=out_features, bias=False)
             qbits_linear.pack(linear, scales.T, qzeros.T, g_idx=None)
             fp_weight, _ = dequantize_weight(qbits_linear.qweight, qbits_linear.qzeros, qbits_linear.scales, bits)
             intweight, zeros = unpack_to_8bit_signed(qbits_linear.qweight, qbits_linear.qzeros, bits)
