@@ -82,7 +82,7 @@ class Perplexity:
 
         Parameters
         ----------
-        logits : np.ndarray
+        logits : torch.Tensor
             The input to the softmax function.
 
         Returns
@@ -90,8 +90,8 @@ class Perplexity:
         np.ndarray
             The output of the softmax function.
         """
-        e_x = np.exp(logits - np.max(logits))
-        return e_x / e_x.sum(axis=0)
+        e_x = torch.exp(logits - torch.max(logits))
+        return e_x / torch.sum(e_x, dim=0)
 
     def calculate(self, n_ctx=512, n_batch=512):
         """
@@ -191,12 +191,13 @@ class Perplexity:
         # process the entire prompt.
 
         for j in range(min(512, n_ctx // 2), n_ctx - 1):
-            tok_logits = logits[0][0][j].cpu().numpy()
+            tok_logits = logits[0][0][j]
+
             # Compute the probability of the next token
             prob = self.softmax(tok_logits)[tokens[0][start + j + 1]]
 
             # Update the negative log likelihood and the count of processed tokens
-            nll += -np.log(prob, where=prob > 0)
+            nll += -torch.log(torch.where(prob > 0, prob, torch.tensor(1e-8))).item()
             count += 1
 
         return nll, count
