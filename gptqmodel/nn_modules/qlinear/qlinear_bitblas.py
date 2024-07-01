@@ -42,7 +42,7 @@ def import_bitblas():
 
         bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
         BITBLAS_TARGET = bitblas.auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-        logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
+        logger.info(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
         from bitblas.cache import get_database_path
