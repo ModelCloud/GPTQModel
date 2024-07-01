@@ -191,12 +191,10 @@ class Perplexity:
         # process the entire prompt.
 
         for j in range(min(512, n_ctx // 2), n_ctx - 1):
-            tok_logits = logits[0][0][j].cpu().numpy()
-            # Convert to tensor and move to device
-            tok_logits_tensor = torch.from_numpy(tok_logits).to(tokens.device)
+            tok_logits = logits[0][0][j]
 
             # Compute the probability of the next token
-            prob = self.softmax(tok_logits_tensor)[tokens[0][start + j + 1]]
+            prob = self.softmax(tok_logits)[tokens[0][start + j + 1]]
 
             # Update the negative log likelihood and the count of processed tokens
             nll += -torch.log(torch.where(prob > 0, prob, torch.tensor(1e-8))).item()
