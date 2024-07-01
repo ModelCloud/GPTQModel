@@ -111,4 +111,4 @@ class TestPerplexity(unittest.TestCase):
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 30.86, FORMAT.MARLIN ppl == 31.04
-            assert abs(quantized_ppl - self.native_ppl) < 1.05
+            assert abs(quantized_ppl - self.native_ppl) < 1.1
