@@ -13,4 +13,4 @@ threadpoolctl>=3.5.0
 packaging>=24.1
 ninja>=1.11.1.1
 bitblas>=0.0.1.dev12
-importlib>=1.0.4
+importlib-metadata
