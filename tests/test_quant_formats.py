@@ -51,7 +51,7 @@ class TestQuantization(unittest.TestCase):
             use_flash_attention_2=False,
         )
 
-        model.quantize(self.calibration_dataset, batch_size=256)
+        model.quantize(self.calibration_dataset, batch_size=128)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save_quantized(tmpdirname)
@@ -135,7 +135,7 @@ class TestQuantization(unittest.TestCase):
             quantize_config=quantize_config,
         )
 
-        model.quantize(self.calibration_dataset, batch_size=256)
+        model.quantize(self.calibration_dataset, batch_size=128)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             err = None
