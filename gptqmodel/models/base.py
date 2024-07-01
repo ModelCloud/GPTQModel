@@ -516,14 +516,15 @@ class BaseGPTQModel(nn.Module):
             if quantize_config.bits != 4:
                 cuda_name_modules = {}
                 from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+                from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
                 for name, module in model.named_modules():
-                    if isinstance(module, CudaQuantLinear):
+                    if isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear):
                         cuda_name_modules[name] = module.gptqmodel_cuda
                         module.gptqmodel_cuda = None
                 model = copy.deepcopy(self.model)
 
                 for name, modules in model.named_modules():
-                    if isinstance(module, CudaQuantLinear) and name in cuda_name_modules:
+                    if (isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear)) and name in cuda_name_modules:
                         module.gptqmodel_cuda = cuda_name_modules[name]
 
                 del cuda_name_modules
