@@ -21,5 +21,5 @@ class Gemma2GPTQ(BaseGPTQModel):
         num_hidden_layers = getattr(self.model.config, "num_hidden_layers")
         # The gemma-2 model 9b has 42 hidden layers, while the gemma-2 model 27b has 46 hidden layers.
         if num_hidden_layers > 42:
-            raise ValueError("gemma-2 model 27b is not supported")
+            raise ValueError("Only Gemma-2 9B models are supported at the moment. For Gemma-2 27B models please following the github issue at https://github.com/ModelCloud/GPTQModel/issues/140 .")
 
