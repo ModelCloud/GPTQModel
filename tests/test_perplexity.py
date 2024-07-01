@@ -16,7 +16,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
-    NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "facebook/opt-125m"
 
     DATASET_PATH = "wikitext"
     DATASET_NAME = "wikitext-2-raw-v1"
@@ -60,8 +60,8 @@ class TestPerplexity(unittest.TestCase):
 
         print(f"Native PPL: {self.native_ppl}")
 
-        #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790
-        assert self.native_ppl < 8.5
+        #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790, opt ppl == 30.02
+        assert self.native_ppl < 30.5
 
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
@@ -110,5 +110,6 @@ class TestPerplexity(unittest.TestCase):
             print(f"Format {format}, Quantized PPL: {quantized_ppl}")
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
-            # FORMAT.GTPQ and FORMAT.GTPQ_V2 ppl == 8.7863, FORMAT.MARLIN ppl == 9.0036
-            assert abs(quantized_ppl - self.native_ppl) < 0.6
+            # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama ppl == 8.7863, FORMAT.MARLIN Tinyllama ppl == 9.0036
+            # FORMAT.GTPQ and FORMAT.GTPQ_V2 opt ppl == 30.91, FORMAT.MARLIN opt ppl == 31.09
+            assert abs(quantized_ppl - self.native_ppl) < 1.1

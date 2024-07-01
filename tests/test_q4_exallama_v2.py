@@ -8,7 +8,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import Backend, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
@@ -46,7 +46,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             bias=False,
         )
 
-        self.assertTrue(isinstance(linear, QuantLinear))
+        self.assertTrue(isinstance(linear, ExllamaV2QuantLinear))
 
         torch.manual_seed(42)
 
