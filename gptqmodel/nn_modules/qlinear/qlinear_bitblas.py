@@ -45,8 +45,9 @@ def import_bitblas():
         logger.info("BITBLAS_TARGET", BITBLAS_TARGET)
 
     if BITBLAS_DATABASE_PATH is None:
-        from bitblas.cache import get_database_path
         from importlib.metadata import version
+
+        from bitblas.cache import get_database_path
 
         bitblas_version = version(distribution_name="bitblas")
         gptqmodel_version = version(distribution_name="gptqmodel")

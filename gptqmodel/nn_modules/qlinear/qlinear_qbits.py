@@ -5,9 +5,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.utils.importer import QBITS_AVAILABLE
 
 logger = getLogger(__name__)
+
+
+try:
+    from intel_extension_for_transformers import qbits  # noqa: F401
+
+    QBITS_AVAILABLE = True
+    QBITS_EXCEPTION = None
+except Exception as e:
+    QBITS_AVAILABLE = False
+    QBITS_EXCEPTION = e
 
 if QBITS_AVAILABLE:
     from intel_extension_for_transformers import qbits  # with QBits kernels ()
@@ -33,7 +42,7 @@ def convert_dtype_torch2str(dtype):
         assert False, "Unsupported pytorch dtype {} to str dtype".format(dtype)
 
 
-class QuantLinear(nn.Module):
+class QBitsQuantLinear(nn.Module):
     QUANT_TYPE = "qbits"
 
     def __init__(
@@ -316,4 +325,4 @@ def dequantize_weight(qweight, qzeros, scales, bits):
     return unpacked_qweight, unpacked_qzeros
 
 
-__all__ = ["QuantLinear"]
+__all__ = ["QBitsQuantLinear"]

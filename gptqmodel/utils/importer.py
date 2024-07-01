@@ -7,8 +7,8 @@ from ..nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBITS_AVAILABLE, QBITS_EXCEPTION, QBitsQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT
 from .backend import Backend
 
@@ -31,14 +31,6 @@ format_dict = {
 
 logger = getLogger(__name__)
 
-try:
-    from intel_extension_for_transformers import qbits  # noqa: F401
-
-    QBITS_AVAILABLE = True
-    QBITS_EXCEPTION = None
-except Exception as e:
-    QBITS_AVAILABLE = False
-    QBITS_EXCEPTION = e
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
