@@ -12,8 +12,8 @@ import torch # noqa: E402
 import torch.nn as nn # noqa: E402
 import gptqmodel_marlin_cuda # noqa: E402
 # isort: on
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight  # noqa: E402
 
 
