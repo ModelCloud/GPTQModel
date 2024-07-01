@@ -67,6 +67,7 @@ MODEL_MAP = {
     "qwen2": Qwen2GPTQ,
     "longllama": LongLlamaGPTQ,
     "gemma": GemmaGPTQ,
+    "gemma2": GemmaGPTQ,
     "phi": PhiGPTQ,
     "phi3": Phi3GPTQ,
     "mpt": MPTGPTQ,
