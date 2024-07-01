@@ -11,7 +11,7 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 from gptqmodel import GPTQModel, exllama_set_max_input_length  # noqa: E402
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_exllama import QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
@@ -1078,7 +1078,7 @@ class TestsQ4Exllama(unittest.TestCase):
             outfeatures=n,
             bias=False,
         )
-        self.assertTrue(isinstance(linear, QuantLinear))
+        self.assertTrue(isinstance(linear, ExllamaQuantLinear))
 
         torch.manual_seed(42)
 

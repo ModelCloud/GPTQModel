@@ -9,7 +9,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearCudaOld  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 try:
@@ -561,7 +561,7 @@ class TestsQ4CUDA(unittest.TestCase):
         device = "cuda"
 
         weight_dtype = torch.float16 if use_half2 else torch.float32
-        linear = QuantLinearCudaOld(
+        linear = CudaOldQuantLinear(
             bits=4,
             group_size=group_size,
             desc_act=False,
