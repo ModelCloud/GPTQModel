@@ -7,6 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
@@ -42,7 +43,8 @@ class TestPerplexity(unittest.TestCase):
 
         return avg
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(self):
         from transformers import AutoModelForCausalLM
         self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
 
@@ -54,30 +56,15 @@ class TestPerplexity(unittest.TestCase):
             device_map="auto",
         )
 
-        self.native_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+        self.native_ppl = self.calculate_avg_ppl(self, model, self.tokenizer)
 
         print(f"Native PPL: {self.native_ppl}")
 
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790
         assert self.native_ppl < 8.5
 
-        return self.native_ppl
-
-    def get_wikitext2_data(self, n_samples=1024):
-        from datasets import load_dataset
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-        traindata = traindata.filter(lambda x: len(x['text']) >= 512)
-
-        ds = traindata
-
-        traindataset = []
-        for example in ds:
-            if len(traindataset) == n_samples:
-                break
-
-            traindataset.append(self.tokenizer(example["text"]))
-
-        return traindataset
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     @parameterized.expand(
         [
@@ -88,8 +75,6 @@ class TestPerplexity(unittest.TestCase):
         ]
     )
     def test_quantized_perplexity(self, format: FORMAT):
-        cal_data = self.get_wikitext2_data()
-
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -106,7 +91,7 @@ class TestPerplexity(unittest.TestCase):
             quantize_config=quantize_config,
         )
 
-        model.quantize(cal_data)
+        model.quantize(self.calibration_dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save_quantized(

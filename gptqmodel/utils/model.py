@@ -109,7 +109,6 @@ def make_quant(
     format: str,
     desc_act: bool = False,
     sym: bool = True,
-    use_cuda_fp16: bool = True,
     pack: bool = False,
 ) -> BaseQuantLinear:
     select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
@@ -143,29 +142,16 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
-            if (not (desc_act) or group_size == -1) and backend != Backend.TRITON:
-                new_layer = QuantLinear(
-                    bits=bits,
-                    group_size=group_size,
-                    desc_act=desc_act,
-                    sym=sym,
-                    infeatures=in_features,
-                    outfeatures=out_features,
-                    bias=bias,
-                    use_cuda_fp16=use_cuda_fp16,
-                    weight_dtype=submodule.weight.dtype,
-                )
-            else:
-                new_layer = QuantLinear(
-                    bits=bits,
-                    group_size=group_size,
-                    desc_act=desc_act,
-                    sym=sym,
-                    infeatures=in_features,
-                    outfeatures=out_features,
-                    bias=bias,
-                    weight_dtype=submodule.weight.dtype,
-                )
+            new_layer = QuantLinear(
+                bits=bits,
+                group_size=group_size,
+                desc_act=desc_act,
+                sym=sym,
+                infeatures=in_features,
+                outfeatures=out_features,
+                bias=bias,
+                weight_dtype=submodule.weight.dtype,
+            )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
@@ -268,7 +254,6 @@ def pack_model(
     format: str,
     desc_act=False,
     sym: bool = True,
-    use_cuda_fp16=True,
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
 ):
@@ -295,7 +280,6 @@ def pack_model(
         group_size,
         backend=backend,
         format=format,
-        use_cuda_fp16=use_cuda_fp16,
         desc_act=desc_act,
         pack=True,
     )
