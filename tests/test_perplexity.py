@@ -18,13 +18,13 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
-    NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
+    NATIVE_MODEL_ID = "ModelCloud/tinyllama-15M-stories"
 
     # DATASET_PATH = "wikitext"
     # DATASET_NAME = "wikitext-2-raw-v1"
     # DATASET_SPLIT = "test"
     # DATASET_COLUMN = "text"
-    DATASET_PATH = "/monster/data/model/TinyStories-hf"
+    DATASET_PATH = "skeskinen/TinyStories-hf"
     DATASET_NAME = "default"
     DATASET_SPLIT = "train"
     DATASET_COLUMN = "text"
