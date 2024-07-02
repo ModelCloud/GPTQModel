@@ -32,40 +32,63 @@ jobs:
         run: python setup.py bdist_wheel
 
       - name: Show dist folder
-        run: ls -alh dist
+        run: |
+          ls -ahl dist
+          echo "DIST_FILE_NAME=$(ls dist)" >> $GITHUB_ENV
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
           name: dist
-          path: dist
+          path: dist/FILE=$(ls dist)
 
   test:
     needs: build
     runs-on: self-hosted
     container:
       image: modelcloud/gptqmodel:github-ci-v1
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: [
+          "test_perplexity.py",
+          "test_lm_head.py",
+          "test_q4_exallama.py",
+          "test_q4_exallama_v2.py",
+          "test_q4_marlin.py",
+          "test_q4_triton.py",
+          "test_repacking.py",
+          "test_serialization.py",
+          "test_sharded.py",
+          "test_triton.py",
+          "test_quant_formats.py",
+          "test_q4_cuda.py",
+          "test_q4_bitblas.py"
+        ]
+
     steps:
+      - name: Show folder
+        run: ls -alh .
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
 
-      - name: Show dist folder
-        run: ls -alh dist
+      - name: Show folder
+        run: ls -alh .
 
       - name: Install wheel
         run: |
-          # install only the last version
-          pip install dist/*.whl
+          pip install $DIST_FILE_NAME
 
       - name: Find suitable GPU
         run: |
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://127.0.0.1:5000/gpu/get?id=${{ github.run_id }}")
+            gpu_id=$(curl -s "http://10.0.23.237:5000/gpu/get?id=${{ github.run_id }}")
           
             if [ "$gpu_id" -lt 0 ]; then
               echo "No available GPU, waiting 5 seconds..."
@@ -77,114 +100,10 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
-      - name: Run test_perplexity.py
-        id: test_perplexity
+      - name: Run tests
         continue-on-error: true
-        run: pytest --durations=0 tests/test_perplexity.py
+        run: pytest --durations=0 tests/${{ matrix.test_script }}
 
-      - name: Run test_lm_head.py
-        id: test_lm_head
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_lm_head.py
-
-      - name: Run test_q4_exallama.py
-        id: test_q4_exallama
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_exallama.py
-
-      - name: Run test_q4_exallama_v2.py
-        id: test_q4_exallama_v2
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_exallama_v2.py
-
-      - name: Run test_q4_marlin.py
-        id: test_q4_marlin
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_marlin.py
-
-      - name: Run test_q4_triton.py
-        id: test_q4_triton
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_triton.py
-
-      - name: Run test_repacking.py
-        id: test_repacking
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_repacking.py
-
-      - name: Run test_serialization.py
-        id: test_serialization
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_serialization.py
-
-      - name: Run test_sharded.py
-        id: test_sharded
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_sharded.py
-
-      - name: Run test_triton.py
-        id: test_triton
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_triton.py
-
-      - name: Run test_quant_formats.py
-        id: test_quant_formats
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_quant_formats.py
-
-      - name: Run test_q4_cuda.py
-        id: test_q4_cuda
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_cuda.py
-
-      - name: Run test_q4_bitblas.py
-        id: test_q4_bitblas
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_bitblas.py
-
-      - name: Print results
-        shell: bash
-        run: |
-          declare -A step_outcomes
-          step_outcomes=(
-            [test_perplexity]="${{ steps.test_perplexity.outcome }}"
-            [test_lm_head]="${{ steps.test_lm_head.outcome }}"
-            [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
-            [test_q4_exallama_v2]="${{ steps.test_q4_exallama_v2.outcome }}"
-            [test_q4_marlin]="${{ steps.test_q4_marlin.outcome }}"
-            [test_q4_triton]="${{ steps.test_q4_triton.outcome }}"
-            [test_repacking]="${{ steps.test_repacking.outcome }}"
-            [test_serialization]="${{ steps.test_serialization.outcome }}"
-            [test_sharded]="${{ steps.test_sharded.outcome }}"
-            [test_triton]="${{ steps.test_triton.outcome }}"
-            [test_quant_formats]="${{ steps.test_quant_formats.outcome }}"
-            [test_q4_cuda]="${{ steps.test_q4_cuda.outcome }}"
-            [test_q4_bitblas]="${{ steps.test_q4_bitblas.outcome }}"
-          )
-  
-          max_length=0
-          for step in "${!step_outcomes[@]}"; do
-            length=${#step}
-            if [[ $length -gt $max_length ]]; then
-              max_length=$length
-            fi
-          done
-
-          error_occurred=0
-          for step in "${!step_outcomes[@]}"; do
-            outcome="${step_outcomes[$step]}"
-            if [ "$outcome" == "success" ]; then
-              printf "\e[32m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
-            else
-              printf "\e[31m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
-              error_occurred=1
-            fi
-          done
-          
-          if [ $error_occurred -eq 1 ]; then
-            exit 1
-          fi
-
-      - name: Run on cancel or failure
-        if: ${{ failure() || cancelled() }}
-        run: curl -X GET "http://127.0.0.1:5000/gpu/reset?id=${{ github.run_id }}"
+      - name: Release GPU
+        if: always()
+        run: curl -X GET "http://127.0.0.1:5000/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
