@@ -84,7 +84,11 @@ at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in 
 if not at_least_one_cuda_v6:
     raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
 
+from transformers.quantizers import auto
+from ..integration.optimum.hf_quantizer_gptq import GptqHfQuantizer
 
+auto.AUTO_QUANTIZER_MAPPING["gptq"] = GptqHfQuantizer
+# TODO monkey patch GPTQConfig?
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(

@@ -39,11 +39,13 @@ if is_accelerate_available():
     )
     from accelerate.hooks import remove_hook_from_module
 
-if is_auto_gptq_available():
-    from auto_gptq import exllama_set_max_input_length
-    from auto_gptq.modeling._utils import autogptq_post_init
-    from auto_gptq.quantization import GPTQ
-    from auto_gptq.utils.import_utils import dynamically_import_QuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear
+from ...utils.exllama import exllama_set_max_input_length
+from ...utils.backend import Backend
+from ...quantization import FORMAT,FORMAT_FIELD_JSON, QuantizeConfig
+from gptqmodel.utils.model import gptqmodel_post_init, convert_gptq_v1_to_v2_format
+from ...quantization import GPTQ
+from gptqmodel.utils.importer import select_quant_linear
 
 logger = getLogger(__name__)
 
@@ -226,8 +228,28 @@ class GPTQModelQuantizer(object):
                         f"Quantization disabled for {name} (only modules_in_block_to_quantize={self.modules_in_block_to_quantize} are quantized)"
                     )
                     del layers_to_be_replaced[name]
-        self._replace_by_quant_layers(model, layers_to_be_replaced)
+        self.qlinear_kernel = self._replace_by_quant_layers(model, layers_to_be_replaced)
         return model
+
+    def convert_gptq_2_gptq_v2(self, model: nn.Module):
+        # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
+        quantize_config = QuantizeConfig()
+        quantize_config.group_size = self.group_size
+        quantize_config.damp_percent = self.damp_percent
+        quantize_config.desc_act = self.desc_act
+        quantize_config.sym = self.sym
+        quantize_config.true_sequential = self.true_sequential
+        quantize_config.bits = self.bits
+
+        logger.info(
+            f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+        model = convert_gptq_v1_to_v2_format(
+            model,
+            quantize_config=quantize_config,
+            qlinear_kernel=self.qlinear_kernel,
+        )
+        return model
+
 
     def get_no_split_module_classes(self, model):
         """
@@ -241,7 +263,7 @@ class GPTQModelQuantizer(object):
         no_split_module_classes = [block_class_name]
         return no_split_module_classes
 
-    def _replace_by_quant_layers(self, module: nn.Module, names: List[str], name: str = ""):
+    def _replace_by_quant_layers(self, module: nn.Module, names: List[str], name: str = "") -> BaseQuantLinear:
         """
         Replaces linear layers in `module` by `QuantLinear`
 
@@ -253,16 +275,9 @@ class GPTQModelQuantizer(object):
             name (`str`, defaults to `""`):
                 To keep track of the name of the current module
         """
-        QuantLinear = dynamically_import_QuantLinear(
-            use_triton=False,
-            desc_act=self.desc_act,
-            group_size=self.group_size,
-            bits=self.bits,
-            disable_exllama=self.disable_exllama or self.exllama_version != ExllamaVersion.ONE,
-            disable_exllamav2=self.disable_exllama or self.exllama_version != ExllamaVersion.TWO,
-        )
+        QuantLinear = self.select_quantlinear()
         if isinstance(module, QuantLinear):
-            return
+            return QuantLinear
         for attr in dir(module):
             layer = getattr(module, attr)
             name1 = name + "." + attr if name != "" else attr
@@ -279,24 +294,21 @@ class GPTQModelQuantizer(object):
                     in_features = layer.weight.shape[0]
                     out_features = layer.weight.shape[1]
                 bias = layer.bias is not None
-                if not (self.desc_act) or self.group_size == -1:
-                    new_layer = QuantLinear(
-                        self.bits,
-                        self.group_size,
-                        in_features,
-                        out_features,
-                        bias,
-                        use_cuda_fp16=self.use_cuda_fp16,
-                        weight_dtype=layer.weight.dtype,
-                    )
-                else:
-                    new_layer = QuantLinear(
-                        self.bits, self.group_size, in_features, out_features, bias, weight_dtype=layer.weight.dtype
-                    )
+                new_layer = QuantLinear(
+                    self.bits,
+                    self.group_size,
+                    self.sym,
+                    self.desc_act,
+                    in_features,
+                    out_features,
+                    bias,
+                    weight_dtype=layer.weight.dtype,
+                )
                 new_layer.device = device
                 setattr(module, attr, new_layer.to(device))
         for name1, child in module.named_children():
             self._replace_by_quant_layers(child, names, name + "." + name1 if name != "" else name1)
+        return QuantLinear
 
     @torch.no_grad()
     def quantize_model(self, model: nn.Module, tokenizer: Optional[Any] = None):
@@ -596,7 +608,7 @@ class GPTQModelQuantizer(object):
 
         model.quantize_config = StoreAttr()
         model.quantize_config.desc_act = self.desc_act
-        model = autogptq_post_init(model, use_act_order=self.desc_act)
+        model = gptqmodel_post_init(model, use_act_order=self.desc_act)
         if (
             self.desc_act
             and (not self.disable_exllama and self.exllama_version == ExllamaVersion.ONE)
@@ -619,14 +631,7 @@ class GPTQModelQuantizer(object):
             quantizers (`Dict[str,Tuple]`):
                 A mapping of the layer name and the data needed to pack the layer
         """
-        QuantLinear = dynamically_import_QuantLinear(
-            use_triton=False,
-            desc_act=self.desc_act,
-            group_size=self.group_size,
-            bits=self.bits,
-            disable_exllama=self.disable_exllama or self.exllama_version != ExllamaVersion.ONE,
-            disable_exllamav2=self.disable_exllama or self.exllama_version != ExllamaVersion.TWO,
-        )
+        QuantLinear = self.select_quantlinear()
         logger.info("Packing model...")
         layers = get_layers(model)
         layers = {n: layers[n] for n in quantizers}
@@ -643,6 +648,23 @@ class GPTQModelQuantizer(object):
             qlayers[name].to(layer_device)
 
         logger.info("Model packed.")
+
+    def select_quantlinear(self):
+        if self.exllama_version == ExllamaVersion.ONE:
+            backend = Backend.EXLLAMA
+        elif self.exllama_version == ExllamaVersion.TWO:
+            backend = Backend.EXLLAMA_V2
+        else:
+            backend = Backend.AUTO
+        QuantLinear = select_quant_linear(
+            sym=self.sym,
+            desc_act=self.desc_act,
+            group_size=self.group_size,
+            bits=self.bits,
+            backend=backend,
+            format=FORMAT.GPTQ,
+        )
+        return QuantLinear
 
     def save(self, model: nn.Module, save_dir: str, max_shard_size: str = "10GB", safe_serialization: bool = True):
         """

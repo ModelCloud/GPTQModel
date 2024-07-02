@@ -22,7 +22,7 @@ from transformers.quantizers.base import HfQuantizer
 if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel
 
-from transformers.utils import is_auto_gptq_available, is_optimum_available, is_torch_available, logging
+from transformers.utils import is_optimum_available, is_torch_available, logging
 from transformers.utils.quantization_config import GPTQConfig, QuantizationConfigMixin
 
 
@@ -35,11 +35,11 @@ logger = logging.get_logger(__name__)
 class GptqHfQuantizer(HfQuantizer):
     """
     Quantizer of the GPTQ method - for GPTQ the quantizer support calibration of the model through
-    `auto_gptq` package. Quantization is done under the hood for users if they load a non-prequantized model.
+    `gptqmodel` package. Quantization is done under the hood for users if they load a non-prequantized model.
     """
 
     requires_calibration = False
-    required_packages = ["optimum", "auto_gptq"]
+    required_packages = ["optimum", "gptqmodel"]
     optimum_quantizer = None
 
     def __init__(self, quantization_config: QuantizationConfigMixin, **kwargs):
@@ -49,16 +49,12 @@ class GptqHfQuantizer(HfQuantizer):
         self.optimum_quantizer = GPTQModelQuantizer.from_dict(self.quantization_config.to_dict_optimum())
 
     def validate_environment(self, *args, **kwargs):
-        gptq_supports_cpu = version.parse(importlib.metadata.version("auto-gptq")) > version.parse("0.4.2")
-        if not gptq_supports_cpu and not torch.cuda.is_available():
+        gptqmodel_supports_cpu = version.parse(importlib.metadata.version("gptqmodel")) > version.parse("0.4.2")
+        if not gptqmodel_supports_cpu and not torch.cuda.is_available():
             raise RuntimeError("GPU is required to quantize or run quantize model.")
-        elif not (is_optimum_available() and is_auto_gptq_available()):
+        elif not is_optimum_available():
             raise ImportError(
-                "Loading a GPTQ quantized model requires optimum (`pip install optimum`) and auto-gptq library (`pip install auto-gptq`)"
-            )
-        elif version.parse(importlib.metadata.version("auto_gptq")) < version.parse("0.4.2"):
-            raise ImportError(
-                "You need a version of auto_gptq >= 0.4.2 to use GPTQ: `pip install --upgrade auto-gptq`"
+                "Loading a GPTQ quantized model requires optimum (`pip install optimum`) and gptqmodel library (`pip install gptqmodel`)"
             )
 
     def update_torch_dtype(self, torch_dtype: "torch.dtype") -> "torch.dtype":
@@ -77,6 +73,8 @@ class GptqHfQuantizer(HfQuantizer):
 
     def _process_model_after_weight_loading(self, model: "PreTrainedModel", **kwargs):
         if self.pre_quantized:
+            # After weight loading, it needs to be converted to GPTQ_V2, otherwise the inference output will be wrong.
+            model = self.optimum_quantizer.convert_gptq_2_gptq_v2(model)
             model = self.optimum_quantizer.post_init_model(model)
         else:
             if self.quantization_config.tokenizer is None:
