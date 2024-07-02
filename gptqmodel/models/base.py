@@ -23,7 +23,7 @@ from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZ
 from ..utils.backend import Backend
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
-from ..utils.importer import select_quant_linear
+from ..utils.importer import QBITS_AVAILABLE, QBITS_EXCEPTION, select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
@@ -33,6 +33,9 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
+
+if QBITS_AVAILABLE:
+    from intel_extension_for_transformers import qbits
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -242,7 +245,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU:
+        if get_device(layers[0]) == CPU and self.device != torch.device("cpu"):
             layers[0] = layers[0].to(CUDA_0)
             force_layer_back_to_cpu = True
 
@@ -276,7 +279,8 @@ class BaseGPTQModel(nn.Module):
             if module is not None:
                 move_to(module, ori_outside_layer_module_devices[module_name])
 
-        torch.cuda.empty_cache()
+        if self.device != torch.device("cpu"):
+            torch.cuda.empty_cache()
 
         layer_modules = self.layer_modules
 
@@ -300,7 +304,7 @@ class BaseGPTQModel(nn.Module):
             layer_pb.set_description(f"Quantizing layer {i + 1} of {layer_count}")
             layer = layers[i]
             force_layer_back_to_cpu = False
-            if get_device(layer) == CPU:
+            if get_device(layer) == CPU and self.device != torch.device("cpu"):
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
@@ -408,7 +412,8 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
-            torch.cuda.empty_cache()
+            if self.device != torch.device("cpu"):
+                torch.cuda.empty_cache()
 
         logger.info(f"Quantization summary:\n{quant_log}")
         for module_log in quant_log:
@@ -432,7 +437,8 @@ class BaseGPTQModel(nn.Module):
 
         self._quantized = True
 
-        torch.cuda.empty_cache()
+        if self.device != torch.device("cpu"):
+            torch.cuda.empty_cache()
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
@@ -685,8 +691,15 @@ class BaseGPTQModel(nn.Module):
     ):
         """load un-quantized pretrained model to cpu"""
 
+        use_cpu = False
         if not torch.cuda.is_available():
-            raise EnvironmentError("Load pretrained model to do quantization requires CUDA available.")
+            use_cpu = True
+            if not QBITS_AVAILABLE:
+                raise ValueError(
+                    f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`."
+                )
+            else:
+                torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -720,7 +733,8 @@ class BaseGPTQModel(nn.Module):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        torch.cuda.empty_cache()
+        if not use_cpu:
+            torch.cuda.empty_cache()
 
         model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
 
@@ -757,6 +771,18 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+
+        if (not torch.cuda.is_available() or device == "cpu") and backend == Backend.AUTO:
+            if device != "cpu":
+                logger.warning("no CUDA devices detected. Falling back to QBIT cpu based generation")
+            backend = Backend.QBITS
+
+        if backend == Backend.QBITS:
+            if not QBITS_AVAILABLE:
+                raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
+            if torch_dtype is None:
+                torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
+
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -816,7 +842,7 @@ class BaseGPTQModel(nn.Module):
                 raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
             backend = Backend.MARLIN
 
-        marlin_compatible = _validate_marlin_device_support()
+        marlin_compatible = False if backend != Backend.QBITS else _validate_marlin_device_support()
 
         if backend != Backend.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)
@@ -1050,8 +1076,8 @@ class BaseGPTQModel(nn.Module):
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
+                # offload_state_dict=True,
+                # offload_buffers=True,
             )
 
         # TODO: Why are we using this custom function and not dispatch_model?

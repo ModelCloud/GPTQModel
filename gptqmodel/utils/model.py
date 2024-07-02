@@ -404,12 +404,17 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     device_to_buffers_size = {}
     # exllama
     model_uses_exllama = False
+    model_uses_qbits = False
+
     # exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaQuantLinear):
+        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "qbits":
+            model_uses_qbits = True
+            submodule.post_init()
+        elif isinstance(submodule, ExllamaQuantLinear):
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -513,7 +518,9 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
-    torch.cuda.empty_cache()
+    if not model_uses_qbits:
+        torch.cuda.empty_cache()
+
 
     return model
 
