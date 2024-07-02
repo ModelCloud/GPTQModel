@@ -10,13 +10,14 @@
 </p>
 
 ## News
+* 07/02/2024 🚀 [v0.9.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.3): Added Gemma 2 support, faster PPL calculations on gpu, and more code/arg refractor.
 
-* 06/30/2024 🚀 [v0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2) released. Added auto-padding of model in/out-features for exllama, exllama v2, marlin. 
+* 06/30/2024 🚀 [v0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2): Added auto-padding of model in/out-features for exllama, exllama v2, marlin. 
 Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepSeek V2-Lite.
 
-* 06/29/2024 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1) released. With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
+* 06/29/2024 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1): With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
 
-* 06/20/2924 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0) released. Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
+* 06/20/2924 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 
 ## Mission Statement
 
@@ -30,6 +31,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
 
+* 🚀 Added `Gemma 2` Model Support
 * 🚀 Added `DeepSeek-V2` Model Support
 * 🚀 Added `DeepSeek-V2-Lite` Model Support
 * 🚀 Added `ChatGLM` Model Support
@@ -44,13 +46,14 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
 * 🚀 Model weights sharding support
 * 🚀 Security: hash check of model weights on load
+* 🚀 Over 50% faster PPL calculations (OPT model)
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
-* ✨ Increased compatiblity with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2, Marlin ] backends.
-* 👾 Fixed OPT quantization. Original OPT model code resulted in unusable quantized models. 
+* ✨ Increased compatibility with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2, Marlin ] backends.
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * 👾 <del>Fixed packing Performance regression on high core-count systems.</del> Backported to AutoGPTQ
 * 👾 <del>Fixed crash on H100.</del> Backported to AutoGPTQ
-* ✨ Many thousands of lines of refactor/cleanup.
+* ✨ 10s of thousands of lines of refactor/cleanup.
+* ✨ Over 8+ overly complex api args removed/merged into simple human-readable args. 
 * ✨ Added CI workflow for validation of future PRs and prevent code regressions.
 * ✨ Added perplexity unit-test to prevent against model quant quality regressions.
 * 👾 De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
@@ -72,14 +75,14 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 | Model          |    |                  |    |           |    |            |    |
 |----------------|----|------------------|----|-----------|----|------------|----|
-| Baichuan       | ✅  | DeepSeek-V2-Lite | 🚀 | LongLLaMA | ✅  | Phi-3      | 🚀 |
-| Bloom          | ✅  | Falon            | ✅  | MiniCPM   | 🚀 | Qwen       | ✅  |
-| ChatGLM        | 🚀 | GPTBigCod        | ✅  | Mistral   | ✅  | Qwen2MoE   | 🚀 |
-| CodeGen        | ✅  | GPTNeoX          | ✅  | Mixtral   | ✅  | RefinedWeb | ✅  |
-| Cohere         | ✅  | GPT-2            | ✅  | MOSS      | ✅  | StableLM   | ✅  |
-| DBRX Converted | 🚀 | GPT-J            | ✅  | MPT       | ✅  | StarCoder2 | ✅  |
-| Deci           | ✅  | InternLM         | ✅  | OPT       | ✅  | XVERSE     | ✅  |
-| DeepSeek-V2    | 🚀 | Llama            | ✅  | Phi       | ✅  | Yi         | ✅  |
+| Baichuan       | ✅  | DeepSeek-V2-Lite | 🚀 | Llama     | ✅  | Phi/Phi-3  | 🚀 |
+| Bloom          | ✅  | Falon            | ✅  | LongLLaMA | ✅  | Qwen       | ✅  |
+| ChatGLM        | 🚀 | Gemma 2          |  🚀  | MiniCPM   | 🚀 | Qwen2MoE   | 🚀 |
+| CodeGen        | ✅  | GPTBigCod        | ✅  | Mistral   | ✅  | RefinedWeb | ✅  |
+| Cohere         | ✅  | GPTNeoX          | ✅  | Mixtral   | ✅  | StableLM   | ✅  |
+| DBRX Converted | 🚀 | GPT-2            | ✅  | MOSS      | ✅  | StarCoder2 | ✅  |
+| Deci           | ✅  | GPT-J            | ✅  | MPT       | ✅  | XVERSE     | ✅  |
+| DeepSeek-V2    | 🚀 | InternLM         | ✅  | OPT       | ✅  | Yi         | ✅  |
 
 ## Compatiblity 
 
