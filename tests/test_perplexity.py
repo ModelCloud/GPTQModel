@@ -18,13 +18,13 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
-    NATIVE_MODEL_ID = "nickypro/tinyllama-15M"
+    NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
 
     # DATASET_PATH = "wikitext"
     # DATASET_NAME = "wikitext-2-raw-v1"
     # DATASET_SPLIT = "test"
     # DATASET_COLUMN = "text"
-    DATASET_PATH = "/monster/data/zyc/TinyStories-hf"
+    DATASET_PATH = "/monster/data/model/TinyStories-hf"
     DATASET_NAME = "default"
     DATASET_SPLIT = "train"
     DATASET_COLUMN = "text"
@@ -69,7 +69,7 @@ class TestPerplexity(unittest.TestCase):
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790, opt ppl == 30.02
         # assert self.native_ppl < 30.5
 
-        traindata = load_dataset("/monster/data/zyc/TinyStories-hf", split="train").filter(lambda x: len(x['text']) >= 512)
+        traindata = load_dataset("/monster/data/model/TinyStories-hf", split="train").filter(lambda x: len(x['text']) >= 512)
         # traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
@@ -96,7 +96,6 @@ class TestPerplexity(unittest.TestCase):
         model = GPTQModel.from_pretrained(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
-            torch_dtype=torch.float32
         )
 
         model.quantize(self.calibration_dataset, batch_size=256)
