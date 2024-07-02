@@ -138,7 +138,6 @@ jobs:
       - name: Run test_q4_cuda.py
         id: test_q4_cuda
         continue-on-error: true
-        if: matrix.test-group == 'gpu_group2'
         run: pytest --durations=0 tests/test_q4_cuda.py
 
       - name: Run test_q4_bitblas.py
