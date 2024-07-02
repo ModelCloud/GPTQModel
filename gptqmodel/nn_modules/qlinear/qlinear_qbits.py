@@ -59,7 +59,7 @@ class QBitsQuantLinear(nn.Module):
     ):
         super().__init__()
 
-        if bits not in [2, 4, 8]:
+        if bits not in [4, 8]:
             raise NotImplementedError("Only 4,8 bits are supported for QBits.")
 
         self.infeatures = infeatures
