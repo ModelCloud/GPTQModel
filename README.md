@@ -75,7 +75,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 | Model          |    |                  |    |           |    |            |    |
 |----------------|----|------------------|----|-----------|----|------------|----|
-| Baichuan       | ✅  | DeepSeek-V2-Lite | 🚀 | Llama     | ✅  | Phi-3      | 🚀 |
+| Baichuan       | ✅  | DeepSeek-V2-Lite | 🚀 | Llama     | ✅  | Phi/Phi-3  | 🚀 |
 | Bloom          | ✅  | Falon            | ✅  | LongLLaMA | ✅  | Qwen       | ✅  |
 | ChatGLM        | 🚀 | Gemma 2          |  🚀  | MiniCPM   | 🚀 | Qwen2MoE   | 🚀 |
 | CodeGen        | ✅  | GPTBigCod        | ✅  | Mistral   | ✅  | RefinedWeb | ✅  |
