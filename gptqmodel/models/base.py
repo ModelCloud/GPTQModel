@@ -799,14 +799,14 @@ class BaseGPTQModel(nn.Module):
     ):
 
         if (not torch.cuda.is_available() or device == "cpu") and backend == Backend.AUTO:
+            if device != "cpu":
+                logger.warning("no CUDA devices detected. Falling back to QBIT cpu based generation")
             backend = Backend.QBITS
 
         if backend == Backend.QBITS:
             if not QBITS_AVAILABLE:
                 raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
             if torch_dtype is None:
-                disable_exllama = True
-                disable_exllamav2 = True
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         """load quantized model from local disk"""
