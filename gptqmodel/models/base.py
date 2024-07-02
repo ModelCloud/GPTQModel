@@ -679,7 +679,6 @@ class BaseGPTQModel(nn.Module):
         cls,
         pretrained_model_name_or_path: str,
         quantize_config: QuantizeConfig,
-        max_memory: Optional[dict] = None,
         trust_remote_code: bool = False,
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
@@ -720,30 +719,6 @@ class BaseGPTQModel(nn.Module):
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
-
-        if max_memory:
-            if "disk" in max_memory:
-                raise NotImplementedError("disk offload not support yet.")
-            with accelerate.init_empty_weights():
-                model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-            model.tie_weights()
-
-            max_memory = accelerate.utils.get_balanced_memory(
-                model,
-                max_memory=max_memory,
-                no_split_module_classes=[cls.layer_type],
-                dtype=model_init_kwargs["torch_dtype"],
-                low_zero=False,
-            )
-            model_init_kwargs["device_map"] = accelerate.infer_auto_device_map(
-                model,
-                max_memory=max_memory,
-                no_split_module_classes=[cls.layer_type],
-                dtype=model_init_kwargs["torch_dtype"],
-            )
-            del model
-        else:
-            model_init_kwargs["device_map"] = None
 
         torch.cuda.empty_cache()
 
