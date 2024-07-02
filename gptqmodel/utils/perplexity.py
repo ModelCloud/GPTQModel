@@ -70,7 +70,7 @@ class Perplexity:
             self._dataset_name = "wikitext-2-raw-v1"
 
         # Load the dataset
-        data = load_dataset(self._dataset_path, self._dataset_name, split=self._split)
+        data = load_dataset(self._dataset_path, self._dataset_name, split=self._split).select(range(2048))
         # Format the text column of the dataset
         text_list = [" \n" if s == "" else s for s in data[self._text_column]]
         return "".join(text_list)
