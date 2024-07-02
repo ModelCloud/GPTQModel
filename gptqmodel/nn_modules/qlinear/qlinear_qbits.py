@@ -59,7 +59,7 @@ class QBitsQuantLinear(nn.Module):
     ):
         super().__init__()
 
-        if bits not in [4, 8]:
+        if bits not in [2, 4, 8]:
             raise NotImplementedError("Only 4,8 bits are supported for QBits.")
 
         self.infeatures = infeatures
@@ -121,9 +121,6 @@ class QBitsQuantLinear(nn.Module):
             # change it to int8 with offset 128
             if self.bits == 8:
                 zeros = (zeros.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
-            else:
-                zeros -= (2**(self.bits - 1))
-                zeros.bitwise_left_shift_(8 - self.bits)
 
         if not self.asym:
             intweight -= (2**(self.bits - 1))
@@ -132,9 +129,6 @@ class QBitsQuantLinear(nn.Module):
         # change it to int8 with offset 128
         if self.asym:
             intweight = (intweight.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
-
-        if self.bits == 4:
-            intweight.bitwise_left_shift_((8 - self.bits))
 
         scales = self.scales if self.bits == 8 else self.scales / (2 ** (8 - self.bits))
 
