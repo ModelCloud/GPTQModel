@@ -90,7 +90,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
       - name: Run tests
-        run: echo ${{ matrix.test_script }}
+        run: pytest tests/${{ matrix.test_script }}
 
       - name: Release GPU
         if: always()
