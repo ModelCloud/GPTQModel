@@ -218,7 +218,6 @@ class BaseGPTQModel(nn.Module):
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
-        cur_device = self.device
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
@@ -246,7 +245,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU and cur_device != torch.device("cpu"):
+        if get_device(layers[0]) == CPU and self.device != torch.device("cpu"):
             layers[0] = layers[0].to(CUDA_0)
             force_layer_back_to_cpu = True
 
@@ -280,7 +279,7 @@ class BaseGPTQModel(nn.Module):
             if module is not None:
                 move_to(module, ori_outside_layer_module_devices[module_name])
 
-        if cur_device != torch.device("cpu"):
+        if self.device != torch.device("cpu"):
             torch.cuda.empty_cache()
 
         layer_modules = self.layer_modules
@@ -305,7 +304,7 @@ class BaseGPTQModel(nn.Module):
             layer_pb.set_description(f"Quantizing layer {i + 1} of {layer_count}")
             layer = layers[i]
             force_layer_back_to_cpu = False
-            if get_device(layer) == CPU and cur_device != torch.device("cpu"):
+            if get_device(layer) == CPU and self.device != torch.device("cpu"):
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
@@ -413,7 +412,7 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
-            if cur_device != torch.device("cpu"):
+            if self.device != torch.device("cpu"):
                 torch.cuda.empty_cache()
 
         logger.info(f"Quantization summary:\n{quant_log}")
@@ -438,7 +437,7 @@ class BaseGPTQModel(nn.Module):
 
         self._quantized = True
 
-        if cur_device != torch.device("cpu"):
+        if self.device != torch.device("cpu"):
             torch.cuda.empty_cache()
 
         if self.quantize_config.format == FORMAT.BITBLAS:
