@@ -22,6 +22,9 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
+      - name: Print GPU infos
+        run: nvidia-smi
+    
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
