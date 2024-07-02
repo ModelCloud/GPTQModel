@@ -98,7 +98,6 @@ class GPTQModel:
         cls,
         pretrained_model_name_or_path: str,
         quantize_config: QuantizeConfig,
-        max_memory: Optional[dict] = None,
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
@@ -106,7 +105,6 @@ class GPTQModel:
         return MODEL_MAP[model_type].from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             quantize_config=quantize_config,
-            max_memory=max_memory,
             trust_remote_code=trust_remote_code,
             **model_init_kwargs,
         )
