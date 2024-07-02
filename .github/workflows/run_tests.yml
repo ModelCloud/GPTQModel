@@ -22,9 +22,6 @@ jobs:
     container:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
-      - name: Print GPU infos
-        run: nvidia-smi
-    
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -35,15 +32,15 @@ jobs:
         run: python setup.py bdist_wheel
 
       - name: Show dist folder
+        shell: bash
         run: |
           ls -ahl dist
           echo "DIST_FILE_NAME=$(ls dist)" >> $GITHUB_ENV
-
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/FILE=$(ls dist)
+          name: package
+          path: dist/${{ env.DIST_FILE_NAME }}
 
   test:
     needs: build
@@ -53,21 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: [
-          "test_perplexity.py",
-          "test_lm_head.py",
-          "test_q4_exallama.py",
-          "test_q4_exallama_v2.py",
-          "test_q4_marlin.py",
-          "test_q4_triton.py",
-          "test_repacking.py",
-          "test_serialization.py",
-          "test_sharded.py",
-          "test_triton.py",
-          "test_quant_formats.py",
-          "test_q4_cuda.py",
-          "test_q4_bitblas.py"
-        ]
+        version: ["test_perplexity.py", "test_lm_head.py", "test_q4_exallama.py", "test_q4_exallama_v2.py", "test_q4_marlin.py", "test_q4_triton.py", "test_repacking.py", "test_serialization.py", "test_sharded.py", "test_triton.py", "test_quant_formats.py", "test_q4_cuda.py", "test_q4_bitblas.py"]
 
     steps:
       - name: Show folder
@@ -76,22 +59,22 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: package
           path: dist
 
       - name: Show folder
-        run: ls -alh .
+        run: ls -alh dist
 
       - name: Install wheel
         run: |
-          pip install $DIST_FILE_NAME
+          pip install dist/${{ env.DIST_FILE_NAME }}
 
       - name: Find suitable GPU
         run: |
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://10.0.23.237:5000/gpu/get?id=${{ github.run_id }}")
+            gpu_id=$(curl -s "http://10.0.13.154:5000/gpu/get?id=${{ github.run_id }}")
           
             if [ "$gpu_id" -lt 0 ]; then
               echo "No available GPU, waiting 5 seconds..."
@@ -104,9 +87,8 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
       - name: Run tests
-        continue-on-error: true
         run: pytest --durations=0 tests/${{ matrix.test_script }}
 
       - name: Release GPU
         if: always()
-        run: curl -X GET "http://127.0.0.1:5000/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
+        run: curl -X GET "http://10.0.13.154:5000/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
