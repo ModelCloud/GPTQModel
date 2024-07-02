@@ -29,6 +29,7 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Compile
+        shell: bash
         run: python setup.py bdist_wheel
 
       - name: Show dist folder
@@ -45,7 +46,24 @@ jobs:
     runs-on: self-hosted
     container:
       image: modelcloud/gptqmodel:github-ci-v1
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ "test_perplexity.py", "test_lm_head.py", "test_q4_exallama.py", "test_q4_exallama_v2.py", "test_q4_marlin.py", "test_q4_triton.py", "test_repacking.py", "test_serialization.py", "test_sharded.py", "test_triton.py", "test_quant_formats.py", "test_q4_cuda.py", "test_q4_bitblas.py" ]
+
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Show folder
+        run: |
+          ls -alh . || true
+          ls -alh dist || true
+          rm -rf dist/* || true
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
@@ -53,137 +71,35 @@ jobs:
           path: dist
 
       - name: Show dist folder
-        run: ls -alh dist
+        run: ls -alh dist || true
 
       - name: Install wheel
+        shell: bash
         run: |
-          # install only the last version
           pip install dist/*.whl
 
       - name: Find suitable GPU
-        run: |
-         suitable_gpu=$(nvidia-smi -L | grep -E '4090' | awk -F': ' '{print $1}' | sed 's/GPU //g' | while read gpu_id
-          do
-            mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i $gpu_id)
-            mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu_id)
-            mem_used_pct=$((100 * mem_used / mem_total))
-            if [ $mem_used_pct -lt 2 ]; then # 2 -> 98% free
-              echo $gpu_id
-              break
-            fi
-          done)
-          if [ -z "$suitable_gpu" ]; then
-            echo "No suitable GPU found. Exiting with error."
-            exit 1
-          else
-            echo "CUDA_VISIBLE_DEVICES=$suitable_gpu" >> $GITHUB_ENV
-            echo "CUDA_VISIBLE_DEVICES set to $suitable_gpu"
-          fi
-
-      - name: Run test_perplexity.py
-        id: test_perplexity
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_perplexity.py
-
-      - name: Run test_lm_head.py
-        id: test_lm_head
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_lm_head.py
-
-      - name: Run test_q4_exallama.py
-        id: test_q4_exallama
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_exallama.py
-
-      - name: Run test_q4_exallama_v2.py
-        id: test_q4_exallama_v2
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_exallama_v2.py
-
-      - name: Run test_q4_marlin.py
-        id: test_q4_marlin
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_marlin.py
-
-      - name: Run test_q4_triton.py
-        id: test_q4_triton
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_triton.py
-
-      - name: Run test_repacking.py
-        id: test_repacking
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_repacking.py
-
-      - name: Run test_serialization.py
-        id: test_serialization
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_serialization.py
-
-      - name: Run test_sharded.py
-        id: test_sharded
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_sharded.py
-
-      - name: Run test_triton.py
-        id: test_triton
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_triton.py
-
-      - name: Run test_quant_formats.py
-        id: test_quant_formats
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_quant_formats.py
-
-      - name: Run test_q4_cuda.py
-        id: test_q4_cuda
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_cuda.py
-
-      - name: Run test_q4_bitblas.py
-        id: test_q4_bitblas
-        continue-on-error: true
-        run: pytest --durations=0 tests/test_q4_bitblas.py
-
-      - name: Print results
         shell: bash
         run: |
-          declare -A step_outcomes
-          step_outcomes=(
-            [test_perplexity]="${{ steps.test_perplexity.outcome }}"
-            [test_lm_head]="${{ steps.test_lm_head.outcome }}"
-            [test_q4_exallama]="${{ steps.test_q4_exallama.outcome }}"
-            [test_q4_exallama_v2]="${{ steps.test_q4_exallama_v2.outcome }}"
-            [test_q4_marlin]="${{ steps.test_q4_marlin.outcome }}"
-            [test_q4_triton]="${{ steps.test_q4_triton.outcome }}"
-            [test_repacking]="${{ steps.test_repacking.outcome }}"
-            [test_serialization]="${{ steps.test_serialization.outcome }}"
-            [test_sharded]="${{ steps.test_sharded.outcome }}"
-            [test_triton]="${{ steps.test_triton.outcome }}"
-            [test_quant_formats]="${{ steps.test_quant_formats.outcome }}"
-            [test_q4_cuda]="${{ steps.test_q4_cuda.outcome }}"
-            [test_q4_bitblas]="${{ steps.test_q4_bitblas.outcome }}"
-          )
-  
-          max_length=0
-          for step in "${!step_outcomes[@]}"; do
-            length=${#step}
-            if [[ $length -gt $max_length ]]; then
-              max_length=$length
-            fi
-          done
-
-          error_occurred=0
-          for step in "${!step_outcomes[@]}"; do
-            outcome="${step_outcomes[$step]}"
-            if [ "$outcome" == "success" ]; then
-              printf "\e[32m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
-            else
-              printf "\e[31m%-*s Result: %s\e[0m\n" $((max_length + 4)) "$step" "$outcome"
-              error_occurred=1
-            fi
-          done
+          gpu_id=-1
           
-          if [ $error_occurred -eq 1 ]; then
-            exit 1
-          fi
+          while [ "$gpu_id" -lt 0 ]; do
+            gpu_id=$(curl -s "http://10.0.23.237/gpu/get?id=${{ github.run_id }}")
+          
+            if [ "$gpu_id" -lt 0 ]; then
+              echo "No available GPU, waiting 5 seconds..."
+              sleep 5
+            else
+              echo "Allocated GPU ID: $gpu_id"
+            fi
+          done
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
+
+      - name: Run tests
+        run: pytest tests/${{ matrix.test_script }}
+
+      - name: Release GPU
+        if: always()
+        shell: bash
+        run: curl -X GET "http://10.0.23.237/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
