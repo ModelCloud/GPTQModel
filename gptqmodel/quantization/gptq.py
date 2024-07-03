@@ -168,8 +168,7 @@ class GPTQ:
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        if self.dev != torch.device("cpu"):
-            torch.cuda.synchronize()
+        torch.cuda.synchronize()
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
@@ -203,8 +202,7 @@ class GPTQ:
         self.H = None
         self.Losses = None
         self.Trace = None
-        if self.dev != torch.device("cpu"):
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
 
 __all__ = ["GPTQ"]
