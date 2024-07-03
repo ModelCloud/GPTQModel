@@ -31,6 +31,7 @@ class TestQuantization(unittest.TestCase):
 
     @parameterized.expand(
         [
+            (Backend.QBITS, True, FORMAT.GPTQ_V2),
             (Backend.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
             (Backend.EXLLAMA_V2, False, FORMAT.GPTQ),
             (Backend.MARLIN, True, FORMAT.MARLIN),
