@@ -39,13 +39,11 @@ if is_accelerate_available():
     )
     from accelerate.hooks import remove_hook_from_module
 
-from gptqmodel.utils.importer import select_quant_linear
-from gptqmodel.utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
-
-from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
 from ...utils.backend import Backend
 from ...utils.exllama import exllama_set_max_input_length
+from ...utils.importer import select_quant_linear
+from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
 
 logger = getLogger(__name__)
 

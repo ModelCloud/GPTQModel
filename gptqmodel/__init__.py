@@ -1,4 +1,3 @@
-from .integration.optimum import monkey_patch_gptq_transformers
 from .models import GPTQModel
 from .quantization import BaseQuantizeConfig, QuantizeConfig
 from .utils import Backend, get_backend

@@ -26,7 +26,8 @@ class TestTransformersIntegration(unittest.TestCase):
     DATASET_COLUMN = "text"
 
     def setUp(self):
-        from gptqmodel import monkey_patch_gptq_transformers
+        from gptqmodel.integration.optimum import monkey_patch_gptq_transformers
+
         monkey_patch_gptq_transformers()
 
         self.device = torch.device("cuda:0")
@@ -111,5 +112,5 @@ class TestTransformersIntegration(unittest.TestCase):
         inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
         res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
         predicted_text = tokenizer.decode(res[0])
-        print("predic", predicted_text)
+        print("predict", predicted_text)
         self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
