@@ -116,7 +116,7 @@ def get_seqlen(model: nn.Module):
     return 2048
 
 
-def monkey_patch_gptq_transformers():
+def monkey_patch_gptqmodel_into_transformers():
     from transformers.quantizers import auto
 
     from .hf_quantizer_gptq import GptqHfQuantizer

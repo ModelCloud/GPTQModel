@@ -26,9 +26,9 @@ class TestTransformersIntegration(unittest.TestCase):
     DATASET_COLUMN = "text"
 
     def setUp(self):
-        from gptqmodel.integration.optimum import monkey_patch_gptq_transformers
+        from gptqmodel.integration.optimum import monkey_patch_gptqmodel_into_transformers
 
-        monkey_patch_gptq_transformers()
+        monkey_patch_gptqmodel_into_transformers()
 
         self.device = torch.device("cuda:0")
         self.prompt = "I am in Paris and"
