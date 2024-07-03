@@ -11,19 +11,21 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-
+import os
 from logging import getLogger
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch import nn
+from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import Conv1D
 
 from .constants import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
 
 
-logger = getLogger(__name__)
+ori_save_pretrained = PreTrainedModel.save_pretrained
 
+logger = getLogger(__name__)
 
 """
 Set of utilities to get specific attributes of a model
@@ -117,7 +119,36 @@ def get_seqlen(model: nn.Module):
 
 def monkey_patch_gptq_transformers():
     from transformers.quantizers import auto
+
     from .hf_quantizer_gptq import GptqHfQuantizer
 
     auto.AUTO_QUANTIZER_MAPPING["gptq"] = GptqHfQuantizer
+
     # TODO monkey patch GPTQConfig?
+
+    # model.save_pretrained() will not call optimum.quantizer.GPTQModelQuantizer.save(),
+    # we need to monkey patch save_pretrained() to convert gptq_v2 to gptq_v1 format.
+    def monkey_patch_save_pretrained(self,
+                                     save_directory: Union[str, os.PathLike],
+                                     is_main_process: bool = True,
+                                     state_dict: Optional[dict] = None,
+                                     save_function: Callable = torch.save,
+                                     push_to_hub: bool = False,
+                                     max_shard_size: Union[int, str] = "5GB",
+                                     safe_serialization: bool = True,
+                                     variant: Optional[str] = None,
+                                     token: Optional[Union[str, bool]] = None,
+                                     save_peft_format: bool = True,
+                                     **kwargs, ):
+        hf_quantizer = getattr(self, "hf_quantizer", None)
+        if hf_quantizer:
+            ori_model = getattr(self, "model", None)
+            assert ori_model
+
+            model = hf_quantizer.optimum_quantizer.convert_gptq_v2_to_v1(ori_model)
+            setattr(self, "model", model)
+
+        ori_save_pretrained(self, save_directory, is_main_process, state_dict, save_function, push_to_hub,
+                            max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
+
+    PreTrainedModel.save_pretrained = monkey_patch_save_pretrained

@@ -86,17 +86,13 @@ class TestTransformersIntegration(unittest.TestCase):
         self.assertResult(model, tokenizer, False, exllama_version, reference_output)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_dir = "tttest/"
             model.save_pretrained(
                 tmp_dir,
             )
 
             del model
 
-            gptq_config = GPTQConfig(bits=4, group_size=128,
-                                 sym=True,
-                                 model_seqlen=2048,
-                                 desc_act=False,exllama_config={
+            gptq_config = GPTQConfig(bits=4, exllama_config={
                 "version": exllama_version,
             })
             model = AutoModelForCausalLM.from_pretrained(

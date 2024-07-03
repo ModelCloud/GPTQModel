@@ -238,10 +238,10 @@ class GPTQModelQuantizer(object):
                         f"Quantization disabled for {name} (only modules_in_block_to_quantize={self.modules_in_block_to_quantize} are quantized)"
                     )
                     del layers_to_be_replaced[name]
-        self.qlinear_kernel = self._replace_by_quant_layers(model, layers_to_be_replaced)
+        self._replace_by_quant_layers(model, layers_to_be_replaced)
         return model
 
-    def convert_gptq_1_gptq_v2(self, model: nn.Module):
+    def convert_gptq_v1_to_v2(self, model: nn.Module):
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         logger.info(
             f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
@@ -249,6 +249,28 @@ class GPTQModelQuantizer(object):
             model,
             quantize_config=self.quantize_config,
             qlinear_kernel=self.qlinear_kernel,
+        )
+        return model
+
+    def convert_gptq_v2_to_v1(self, model: nn.Module):
+        if self.bits != 4:
+            cuda_name_modules = {}
+            from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+            from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
+            for name, module in model.named_modules():
+                if isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear):
+                    cuda_name_modules[name] = module.gptqmodel_cuda
+                    module.gptqmodel_cuda = None
+
+            for name, module in model.named_modules():
+                if (isinstance(module, CudaQuantLinear) or isinstance(module,
+                                                                      CudaOldQuantLinear)) and name in cuda_name_modules:
+                    module.gptqmodel_cuda = cuda_name_modules[name]
+
+            del cuda_name_modules
+
+        model = convert_gptq_v2_to_v1_format(
+            model, quantize_config=self.quantize_config, qlinear_kernel=self.qlinear_kernel
         )
         return model
 
@@ -265,7 +287,7 @@ class GPTQModelQuantizer(object):
         no_split_module_classes = [block_class_name]
         return no_split_module_classes
 
-    def _replace_by_quant_layers(self, module: nn.Module, names: List[str], name: str = "") -> BaseQuantLinear:
+    def _replace_by_quant_layers(self, module: nn.Module, names: List[str], name: str = ""):
         """
         Replaces linear layers in `module` by `QuantLinear`
 
@@ -278,8 +300,9 @@ class GPTQModelQuantizer(object):
                 To keep track of the name of the current module
         """
         QuantLinear = self.select_quantlinear()
+        self.qlinear_kernel = QuantLinear
         if isinstance(module, QuantLinear):
-            return QuantLinear
+            return
         for attr in dir(module):
             layer = getattr(module, attr)
             name1 = name + "." + attr if name != "" else attr
@@ -310,7 +333,7 @@ class GPTQModelQuantizer(object):
                 setattr(module, attr, new_layer.to(device))
         for name1, child in module.named_children():
             self._replace_by_quant_layers(child, names, name + "." + name1 if name != "" else name1)
-        return QuantLinear
+        return
 
     @torch.no_grad()
     def quantize_model(self, model: nn.Module, tokenizer: Optional[Any] = None):
@@ -698,28 +721,7 @@ class GPTQModelQuantizer(object):
                 Whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).
 
         """
-        if self.bits != 4:
-            cuda_name_modules = {}
-            from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
-            from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
-            for name, module in model.named_modules():
-                if isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear):
-                    cuda_name_modules[name] = module.gptqmodel_cuda
-                    module.gptqmodel_cuda = None
-            model = copy.deepcopy(model)
-
-            for name, module in model.named_modules():
-                if (isinstance(module, CudaQuantLinear) or isinstance(module,
-                                                                      CudaOldQuantLinear)) and name in cuda_name_modules:
-                    module.gptqmodel_cuda = cuda_name_modules[name]
-
-            del cuda_name_modules
-        else:
-            model = copy.deepcopy(model)
-
-        model = convert_gptq_v2_to_v1_format(
-            model, quantize_config=self.quantize_config, qlinear_kernel=self.qlinear_kernel
-        )
+        model = self.convert_gptq_v2_to_v1(model)
 
         os.makedirs(save_dir, exist_ok=True)
         model.save_pretrained(save_dir, max_shard_size=max_shard_size, safe_serialization=safe_serialization)
