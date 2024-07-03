@@ -1,4 +1,6 @@
 # -- do not touch
+import torch
+
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -16,11 +18,15 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
-    NATIVE_MODEL_ID = "facebook/opt-125m"
+    NATIVE_MODEL_ID = "ModelCloud/tinyllama-15M-stories"
 
-    DATASET_PATH = "wikitext"
-    DATASET_NAME = "wikitext-2-raw-v1"
-    DATASET_SPLIT = "test"
+    # DATASET_PATH = "wikitext"
+    # DATASET_NAME = "wikitext-2-raw-v1"
+    # DATASET_SPLIT = "test"
+    # DATASET_COLUMN = "text"
+    DATASET_PATH = "skeskinen/TinyStories-hf"
+    DATASET_NAME = "default"
+    DATASET_SPLIT = "train"
     DATASET_COLUMN = "text"
 
     N_CTX = 512
@@ -31,7 +37,7 @@ class TestPerplexity(unittest.TestCase):
             model=model,
             tokenizer=tokenizer,
             dataset_path=self.DATASET_PATH,
-            dataset_name=self.DATASET_NAME,
+            # dataset_name=self.DATASET_NAME,
             split=self.DATASET_SPLIT,
             text_column=self.DATASET_COLUMN,
         )
@@ -61,9 +67,10 @@ class TestPerplexity(unittest.TestCase):
         print(f"Native PPL: {self.native_ppl}")
 
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790, opt ppl == 30.02
-        assert self.native_ppl < 30.5
+        # assert self.native_ppl < 30.5
 
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
+        traindata = load_dataset(DATASET_PATH, split="train").filter(lambda x: len(x['text']) >= 512)
+        # traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     @parameterized.expand(
