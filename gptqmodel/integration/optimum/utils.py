@@ -113,3 +113,11 @@ def get_seqlen(model: nn.Module):
         "We couldn't get the model sequence length. Setting it to 2048. You can overwrite this value by passing `model_seqlen` in` GPTQQuantizer`"
     )
     return 2048
+
+
+def monkey_patch_gptq_transformers():
+    from transformers.quantizers import auto
+    from .hf_quantizer_gptq import GptqHfQuantizer
+
+    auto.AUTO_QUANTIZER_MAPPING["gptq"] = GptqHfQuantizer
+    # TODO monkey patch GPTQConfig?
