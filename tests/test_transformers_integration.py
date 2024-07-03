@@ -2,7 +2,6 @@
 import os
 import tempfile
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -12,7 +11,6 @@ import torch
 from datasets import load_dataset  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
-
 
 GENERATE_EVAL_SIZE = 100
 

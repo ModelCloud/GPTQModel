@@ -7,6 +7,7 @@ from typing import List, Union
 
 import torch
 import torch.nn as nn
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from .qlinear_cuda_old import CudaOldQuantLinear
@@ -45,8 +46,9 @@ def import_bitblas():
         logger.info(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
-        from bitblas.cache import get_database_path
         from importlib.metadata import version
+
+        from bitblas.cache import get_database_path
 
         bitblas_version = version(distribution_name="bitblas")
         gptqmodel_version = version(distribution_name="gptqmodel")

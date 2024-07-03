@@ -22,7 +22,6 @@ from transformers.pytorch_utils import Conv1D
 
 from .constants import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
 
-
 ori_save_pretrained = PreTrainedModel.save_pretrained
 
 logger = getLogger(__name__)

@@ -20,7 +20,6 @@ import numpy as np
 import torch
 from datasets import load_dataset
 
-
 """
 Set of utilities for loading most used datasets (original dataset from GPTQ paper) and be able to easily use them during quantization
 """

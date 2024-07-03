@@ -3,8 +3,9 @@ import random
 import numpy as np
 import torch
 from datasets import load_dataset
-from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import TextGenerationPipeline
+
+from gptqmodel import GPTQModel, QuantizeConfig
 
 pretrained_model_dir = "gpt2-xl"
 quantized_model_dir = "gpt2-large-4bit-128g"

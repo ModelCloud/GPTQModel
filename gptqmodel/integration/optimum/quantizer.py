@@ -20,18 +20,17 @@ from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+from optimum.utils import is_accelerate_available, is_auto_gptq_available
+from optimum.utils.modeling_utils import recurse_getattr
 from torch import nn
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
 from transformers.utils.quantization_config import QuantizationMethod
 
-from optimum.utils import is_accelerate_available, is_auto_gptq_available
-from optimum.utils.modeling_utils import recurse_getattr
 from .constants import GPTQ_CONFIG
 from .data import get_dataset, prepare_dataset
 from .utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
-
 
 if is_accelerate_available():
     from accelerate import (
@@ -40,13 +39,13 @@ if is_accelerate_available():
     )
     from accelerate.hooks import remove_hook_from_module
 
-from ...nn_modules.qlinear import BaseQuantLinear
-from ...utils.exllama import exllama_set_max_input_length
-from ...utils.backend import Backend
-from ...quantization import FORMAT,FORMAT_FIELD_JSON, QuantizeConfig
-from gptqmodel.utils.model import gptqmodel_post_init, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format
-from ...quantization import GPTQ
 from gptqmodel.utils.importer import select_quant_linear
+from gptqmodel.utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
+
+from ...nn_modules.qlinear import BaseQuantLinear
+from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
+from ...utils.backend import Backend
+from ...utils.exllama import exllama_set_max_input_length
 
 logger = getLogger(__name__)
 
