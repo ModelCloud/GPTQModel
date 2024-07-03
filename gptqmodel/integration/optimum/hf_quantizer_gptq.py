@@ -74,7 +74,7 @@ class GptqHfQuantizer(HfQuantizer):
     def _process_model_after_weight_loading(self, model: "PreTrainedModel", **kwargs):
         if self.pre_quantized:
             # After weight loading, it needs to be converted to GPTQ_V2, otherwise the inference output will be wrong.
-            model = self.optimum_quantizer.convert_gptq_2_gptq_v2(model)
+            model = self.optimum_quantizer.convert_gptq_1_gptq_v2(model)
             model = self.optimum_quantizer.post_init_model(model)
         else:
             if self.quantization_config.tokenizer is None:

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import json
 import os
 from enum import Enum
@@ -43,7 +44,7 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.exllama import exllama_set_max_input_length
 from ...utils.backend import Backend
 from ...quantization import FORMAT,FORMAT_FIELD_JSON, QuantizeConfig
-from gptqmodel.utils.model import gptqmodel_post_init, convert_gptq_v1_to_v2_format
+from gptqmodel.utils.model import gptqmodel_post_init, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format
 from ...quantization import GPTQ
 from gptqmodel.utils.importer import select_quant_linear
 
@@ -153,6 +154,15 @@ class GPTQModelQuantizer(object):
         self.cache_block_outputs = cache_block_outputs
         self.modules_in_block_to_quantize = modules_in_block_to_quantize
 
+        quantize_config = QuantizeConfig()
+        quantize_config.group_size = self.group_size
+        quantize_config.damp_percent = self.damp_percent
+        quantize_config.desc_act = self.desc_act
+        quantize_config.sym = self.sym
+        quantize_config.true_sequential = self.true_sequential
+        quantize_config.bits = self.bits
+        self.quantize_config = quantize_config
+
         self.serialization_keys = [
             "bits",
             "dataset",
@@ -231,21 +241,13 @@ class GPTQModelQuantizer(object):
         self.qlinear_kernel = self._replace_by_quant_layers(model, layers_to_be_replaced)
         return model
 
-    def convert_gptq_2_gptq_v2(self, model: nn.Module):
+    def convert_gptq_1_gptq_v2(self, model: nn.Module):
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        quantize_config = QuantizeConfig()
-        quantize_config.group_size = self.group_size
-        quantize_config.damp_percent = self.damp_percent
-        quantize_config.desc_act = self.desc_act
-        quantize_config.sym = self.sym
-        quantize_config.true_sequential = self.true_sequential
-        quantize_config.bits = self.bits
-
         logger.info(
             f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
         model = convert_gptq_v1_to_v2_format(
             model,
-            quantize_config=quantize_config,
+            quantize_config=self.quantize_config,
             qlinear_kernel=self.qlinear_kernel,
         )
         return model
@@ -521,9 +523,12 @@ class GPTQModelQuantizer(object):
                     h.remove()
                 for name in subset_name_list:
                     logger.info(f"Quantizing {name} in block {i + 1}/{len(blocks)}...")
-                    scale, zero, g_idx = gptq[name].fasterquant(
+                    scale, zero, g_idx, duration, avg_loss = gptq[name].fasterquant(
                         percdamp=self.damp_percent, group_size=self.group_size, actorder=self.desc_act
                     )
+                    stat = {"layer": i + 1, "module": name, "avg_loss": f"{avg_loss:.4f}",
+                            "time": f"{duration:.4f}"}
+                    logger.info(stat)
                     quantizers[f"{self.block_name_to_quantize}.{i}.{name}"] = (
                         gptq[name].quantizer,
                         scale,
@@ -656,6 +661,10 @@ class GPTQModelQuantizer(object):
             backend = Backend.EXLLAMA_V2
         else:
             backend = Backend.AUTO
+
+        if self.disable_exllama:
+            backend = Backend.AUTO
+
         QuantLinear = select_quant_linear(
             sym=self.sym,
             desc_act=self.desc_act,
@@ -663,6 +672,7 @@ class GPTQModelQuantizer(object):
             bits=self.bits,
             backend=backend,
             format=FORMAT.GPTQ,
+            disable_exllama=self.disable_exllama,
         )
         return QuantLinear
 
@@ -688,6 +698,29 @@ class GPTQModelQuantizer(object):
                 Whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).
 
         """
+        if self.bits != 4:
+            cuda_name_modules = {}
+            from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+            from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
+            for name, module in model.named_modules():
+                if isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear):
+                    cuda_name_modules[name] = module.gptqmodel_cuda
+                    module.gptqmodel_cuda = None
+            model = copy.deepcopy(model)
+
+            for name, module in model.named_modules():
+                if (isinstance(module, CudaQuantLinear) or isinstance(module,
+                                                                      CudaOldQuantLinear)) and name in cuda_name_modules:
+                    module.gptqmodel_cuda = cuda_name_modules[name]
+
+            del cuda_name_modules
+        else:
+            model = copy.deepcopy(model)
+
+        model = convert_gptq_v2_to_v1_format(
+            model, quantize_config=self.quantize_config, qlinear_kernel=self.qlinear_kernel
+        )
+
         os.makedirs(save_dir, exist_ok=True)
         model.save_pretrained(save_dir, max_shard_size=max_shard_size, safe_serialization=safe_serialization)
         with open(os.path.join(save_dir, GPTQ_CONFIG), "w", encoding="utf-8") as f:
@@ -709,7 +742,6 @@ def load_quantized_model(
     exllama_config: Optional[Dict[str, Any]] = None,
     max_input_length: Optional[int] = None,
 ):
-    print("load_quantized_model",load_quantized_model)
     """
     Load quantized weights from the save_folder into the converted model and dispatch the weights according to the device_map.
 

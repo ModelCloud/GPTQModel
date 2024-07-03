@@ -14,6 +14,7 @@ logger = getLogger(__name__)
 
 class CudaOldQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [2, 3, 4, 8]
+    SUPPORTED_DESC_ACT = [False]
 
     def __init__(
         self,
