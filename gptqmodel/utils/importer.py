@@ -40,7 +40,6 @@ def select_quant_linear(
         backend: Backend,
         format: FORMAT,
         pack: bool = False,
-        disable_exllama: bool = False,
 ):
     # Handle the case where backend is AUTO.
     if backend == Backend.AUTO:
@@ -49,8 +48,7 @@ def select_quant_linear(
             in_allow_backends = k in allow_backends
             validate = v.validate(bits, group_size, desc_act, sym, raise_error=False)
             check_pack_func = hasattr(v, "pack") if pack else True
-            check_exllama = v != ExllamaQuantLinear and v != ExllamaV2QuantLinear if disable_exllama else True
-            if in_allow_backends and validate and check_pack_func and check_exllama:
+            if in_allow_backends and validate and check_pack_func:
                 logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                 return v
 

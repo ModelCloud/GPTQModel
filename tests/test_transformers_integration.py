@@ -108,7 +108,7 @@ class TestTransformersIntegration(unittest.TestCase):
             if load_quant_model:
                 self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaV2QuantLinear)
             else:
-                self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, CudaOldQuantLinear)
+                self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaQuantLinear)
         inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
         res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
         predicted_text = tokenizer.decode(res[0])
