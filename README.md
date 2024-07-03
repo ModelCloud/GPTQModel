@@ -48,7 +48,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Security: hash check of model weights on load
 * 🚀 Over 50% faster PPL calculations (OPT model)
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
-* ✨ Increased compatibility with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2, Marlin ] backends.
+* ✨ Increased compatibility with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2 ] backends.
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * 👾 <del>Fixed packing Performance regression on high core-count systems.</del> Backported to AutoGPTQ
 * 👾 <del>Fixed crash on H100.</del> Backported to AutoGPTQ
