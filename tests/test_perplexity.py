@@ -70,9 +70,9 @@ class TestPerplexity(unittest.TestCase):
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790, opt ppl == 30.02
         # assert self.native_ppl < 30.5
 
-        traindata = load_dataset(DATASET_PATH, split="train").filter(lambda x: len(x['text']) >= 512)
+        traindata = load_dataset(self.DATASET_PATH, split=self.DATASET_SPLIT).filter(lambda x: len(x[self.DATASET_COLUMN]) >= 512)
         # traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration_dataset = [self.tokenizer(example[self.DATASET_COLUMN]) for example in traindata.select(range(1024))]
 
     @parameterized.expand(
         [
