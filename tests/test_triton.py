@@ -9,8 +9,9 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 import torch.utils.benchmark as benchmark  # noqa: E402
-from gptqmodel import Backend, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import Backend, GPTQModel  # noqa: E402
 
 MODEL_ID = "TheBloke/Llama-7B-GPTQ"
 DATASET_ID = "timdettmers/openassistant-guanaco"

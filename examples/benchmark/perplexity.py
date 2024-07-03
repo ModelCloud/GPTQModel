@@ -2,8 +2,9 @@ import argparse
 import os
 
 import torch
-from gptqmodel.utils import Perplexity, get_backend
 from transformers import AutoTokenizer
+
+from gptqmodel.utils import Perplexity, get_backend
 
 if __name__ == "__main__":
     """
