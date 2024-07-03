@@ -84,7 +84,7 @@ jobs:
           gpu_id=-1
           
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://10.0.23.237/gpu/get?id=${{ github.run_id }}")
+            gpu_id=$(curl -s "http://10.0.13.154/gpu/get?id=${{ github.run_id }}")
           
             if [ "$gpu_id" -lt 0 ]; then
               echo "No available GPU, waiting 5 seconds..."
@@ -102,4 +102,4 @@ jobs:
       - name: Release GPU
         if: always()
         shell: bash
-        run: curl -X GET "http://10.0.23.237/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
+        run: curl -X GET "http://10.0.13.154/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
