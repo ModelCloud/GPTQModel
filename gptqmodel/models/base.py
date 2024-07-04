@@ -218,6 +218,7 @@ class BaseGPTQModel(nn.Module):
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
+        cur_device = self.device
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
@@ -245,7 +246,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU:
+        if get_device(layers[0]) == CPU and cur_device != torch.device("cpu"):
             layers[0] = layers[0].to(CUDA_0)
             force_layer_back_to_cpu = True
 
@@ -303,7 +304,7 @@ class BaseGPTQModel(nn.Module):
             layer_pb.set_description(f"Quantizing layer {i + 1} of {layer_count}")
             layer = layers[i]
             force_layer_back_to_cpu = False
-            if get_device(layer) == CPU:
+            if get_device(layer) == CPU and cur_device != torch.device("cpu"):
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
@@ -411,7 +412,8 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
-            torch.cuda.empty_cache()
+            if cur_device != torch.device("cpu"):
+                torch.cuda.empty_cache()
 
         logger.info(f"Quantization summary:\n{quant_log}")
         for module_log in quant_log:
@@ -435,7 +437,8 @@ class BaseGPTQModel(nn.Module):
 
         self._quantized = True
 
-        torch.cuda.empty_cache()
+        if cur_device != torch.device("cpu"):
+            torch.cuda.empty_cache()
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
@@ -730,7 +733,8 @@ class BaseGPTQModel(nn.Module):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        torch.cuda.empty_cache()
+        if not use_cpu:
+            torch.cuda.empty_cache()
 
         model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
 
@@ -838,7 +842,7 @@ class BaseGPTQModel(nn.Module):
                 raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
             backend = Backend.MARLIN
 
-        marlin_compatible = False if backend != Backend.QBITS else _validate_marlin_device_support()
+        marlin_compatible = False if backend == Backend.QBITS else _validate_marlin_device_support()
 
         if backend != Backend.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)
