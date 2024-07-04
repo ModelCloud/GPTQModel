@@ -72,19 +72,11 @@ jobs:
           ls -alh dist || true
           rm -rf dist/* || true
 
-      - name: Set run-id
-        run: |
-          if [ -z "${{ github.event.inputs.artifact_runid }}" ]; then
-            echo "RUN_ID=${{ github.run_id }}" >> $GITHUB_ENV
-          else
-            echo "RUN_ID=${{ github.event.inputs.artifact_runid }}" >> $GITHUB_ENV
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
-          run-id: ${{ env.RUN_ID }}
 
       - name: Show dist folder
         run: ls -alh dist || true
@@ -143,19 +135,11 @@ jobs:
 
       - run: pip install protobuf
 
-      - name: Set run-id
-        run: |
-          if [ -z "${{ github.event.inputs.artifact_runid }}" ]; then
-            echo "RUN_ID=${{ github.run_id }}" >> $GITHUB_ENV
-          else
-            echo "RUN_ID=${{ github.event.inputs.artifact_runid }}" >> $GITHUB_ENV
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
-          run-id: ${{ env.RUN_ID }}
 
       - name: Install wheel
         shell: bash
