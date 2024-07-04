@@ -54,24 +54,16 @@ def select_quant_linear(
 
     # Handle the case where backend is not AUTO.
     if backend == Backend.TRITON:
-        logger.info("Using tritonv2 for GPTQ")
-        from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
         return TritonV2QuantLinear
     elif backend == Backend.BITBLAS:
-        from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
         return BitBLASQuantLinear
     elif bits == 4 and sym and not desc_act and backend == Backend.MARLIN:
-        from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
         return MarlinQuantLinear
     elif bits == 4 and backend == Backend.EXLLAMA_V2:
-        from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
         return ExllamaV2QuantLinear
     elif bits == 4 and backend == Backend.EXLLAMA:
-        from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
         return ExllamaQuantLinear
     elif not desc_act or group_size == -1:
-        from ..nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
         return CudaOldQuantLinear
     else:
-        from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
         return CudaQuantLinear

@@ -523,7 +523,7 @@ class BaseGPTQModel(nn.Module):
                         module.gptqmodel_cuda = None
                 model = copy.deepcopy(self.model)
 
-                for name, modules in model.named_modules():
+                for name, module in model.named_modules():
                     if (isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear)) and name in cuda_name_modules:
                         module.gptqmodel_cuda = cuda_name_modules[name]
 

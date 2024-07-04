@@ -12,7 +12,7 @@
 ## News
 * 07/02/2024 🚀 [v0.9.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.3): Added Gemma 2 support, faster PPL calculations on gpu, and more code/arg refractor.
 
-* 06/30/2024 🚀 [v0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2): Added auto-padding of model in/out-features for exllama, exllama v2, marlin. 
+* 06/30/2024 🚀 [v0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2): Added auto-padding of model in/out-features for exllama and exllama v2. 
 Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepSeek V2-Lite.
 
 * 06/29/2024 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1): With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
@@ -48,7 +48,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Security: hash check of model weights on load
 * 🚀 Over 50% faster PPL calculations (OPT model)
 * ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
-* ✨ Increased compatibility with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2, Marlin ] backends.
+* ✨ Increased compatibility with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2 ] backends.
 * 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
 * 👾 <del>Fixed packing Performance regression on high core-count systems.</del> Backported to AutoGPTQ
 * 👾 <del>Fixed crash on H100.</del> Backported to AutoGPTQ

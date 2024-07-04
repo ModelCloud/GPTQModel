@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+
 from gptqmodel import GPTQModel, QuantizeConfig
 
 pretrained_model_dir = "facebook/opt-125m"

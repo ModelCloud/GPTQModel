@@ -1,7 +1,7 @@
 # -- do not touch
-import torch
-
 import os
+
+import torch
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
