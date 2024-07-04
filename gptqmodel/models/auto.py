@@ -81,10 +81,10 @@ MODEL_MAP = {
 
 at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
 
-# TODO, check if use qbits
-# if not at_least_one_cuda_v6:
-#     raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
 
+def check_cuda():
+    if not at_least_one_cuda_v6:
+        raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
 
 class GPTQModel:
     def __init__(self):
@@ -102,6 +102,7 @@ class GPTQModel:
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
+        check_cuda()
         model_type = check_and_get_model_type(pretrained_model_name_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -129,6 +130,9 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
+        if backend != Backend.QBITS or backend != Backend.AUTO:
+            check_cuda()
+
         model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
