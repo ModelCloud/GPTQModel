@@ -130,8 +130,13 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
+        # TODO REFRACTOR check_cuda by introducing SUPPORTED_DEVICE into BaseQuantLinear
         if backend != Backend.QBITS and backend != Backend.AUTO:
             check_cuda()
+
+        # QBITS backend will override device to cpu
+        if backend == Backend.QBITS:
+            device = "cpu"
 
         model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
