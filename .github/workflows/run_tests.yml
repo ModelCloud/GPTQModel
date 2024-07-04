@@ -119,6 +119,14 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
+      - name: Setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: pip install protobuf
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
