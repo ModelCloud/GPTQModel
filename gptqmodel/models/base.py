@@ -748,22 +748,21 @@ class BaseGPTQModel(nn.Module)  :
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
-
         if backend == Backend.QBITS:
-            device = "cpu"
-            if not QBITS_AVAILABLE:
+           device = "cpu"
+           if not QBITS_AVAILABLE:
                 raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
-            if torch_dtype is None or torch_dtype == "auto":
+           if torch_dtype is None or torch_dtype == "auto":
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
-        
-       if backend != Backend.QBITS and not torch.cuda.is_available():
-            raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=Backend.QBITS for cpu only quantization and inference.")
-          
+
+        if backend != Backend.QBITS and not torch.cuda.is_available():
+           raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=Backend.QBITS for cpu only quantization and inference.")
+
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
-            raise ValueError(
-                f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
-            )
+           raise ValueError(
+               f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+           )
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)

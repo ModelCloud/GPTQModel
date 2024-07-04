@@ -3,10 +3,9 @@
 
 from logging import getLogger
 
+import gptqmodel_marlin_cuda
 import numpy as np
 import torch
-
-import gptqmodel_marlin_cuda
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)

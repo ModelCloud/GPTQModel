@@ -5,7 +5,7 @@ from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBITS_AVAILABLE, QBITS_EXCEPTION, QBitsQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT
 from .backend import Backend

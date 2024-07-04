@@ -7,7 +7,6 @@ import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-
 logger = getLogger(__name__)
 
 
@@ -45,7 +44,7 @@ def convert_dtype_torch2str(dtype):
 
 class QBitsQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [4, 8]
-    
+
     def __init__(
         self,
         bits: int,

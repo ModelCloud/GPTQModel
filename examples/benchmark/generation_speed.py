@@ -7,11 +7,10 @@ from typing import Dict, List, Optional
 
 import torch
 from datasets import Dataset, load_dataset
+from gptqmodel import Backend, GPTQModel, QuantizeConfig, get_backend
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
-
-from gptqmodel import Backend, GPTQModel, QuantizeConfig, get_backend
 
 logger = logging.getLogger(__name__)
 

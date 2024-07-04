@@ -2,7 +2,6 @@
 import os
 
 import torch
-
 from gptqmodel import Backend
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
