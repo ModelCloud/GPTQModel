@@ -1,7 +1,5 @@
 from typing import Dict, List, Optional, Union
 
-import torch
-
 from ..utils import Backend
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
@@ -79,12 +77,6 @@ MODEL_MAP = {
     "deepseek_v2": DeepSeekV2GPTQ,
 }
 
-at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-
-
-def check_cuda():
-    if not at_least_one_cuda_v6:
-        raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
 
 class GPTQModel:
     def __init__(self):
@@ -102,7 +94,6 @@ class GPTQModel:
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
-        check_cuda()
         model_type = check_and_get_model_type(pretrained_model_name_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -130,14 +121,6 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
-        # TODO REFRACTOR check_cuda by introducing SUPPORTED_DEVICE into BaseQuantLinear
-        if backend != Backend.QBITS and backend != Backend.AUTO:
-            check_cuda()
-
-        # QBITS backend will override device to cpu
-        if backend == Backend.QBITS:
-            device = "cpu"
-
         model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
