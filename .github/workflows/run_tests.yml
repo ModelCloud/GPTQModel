@@ -1,4 +1,4 @@
-name: Unit Tests (GPU)
+name: Unit Tests
 
 on:
   repository_dispatch:
