@@ -59,8 +59,8 @@ class QBitsQuantLinear(nn.Module):
     ):
         super().__init__()
 
-        if bits not in [4, 8]:
-            raise NotImplementedError("Only 4,8 bits are supported for QBits.")
+        if not BITS_DTYPE_MAPPING.get(bits):
+            raise NotImplementedError(f"{bits} bits is not supported by QBits. please check BITS_DTYPE_MAPPING")
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
