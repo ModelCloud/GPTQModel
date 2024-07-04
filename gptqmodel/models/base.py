@@ -17,6 +17,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
+from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
@@ -675,7 +676,7 @@ class BaseGPTQModel(nn.Module)  :
                 )
 
             model_init_kwargs["device"] = "cpu"
-            torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
+            torch_dtype = qbits_dtype()
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -757,7 +758,7 @@ class BaseGPTQModel(nn.Module)  :
                 )
 
             if torch_dtype is None or torch_dtype == "auto":
-                torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
+                torch_dtype = qbits_dtype()
 
         if backend != Backend.QBITS and not torch.cuda.is_available():
            raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=Backend.QBITS for cpu only quantization and inference.")

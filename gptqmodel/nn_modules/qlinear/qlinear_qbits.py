@@ -16,6 +16,11 @@ BITS_DTYPE_MAPPING = {
 }
 
 
+def qbits_dtype() -> torch.dtype:
+    from intel_extension_for_transformers import qbits
+    return torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
+
+
 def convert_dtype_torch2str(dtype):
     if dtype == torch.int8:
         return "int8"
