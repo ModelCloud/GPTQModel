@@ -9,7 +9,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from test_q4_cuda import get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel, exllama_set_max_input_length  # noqa: E402
@@ -20,7 +19,7 @@ from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
 
-CUDA_OLD_REFERENCE = torch.Tensor(
+REFERENCE = torch.Tensor(
     [
         5.8398,
         6.8555,
@@ -1051,6 +1050,9 @@ CUDA_OLD_REFERENCE = torch.Tensor(
 
 GENERATE_EVAL_SIZE = 100
 
+def get_diff(a, ref):
+    eps = 1e-6
+    return f"Maxdiff: {(a - ref).abs().max()}, Mean relative diff: {((a - ref).abs() / (ref.abs() + eps)).mean()}"
 
 class TestsQ4Exllama(unittest.TestCase):
     def test_exllama(self):
@@ -1113,7 +1115,7 @@ class TestsQ4Exllama(unittest.TestCase):
         with torch.no_grad():
             res = linear(inp)[0][0]
 
-        reference = CUDA_OLD_REFERENCE.to(device)
+        reference = REFERENCE.to(device)
 
         self.assertTrue(
             torch.allclose(res, reference, rtol=3e-5, atol=2e-2),
@@ -1159,7 +1161,6 @@ class TestsQ4Exllama(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -1182,7 +1183,6 @@ class TestsQ4Exllama(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\nThe stage is now set in a Parisian café. The café is filled with people, including a group of friends, a couple, and a group of tourists. The friends are discussing their plans for the"
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"

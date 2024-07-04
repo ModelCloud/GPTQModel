@@ -10,8 +10,6 @@ import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from .qlinear_cuda_old import CudaOldQuantLinear
-
 logger = getLogger(__name__)
 
 BITBLAS_TARGET = None
@@ -252,7 +250,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             param_list.append(self.bias)
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
 
-    def repack_from_gptq(self, gptq_module: CudaOldQuantLinear):
+    def repack_from_gptq(self, gptq_module):
         from bitblas.quantization.utils import general_compress
 
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.

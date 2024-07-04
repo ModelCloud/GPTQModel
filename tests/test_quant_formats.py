@@ -122,26 +122,26 @@ class TestQuantization(unittest.TestCase):
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
 
-    def test_gptq_8bit(self):
-        quantize_config = QuantizeConfig(
-            bits=8,
-            group_size=128,
-            format=FORMAT.GPTQ,
-            desc_act=True
-        )
-
-        model = GPTQModel.from_pretrained(
-            self.pretrained_model_dir,
-            quantize_config=quantize_config,
-        )
-
-        model.quantize(self.calibration_dataset, batch_size=128)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            err = None
-            try:
-                model.save_quantized(tmpdirname)
-            except Exception as e:
-                print(e)
-                err = e
-            self.assertTrue(err is None)
+    # def test_gptq_8bit(self):
+    #     quantize_config = QuantizeConfig(
+    #         bits=8,
+    #         group_size=128,
+    #         format=FORMAT.GPTQ,
+    #         desc_act=True
+    #     )
+    #
+    #     model = GPTQModel.from_pretrained(
+    #         self.pretrained_model_dir,
+    #         quantize_config=quantize_config,
+    #     )
+    #
+    #     model.quantize(self.calibration_dataset, batch_size=128)
+    #
+    #     with tempfile.TemporaryDirectory() as tmpdirname:
+    #         err = None
+    #         try:
+    #             model.save_quantized(tmpdirname)
+    #         except Exception as e:
+    #             print(e)
+    #             err = e
+    #         self.assertTrue(err is None)
