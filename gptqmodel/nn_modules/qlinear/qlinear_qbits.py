@@ -23,6 +23,7 @@ except Exception as e:
 if QBITS_AVAILABLE:
     from intel_extension_for_transformers import qbits  # with QBits kernels ()
 
+# TODO FIXME: qbits support 2, 3 bits also so dtype mapping should be fixed
 BITS_DTYPE_MAPPING = {
     4: "int4_clip",
     8: "int8",
@@ -45,7 +46,7 @@ def convert_dtype_torch2str(dtype):
 
 
 class QBitsQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [2, 3, 4, 8]
+    SUPPORTED_BITS = [4, 8]
     
     def __init__(
         self,
