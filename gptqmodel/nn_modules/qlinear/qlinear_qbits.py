@@ -45,7 +45,7 @@ def convert_dtype_torch2str(dtype):
 
 
 class QBitsQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4, 8]
+    SUPPORTED_BITS = [2, 3, 4, 8]
     
     def __init__(
         self,
