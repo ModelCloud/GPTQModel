@@ -49,7 +49,6 @@ class TestQuantization(unittest.TestCase):
         model = GPTQModel.from_pretrained(
             self.pretrained_model_dir,
             quantize_config=quantize_config,
-            use_flash_attention_2=False,
         )
 
         model.quantize(self.calibration_dataset, batch_size=128)
