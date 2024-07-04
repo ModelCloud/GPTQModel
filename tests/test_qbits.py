@@ -25,7 +25,6 @@ class TestsQBits(unittest.TestCase):
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            device="cpu",
             backend=Backend.QBITS,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
