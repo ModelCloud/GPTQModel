@@ -412,7 +412,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, QBitsQuantLinear) and submodule.QUANT_TYPE == "qbits":
+        if isinstance(submodule, QBitsQuantLinear):
             model_uses_qbits = True
             submodule.post_init()
         elif isinstance(submodule, ExllamaQuantLinear):
