@@ -105,7 +105,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
       - name: Run tests
-        run: pytest tests/${{ matrix.test_script }}
+        run: pytest --durations=0 tests/${{ matrix.test_script }}
 
       - name: Release GPU
         if: always()
@@ -147,5 +147,5 @@ jobs:
           pip install dist/*.whl
 
       - name: Run tests
-        run: pytest tests/${{ matrix.test_script }}
+        run: pytest --durations=0 tests/${{ matrix.test_script }}
 
