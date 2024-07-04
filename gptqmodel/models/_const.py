@@ -32,7 +32,7 @@ SUPPORTED_MODELS = [
     "phi",
     "phi3",
     "gemma",
-    "gamma2",
+    "gemma2",
     "starcoder2",
     "cohere",
     "minicpm",
