@@ -9,7 +9,7 @@ on:
         required: false
         default: ''
       ref:
-        description: 'branch, tag or SHA'
+        description: 'Branch, Tag or Commit SHA'
         required: false
         default: ''
       artifact_runid:
