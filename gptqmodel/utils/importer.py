@@ -2,8 +2,6 @@ from collections import OrderedDict
 from logging import getLogger
 
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
-from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
-from ..nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
@@ -16,14 +14,12 @@ backend_dict = OrderedDict({
     Backend.EXLLAMA_V2: ExllamaV2QuantLinear,
     Backend.EXLLAMA: ExllamaQuantLinear,
     Backend.TRITON: TritonV2QuantLinear,
-    Backend.CUDA_OLD: CudaOldQuantLinear,
-    Backend.CUDA: CudaQuantLinear,
     Backend.BITBLAS: BitBLASQuantLinear,
 })
 
 format_dict = {
-    FORMAT.GPTQ: [Backend.EXLLAMA_V2, Backend.EXLLAMA, Backend.CUDA_OLD, Backend.CUDA],
-    FORMAT.GPTQ_V2: [Backend.EXLLAMA_V2, Backend.EXLLAMA, Backend.CUDA_OLD, Backend.CUDA],
+    FORMAT.GPTQ: [Backend.EXLLAMA_V2, Backend.EXLLAMA],
+    FORMAT.GPTQ_V2: [Backend.EXLLAMA_V2, Backend.EXLLAMA],
     FORMAT.MARLIN: [Backend.MARLIN],
     FORMAT.BITBLAS: [Backend.BITBLAS],
 }
@@ -63,7 +59,5 @@ def select_quant_linear(
         return ExllamaV2QuantLinear
     elif bits == 4 and backend == Backend.EXLLAMA:
         return ExllamaQuantLinear
-    elif not desc_act or group_size == -1:
-        return CudaOldQuantLinear
     else:
-        return CudaQuantLinear
+        return ExllamaQuantLinear
