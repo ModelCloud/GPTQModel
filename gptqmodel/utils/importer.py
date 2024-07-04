@@ -61,6 +61,6 @@ def select_quant_linear(
     elif Backend.EXLLAMA:
         return ExllamaQuantLinear
     elif backend == Backend.QBITS:
-         return QBitsQuantLinear
+        return QBitsQuantLinear
     else:
         return ExllamaQuantLinear
