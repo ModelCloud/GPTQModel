@@ -1,12 +1,13 @@
 import math
 from logging import getLogger
 
-import gptqmodel_cuda_64
-import gptqmodel_cuda_256
 import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+
+import gptqmodel_cuda_64
+import gptqmodel_cuda_256
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)

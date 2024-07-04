@@ -1,5 +1,6 @@
-from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer, TextGenerationPipeline
+
+from gptqmodel import GPTQModel, QuantizeConfig
 
 pretrained_model_dir = "facebook/opt-125m"
 quantized_model_dir = "opt-125m-4bit-128g"
