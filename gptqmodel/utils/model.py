@@ -20,6 +20,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import Backend
 from .importer import select_quant_linear
@@ -411,7 +412,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if hasattr(submodule, "QUANT_TYPE") and submodule.QUANT_TYPE == "qbits":
+        if isinstance(submodule, QBitsQuantLinear) and submodule.QUANT_TYPE == "qbits":
             model_uses_qbits = True
             submodule.post_init()
         elif isinstance(submodule, ExllamaQuantLinear):
