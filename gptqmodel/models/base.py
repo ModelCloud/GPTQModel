@@ -729,7 +729,7 @@ class BaseGPTQModel(nn.Module):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        if not use_cpu:
+        if model_init_kwargs.get("cpu") != "cpu":
             torch.cuda.empty_cache()
 
         model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
