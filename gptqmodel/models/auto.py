@@ -130,7 +130,7 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
-        if backend != Backend.QBITS or backend != Backend.AUTO:
+        if backend != Backend.QBITS and backend != Backend.AUTO:
             check_cuda()
 
         model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
