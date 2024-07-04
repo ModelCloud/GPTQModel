@@ -107,8 +107,6 @@ jobs:
   test_cpu:
     needs: build
     runs-on: ubuntu-latest
-    container:
-      image: modelcloud/gptqmodel:github-ci-v1
     strategy:
       fail-fast: false
       matrix:
