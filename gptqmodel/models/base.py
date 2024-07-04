@@ -780,7 +780,7 @@ class BaseGPTQModel(nn.Module):
         if backend == Backend.QBITS:
             if not QBITS_AVAILABLE:
                 raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
-            if torch_dtype is None:
+            if torch_dtype is None or torch_dtype == "auto":
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         """load quantized model from local disk"""
