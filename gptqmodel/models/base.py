@@ -688,14 +688,13 @@ class BaseGPTQModel(nn.Module):
     ):
         """load un-quantized pretrained model to cpu"""
 
-        use_cpu = False
         if not torch.cuda.is_available():
-            use_cpu = True
             if not QBITS_AVAILABLE:
                 raise ValueError(
                     f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`."
                 )
             else:
+                model_init_kwargs["device"] = "cpu"
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -769,17 +768,16 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
 
-        if (not torch.cuda.is_available() or device == "cpu") and backend == Backend.AUTO:
-            if device != "cpu":
-                logger.warning("no CUDA devices detected. Falling back to QBIT cpu based generation")
-            backend = Backend.QBITS
-
         if backend == Backend.QBITS:
+            device = "cpu"
             if not QBITS_AVAILABLE:
                 raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
             if torch_dtype is None or torch_dtype == "auto":
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
-
+        
+       if backend != Backend.QBITS and not torch.cuda.is_available():
+            raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=Backend.QBITS for cpu only quantization and inference.")
+          
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
