@@ -137,8 +137,8 @@ class TestPerplexity(unittest.TestCase):
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama ppl == 8.7863, FORMAT.MARLIN Tinyllama ppl == 9.0036
             # FORMAT.MARLIN opt ppl == 34.85, FORMAT.BITBLAS opt ppl == 34.11, native opt ppl == 30.39
-            # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama-15M ppl == 182.38, native Tinyllama-15M ppl == 78.56
+            # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama-15M ppl == 111.32, native Tinyllama-15M ppl == 54.61
             if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
                 assert abs(quantized_ppl - self.opt_native_ppl) < 4.7
             else:
-                assert abs(quantized_ppl - self.tinyllama_native_ppl) < 105
+                assert abs(quantized_ppl - self.tinyllama_native_ppl) < 56.8
