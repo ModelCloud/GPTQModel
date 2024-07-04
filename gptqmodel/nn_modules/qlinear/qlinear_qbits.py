@@ -5,6 +5,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 
 logger = getLogger(__name__)
 
@@ -42,24 +44,25 @@ def convert_dtype_torch2str(dtype):
         assert False, "Unsupported pytorch dtype {} to str dtype".format(dtype)
 
 
-class QBitsQuantLinear(nn.Module):
-
+class QBitsQuantLinear(BaseQuantLinear):
+    SUPPORTED_BITS = [4, 8]
+    
     def __init__(
         self,
-        bits,
-        group_size,
-        infeatures,
-        outfeatures,
-        bias,
+        bits: int,
+        group_size: int,
+        infeatures: int,
+        outfeatures: int,
+        bias: bool,
         kernel_switch_threshold=128,
         trainable=False,
         weight_dtype=torch.bfloat16,
         **kwargs,
     ):
         super().__init__()
-
-        if not BITS_DTYPE_MAPPING.get(bits):
-            raise NotImplementedError(f"{bits} bits is not supported by QBits. please check BITS_DTYPE_MAPPING")
+        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
+        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
+        self.validate(bits=bits, group_size=group_size, sym=False, desc_act=False)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
@@ -67,6 +70,9 @@ class QBitsQuantLinear(nn.Module):
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
         self.weight_dtype = weight_dtype
+
+        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
+        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
         self.asym = True
 
         self.register_buffer(
@@ -113,6 +119,9 @@ class QBitsQuantLinear(nn.Module):
         # intweight: k x n, zeros: k / group_size x n
         intweight, zeros = unpack_to_8bit_signed(self.qweight, self.qzeros, self.bits,
                                                  self.g_idx if is_desc_act else None)
+
+        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
+        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
         if zeros is None:
             zeros = torch.empty(0, dtype=torch.int8)
             self.asym = False
