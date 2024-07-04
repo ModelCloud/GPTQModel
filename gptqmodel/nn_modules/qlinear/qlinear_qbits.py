@@ -20,8 +20,6 @@ except Exception as e:
     QBITS_AVAILABLE = False
     QBITS_EXCEPTION = e
 
-if QBITS_AVAILABLE:
-    from intel_extension_for_transformers import qbits  # with QBits kernels ()
 
 # TODO FIXME: qbits support 2, 3 bits also so dtype mapping should be fixed
 BITS_DTYPE_MAPPING = {
@@ -52,6 +50,7 @@ class QBitsQuantLinear(BaseQuantLinear):
         self,
         bits: int,
         group_size: int,
+        sym: bool,
         infeatures: int,
         outfeatures: int,
         bias: bool,
@@ -61,9 +60,15 @@ class QBitsQuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         super().__init__()
+
         # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
         # TODO: change to sym=False not asym=True since all our code is using sym, not asym
-        self.validate(bits=bits, group_size=group_size, sym=False, desc_act=False)
+        self.sym = False
+
+
+        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
+        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
+        self.validate(bits=bits, group_size=group_size, sym=self.sym, desc_act=False)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
@@ -72,9 +77,6 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.maxq = 2**self.bits - 1
         self.weight_dtype = weight_dtype
 
-        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
-        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
-        self.asym = True
 
         self.register_buffer(
             "qweight",
@@ -125,18 +127,18 @@ class QBitsQuantLinear(BaseQuantLinear):
         # TODO: change to sym=False not asym=True since all our code is using sym, not asym
         if zeros is None:
             zeros = torch.empty(0, dtype=torch.int8)
-            self.asym = False
+            self.sym = True
         else:
             # change it to int8 with offset 128
             if self.bits == 8:
                 zeros = (zeros.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
 
-        if not self.asym:
+        if self.sym:
             intweight -= (2**(self.bits - 1))
-        intweight = intweight.to(torch.uint8 if self.asym else torch.int8)
+        intweight = intweight.to(torch.uint8 if not self.sym else torch.int8)
         # due to asym return torch.uint8 but backend request int8,
         # change it to int8 with offset 128
-        if self.asym:
+        if not self.sym:
             intweight = (intweight.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
 
         scales = self.scales if self.bits == 8 else self.scales / (2 ** (8 - self.bits))
@@ -150,7 +152,7 @@ class QBitsQuantLinear(BaseQuantLinear):
                                                      BITS_DTYPE_MAPPING[self.bits],  # weight_dtype
                                                      "fp32",  # scale_dtype
                                                      convert_dtype_torch2str(self.scales.dtype),  # compute_dtype
-                                                     self.asym,
+                                                     not self.sym,
                                                      self.group_size)
 
     def pack(self, linear, scales, zeros, g_idx=None):
@@ -262,7 +264,7 @@ class QBitsQuantLinear(BaseQuantLinear):
                          convert_dtype_torch2str(input_dtype),  # compute_dtype
                          BITS_DTYPE_MAPPING[self.bits],  # weight_dtype
                          "fp32",  # scale_dtype
-                         self.asym)
+                         not self.sym)
         return outputs.view(out_shape)
 
 
