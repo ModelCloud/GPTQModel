@@ -23,24 +23,27 @@ env:
 jobs:
   build:
     runs-on: self-hosted
-    if: ${{ github.event.inputs.artifact_runid != '' }}
     container:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
       - name: Checkout Codes
+        if: ${{ github.event.inputs.artifact_runid == '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
       - name: Compile
+        if: ${{ github.event.inputs.artifact_runid == '' }}
         shell: bash
         run: python setup.py bdist_wheel
 
       - name: Show dist folder
+        if: ${{ github.event.inputs.artifact_runid == '' }}
         run: ls -alh dist
 
       - name: Upload to artifact
+        if: ${{ github.event.inputs.artifact_runid == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: dist
