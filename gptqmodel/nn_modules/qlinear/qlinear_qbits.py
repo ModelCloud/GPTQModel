@@ -9,17 +9,6 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
-
-try:
-    from intel_extension_for_transformers import qbits  # noqa: F401
-
-    QBITS_AVAILABLE = True
-    QBITS_EXCEPTION = None
-except Exception as e:
-    QBITS_AVAILABLE = False
-    QBITS_EXCEPTION = e
-
-
 # TODO FIXME: qbits support 2, 3 bits also so dtype mapping should be fixed
 BITS_DTYPE_MAPPING = {
     4: "int4_clip",
@@ -112,6 +101,8 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.trainable = trainable
 
     def post_init(self):
+        from intel_extension_for_transformers import qbits
+
         assert self.qweight.device.type == "cpu"
         if self.bias is not None:
             self.bias = self.bias.to(dtype=torch.float32)
@@ -250,6 +241,8 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x: torch.Tensor):
+        from intel_extension_for_transformers import qbits
+
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.view(-1, x.shape[-1])  # convert xd to 2d

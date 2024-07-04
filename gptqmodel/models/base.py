@@ -23,7 +23,7 @@ from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZ
 from ..utils.backend import Backend
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
-from ..utils.importer import QBITS_AVAILABLE, QBITS_EXCEPTION, select_quant_linear
+from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
@@ -33,9 +33,6 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
-
-if QBITS_AVAILABLE:
-    from intel_extension_for_transformers import qbits
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -670,13 +667,15 @@ class BaseGPTQModel(nn.Module)  :
         """load un-quantized pretrained model to cpu"""
 
         if not torch.cuda.is_available():
-            if not QBITS_AVAILABLE:
+            try:
+                from intel_extension_for_transformers import qbits
+            except Exception as e:
                 raise ValueError(
-                    f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`."
+                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
                 )
-            else:
-                model_init_kwargs["device"] = "cpu"
-                torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
+
+            model_init_kwargs["device"] = "cpu"
+            torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -749,10 +748,15 @@ class BaseGPTQModel(nn.Module)  :
         **kwargs,
     ):
         if backend == Backend.QBITS:
-           device = "cpu"
-           if not QBITS_AVAILABLE:
-                raise ValueError(f"QBits appears to be not available with the error: {QBITS_EXCEPTION}. Please install with `pip install intel-extension-for-transformers`.")
-           if torch_dtype is None or torch_dtype == "auto":
+            device = "cpu"
+            try:
+                from intel_extension_for_transformers import qbits
+            except Exception as e:
+                raise ValueError(
+                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                )
+
+            if torch_dtype is None or torch_dtype == "auto":
                 torch_dtype = torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
         if backend != Backend.QBITS and not torch.cuda.is_available():
