@@ -15,7 +15,6 @@ from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noq
 
 class TestQ4Marlin(unittest.TestCase):
     def test_generation(self):
-        # Reference generated with the cuda-old kernel and TheBloke/Llama-2-7B-Chat-GPTQ
         reference_output = "<s> I am in Paris and I am feeling very sad and lonely. everybody I know is busy and I don't have any friends here. I am staying in a small apartment in the 11th arrondissement and I am feeling very isolated. I miss my friends and family back home and I don'"
 
         prompt = "I am in Paris and"

@@ -22,7 +22,6 @@ from gptqmodel import Backend, GPTQModel  # noqa: E402
 
 class TestQ4BitBLAS(unittest.TestCase):
     def test_generation(self):
-        # Reference generated with the cuda-old kernel and TheBloke/Llama-2-7B-Chat-GPTQ
         reference_output = "</s>I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
 
         prompt = "I am in Paris and"
