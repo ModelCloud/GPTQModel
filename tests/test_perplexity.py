@@ -103,12 +103,9 @@ class TestPerplexity(unittest.TestCase):
             bits=4,
             group_size=128,
             format=format,
-            desc_act=False if format == FORMAT.MARLIN else True
-        )
-
-        if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
             # MARLIN and BITBLAS Only supported when desc_act is False.
-            quantize_config.desc_act = False
+            desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
+        )
 
         model = GPTQModel.from_pretrained(
             self.OPT_MODEL_ID if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_MODEL_ID,
