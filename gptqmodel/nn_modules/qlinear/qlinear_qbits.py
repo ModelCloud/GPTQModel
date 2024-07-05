@@ -100,7 +100,7 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.kernel_switch_threshold = kernel_switch_threshold
 
 
-    def post_init(self):
+    def post_init(self, quantize_config):
         from intel_extension_for_transformers import qbits
 
         assert self.qweight.device.type == "cpu"
@@ -120,6 +120,8 @@ class QBitsQuantLinear(BaseQuantLinear):
             # change it to int8 with offset 128
             if self.bits == 8:
                 zeros = (zeros.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
+
+        quantize_config.sym = self.sym
 
         if self.sym:
             intweight -= (2**(self.bits - 1))
