@@ -10,6 +10,10 @@
 </p>
 
 ## News
+* 07/05/2024 🚀🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): Intel QBits support added for [2,3,4,8] bit quantization/inference on CPU. Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
+
+* 07/03/2024 🚀 [v0.9.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.4): HF Transformers integration added and bug fixed Gemma 2 support.
+
 * 07/02/2024 🚀 [v0.9.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.3): Added Gemma 2 support, faster PPL calculations on gpu, and more code/arg refractor.
 
 * 06/30/2024 🚀 [v0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2): Added auto-padding of model in/out-features for exllama and exllama v2. 
@@ -65,7 +69,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 * `lm_head` quantization support by integrating with Intel/AutoRound.
 * Customizable callback in Per-Layer quantization.
-* Add Qbits (cpu inference) support from Intel/Qbits.
+* <del>Add Qbits (cpu inference) support from Intel/Qbits.</del> Completed
 * Add back ROCM/AMD support once everything is validated.
 * Store quant loss stat and apply diffs to new quant for quality control.
 * Add Tests for every single supported model.
@@ -266,7 +270,7 @@ Currently, `gptqmodel` supports: `LanguageModelingTask`, `SequenceClassification
 
 ### Which kernel is used by default?
 
-GPTQModel will use Marlin, Exllama v2, Triton/CUDA kernels in that order for maximum inference performance.
+GPTQModel will use Marlin, Exllama v2, Triton kernels in that order for maximum inference performance.
 
 # Acknowledgements
 
