@@ -10,8 +10,9 @@ from gptqmodel.models._const import DEVICE_TYPE_CPU
 
 logger = getLogger(__name__)
 
-# TODO FIXME: qbits support 2, 3 bits also so dtype mapping should be fixed
 BITS_DTYPE_MAPPING = {
+    2: "int2_clip",
+    3: "int3_clip",
     4: "int4_clip",
     8: "int8",
 }
@@ -38,7 +39,7 @@ def convert_dtype_torch2str(dtype):
 
 
 class QBitsQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4, 8]
+    SUPPORTED_BITS = [2, 3, 4, 8]
     SUPPORTED_DEVICES = [DEVICE_TYPE_CPU]
 
     def __init__(
@@ -51,7 +52,6 @@ class QBitsQuantLinear(BaseQuantLinear):
         outfeatures: int,
         bias: bool,
         kernel_switch_threshold=128,
-        trainable=False,
         weight_dtype=torch.bfloat16,
         **kwargs,
     ):
@@ -98,7 +98,6 @@ class QBitsQuantLinear(BaseQuantLinear):
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
-        self.trainable = trainable
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)
