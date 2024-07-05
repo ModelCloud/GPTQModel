@@ -1,5 +1,5 @@
 # Advanced Model Loading and Best Practice
-Welcome to the tutorial of AutoGPTQ, in this chapter, you will learn advanced model loading and best practice in `auto-gptq`.
+Welcome to the tutorial of GPTQModel, in this chapter, you will learn advanced model loading and best practice in `gptqmodel`.
 
 ## Arguments Introduction
 In previous chapter, you learned how to load model into CPU or single GPU with the two basic apis:
@@ -11,11 +11,11 @@ In previous chapter, you learned how to load model into CPU or single GPU with t
 
 However, the default settings above may not meet many users' demands, for they want to have more control of model loading.
 
-Luckily, in AutoGPTQ, we provide some advanced arguments that users can tweak to manually config model loading strategy:
+Luckily, in GPTQModel, we provide some advanced arguments that users can tweak to manually config model loading strategy:
 - `max_memory`: an optional `List[Dict[Union[str, int], str]]` type argument, can be used both in `.from_pretrained` and `.from_quantized`.
 - `device_map`: an optional `Union[str, Dict[str, Union[int, str]]]` type argument, currently only be supported in `.from_quantized`.
 
-Before `auto-gptq`'s existence, there are many users have already used other popular tools such as [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa) to quantize their model and saved with different name without `quantize_config.json` file introduced in previous chapter.
+Before `gptqmodel`'s existence, there are many users have already used other popular tools such as [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa) to quantize their model and saved with different name without `quantize_config.json` file introduced in previous chapter.
 
 To address this, two more arguments were introduced in `.from_quantized` so that users can load quantized model with arbitrary names.
 - `quantize_config`: an optional `QuantizeConfig` type argument, can be used to match model file and initialize model incase `quantize_config.json` not in the directory where model is saved.
@@ -70,4 +70,4 @@ However, not everyone have large GPU memory. Roughly speaking, always specify th
 For inference, following this principle: always using single GPU if you can, otherwise multiple GPUs, CPU offload is the last one to consider.
 
 ## Conclusion
-Congrats! You learned the advanced strategies to load model using `.from_pretrained` and `.from_quantized` in `auto-gptq` with some best practice advices. In the next chapter, you will learn how to quickly customize an AutoGPTQ model and use it to quantize and inference.
+Congrats! You learned the advanced strategies to load model using `.from_pretrained` and `.from_quantized` in `gptqmodel` with some best practice advices. In the next chapter, you will learn how to quickly customize an GPTQModel model and use it to quantize and inference.

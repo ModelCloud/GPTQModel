@@ -15,7 +15,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
     examples = [
         tokenizer(
-            "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
         )
     ]
 

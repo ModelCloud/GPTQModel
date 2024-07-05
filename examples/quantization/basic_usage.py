@@ -10,7 +10,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
     calibration_dataset = [
         tokenizer(
-            "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
         )
     ]
 
@@ -56,7 +56,7 @@ def main():
 
     # or you can also use pipeline
     pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-    print(pipeline("auto-gptq is")[0]["generated_text"])
+    print(pipeline("gptqmodel is")[0]["generated_text"])
 
 
 if __name__ == "__main__":
