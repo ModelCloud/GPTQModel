@@ -276,7 +276,7 @@ def unpack_to_8bit_signed(qweight, qzeros, bits, g_idx=None):
         zeros = zeros + 1
         try:
             zeros = zeros.reshape(zp_shape)
-        except:
+        except Exception:
             # zeros and scales have different iteam numbers.
             # remove 1 (due to 0 + 1 in line 252)
             zeros = zeros[zeros != 1]
