@@ -9,8 +9,9 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
-# TODO FIXME: qbits support 2, 3 bits also so dtype mapping should be fixed
 BITS_DTYPE_MAPPING = {
+    2: "int2_clip",
+    3: "int3_clip",
     4: "int4_clip",
     8: "int8",
 }
