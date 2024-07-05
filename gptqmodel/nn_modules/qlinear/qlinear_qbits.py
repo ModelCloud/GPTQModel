@@ -49,7 +49,6 @@ class QBitsQuantLinear(BaseQuantLinear):
         outfeatures: int,
         bias: bool,
         kernel_switch_threshold=128,
-        trainable=False,
         weight_dtype=torch.bfloat16,
         **kwargs,
     ):
@@ -100,7 +99,6 @@ class QBitsQuantLinear(BaseQuantLinear):
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
-        self.trainable = trainable
 
     def post_init(self):
         from intel_extension_for_transformers import qbits
