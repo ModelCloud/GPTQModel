@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from ...models._const import DEVICE_TYPE_CUDA
+from ...models._const import Device, get_device_by_type
 from ...utils.device import check_cuda
 
 class BaseQuantLinear(nn.Module):
@@ -9,7 +9,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTED_DESC_ACT = [True, False]
     SUPPORTED_SYM = [True, False]
     SUPPORTED_SHARDS: bool = True
-    SUPPORTED_DEVICES = [DEVICE_TYPE_CUDA]
+    SUPPORTED_DEVICES = [Device.CUDA]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, *args, **kwargs):
         super().__init__()
@@ -17,7 +17,7 @@ class BaseQuantLinear(nn.Module):
         if err:
             raise NotImplementedError(err)
 
-        if DEVICE_TYPE_CUDA in self.SUPPORTED_DEVICES:
+        if Device.CUDA in self.SUPPORTED_DEVICES:
             check_cuda()
 
     @classmethod
@@ -45,8 +45,9 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate_device(cls, device_type: str):
-        if cls.SUPPORTED_DEVICES and device_type not in cls.SUPPORTED_DEVICES:
-            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTED_DEVICES}` bits: actual device = `{device_type}`")
+        device = get_device_by_type(device_type)
+        if cls.SUPPORTED_DEVICES and device not in cls.SUPPORTED_DEVICES:
+            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTED_DEVICES}` bits: actual device = `{device}`")
 
     # override me
     def post_init(self):

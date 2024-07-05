@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.models._const import DEVICE_TYPE_CPU
+from gptqmodel.models._const import Device
 
 logger = getLogger(__name__)
 
@@ -40,7 +40,7 @@ def convert_dtype_torch2str(dtype):
 
 class QBitsQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [2, 3, 4, 8]
-    SUPPORTED_DEVICES = [DEVICE_TYPE_CPU]
+    SUPPORTED_DEVICES = [Device.CPU]
 
     def __init__(
         self,
