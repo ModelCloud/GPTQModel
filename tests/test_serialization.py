@@ -9,7 +9,7 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON, QUANT_CONFIG_FILENAME  # noqa: E402
 
 
@@ -17,7 +17,7 @@ class TestSerialization(unittest.TestCase):
     MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     def test_marlin_local_serialization(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=Backend.MARLIN)
+        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             model.save_pretrained(tmpdir)
@@ -29,13 +29,13 @@ class TestSerialization(unittest.TestCase):
 
             self.assertTrue(config[FORMAT_FIELD_JSON] == FORMAT.MARLIN)
 
-            model = GPTQModel.from_quantized(tmpdir, device="cuda:0", backend=Backend.MARLIN)
+            model = GPTQModel.from_quantized(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
 
     def test_marlin_hf_cache_serialization(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=Backend.MARLIN)
+        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
         self.assertTrue(model.quantize_config.format == FORMAT.MARLIN)
 
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=Backend.MARLIN)
+        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
         self.assertTrue(model.quantize_config.format == FORMAT.MARLIN)
 
     def test_gptq_v1_to_v2_runtime_convert(self):

@@ -2,7 +2,7 @@
 import os
 
 import torch
-from gptqmodel import Backend
+from gptqmodel import BACKEND
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -25,7 +25,7 @@ class TestsQBits(unittest.TestCase):
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            backend=Backend.QBITS,
+            backend=BACKEND.QBITS,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 

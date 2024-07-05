@@ -21,19 +21,20 @@ from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
-from ..utils.backend import Backend
+from ..utils.backend import BACKEND
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, check_cuda, convert_gptq_v1_to_v2_format,
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
                            get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model,
                            verify_model_hash, verify_sharded_model_hashes)
+from ..utils.device import check_cuda
 from ..version import __version__
-from ._const import CPU, CUDA_0, SUPPORTED_MODELS
+from ._const import CPU, DEVICE, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -420,7 +421,7 @@ class BaseGPTQModel(nn.Module)  :
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=Backend.AUTO,
+            backend=BACKEND.AUTO,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
@@ -737,7 +738,7 @@ class BaseGPTQModel(nn.Module)  :
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
-        backend: Backend = Backend.AUTO,
+        backend: BACKEND = BACKEND.AUTO,
         torch_dtype: [str | torch.dtype] = "auto",
         quantize_config: Optional[QuantizeConfig] = None,
         model_basename: Optional[str] = None,
@@ -749,12 +750,8 @@ class BaseGPTQModel(nn.Module)  :
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
-        # TODO REFRACTOR check_cuda by introducing SUPPORTED_DEVICE into BaseQuantLinear
-        if backend != Backend.QBITS and backend != Backend.AUTO:
-            check_cuda()
-
-        if backend == Backend.QBITS:
-            device = torch.device("cpu")
+        if backend == BACKEND.QBITS:
+            device = CPU
             try:
                 pass
             except Exception as e:
@@ -765,8 +762,8 @@ class BaseGPTQModel(nn.Module)  :
             if torch_dtype is None or torch_dtype == "auto":
                 torch_dtype = qbits_dtype()
 
-        if backend != Backend.QBITS and not torch.cuda.is_available():
-           raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=Backend.QBITS for cpu only quantization and inference.")
+        if backend != BACKEND.QBITS and not torch.cuda.is_available():
+           raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.QBITS for cpu only quantization and inference.")
 
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -823,24 +820,24 @@ class BaseGPTQModel(nn.Module)  :
 
         if quantize_config.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            if backend != Backend.MARLIN and backend != Backend.AUTO:
-                raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
-            backend = Backend.MARLIN
+            if backend != BACKEND.MARLIN and backend != BACKEND.AUTO:
+                raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
+            backend = BACKEND.MARLIN
 
-        marlin_compatible = False if backend == Backend.QBITS else _validate_marlin_device_support()
+        marlin_compatible = False if backend == BACKEND.QBITS else _validate_marlin_device_support()
 
-        if backend != Backend.MARLIN:
+        if backend != BACKEND.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)
             if unsupported is None and marlin_compatible:
                 logger.info(
-                    "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but backend is not Backend.MARLIN. We recommend using `backend=Backend.MARLIN` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., backend=Backend.MARLIN)`."
+                    "You passed a model that is compatible with the Marlin int4*fp16 GPTQ kernel but backend is not BACKEND.MARLIN. We recommend using `backend=BACKEND.MARLIN` to use the optimized Marlin kernels for inference. Example: `model = GPTQModel.from_quantized(..., backend=BACKEND.MARLIN)`."
                 )
 
         if quantize_config.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            if backend != Backend.BITBLAS and backend != Backend.AUTO:
-                raise TypeError(f"FORMAT.BITBLAS requires Backend.AUTO or Backend.BITBLAS: actual = `{backend}`.")
-            backend = Backend.BITBLAS
+            if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
+                raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
+            backend = BACKEND.BITBLAS
 
         if model_basename is None:
             if quantize_config.model_file_base_name:
@@ -936,7 +933,7 @@ class BaseGPTQModel(nn.Module)  :
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend.AUTO if backend == Backend.MARLIN or backend == Backend.BITBLAS else backend,
+                backend=backend.AUTO if backend == BACKEND.MARLIN or backend == BACKEND.BITBLAS else backend,
                 format=FORMAT.GPTQ_V2,
                 desc_act=quantize_config.desc_act,
             )
@@ -961,7 +958,7 @@ class BaseGPTQModel(nn.Module)  :
             if device is not None:
                 device = torch.device(device)
                 if not max_memory and not device_map:
-                    device_map = {"": device.index if device.type == "cuda" else device.type}
+                    device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
             if not isinstance(device_map, dict) and device_map != "sequential":
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
@@ -1004,14 +1001,14 @@ class BaseGPTQModel(nn.Module)  :
             load_checkpoint_in_model = True
             quantize_config.format = FORMAT.GPTQ_V2
 
-        if backend == Backend.MARLIN:
+        if backend == BACKEND.MARLIN:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=Backend.MARLIN`.'
+                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
                 )
 
             # Validate the model can run in Marlin.
@@ -1034,7 +1031,7 @@ class BaseGPTQModel(nn.Module)  :
                 load_checkpoint_in_model=load_checkpoint_in_model,
             )
 
-        if backend == Backend.BITBLAS:
+        if backend == BACKEND.BITBLAS:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
@@ -1055,7 +1052,7 @@ class BaseGPTQModel(nn.Module)  :
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if not load_checkpoint_in_model and backend != Backend.MARLIN and backend != Backend.BITBLAS:
+        if not load_checkpoint_in_model and backend != BACKEND.MARLIN and backend != BACKEND.BITBLAS:
             accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
@@ -1095,7 +1092,7 @@ class BaseGPTQModel(nn.Module)  :
         model.eval()
 
         # == step6: (optional) warmup triton == #
-        if backend == Backend.TRITON and warmup_triton:
+        if backend == BACKEND.TRITON and warmup_triton:
             from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 
             TritonV2QuantLinear.warmup(model, seqlen=model.seqlen)
