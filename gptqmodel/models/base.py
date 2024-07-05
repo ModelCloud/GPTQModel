@@ -480,7 +480,7 @@ class BaseGPTQModel(nn.Module)  :
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
-        # write autogptq tooling fingerprint to config
+        # write gptqmodel tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
             value=META_QUANTIZER_GPTQMODEL,

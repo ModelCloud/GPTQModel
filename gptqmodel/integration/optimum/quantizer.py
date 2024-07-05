@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 import json
 import os
 from enum import Enum
@@ -20,7 +19,7 @@ from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from optimum.utils import is_accelerate_available, is_auto_gptq_available
+from optimum.utils import is_accelerate_available
 from optimum.utils.modeling_utils import recurse_getattr
 from torch import nn
 from tqdm.auto import tqdm
@@ -335,9 +334,6 @@ class GPTQModelQuantizer(object):
         Returns:
             `nn.Module`: The quantized model
         """
-
-        if not is_auto_gptq_available():
-            raise RuntimeError("auto-gptq is required in order to perform quantzation : `pip install auto-gptq`")
         if not torch.cuda.is_available():
             raise RuntimeError("No GPU found. A GPU is needed to quantize model.")
 
@@ -750,8 +746,6 @@ def load_quantized_model(
     """
     if not torch.cuda.is_available():
         raise RuntimeError("No GPU found. A GPU is needed to run quantized model.")
-    if not is_auto_gptq_available():
-        raise RuntimeError("auto-gptq is required in order to load quantized weights : `pip install auto-gptq`")
     if not is_accelerate_available():
         raise RuntimeError(
             "You need to install accelerate in order to load and dispatch weights to"
