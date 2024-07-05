@@ -528,7 +528,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
         if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear):
+        elif isinstance(submodule, BaseQuantLinear) and not model_uses_qbits:
             submodule.post_init()
 
     if not model_uses_qbits:
