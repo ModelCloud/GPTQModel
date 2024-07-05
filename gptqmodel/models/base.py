@@ -237,7 +237,7 @@ class BaseGPTQModel(nn.Module):
                 input_ids_new = []
                 attention_mask_new = []
                 for text in batch:
-                    input_ids, attention_mask = text["input_ids"], text["attention_mask"]
+                    input_ids, attention_mask = text["input_ids"][0], text["attention_mask"][0]
 
                     input_ids = input_ids[:self.quantize_config.seqlen]
                     input_ids_new.append(input_ids)
@@ -248,14 +248,10 @@ class BaseGPTQModel(nn.Module):
                 if len(input_ids_new) == 0:
                     return None
 
-                max_input_ids_length = max(tensor.size(0) for tensor in input_ids_new)
-                max_attention_mask_length = max(tensor.size(0) for tensor in attention_mask_new)
-                input_ids_new = [F.pad(t, (0, max_input_ids_length - t.size(1))) for t in input_ids_new]
-                attention_mask_new = [F.pad(t, (0, max_attention_mask_length - t.size(1))) for t in attention_mask_new]
+                input_ids_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in input_ids_new]
 
-                for input_ids in input_ids_new:
-                    print("shape", input_ids.shape)
-
+                attention_mask_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in
+                                      attention_mask_new]
                 input_ids_new = torch.vstack(input_ids_new)
                 attention_mask_new = torch.vstack(attention_mask_new)
                 res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
@@ -303,6 +299,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             self.model = model
+            self._quantized = True
             return
 
         forward_pass_use_cache = self.model.config.use_cache
