@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional, Union
 
-from ..utils import Backend
+from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
 from .base import BaseGPTQModel, QuantizeConfig
@@ -109,7 +109,7 @@ class GPTQModel:
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
-        backend: Backend = Backend.AUTO,
+        backend: BACKEND = BACKEND.AUTO,
         quantize_config: Optional[QuantizeConfig | Dict] = None,
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,

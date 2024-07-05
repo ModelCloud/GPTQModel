@@ -9,7 +9,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 import torch.utils.benchmark as benchmark  # noqa: E402
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 MODEL_ID = "TheBloke/Llama-7B-GPTQ"
@@ -79,7 +79,7 @@ class TestTriton(unittest.TestCase):
     def test_triton_qlinear(self):
         ref_model, _ = get_model_and_tokenizer(
             model_id=MODEL_ID,
-            backend=Backend.TRITON,
+            backend=BACKEND.TRITON,
         )
 
         hidden_size = ref_model.model.model.embed_tokens.weight.shape[1]

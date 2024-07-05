@@ -14,7 +14,7 @@ try:
 except ImportError as e:
     print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
 
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
@@ -28,7 +28,7 @@ class TestQ4BitBLAS(unittest.TestCase):
         model_id = "LnL-AI/opt-125M-autoround-lm_head-false-symTrue"
 
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.BITBLAS)
+            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=BACKEND.BITBLAS)
         except ValueError as e:
             raise e
 
@@ -53,7 +53,7 @@ class TestQ4BitBLAS(unittest.TestCase):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "s3nh/starcoderbase-1b-GPTQ"
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.BITBLAS)
+            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=BACKEND.BITBLAS)
         except ValueError as e:
             raise e
 

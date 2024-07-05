@@ -8,7 +8,7 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
@@ -79,7 +79,7 @@ class TestSharded(unittest.TestCase):
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device_map="auto",
-            backend=Backend.BITBLAS,
+            backend=BACKEND.BITBLAS,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
