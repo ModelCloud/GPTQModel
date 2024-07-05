@@ -54,13 +54,9 @@ class QBitsQuantLinear(BaseQuantLinear):
     ):
         super().__init__()
 
-        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
-        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
         self.sym = False
 
 
-        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
-        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
         self.validate(bits=bits, group_size=group_size, sym=self.sym, desc_act=False)
 
         self.infeatures = infeatures
@@ -118,8 +114,6 @@ class QBitsQuantLinear(BaseQuantLinear):
         intweight, zeros = unpack_to_8bit_signed(self.qweight, self.qzeros, self.bits,
                                                  self.g_idx if is_desc_act else None)
 
-        # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
-        # TODO: change to sym=False not asym=True since all our code is using sym, not asym
         if zeros is None:
             zeros = torch.empty(0, dtype=torch.int8)
             self.sym = True
@@ -131,7 +125,7 @@ class QBitsQuantLinear(BaseQuantLinear):
         if self.sym:
             intweight -= (2**(self.bits - 1))
         intweight = intweight.to(torch.uint8 if not self.sym else torch.int8)
-        # due to asym return torch.uint8 but backend request int8,
+        # due to not sym return torch.uint8 but backend request int8,
         # change it to int8 with offset 128
         if not self.sym:
             intweight = (intweight.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
