@@ -36,7 +36,7 @@ def convert_dtype_torch2str(dtype):
         assert False, "Unsupported pytorch dtype {} to str dtype".format(dtype)
 
 
-class QBitsQuantLinear(BaseQuantLinear):
+class QBitsQuantLinear(nn.Module):
     SUPPORTED_BITS = [4, 8]
 
     def __init__(
@@ -61,7 +61,7 @@ class QBitsQuantLinear(BaseQuantLinear):
 
         # TODO: Qbbits use dynamic sym depending on zeros value. This has problem in config.json where we store the sym value
         # TODO: change to sym=False not asym=True since all our code is using sym, not asym
-        self.validate(bits=bits, group_size=group_size, sym=self.sym, desc_act=False)
+        # self.validate(bits=bits, group_size=group_size, sym=self.sym, desc_act=False)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
