@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from ...models._const import Device, get_device_by_type
+from ...models._const import DEVICE, get_device_by_type
 from ...utils.device import check_cuda
 
 class BaseQuantLinear(nn.Module):
@@ -9,7 +9,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTED_DESC_ACT = [True, False]
     SUPPORTED_SYM = [True, False]
     SUPPORTED_SHARDS: bool = True
-    SUPPORTED_DEVICES = [Device.CUDA]
+    SUPPORTED_DEVICES = [DEVICE.CUDA]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, *args, **kwargs):
         super().__init__()
@@ -17,7 +17,7 @@ class BaseQuantLinear(nn.Module):
         if err:
             raise NotImplementedError(err)
 
-        if Device.CUDA in self.SUPPORTED_DEVICES:
+        if DEVICE.CUDA in self.SUPPORTED_DEVICES:
             check_cuda()
 
     @classmethod

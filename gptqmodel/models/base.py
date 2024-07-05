@@ -34,7 +34,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            verify_model_hash, verify_sharded_model_hashes)
 from ..utils.device import check_cuda
 from ..version import __version__
-from ._const import CPU, Device, CUDA_0, SUPPORTED_MODELS
+from ._const import CPU, DEVICE, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -958,7 +958,7 @@ class BaseGPTQModel(nn.Module)  :
             if device is not None:
                 device = torch.device(device)
                 if not max_memory and not device_map:
-                    device_map = {"": device.index if device.type == Device.CUDA else device.type}
+                    device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
             if not isinstance(device_map, dict) and device_map != "sequential":
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
