@@ -230,12 +230,46 @@ class BaseGPTQModel(nn.Module):
             if self.quantize_config.lm_head:
                 weight_config['lm_head'] = {"data_type": "int"}
 
+            from torch.utils.data import DataLoader
+
+            @torch.no_grad()
+            def collate_batch(batch):
+                input_ids_new = []
+                attention_mask_new = []
+                for text in batch:
+                    input_ids, attention_mask = text["input_ids"], text["attention_mask"]
+
+                    input_ids = input_ids[:self.quantize_config.seqlen]
+                    input_ids_new.append(input_ids)
+
+                    attention_mask = attention_mask[:self.quantize_config.seqlen]
+                    attention_mask_new.append(attention_mask)
+
+                if len(input_ids_new) == 0:
+                    return None
+
+                max_input_ids_length = max(tensor.size(0) for tensor in input_ids_new)
+                max_attention_mask_length = max(tensor.size(0) for tensor in attention_mask_new)
+                input_ids_new = [F.pad(t, (0, max_input_ids_length - t.size(1))) for t in input_ids_new]
+                attention_mask_new = [F.pad(t, (0, max_attention_mask_length - t.size(1))) for t in attention_mask_new]
+
+                for input_ids in input_ids_new:
+                    print("shape", input_ids.shape)
+
+                input_ids_new = torch.vstack(input_ids_new)
+                attention_mask_new = torch.vstack(attention_mask_new)
+                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
+                return res
+
+            # we can pass batch_size=len(calibration_dataset), cause it spends less memory on GPU
+            dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=len(calibration_dataset))
+
             self.autoround = AutoRound(self.model,
                                   tokenizer=None,
                                   bits=self.quantize_config.bits,
                                   group_size=self.quantize_config.group_size,
                                   sym=self.quantize_config.sym, batch_size=batch_size,
-                                  dataset=calibration_dataset, seqlen=self.quantize_config.seqlen, nblocks=self.quantize_config.nblocks,
+                                  dataset=dataloader, seqlen=self.quantize_config.seqlen, nblocks=self.quantize_config.nblocks,
                                   iters=self.quantize_config.iters, lr=self.quantize_config.lr,
                                   minmax_lr=self.quantize_config.minmax_lr,
                                   enable_quanted_input=self.quantize_config.enable_quanted_input,
