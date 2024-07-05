@@ -1,7 +1,12 @@
 from torch import device
 
 CPU = device("cpu")
+CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
+
+
+DEVICE_TYPE_CPU = "cuda"
+DEVICE_TYPE_CUDA = "cuda"
 
 SUPPORTED_MODELS = [
     "bloom",

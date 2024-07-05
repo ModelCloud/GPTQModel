@@ -100,10 +100,9 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool, infeatures: int, outfeatures: int,
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool,  **kwargs,):
-        super().__init__()
-        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         self.q_handle = None
         self.q_tensors = None
@@ -156,7 +155,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             self.bias = None
 
     def post_init(self, temp_dq):
-        assert self.qweight.device.type == "cuda"
+        self.validate_device(self.qweight.device.type)
         assert self.qweight.device.index is not None
 
         # resize due to padding after model weights have been loaded

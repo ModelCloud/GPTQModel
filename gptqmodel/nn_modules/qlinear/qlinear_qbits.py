@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.models._const import DEVICE_TYPE_CPU
 
 logger = getLogger(__name__)
 
@@ -38,11 +39,13 @@ def convert_dtype_torch2str(dtype):
 
 class QBitsQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [4, 8]
+    SUPPORTED_DEVICES = [DEVICE_TYPE_CPU]
 
     def __init__(
         self,
         bits: int,
         group_size: int,
+        desc_act: bool,
         sym: bool,
         infeatures: int,
         outfeatures: int,
@@ -52,12 +55,8 @@ class QBitsQuantLinear(BaseQuantLinear):
         weight_dtype=torch.bfloat16,
         **kwargs,
     ):
-        super().__init__()
-
         self.sym = False
-
-
-        self.validate(bits=bits, group_size=group_size, sym=self.sym, desc_act=False)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
@@ -102,9 +101,9 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.trainable = trainable
 
     def post_init(self):
+        self.validate_device(self.qweight.device.type)
         from intel_extension_for_transformers import qbits
 
-        assert self.qweight.device.type == "cpu"
         if self.bias is not None:
             self.bias = self.bias.to(dtype=torch.float32)
 

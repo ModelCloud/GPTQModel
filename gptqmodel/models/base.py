@@ -33,7 +33,7 @@ from ..utils.model import (auto_dtype_from_config, check_cuda, convert_gptq_v1_t
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model,
                            verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
-from ._const import CPU, CUDA_0, SUPPORTED_MODELS
+from ._const import CPU, DEVICE_TYPE_CUDA, CUDA_0, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -754,7 +754,7 @@ class BaseGPTQModel(nn.Module)  :
             check_cuda()
 
         if backend == Backend.QBITS:
-            device = torch.device("cpu")
+            device = CPU
             try:
                 pass
             except Exception as e:
@@ -961,7 +961,7 @@ class BaseGPTQModel(nn.Module)  :
             if device is not None:
                 device = torch.device(device)
                 if not max_memory and not device_map:
-                    device_map = {"": device.index if device.type == "cuda" else device.type}
+                    device_map = {"": device.index if device.type == DEVICE_TYPE_CUDA else device.type}
             if not isinstance(device_map, dict) and device_map != "sequential":
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,

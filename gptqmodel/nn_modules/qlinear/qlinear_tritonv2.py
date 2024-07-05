@@ -14,6 +14,7 @@ logger = getLogger(__name__)
 
 
 class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
+    SUPPORTED_BITS = [2, 4, 8]
     """
     Triton v2 quantized linear layer.
 
@@ -22,10 +23,8 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits, group_size, infeatures, outfeatures, bias, **kwargs,):
-        super().__init__()
-        if bits not in [2, 4, 8]:
-            raise NotImplementedError("Only 2,4,8 bits are supported.")
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, bias, **kwargs,):
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
         if infeatures % 32 != 0 or outfeatures % 32 != 0:
             raise NotImplementedError("in_feature and out_feature must be divisible by 32.")
         self.infeatures = infeatures
@@ -65,7 +64,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             self.bias = None
 
     def post_init(self):
-        pass
+        self.validate_device(self.qweight.device.type)
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
