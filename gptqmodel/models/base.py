@@ -27,11 +27,12 @@ from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, check_cuda, convert_gptq_v1_to_v2_format,
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
                            get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model,
                            verify_model_hash, verify_sharded_model_hashes)
+from ..utils.device import check_cuda
 from ..version import __version__
 from ._const import CPU, DEVICE_TYPE_CUDA, CUDA_0, SUPPORTED_MODELS
 
@@ -749,10 +750,6 @@ class BaseGPTQModel(nn.Module)  :
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
-        # TODO REFRACTOR check_cuda by introducing SUPPORTED_DEVICE into BaseQuantLinear
-        if backend != Backend.QBITS and backend != Backend.AUTO:
-            check_cuda()
-
         if backend == Backend.QBITS:
             device = CPU
             try:

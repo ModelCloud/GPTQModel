@@ -10,7 +10,6 @@ import torch.nn.functional as F
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel_exllama_kernels import make_q4, q4_matmul
-from gptqmodel.models._const import CUDA
 
 logger = getLogger(__name__)
 

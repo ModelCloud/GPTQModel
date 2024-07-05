@@ -1,7 +1,7 @@
 import torch.nn as nn
 
 from ...models._const import DEVICE_TYPE_CUDA
-
+from ...utils.device import check_cuda
 
 class BaseQuantLinear(nn.Module):
     SUPPORTED_BITS = []
@@ -16,6 +16,9 @@ class BaseQuantLinear(nn.Module):
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym)
         if err:
             raise NotImplementedError(err)
+
+        if DEVICE_TYPE_CUDA in self.SUPPORTED_DEVICES:
+            check_cuda()
 
     @classmethod
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool) -> bool:
