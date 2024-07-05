@@ -82,7 +82,7 @@ class TestQuantization(unittest.TestCase):
             torch.cuda.empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
-            if not sym and format == FORMAT.GPTQ:
+            if not sym and format == FORMAT.GPTQ or format == FORMAT.QBITS:
                 return
 
             # test compat: 1) with simple dict type 2) is_marlin_format

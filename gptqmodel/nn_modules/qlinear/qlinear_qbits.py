@@ -99,8 +99,10 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.kernel_switch_threshold = kernel_switch_threshold
 
 
-    def post_init(self):
+
+    def post_init(self, quantize_config):
         self.validate_device(self.qweight.device.type)
+
         from intel_extension_for_transformers import qbits
 
         if self.bias is not None:
@@ -119,6 +121,10 @@ class QBitsQuantLinear(BaseQuantLinear):
             # change it to int8 with offset 128
             if self.bits == 8:
                 zeros = (zeros.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
+
+        # qbits uses and sym=False and switches to sym=True is zeros are detected in model.post_init
+        # we need to make sure the model.config.sym is following this dynamic behaavior 
+        quantize_config.sym = self.sym
 
         if self.sym:
             intweight -= (2**(self.bits - 1))

@@ -397,7 +397,7 @@ def simple_dispatch_model(model, device_map):
 
     return model
 
-def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[int] = None):
+def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig, max_input_length: Optional[int] = None):
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
@@ -414,7 +414,7 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     for name, submodule in model.named_modules():
         if isinstance(submodule, QBitsQuantLinear):
             model_uses_qbits = True
-            submodule.post_init()
+            submodule.post_init(quantize_config)
         elif isinstance(submodule, ExllamaQuantLinear):
             model_uses_exllama = True
             device = submodule.qweight.device

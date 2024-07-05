@@ -1087,7 +1087,7 @@ class BaseGPTQModel(nn.Module)  :
             model.seqlen = 4096
 
         # Any post-initialization that require device information, for example buffers initialization on device.
-        model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act)
+        model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act, quantize_config=quantize_config)
 
         model.eval()
 

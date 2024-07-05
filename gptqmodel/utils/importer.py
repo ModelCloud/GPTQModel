@@ -16,6 +16,7 @@ backend_dict = OrderedDict({
     BACKEND.EXLLAMA: ExllamaQuantLinear,
     BACKEND.TRITON: TritonV2QuantLinear,
     BACKEND.BITBLAS: BitBLASQuantLinear,
+    BACKEND.QBITS: QBitsQuantLinear,
 })
 
 format_dict = {
@@ -23,6 +24,7 @@ format_dict = {
     FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
+    FORMAT.QBITS: [BACKEND.QBITS],
 }
 
 logger = getLogger(__name__)
