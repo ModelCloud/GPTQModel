@@ -7,8 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from test_q4_cuda import get_diff  # noqa: E402
-from test_q4_exallama import CUDA_OLD_REFERENCE  # noqa: E402
+from test_q4_exllama import REFERENCE, get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import Backend, GPTQModel  # noqa: E402
@@ -65,7 +64,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         with torch.no_grad():
             res = linear(inp)[0][0]
 
-        reference = CUDA_OLD_REFERENCE.to(device)
+        reference = REFERENCE.to(device)
 
         self.assertTrue(
             torch.allclose(res, reference, rtol=3e-5, atol=2e-2),
@@ -76,7 +75,6 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can only see the characters' silhouettes.)\n\n("
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -96,7 +94,6 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"

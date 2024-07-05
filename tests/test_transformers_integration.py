@@ -14,7 +14,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa
 
 GENERATE_EVAL_SIZE = 100
 
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 

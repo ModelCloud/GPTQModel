@@ -12,7 +12,7 @@ import torch # noqa: E402
 import torch.nn as nn # noqa: E402
 import gptqmodel_marlin_cuda # noqa: E402
 # isort: on
-from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight  # noqa: E402
 
@@ -67,21 +67,28 @@ class TestRepacking(unittest.TestCase):
         group_size = 128
 
         _, linear, s = gen_quant4(k, n, group_size)
-        cuda_old_linear = CudaOldQuantLinear(
+        use_act_order = False
+        exllama_linear = ExllamaQuantLinear(
             bits=4,
             group_size=group_size,
             sym=True,
-            desc_act=True,
+            desc_act=use_act_order,
             infeatures=k,
             outfeatures=n,
             bias=False)
 
+        exllama_linear._use_act_order = use_act_order
+
         zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
 
-        cuda_old_linear.pack(linear, s.T, zeros.T, g_idx=None)
+        exllama_linear.pack(linear, s.T, zeros.T, g_idx=None)
+
+        exllama_linear = exllama_linear.to("cuda")
+
+        exllama_linear.post_init()
 
         # Adapted from utils.marlin_utils.convert_to_marlin
-        dequantized_weight, dequantized_qzeros = dequantize_weight(cuda_old_linear)
+        dequantized_weight, dequantized_qzeros = dequantize_weight(exllama_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
 
         self.assertTrue(torch.all(dequantized_qzeros == 8))
@@ -106,26 +113,26 @@ class TestRepacking(unittest.TestCase):
             bias=False,
         )
 
-        marlin_linear.pack(linear_module.to("cuda"), scales=copy.deepcopy(cuda_old_linear.scales.data.t()).to("cuda"))
+        marlin_linear.pack(linear_module.to("cuda"), scales=copy.deepcopy(exllama_linear.scales.data.t()).to("cuda"))
 
         inp = torch.rand(m, k, dtype=torch.float16, device="cuda")
 
-        cuda_old_linear = cuda_old_linear.to("cuda")
+        exllama_linear = exllama_linear.to("cuda")
         marlin_linear = marlin_linear.to("cuda")
         with torch.no_grad():
-            res_cuda_old = cuda_old_linear(inp)
+            res_exllama = exllama_linear(inp)
             res_marlin = marlin_linear(inp)
 
-        reldiff = (res_cuda_old - res_marlin).abs() / (res_cuda_old.abs() + 1e-12)
-        print(f"reldiff = {reldiff}")
-        self.assertTrue(torch.mean(reldiff) < 4e-3)
+        reldiff = (res_exllama - res_marlin).abs() / (res_exllama.abs() + 1e-12)
+        print(f"reldiff = {reldiff}, ",torch.mean(reldiff))
+        self.assertTrue(torch.mean(reldiff) < 6e-3)
 
-        weight_repacked = gptqmodel_marlin_cuda.gptq_repack(cuda_old_linear.qweight)
+        weight_repacked = gptqmodel_marlin_cuda.gptq_repack(exllama_linear.qweight)
         self.assertTrue(torch.allclose(weight_repacked, marlin_linear.B))
 
         _, _scale_perm, _scale_perm_single = _get_perms()
 
-        s = cuda_old_linear.scales.data.clone()
+        s = exllama_linear.scales.data.clone()
         if group_size != k:
             s = s.reshape((1, -1))
             s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]

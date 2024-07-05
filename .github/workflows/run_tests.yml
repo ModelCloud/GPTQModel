@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: [ "test_perplexity.py", "test_lm_head.py", "test_q4_exallama.py", "test_q4_exallama_v2.py", "test_q4_marlin.py", "test_q4_triton.py", "test_repacking.py", "test_serialization.py", "test_sharded.py", "test_triton.py", "test_quant_formats.py", "test_q4_cuda.py", "test_q4_bitblas.py" ]
+        test_script: [ "test_perplexity.py", "test_lm_head.py", "test_q4_exllama.py", "test_q4_exllama_v2.py", "test_q4_marlin.py", "test_q4_triton.py", "test_repacking.py", "test_serialization.py", "test_sharded.py", "test_triton.py", "test_quant_formats.py", "test_q4_cuda.py", "test_q4_bitblas.py" ]
 
     steps:
       - name: Checkout Codes
