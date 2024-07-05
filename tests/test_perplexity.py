@@ -87,7 +87,7 @@ class TestPerplexity(unittest.TestCase):
 
         length = 512 if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else 2048
         traindata = load_dataset(dataset_path, dataset_name, split=dataset_split).filter(lambda x: len(x[dataset_column]) >= length)
-        calibration_dataset = [self.tinyllama_tokenizer(example[dataset_column]) for example in traindata.select(range(1024))]
+        calibration_dataset = [tokenizer(example[dataset_column]) for example in traindata.select(range(1024))]
         return calibration_dataset, native_ppl
 
     @parameterized.expand(
@@ -136,9 +136,9 @@ class TestPerplexity(unittest.TestCase):
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama ppl == 8.7863, FORMAT.MARLIN Tinyllama ppl == 9.0036
-            # FORMAT.MARLIN opt ppl == 34.85, FORMAT.BITBLAS opt ppl == 34.11, native opt ppl == 30.39
+            # FORMAT.MARLIN opt ppl == 33.43, FORMAT.BITBLAS opt ppl == 32.61, native opt ppl == 30.39
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama-15M ppl == 111.32, native Tinyllama-15M ppl == 54.61
             if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
-                assert abs(quantized_ppl - self.opt_native_ppl) < 4.7
+                assert abs(quantized_ppl - self.opt_native_ppl) < 3.5
             else:
                 assert abs(quantized_ppl - self.tinyllama_native_ppl) < 56.8
