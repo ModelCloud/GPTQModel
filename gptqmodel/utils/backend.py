@@ -10,6 +10,7 @@ class Backend(Enum):
     EXLLAMA_V2 = 5
     MARLIN = 6
     BITBLAS = 7
+    QBITS = 8
 
 
 def get_backend(backend: str):

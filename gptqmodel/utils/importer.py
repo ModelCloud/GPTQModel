@@ -5,6 +5,7 @@ from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT
 from .backend import Backend
@@ -53,11 +54,13 @@ def select_quant_linear(
         return TritonV2QuantLinear
     elif backend == Backend.BITBLAS:
         return BitBLASQuantLinear
-    elif bits == 4 and sym and not desc_act and backend == Backend.MARLIN:
+    elif backend == Backend.MARLIN:
         return MarlinQuantLinear
-    elif bits == 4 and backend == Backend.EXLLAMA_V2:
+    elif backend == Backend.EXLLAMA_V2:
         return ExllamaV2QuantLinear
-    elif bits == 4 and backend == Backend.EXLLAMA:
+    elif backend == Backend.EXLLAMA:
         return ExllamaQuantLinear
+    elif backend == Backend.QBITS:
+        return QBitsQuantLinear
     else:
         return ExllamaQuantLinear

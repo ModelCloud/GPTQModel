@@ -7,14 +7,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from test_q4_exllama import REFERENCE, get_diff  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
 from gptqmodel import Backend, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.quantization import FORMAT
+from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
+from test_q4_exllama import REFERENCE, get_diff  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
@@ -121,7 +120,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         device = torch.device("cuda:0")
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-        revision = "desc_act_true"
+        # revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
             model_id,

@@ -1,6 +1,5 @@
-from transformers import AutoTokenizer, TextGenerationPipeline
-
 from gptqmodel import GPTQModel, QuantizeConfig
+from transformers import AutoTokenizer, TextGenerationPipeline
 
 pretrained_model_dir = "facebook/opt-125m"
 quantized_model_dir = "opt-125m-4bit-128g"
@@ -47,6 +46,9 @@ def main():
 
     # load quantized model to the first GPU
     model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
+
+    # load quantized model to CPU with QBits kernel linear.
+    model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
 
     # download quantized model from Hugging Face Hub and load to the first GPU
     # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True,)

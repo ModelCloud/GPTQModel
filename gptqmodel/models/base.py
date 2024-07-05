@@ -17,6 +17,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
+from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
                                    META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
@@ -26,11 +27,11 @@ from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
-                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
-                           verify_sharded_model_hashes)
+from ..utils.model import (auto_dtype_from_config, check_cuda, convert_gptq_v1_to_v2_format,
+                           convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
+                           get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
+                           gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model,
+                           verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -665,9 +666,18 @@ class BaseGPTQModel(nn.Module)  :
         **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
+        got_cuda = check_cuda(raise_exception=False)
 
-        if not torch.cuda.is_available():
-            raise EnvironmentError("Load pretrained model to do quantization requires CUDA available.")
+        if not got_cuda:
+            try:
+                pass
+            except Exception as e:
+                raise ValueError(
+                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                )
+
+            model_init_kwargs["device"] = "cpu"
+            torch_dtype = qbits_dtype()
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -701,7 +711,8 @@ class BaseGPTQModel(nn.Module)  :
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        torch.cuda.empty_cache()
+        if model_init_kwargs.get("cpu") != "cpu":
+            torch.cuda.empty_cache()
 
         model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
 
@@ -738,11 +749,30 @@ class BaseGPTQModel(nn.Module)  :
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+        # TODO REFRACTOR check_cuda by introducing SUPPORTED_DEVICE into BaseQuantLinear
+        if backend != Backend.QBITS and backend != Backend.AUTO:
+            check_cuda()
+
+        if backend == Backend.QBITS:
+            device = torch.device("cpu")
+            try:
+                pass
+            except Exception as e:
+                raise ValueError(
+                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                )
+
+            if torch_dtype is None or torch_dtype == "auto":
+                torch_dtype = qbits_dtype()
+
+        if backend != Backend.QBITS and not torch.cuda.is_available():
+           raise EnvironmentError("Load pretrained model to do quantization requires CUDA gpu. Please set backend=Backend.QBITS for cpu only quantization and inference.")
+
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
-            raise ValueError(
-                f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
-            )
+           raise ValueError(
+               f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+           )
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
@@ -797,7 +827,7 @@ class BaseGPTQModel(nn.Module)  :
                 raise TypeError(f"FORMAT.MARLIN requires Backend.AUTO or Backend.MARLIN: actual = `{backend}`.")
             backend = Backend.MARLIN
 
-        marlin_compatible = _validate_marlin_device_support()
+        marlin_compatible = False if backend == Backend.QBITS else _validate_marlin_device_support()
 
         if backend != Backend.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)
@@ -1031,8 +1061,8 @@ class BaseGPTQModel(nn.Module)  :
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
+                # offload_state_dict=True,
+                # offload_buffers=True,
             )
 
         # TODO: Why are we using this custom function and not dispatch_model?

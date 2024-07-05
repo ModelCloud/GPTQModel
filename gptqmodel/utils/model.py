@@ -20,6 +20,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import Backend
 from .importer import select_quant_linear
@@ -30,6 +31,18 @@ formatter = logging.Formatter("%(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+
+def check_cuda(raise_exception: bool = True) -> bool:
+    at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+    if not at_least_one_cuda_v6:
+        if raise_exception:
+            raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
+        else:
+            return False
+    else:
+        return True
 
 
 def recurse_getattr(obj, attr: str):
@@ -404,12 +417,17 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     device_to_buffers_size = {}
     # exllama
     model_uses_exllama = False
+    model_uses_qbits = False
+
     # exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaQuantLinear):
+        if isinstance(submodule, QBitsQuantLinear):
+            model_uses_qbits = True
+            submodule.post_init()
+        elif isinstance(submodule, ExllamaQuantLinear):
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -510,10 +528,12 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
         if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear):
+        elif isinstance(submodule, BaseQuantLinear) and not model_uses_qbits:
             submodule.post_init()
 
-    torch.cuda.empty_cache()
+    if not model_uses_qbits:
+        torch.cuda.empty_cache()
+
 
     return model
 

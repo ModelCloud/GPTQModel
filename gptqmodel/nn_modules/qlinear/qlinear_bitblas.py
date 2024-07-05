@@ -7,7 +7,6 @@ from typing import List, Union
 
 import torch
 import torch.nn as nn
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)

@@ -12,12 +12,11 @@ import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
 from gptqmodel import Backend, GPTQModel, __version__  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantization(unittest.TestCase):
@@ -32,6 +31,7 @@ class TestQuantization(unittest.TestCase):
 
     @parameterized.expand(
         [
+            (Backend.QBITS, False, FORMAT.GPTQ),
             (Backend.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
             (Backend.EXLLAMA_V2, False, FORMAT.GPTQ),
             (Backend.MARLIN, True, FORMAT.MARLIN),
@@ -50,7 +50,6 @@ class TestQuantization(unittest.TestCase):
             self.pretrained_model_dir,
             quantize_config=quantize_config,
         )
-
         model.quantize(self.calibration_dataset, batch_size=128)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -70,7 +69,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0",
+                device="cuda:0" if backend != Backend.QBITS else "cpu",
                 backend=backend,
             )
 
@@ -97,7 +96,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0",
+                device="cuda:0" if backend != Backend.QBITS else "cpu",
                 quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
@@ -116,7 +115,7 @@ class TestQuantization(unittest.TestCase):
             }
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0",
+                device="cuda:0" if backend != Backend.QBITS else "cpu",
                 quantize_config=compat_quantize_config,
                 format=format,
             )

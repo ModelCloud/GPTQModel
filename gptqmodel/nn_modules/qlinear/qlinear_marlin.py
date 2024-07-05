@@ -3,10 +3,9 @@
 
 from logging import getLogger
 
+import gptqmodel_marlin_cuda
 import numpy as np
 import torch
-
-import gptqmodel_marlin_cuda
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
@@ -221,6 +220,7 @@ def unpack_qzeros(qzeros):
 def dequantize_weight(layer):
     qweight, qzeros, scales = layer.qweight, layer.qzeros, layer.scales
     unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
+    unpacked_qzeros = torch.clamp(unpacked_qzeros, min=0, max=15)
     group_size = unpacked_qweight.shape[0] // scales.shape[0]
     scales = scales.repeat_interleave(group_size, dim=0)
     unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)

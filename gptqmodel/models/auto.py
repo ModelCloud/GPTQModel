@@ -1,7 +1,5 @@
 from typing import Dict, List, Optional, Union
 
-import torch
-
 from ..utils import Backend
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
@@ -78,11 +76,6 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
 }
-
-at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-
-if not at_least_one_cuda_v6:
-    raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
 
 
 class GPTQModel:

@@ -1,8 +1,7 @@
 import torch
-from transformers import AutoTokenizer, TextGenerationPipeline
-
 from gptqmodel import Backend, GPTQModel
 from gptqmodel.quantization import QuantizeConfig
+from transformers import AutoTokenizer, TextGenerationPipeline
 
 backend = Backend.BITBLAS
 pretrained_model_dir = "facebook/opt-125m"

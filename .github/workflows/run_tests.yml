@@ -1,4 +1,4 @@
-name: Unit Tests (GPU)
+name: Unit Tests
 
 on:
   repository_dispatch:
@@ -9,7 +9,7 @@ on:
         required: false
         default: ''
       ref:
-        description: 'branch, tag or SHA'
+        description: 'Branch, Tag or Commit SHA'
         required: false
         default: ''
 
@@ -41,7 +41,7 @@ jobs:
           name: dist
           path: dist
 
-  test:
+  test_gpu:
     needs: build
     runs-on: self-hosted
     container:
@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: [ "test_perplexity.py", "test_lm_head.py", "test_q4_exllama.py", "test_q4_exllama_v2.py", "test_q4_marlin.py", "test_q4_triton.py", "test_repacking.py", "test_serialization.py", "test_sharded.py", "test_triton.py", "test_quant_formats.py", "test_q4_cuda.py", "test_q4_bitblas.py" ]
+        test_script: [ "test_perplexity.py", "test_lm_head.py", "test_q4_exllama.py", "test_q4_exllama_v2.py", "test_q4_marlin.py", "test_q4_triton.py", "test_repacking.py", "test_serialization.py", "test_sharded.py", "test_triton.py", "test_quant_formats.py", "test_q4_bitblas.py" ]
 
     steps:
       - name: Checkout Codes
@@ -97,9 +97,45 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
       - name: Run tests
-        run: pytest tests/${{ matrix.test_script }}
+        run: pytest --durations=0 tests/${{ matrix.test_script }}
 
       - name: Release GPU
         if: always()
         shell: bash
         run: curl -X GET "http://10.0.13.154/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
+
+  test_cpu:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: [ "test_qbits.py" ]
+
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Install wheel
+        shell: bash
+        run: |
+          pip install dist/*.whl
+
+      - name: Run tests
+        run: pytest --durations=0 tests/${{ matrix.test_script }}
+

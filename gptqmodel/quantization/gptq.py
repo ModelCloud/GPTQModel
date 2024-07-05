@@ -169,7 +169,6 @@ class GPTQ:
                 logger.debug(torch.sum(Losses))
 
         torch.cuda.synchronize()
-
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
