@@ -80,7 +80,7 @@ class QuantizeConfig():
     lm_head: bool = field(default=False)
     quant_method: str = field(default=QUANT_METHOD.GPTQ)
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
-    # if you inference with autogptq, save to gptq_v2 format for best result
+    # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
 
     # TODO: remove
@@ -141,7 +141,7 @@ class QuantizeConfig():
         parts = val.split(":")
         return parts[0].lower(), parts[1].lower() if len(parts) >= 2 else None
 
-    # is quantized model quantized or packed by autogptq version with v2 format code
+    # is quantized model quantized or packed by gptqmodel version with v2 format code
     def is_quantized_or_packed_by_v2(self) -> bool:
         # check meta.quantizer
         producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)

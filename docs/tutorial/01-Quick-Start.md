@@ -1,22 +1,22 @@
 # Quick Start
 
-Welcome to the tutorial of AutoGPTQ, in this chapter, you will learn quick install `auto-gptq` from pypi and the basic usages of this library.
+Welcome to the tutorial of GPTQModel, in this chapter, you will learn quick install `gptqmodel` from pypi and the basic usages of this library.
 
 ## Quick Installation
 
-Start from v0.0.4, one can install `auto-gptq` directly from pypi using `pip`:
+Start from v0.0.4, one can install `gptqmodel` directly from pypi using `pip`:
 ```shell
-pip install auto-gptq
+pip install gptqmodel
 ```
 
-AutoGPTQ supports using `triton` to speedup inference, but it currently **only supports Linux**. To integrate triton, using:
+GPTQModel supports using `triton` to speedup inference, but it currently **only supports Linux**. To integrate triton, using:
 ```shell
-pip install auto-gptq[triton]
+pip install gptqmodel[triton]
 ```
 
 For some people who want to try the newly supported `llama` type models in 🤗 Transformers but not update it to the latest version, using:
 ```shell
-pip install auto-gptq[llama]
+pip install gptqmodel[llama]
 ```
 
 By default, CUDA extension will be built at installation if CUDA and pytorch are already installed.
@@ -25,17 +25,17 @@ To disable building CUDA extension, you can use the following commands:
 
 For Linux
 ```shell
-BUILD_CUDA_EXT=0 pip install auto-gptq
+BUILD_CUDA_EXT=0 pip install gptqmodel
 ```
 For Windows
 ```shell
-set BUILD_CUDA_EXT=0 && pip install auto-gptq
+set BUILD_CUDA_EXT=0 && pip install gptqmodel
 ```
 
 ## Basic Usage
 *The full script of basic usage demonstrated here is `examples/quantization/basic_usage.py`*
 
-The two main classes currently used in AutoGPTQ are `GPTQModel` and `QuantizeConfig`.
+The two main classes currently used in GPTQModel are `GPTQModel` and `QuantizeConfig`.
 
 ```python
 from gptqmodel import GPTQModel, QuantizeConfig
@@ -58,7 +58,7 @@ Then, prepare calibration_dataset(a list of dict with only two keys, 'input_ids'
 ```python
 calibration_dataset = [
     tokenizer(
-        "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+        "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
     )
 ]
 ```
@@ -88,8 +88,8 @@ Then you can initialize 🤗 Transformers' `TextGenerationPipeline` and do infer
 from transformers import TextGenerationPipeline
 
 pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer, device=device)
-print(pipeline("auto-gptq is")[0]["generated_text"])
+print(pipeline("gptqmodel is")[0]["generated_text"])
 ```
 
 ## Conclusion
-Congrats! You learned how to quickly install `auto-gptq` and integrate with it. In the next chapter, you will learn the advanced loading strategies for pretrained or quantized model and some best practices on different situations.
+Congrats! You learned how to quickly install `gptqmodel` and integrate with it. In the next chapter, you will learn the advanced loading strategies for pretrained or quantized model and some best practices on different situations.
