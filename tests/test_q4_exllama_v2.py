@@ -7,7 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
@@ -31,7 +31,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            backend=Backend.EXLLAMA_V2,
+            backend=BACKEND.EXLLAMA_V2,
             format=FORMAT.GPTQ,
         )
 
@@ -102,7 +102,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             model_id,
             rivision=revision,
             device="cuda:0",
-            backend=Backend.EXLLAMA_V2,
+            backend=BACKEND.EXLLAMA_V2,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -126,7 +126,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             model_id,
             # revision=revision,
             device="cuda:0",
-            backend=Backend.EXLLAMA_V2,
+            backend=BACKEND.EXLLAMA_V2,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)

@@ -1,13 +1,13 @@
 import torch
-from gptqmodel import Backend, GPTQModel
+from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.quantization import QuantizeConfig
 from transformers import AutoTokenizer, TextGenerationPipeline
 
-backend = Backend.BITBLAS
+backend = BACKEND.BITBLAS
 pretrained_model_dir = "facebook/opt-125m"
 quantized_model_dir = "./facebook/opt-125m-4bit-128g"
 
-if backend == Backend.BITBLAS:
+if backend == BACKEND.BITBLAS:
     quantized_model_dir += "-bitblas"
 
 def main():

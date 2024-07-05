@@ -39,7 +39,7 @@ if is_accelerate_available():
     from accelerate.hooks import remove_hook_from_module
 
 from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
-from ...utils.backend import Backend
+from ...utils.backend import BACKEND
 from ...utils.exllama import exllama_set_max_input_length
 from ...utils.importer import select_quant_linear
 from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
@@ -644,11 +644,11 @@ class GPTQModelQuantizer(object):
 
     def select_quantlinear(self):
         if self.exllama_version == ExllamaVersion.ONE:
-            backend = Backend.EXLLAMA
+            backend = BACKEND.EXLLAMA
         elif self.exllama_version == ExllamaVersion.TWO:
-            backend = Backend.EXLLAMA_V2
+            backend = BACKEND.EXLLAMA_V2
         else:
-            backend = Backend.AUTO
+            backend = BACKEND.AUTO
 
         QuantLinear = select_quant_linear(
             sym=self.sym,

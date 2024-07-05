@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 import torch
 from datasets import Dataset, load_dataset
-from gptqmodel import Backend, GPTQModel, QuantizeConfig, get_backend
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
@@ -143,7 +143,7 @@ def load_data(tokenizer, n_samples, max_new_tokens):
 
 def load_model_tokenizer(
     model_name_or_path: str,
-    backend: Backend,
+    backend: BACKEND,
     tokenizer_name_or_path: Optional[str] = None,
     from_pretrained: bool = False,
     max_memory: Optional[dict] = None,
@@ -280,7 +280,7 @@ def main():
     logger.info(f"quantize config: {model.quantize_config.to_dict()}")
     logger.info(f"model device map: {model.hf_device_map}")
 
-    if args.backend == Backend.TRITON:
+    if args.backend == BACKEND.TRITON:
         logger.info("warmup triton, this may take a while.")
         model.warmup_triton()
 

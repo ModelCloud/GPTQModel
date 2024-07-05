@@ -92,8 +92,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self,
         bits: int,
         group_size: int,
-        sym: bool,
         desc_act: bool,
+        sym: bool,
         infeatures: int,
         outfeatures: int,
         bias: bool,
@@ -104,12 +104,10 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__()
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         # TODO: remove delayed import after bitblas whl support for 11.7, 11.8, 12.0 are added
         import_bitblas()
-
-        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self._validate_parameters(group_size, infeatures, outfeatures)
 
@@ -243,6 +241,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.q_params = None
 
     def post_init(self):
+        self.validate_device(self.qweight.device.type)
         # eliminate runtime overhead like exllama state
         param_list = [self.qweight, self.scales, self.zeros]
         if self.bitblas_matmul.config.with_bias:

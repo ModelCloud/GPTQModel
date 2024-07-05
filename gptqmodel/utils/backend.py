@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class Backend(Enum):
+class BACKEND(Enum):
     AUTO = 0  # choose the fastest one based on quant model compatibility
     # CUDA_OLD = 1
     # CUDA = 2
@@ -15,6 +15,6 @@ class Backend(Enum):
 
 def get_backend(backend: str):
     try:
-        return Backend[backend]
+        return BACKEND[backend]
     except KeyError:
         raise ValueError(f"Invalid Backend str: {backend}")

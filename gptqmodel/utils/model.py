@@ -22,7 +22,7 @@ from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .backend import Backend
+from .backend import BACKEND
 from .importer import select_quant_linear
 
 logger = getLogger(__name__)
@@ -31,18 +31,6 @@ formatter = logging.Formatter("%(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
-
-
-def check_cuda(raise_exception: bool = True) -> bool:
-    at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-
-    if not at_least_one_cuda_v6:
-        if raise_exception:
-            raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
-        else:
-            return False
-    else:
-        return True
 
 
 def recurse_getattr(obj, attr: str):
@@ -121,7 +109,7 @@ def make_quant(
     names,
     bits: int,
     group_size: int,
-    backend: Backend,
+    backend: BACKEND,
     format: str,
     desc_act: bool = False,
     sym: bool = True,
@@ -240,14 +228,14 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 def select_quant_linear_with_pack(bits: int,
-    group_size: int,
-    desc_act: bool,
-    sym: bool,
-    backend: Backend, format: str, pack: bool):
+                                  group_size: int,
+                                  desc_act: bool,
+                                  sym: bool,
+                                  backend: BACKEND, format: str, pack: bool):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
     if format == FORMAT.BITBLAS:
-        backend = Backend.AUTO
+        backend = BACKEND.AUTO
         format = FORMAT.GPTQ_V2
 
     QuantLinear = select_quant_linear(
@@ -266,7 +254,7 @@ def pack_model(
     quantizers,
     bits,
     group_size,
-    backend: Backend,
+    backend: BACKEND,
     format: str,
     desc_act=False,
     sym: bool = True,
@@ -325,7 +313,7 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if backend == Backend.TRITON and warmup_triton:
+    if backend == BACKEND.TRITON and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )

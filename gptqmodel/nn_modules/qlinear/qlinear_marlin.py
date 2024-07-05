@@ -67,10 +67,9 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTED_DESC_ACT = [False]
     SUPPORTED_SYM = [True]
 
-    def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool, infeatures: int, outfeatures: int,
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
-        super().__init__()
-        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(
@@ -169,6 +168,9 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
         C = C + self.bias if self.bias is not None else C
         return C
+
+    def post_init(self):
+        self.validate_device(self.B.device.type)
 
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
