@@ -19,7 +19,7 @@ from transformers.utils.generic import ContextManagers
 
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
-                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import Backend
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
@@ -30,7 +30,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
-                           verify_sharded_model_hashes)
+                           verify_sharded_model_hashes, check_to_quantized)
 from ..version import __version__
 from ._const import CPU, CUDA_0, SUPPORTED_MODELS
 
@@ -201,16 +201,71 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
+
+        if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
+            from auto_round import AutoRound
+            from transformers import modeling_utils
+            weight_config = {}
+            for n, m in self.model.named_modules():
+                if isinstance(m, torch.nn.Linear) or isinstance(m, modeling_utils.Conv1D):
+                    if m.weight.shape[0] % 32 != 0 or m.weight.shape[1] % 32 != 0:
+                        weight_config[n] = {"data_type": "fp"}
+                        print(
+                            f"{n} will not be quantized due to its shape not being divisible by 32, resulting in an exporting issue to autogptq")
+
+            if self.quantize_config.lm_head:
+                weight_config['lm_head'] = {"data_type": "int"}
+
+            self.autoround = AutoRound(self.model,
+                                  tokenizer=None,
+                                  bits=self.quantize_config.bits,
+                                  group_size=self.quantize_config.group_size,
+                                  sym=self.quantize_config.sym, batch_size=batch_size,
+                                  dataset=calibration_dataset, seqlen=self.quantize_config.seqlen, nblocks=self.quantize_config.nblocks,
+                                  iters=self.quantize_config.iters, lr=self.quantize_config.lr,
+                                  minmax_lr=self.quantize_config.minmax_lr,
+                                  enable_quanted_input=self.quantize_config.enable_quanted_input,
+                                  device=self.hf_device_map,
+                                  amp=self.quantize_config.amp, nsamples=self.quantize_config.nsamples,
+                                  low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
+                                  seed=self.quantize_config.seed,
+                                  gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
+                                  scale_dtype=self.quantize_config.scale_dtype, weight_config=weight_config,
+                                  enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
+
+            model, _ = self.autoround.quantize()
+
+            quantizers = {}
+            for key in self.autoround.weight_config:
+                info = weight_config[key]
+                if not check_to_quantized(info):
+                    continue
+                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32), info["g_idx"])
+
+            self.qlinear_kernel = pack_model(
+                model=self.model,
+                quantizers=quantizers,
+                bits=self.quantize_config.bits,
+                group_size=self.quantize_config.group_size,
+                backend=Backend.AUTO,
+                desc_act=self.quantize_config.desc_act,
+                warmup_triton=autotune_warmup_after_quantized,
+                force_layer_back_to_cpu=True,
+                format=self.quantize_config.format,
+            )
+
+            self.model = model
+            return
+
+        forward_pass_use_cache = self.model.config.use_cache
+        self.model.config.use_cache = False
+
         layer_inputs = []
         attention_masks = []
         position_ids = []
         layer_input_kwargs = []
         layer_outputs = []
-
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
-
-        forward_pass_use_cache = self.model.config.use_cache
-        self.model.config.use_cache = False
 
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
@@ -507,7 +562,7 @@ class BaseGPTQModel(nn.Module):
             )
 
         # internal is always gptq v2 but allow users to pass gptq (v1) via config
-        if quantize_config.format == FORMAT.GPTQ:
+        if quantize_config.format == FORMAT.GPTQ and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             # Model qzeros may be edited in place.
             # TODO: avoid inplace modification of the weights
             # fix ModelCloud/GPTQModel/issues/47

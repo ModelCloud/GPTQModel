@@ -45,6 +45,7 @@ class FORMAT:
 # quant methods
 class QUANT_METHOD:
     GPTQ = "gptq"
+    AUTO_ROUND = "auto_round"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -54,6 +55,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
+    QUANT_METHOD.AUTO_ROUND: {
+        FORMAT.GPTQ,
+    }
 }
 
 # inference only methods should go here
@@ -297,6 +301,69 @@ class QuantizeConfig():
             QUANT_METHOD_FIELD: self.quant_method,
             FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,
+        }
+
+@dataclass
+class AutoRoundQuantizeConfig(QuantizeConfig):
+    weight_config: dict = {}
+    enable_full_range: bool = False  ##for symmetric, TODO support later
+    batch_size: int = 1
+    amp: bool = True
+    lr_scheduler = None
+    enable_quanted_input: bool = True
+    enable_minmax_tuning: bool = True
+    lr: float = None
+    minmax_lr: float = None
+    low_gpu_mem_usage: bool = True
+    iters: int = 200
+    seqlen: int = 2048
+    nsamples: int = 512
+    sampler: str = "rand"
+    seed: int = 42
+    nblocks: int = 1
+    gradient_accumulate_steps: int = 1
+    not_use_best_mse: bool = False
+    dynamic_max_gap: int = -1
+    data_type: str = "int"  ##only support int for now
+    scale_dtype: str = "fp16"
+    quant_method: str = QUANT_METHOD.AUTO_ROUND
+
+    def to_dict(self):
+        return {
+            "bits": self.bits,
+            "group_size": self.group_size,
+            "desc_act": self.desc_act,
+            "static_groups": self.static_groups,
+            "sym": self.sym,
+            "lm_head": self.lm_head,
+            "damp_percent": self.damp_percent,
+            "true_sequential": self.true_sequential,
+            "model_name_or_path": self.model_name_or_path,
+            "model_file_base_name": self.model_file_base_name,
+            "quant_method": self.quant_method,
+            "format": self.format,
+            "weight_config": self.weight_config,
+            "enable_full_range": self.enable_full_range,
+            "batch_size": self.batch_size,
+            "amp": self.amp,
+            "lr_scheduler": self.lr_scheduler,
+            "enable_quanted_input": self.enable_quanted_input,
+            "enable_minmax_tuning": self.enable_minmax_tuning,
+            "lr": self.lr,
+            "minmax_lr": self.minmax_lr,
+            "low_gpu_mem_usage": self.low_gpu_mem_usage,
+            "iters": self.iters,
+            "seqlen": self.seqlen,
+            "nsamples": self.nsamples,
+            "sampler": self.sampler,
+            "seed": self.seed,
+            "nblocks": self.nblocks,
+            "gradient_accumulate_steps": self.gradient_accumulate_steps,
+            "not_use_best_mse": self.not_use_best_mse,
+            "dynamic_max_gap": self.dynamic_max_gap,
+            "data_type": self.data_type,
+            "scale_dtype": self.scale_dtype,
+            QUANT_METHOD_FIELD: self.quant_method,
         }
 
 # deprecated: will be removed in future update
