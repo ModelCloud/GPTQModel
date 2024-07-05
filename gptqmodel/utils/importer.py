@@ -56,9 +56,9 @@ def select_quant_linear(
         return BitBLASQuantLinear
     elif backend == Backend.MARLIN:
         return MarlinQuantLinear
-    elif Backend.EXLLAMA_V2:
+    elif backend == Backend.EXLLAMA_V2:
         return ExllamaV2QuantLinear
-    elif Backend.EXLLAMA:
+    elif backend == Backend.EXLLAMA:
         return ExllamaQuantLinear
     elif backend == Backend.QBITS:
         return QBitsQuantLinear
