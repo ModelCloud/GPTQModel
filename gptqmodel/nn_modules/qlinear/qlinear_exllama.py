@@ -41,8 +41,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, device: torch.device, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
-        super().__init__(bits, group_size, sym, desc_act, device, **kwargs)
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures

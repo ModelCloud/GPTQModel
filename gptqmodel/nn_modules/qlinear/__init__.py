@@ -25,7 +25,6 @@ class BaseQuantLinear(nn.Module):
     @classmethod
     def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, ):
         validate = True
-        print("cccc",cls, cls.SUPPORTED_BITS)
         err = ""
         if cls.SUPPORTED_BITS and bits not in cls.SUPPORTED_BITS:
             validate = False
