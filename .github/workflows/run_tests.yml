@@ -12,10 +12,6 @@ on:
         description: 'Branch, Tag or Commit SHA'
         required: false
         default: ''
-      artifact_runid:
-        description: 'Download artifact from another run'
-        required: false
-        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -27,23 +23,19 @@ jobs:
       image: modelcloud/gptqmodel:github-ci-v1
     steps:
       - name: Checkout Codes
-        if: ${{ github.event.inputs.artifact_runid == '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
       - name: Compile
-        if: ${{ github.event.inputs.artifact_runid == '' }}
         shell: bash
         run: python setup.py bdist_wheel
 
       - name: Show dist folder
-        if: ${{ github.event.inputs.artifact_runid == '' }}
         run: ls -alh dist
 
       - name: Upload to artifact
-        if: ${{ github.event.inputs.artifact_runid == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -132,8 +124,6 @@ jobs:
         with:
           python-version: '3.10'
           cache: 'pip'
-
-      - run: pip install protobuf
 
       - name: Download artifact
         uses: actions/download-artifact@v4
