@@ -207,7 +207,6 @@ class BaseGPTQModel(nn.Module)  :
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
                              f"{min_calibration_dataset_input_ids_avg_length}! Current AVG is {avg}.")
 
-
         device_map = self.hf_device_map
         if device_map:
             for name, device in device_map.items():
@@ -234,6 +233,7 @@ class BaseGPTQModel(nn.Module)  :
                 weight_config['lm_head'] = {"data_type": "int"}
 
             from torch.utils.data import DataLoader
+            import torch.nn.functional as F
 
             @torch.no_grad()
             def collate_batch(batch):
@@ -252,9 +252,8 @@ class BaseGPTQModel(nn.Module)  :
                     return None
 
                 input_ids_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in input_ids_new]
+                attention_mask_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in attention_mask_new]
 
-                attention_mask_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in
-                                      attention_mask_new]
                 input_ids_new = torch.vstack(input_ids_new)
                 attention_mask_new = torch.vstack(attention_mask_new)
                 res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
