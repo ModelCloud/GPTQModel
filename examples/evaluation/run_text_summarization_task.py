@@ -3,10 +3,9 @@ from argparse import ArgumentParser
 
 import datasets
 import torch
-from transformers import AutoTokenizer, GenerationConfig
-
 from gptqmodel import GPTQModel, QuantizeConfig, get_backend
 from gptqmodel.eval_tasks import TextSummarizationTask
+from transformers import AutoTokenizer, GenerationConfig
 
 os.system("pip install py7zr")
 
@@ -38,7 +37,7 @@ def main():
     )
     parser.add_argument("--sample_max_len", type=int, default=1024, help="max tokens for each sample")
     parser.add_argument("--block_max_len", type=int, default=2048, help="max tokens for each data block")
-    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)

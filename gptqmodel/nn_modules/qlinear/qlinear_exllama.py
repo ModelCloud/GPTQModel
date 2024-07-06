@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel_exllama_kernels import make_q4, q4_matmul
 
@@ -41,9 +40,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int , sym:bool, desc_act: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
-        super().__init__()
-        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
@@ -93,7 +91,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
             self.bias = None
 
     def post_init(self):
-        assert self.qweight.device.type == "cuda"
+        self.validate_device(self.qweight.device.type)
         assert self.qweight.device.index is not None
 
         # resize due to padding after model weights have been loaded

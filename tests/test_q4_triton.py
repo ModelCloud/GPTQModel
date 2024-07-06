@@ -7,10 +7,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
@@ -26,7 +25,7 @@ class TestsQ4Triton(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            backend=Backend.TRITON,
+            backend=BACKEND.TRITON,
             torch_dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
@@ -55,7 +54,6 @@ class TestsQ4Triton(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\nThe stage is now set in a Parisian café. The café is filled with people, including a group of friends, a couple, and a group of tourists. The friends are discussing their plans for the"
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -64,7 +62,7 @@ class TestsQ4Triton(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            backend=Backend.TRITON,
+            backend=BACKEND.TRITON,
             revision=revision,
 
         )

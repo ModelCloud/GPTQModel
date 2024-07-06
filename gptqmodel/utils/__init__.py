@@ -1,2 +1,2 @@
-from .backend import Backend, get_backend
+from .backend import BACKEND, get_backend
 from .perplexity import Perplexity

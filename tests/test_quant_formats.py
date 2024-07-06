@@ -12,12 +12,11 @@ import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import Backend, GPTQModel, __version__  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, __version__  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantization(unittest.TestCase):
@@ -32,12 +31,13 @@ class TestQuantization(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (Backend.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
-            (Backend.EXLLAMA_V2, False, FORMAT.GPTQ),
-            (Backend.MARLIN, True, FORMAT.MARLIN),
+            (BACKEND.QBITS, False, FORMAT.GPTQ),
+            (BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
+            (BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ),
+            (BACKEND.MARLIN, True, FORMAT.MARLIN),
         ]
     )
-    def test_quantize(self, backend: Backend, sym: bool, format: FORMAT):
+    def test_quantize(self, backend: BACKEND, sym: bool, format: FORMAT):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -49,9 +49,7 @@ class TestQuantization(unittest.TestCase):
         model = GPTQModel.from_pretrained(
             self.pretrained_model_dir,
             quantize_config=quantize_config,
-            use_flash_attention_2=False,
         )
-
         model.quantize(self.calibration_dataset, batch_size=128)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -71,7 +69,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0",
+                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
                 backend=backend,
             )
 
@@ -84,7 +82,7 @@ class TestQuantization(unittest.TestCase):
             torch.cuda.empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
-            if not sym and format == FORMAT.GPTQ:
+            if not sym and format == FORMAT.GPTQ or format == FORMAT.QBITS:
                 return
 
             # test compat: 1) with simple dict type 2) is_marlin_format
@@ -93,12 +91,12 @@ class TestQuantization(unittest.TestCase):
                 "group_size": 128,
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,
-                "is_marlin_format": backend == Backend.MARLIN,
+                "is_marlin_format": backend == BACKEND.MARLIN,
             }
 
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0",
+                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
                 quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
@@ -117,32 +115,9 @@ class TestQuantization(unittest.TestCase):
             }
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0",
+                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
                 quantize_config=compat_quantize_config,
                 format=format,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
 
-    def test_gptq_8bit(self):
-        quantize_config = QuantizeConfig(
-            bits=8,
-            group_size=128,
-            format=FORMAT.GPTQ,
-            desc_act=True
-        )
-
-        model = GPTQModel.from_pretrained(
-            self.pretrained_model_dir,
-            quantize_config=quantize_config,
-        )
-
-        model.quantize(self.calibration_dataset, batch_size=128)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            err = None
-            try:
-                model.save_quantized(tmpdirname)
-            except Exception as e:
-                print(e)
-                err = e
-            self.assertTrue(err is None)

@@ -20,8 +20,9 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .backend import Backend
+from .backend import BACKEND
 from .importer import select_quant_linear
 
 logger = getLogger(__name__)
@@ -108,7 +109,7 @@ def make_quant(
     names,
     bits: int,
     group_size: int,
-    backend: Backend,
+    backend: BACKEND,
     format: str,
     desc_act: bool = False,
     sym: bool = True,
@@ -227,14 +228,14 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 def select_quant_linear_with_pack(bits: int,
-    group_size: int,
-    desc_act: bool,
-    sym: bool,
-    backend: Backend, format: str, pack: bool):
+                                  group_size: int,
+                                  desc_act: bool,
+                                  sym: bool,
+                                  backend: BACKEND, format: str, pack: bool):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
     if format == FORMAT.BITBLAS:
-        backend = Backend.AUTO
+        backend = BACKEND.AUTO
         format = FORMAT.GPTQ_V2
 
     QuantLinear = select_quant_linear(
@@ -253,7 +254,7 @@ def pack_model(
     quantizers,
     bits,
     group_size,
-    backend: Backend,
+    backend: BACKEND,
     format: str,
     desc_act=False,
     sym: bool = True,
@@ -312,7 +313,7 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if backend == Backend.TRITON and warmup_triton:
+    if backend == BACKEND.TRITON and warmup_triton:
         logger.warning(
             "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
         )
@@ -396,7 +397,7 @@ def simple_dispatch_model(model, device_map):
 
     return model
 
-def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[int] = None):
+def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None, max_input_length: Optional[int] = None):
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
@@ -404,12 +405,17 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
     device_to_buffers_size = {}
     # exllama
     model_uses_exllama = False
+    model_uses_qbits = False
+
     # exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaQuantLinear):
+        if isinstance(submodule, QBitsQuantLinear):
+            model_uses_qbits = True
+            submodule.post_init(quantize_config)
+        elif isinstance(submodule, ExllamaQuantLinear):
             model_uses_exllama = True
             device = submodule.qweight.device
             if device not in device_to_buffers_size:
@@ -510,10 +516,12 @@ def gptqmodel_post_init(model, use_act_order: bool, max_input_length: Optional[i
         if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear):
+        elif isinstance(submodule, BaseQuantLinear) and not model_uses_qbits:
             submodule.post_init()
 
-    torch.cuda.empty_cache()
+    if not model_uses_qbits:
+        torch.cuda.empty_cache()
+
 
     return model
 

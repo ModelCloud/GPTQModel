@@ -1,8 +1,6 @@
 from typing import Dict, List, Optional, Union
 
-import torch
-
-from ..utils import Backend
+from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
 from .baichuan import BaiChuanGPTQ
 from .base import BaseGPTQModel, QuantizeConfig
@@ -79,11 +77,6 @@ MODEL_MAP = {
     "deepseek_v2": DeepSeekV2GPTQ,
 }
 
-at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-
-if not at_least_one_cuda_v6:
-    raise EnvironmentError("GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`.")
-
 
 class GPTQModel:
     def __init__(self):
@@ -116,7 +109,7 @@ class GPTQModel:
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
-        backend: Backend = Backend.AUTO,
+        backend: BACKEND = BACKEND.AUTO,
         quantize_config: Optional[QuantizeConfig | Dict] = None,
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,

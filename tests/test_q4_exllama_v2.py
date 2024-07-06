@@ -7,15 +7,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from test_q4_cuda import get_diff  # noqa: E402
-from test_q4_exallama import CUDA_OLD_REFERENCE  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.quantization import FORMAT
+from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
+from test_q4_exllama import REFERENCE, get_diff  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
@@ -33,7 +31,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            backend=Backend.EXLLAMA_V2,
+            backend=BACKEND.EXLLAMA_V2,
             format=FORMAT.GPTQ,
         )
 
@@ -65,7 +63,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         with torch.no_grad():
             res = linear(inp)[0][0]
 
-        reference = CUDA_OLD_REFERENCE.to(device)
+        reference = REFERENCE.to(device)
 
         self.assertTrue(
             torch.allclose(res, reference, rtol=3e-5, atol=2e-2),
@@ -76,7 +74,6 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can only see the characters' silhouettes.)\n\n("
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -96,7 +93,6 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
-        # Reference generated with the cuda-old kernel
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -106,7 +102,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             model_id,
             rivision=revision,
             device="cuda:0",
-            backend=Backend.EXLLAMA_V2,
+            backend=BACKEND.EXLLAMA_V2,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -124,19 +120,19 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         device = torch.device("cuda:0")
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-        revision = "desc_act_true"
+        # revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
             model_id,
             # revision=revision,
             device="cuda:0",
-            backend=Backend.EXLLAMA_V2,
+            backend=BACKEND.EXLLAMA_V2,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
-        self.assertTrue(inp["input_ids"].shape[1] > 2048)  # 2048 is the default max_input_length for LLama
+        self.assertGreater(inp["input_ids"].shape[1], 2048)  # 2048 is the default max_input_length for LLama
 
         _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)

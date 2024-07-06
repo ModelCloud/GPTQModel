@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 import json
 import os
 from enum import Enum
@@ -20,7 +19,7 @@ from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from optimum.utils import is_accelerate_available, is_auto_gptq_available
+from optimum.utils import is_accelerate_available
 from optimum.utils.modeling_utils import recurse_getattr
 from torch import nn
 from tqdm.auto import tqdm
@@ -40,7 +39,7 @@ if is_accelerate_available():
     from accelerate.hooks import remove_hook_from_module
 
 from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
-from ...utils.backend import Backend
+from ...utils.backend import BACKEND
 from ...utils.exllama import exllama_set_max_input_length
 from ...utils.importer import select_quant_linear
 from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
@@ -250,22 +249,6 @@ class GPTQModelQuantizer(object):
         return model
 
     def convert_gptq_v2_to_v1(self, model: nn.Module):
-        if self.bits != 4:
-            cuda_name_modules = {}
-            from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
-            from gptqmodel.nn_modules.qlinear.qlinear_cuda_old import CudaOldQuantLinear
-            for name, module in model.named_modules():
-                if isinstance(module, CudaQuantLinear) or isinstance(module, CudaOldQuantLinear):
-                    cuda_name_modules[name] = module.gptqmodel_cuda
-                    module.gptqmodel_cuda = None
-
-            for name, module in model.named_modules():
-                if (isinstance(module, CudaQuantLinear) or isinstance(module,
-                                                                      CudaOldQuantLinear)) and name in cuda_name_modules:
-                    module.gptqmodel_cuda = cuda_name_modules[name]
-
-            del cuda_name_modules
-
         model = convert_gptq_v2_to_v1_format(
             model, quantize_config=self.quantize_config, qlinear_kernel=self.qlinear_kernel
         )
@@ -351,9 +334,6 @@ class GPTQModelQuantizer(object):
         Returns:
             `nn.Module`: The quantized model
         """
-
-        if not is_auto_gptq_available():
-            raise RuntimeError("auto-gptq is required in order to perform quantzation : `pip install auto-gptq`")
         if not torch.cuda.is_available():
             raise RuntimeError("No GPU found. A GPU is needed to quantize model.")
 
@@ -664,11 +644,11 @@ class GPTQModelQuantizer(object):
 
     def select_quantlinear(self):
         if self.exllama_version == ExllamaVersion.ONE:
-            backend = Backend.EXLLAMA
+            backend = BACKEND.EXLLAMA
         elif self.exllama_version == ExllamaVersion.TWO:
-            backend = Backend.EXLLAMA_V2
+            backend = BACKEND.EXLLAMA_V2
         else:
-            backend = Backend.AUTO
+            backend = BACKEND.AUTO
 
         QuantLinear = select_quant_linear(
             sym=self.sym,
@@ -766,8 +746,6 @@ def load_quantized_model(
     """
     if not torch.cuda.is_available():
         raise RuntimeError("No GPU found. A GPU is needed to run quantized model.")
-    if not is_auto_gptq_available():
-        raise RuntimeError("auto-gptq is required in order to load quantized weights : `pip install auto-gptq`")
     if not is_accelerate_available():
         raise RuntimeError(
             "You need to install accelerate in order to load and dispatch weights to"

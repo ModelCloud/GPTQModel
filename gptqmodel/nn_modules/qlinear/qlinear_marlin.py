@@ -3,10 +3,9 @@
 
 from logging import getLogger
 
+import gptqmodel_marlin_cuda
 import numpy as np
 import torch
-
-import gptqmodel_marlin_cuda
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
@@ -68,10 +67,9 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTED_DESC_ACT = [False]
     SUPPORTED_SYM = [True]
 
-    def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool, infeatures: int, outfeatures: int,
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
-        super().__init__()
-        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(
@@ -171,6 +169,9 @@ class MarlinQuantLinear(BaseQuantLinear):
         C = C + self.bias if self.bias is not None else C
         return C
 
+    def post_init(self):
+        self.validate_device(self.B.device.type)
+
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
 @torch.no_grad()
@@ -221,6 +222,7 @@ def unpack_qzeros(qzeros):
 def dequantize_weight(layer):
     qweight, qzeros, scales = layer.qweight, layer.qzeros, layer.scales
     unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
+    unpacked_qzeros = torch.clamp(unpacked_qzeros, min=0, max=15)
     group_size = unpacked_qweight.shape[0] // scales.shape[0]
     scales = scales.repeat_interleave(group_size, dim=0)
     unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)

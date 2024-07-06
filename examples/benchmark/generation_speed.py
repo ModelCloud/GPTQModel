@@ -7,11 +7,10 @@ from typing import Dict, List, Optional
 
 import torch
 from datasets import Dataset, load_dataset
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
-
-from gptqmodel import Backend, GPTQModel, QuantizeConfig, get_backend
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +143,7 @@ def load_data(tokenizer, n_samples, max_new_tokens):
 
 def load_model_tokenizer(
     model_name_or_path: str,
-    backend: Backend,
+    backend: BACKEND,
     tokenizer_name_or_path: Optional[str] = None,
     from_pretrained: bool = False,
     max_memory: Optional[dict] = None,
@@ -230,7 +229,7 @@ def main():
     parser.add_argument("--model_basename", type=str, default=None)
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--backend", choices=['AUTO', 'CUDA_OLD', 'CUDA', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
@@ -281,7 +280,7 @@ def main():
     logger.info(f"quantize config: {model.quantize_config.to_dict()}")
     logger.info(f"model device map: {model.hf_device_map}")
 
-    if args.backend == Backend.TRITON:
+    if args.backend == BACKEND.TRITON:
         logger.info("warmup triton, this may take a while.")
         model.warmup_triton()
 

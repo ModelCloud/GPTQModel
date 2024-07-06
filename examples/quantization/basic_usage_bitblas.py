@@ -1,21 +1,20 @@
 import torch
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import QuantizeConfig
 from transformers import AutoTokenizer, TextGenerationPipeline
 
-from gptqmodel import Backend, GPTQModel
-from gptqmodel.quantization import QuantizeConfig
-
-backend = Backend.BITBLAS
+backend = BACKEND.BITBLAS
 pretrained_model_dir = "facebook/opt-125m"
 quantized_model_dir = "./facebook/opt-125m-4bit-128g"
 
-if backend == Backend.BITBLAS:
+if backend == BACKEND.BITBLAS:
     quantized_model_dir += "-bitblas"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
     examples = [
         tokenizer(
-            "auto-gptq is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
+            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
         )
     ]
 

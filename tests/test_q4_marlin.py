@@ -7,15 +7,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import Backend, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQ4Marlin(unittest.TestCase):
     def test_generation(self):
-        # Reference generated with the cuda-old kernel and TheBloke/Llama-2-7B-Chat-GPTQ
         reference_output = "<s> I am in Paris and I am feeling very sad and lonely. everybody I know is busy and I don't have any friends here. I am staying in a small apartment in the 11th arrondissement and I am feeling very isolated. I miss my friends and family back home and I don'"
 
         prompt = "I am in Paris and"
@@ -24,7 +22,7 @@ class TestQ4Marlin(unittest.TestCase):
         model_id = "TheBloke/Llama-2-7B-Chat-GPTQ"
 
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.MARLIN)
+            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
@@ -49,15 +47,15 @@ class TestQ4Marlin(unittest.TestCase):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "s3nh/starcoderbase-1b-GPTQ"
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=Backend.MARLIN)
+            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
         for _, param in model_q.named_parameters():
-            self.assertTrue(param.device != torch.device("meta"))
+            self.assertNotEqual(param.device, torch.device("meta"))
 
         for _, param in model_q.named_buffers():
-            self.assertTrue(param.device != torch.device("meta"))
+            self.assertNotEqual(param.device, torch.device("meta"))
 
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_proj.bias) > 0)
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_attn.bias) > 0)

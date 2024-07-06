@@ -7,10 +7,7 @@ from typing import List, Union
 
 import torch
 import torch.nn as nn
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-
-from .qlinear_cuda_old import CudaOldQuantLinear
 
 logger = getLogger(__name__)
 
@@ -95,8 +92,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self,
         bits: int,
         group_size: int,
-        sym: bool,
         desc_act: bool,
+        sym: bool,
         infeatures: int,
         outfeatures: int,
         bias: bool,
@@ -107,12 +104,10 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__()
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
 
         # TODO: remove delayed import after bitblas whl support for 11.7, 11.8, 12.0 are added
         import_bitblas()
-
-        self.validate(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act)
 
         self._validate_parameters(group_size, infeatures, outfeatures)
 
@@ -246,13 +241,14 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.q_params = None
 
     def post_init(self):
+        self.validate_device(self.qweight.device.type)
         # eliminate runtime overhead like exllama state
         param_list = [self.qweight, self.scales, self.zeros]
         if self.bitblas_matmul.config.with_bias:
             param_list.append(self.bias)
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
 
-    def repack_from_gptq(self, gptq_module: CudaOldQuantLinear):
+    def repack_from_gptq(self, gptq_module):
         from bitblas.quantization.utils import general_compress
 
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
