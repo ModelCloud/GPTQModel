@@ -33,14 +33,14 @@ class TestSerialization(unittest.TestCase):
 
     def test_marlin_hf_cache_serialization(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
-        self.assertTrue(model.quantize_config.format == FORMAT.MARLIN)
+        self.assertEqual(model.quantize_config.format, FORMAT.MARLIN)
 
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
-        self.assertTrue(model.quantize_config.format == FORMAT.MARLIN)
+        self.assertEqual(model.quantize_config.format, FORMAT.MARLIN)
 
     def test_gptq_v1_to_v2_runtime_convert(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
-        self.assertTrue(model.quantize_config.format == FORMAT.GPTQ_V2)
+        self.assertEqual(model.quantize_config.format, FORMAT.GPTQ_V2)
 
     def test_gptq_v1_serialization(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
@@ -52,4 +52,4 @@ class TestSerialization(unittest.TestCase):
             with open(os.path.join(tmpdir, "quantize_config.json"), "r") as f:
                 quantize_config = json.load(f)
 
-            self.assertTrue(quantize_config[FORMAT_FIELD_JSON] == "gptq")
+            self.assertEqual(quantize_config[FORMAT_FIELD_JSON], "gptq")

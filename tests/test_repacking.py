@@ -125,7 +125,11 @@ class TestRepacking(unittest.TestCase):
 
         reldiff = (res_exllama - res_marlin).abs() / (res_exllama.abs() + 1e-12)
         print(f"reldiff = {reldiff}, ",torch.mean(reldiff))
-        self.assertTrue(torch.mean(reldiff) < 6e-3)
+        # torch.mean(reldiff) 100 times:
+        # Max: 0.010498046875
+        # Min: 0.00415802001953125
+        # Average: 0.006191991990612399
+        self.assertLess(torch.mean(reldiff).item(), 0.0068)
 
         weight_repacked = gptqmodel_marlin_cuda.gptq_repack(exllama_linear.qweight)
         self.assertTrue(torch.allclose(weight_repacked, marlin_linear.B))

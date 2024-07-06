@@ -1144,7 +1144,7 @@ class TestsQ4Exllama(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as cm:
             _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
-        self.assertTrue("temp_state buffer is too small" in str(cm.exception))
+        self.assertIn("temp_state buffer is too small", str(cm.exception))
 
         model_q = exllama_set_max_input_length(model_q, 4096)
 
@@ -1154,7 +1154,7 @@ class TestsQ4Exllama(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as cm:
             _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
-        self.assertTrue("temp_state buffer is too small" in str(cm.exception))
+        self.assertIn("temp_state buffer is too small", str(cm.exception))
 
     def test_generation_desc_act_false(self):
         prompt = "I am in Paris and"
