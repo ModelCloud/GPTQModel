@@ -34,4 +34,4 @@ class TestsQBits(unittest.TestCase):
         result = model_q.generate(**input, num_beams=1, max_new_tokens=5)
         output = tokenizer.decode(result[0])
         print(f"output={output}")
-        self.assertTrue(len(output) > 0)
+        self.assertGreater(len(output), 0)

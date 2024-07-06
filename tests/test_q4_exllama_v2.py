@@ -133,6 +133,6 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
-        self.assertTrue(inp["input_ids"].shape[1] > 2048)  # 2048 is the default max_input_length for LLama
+        self.assertGreater(inp["input_ids"].shape[1], 2048)  # 2048 is the default max_input_length for LLama
 
         _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)

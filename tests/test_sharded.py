@@ -43,7 +43,7 @@ class TestSharded(unittest.TestCase):
             result = tokenizer.decode(tokens)
 
             print(result)
-            self.assertTrue(len(result) > 0)
+            self.assertGreater(len(result), 0)
 
     def test_save_and_load_no_shard(self):
         model = GPTQModel.from_quantized(
@@ -73,7 +73,7 @@ class TestSharded(unittest.TestCase):
             result = tokenizer.decode(tokens)
 
             print(result)
-            self.assertTrue(len(result) > 0)
+            self.assertGreater(len(result), 0)
 
     def test_save_and_load_unsupports_shard(self):
         model = GPTQModel.from_quantized(
@@ -104,4 +104,4 @@ class TestSharded(unittest.TestCase):
             result = tokenizer.decode(tokens)
 
             print(result)
-            self.assertTrue(len(result) > 0)
+            self.assertGreater(len(result), 0)

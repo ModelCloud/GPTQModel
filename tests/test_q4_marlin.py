@@ -52,10 +52,10 @@ class TestQ4Marlin(unittest.TestCase):
             raise e
 
         for _, param in model_q.named_parameters():
-            self.assertTrue(param.device != torch.device("meta"))
+            self.assertNotEqual(param.device, torch.device("meta"))
 
         for _, param in model_q.named_buffers():
-            self.assertTrue(param.device != torch.device("meta"))
+            self.assertNotEqual(param.device, torch.device("meta"))
 
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_proj.bias) > 0)
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_attn.bias) > 0)
