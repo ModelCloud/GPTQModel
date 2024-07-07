@@ -308,7 +308,9 @@ class BaseGPTQModel(nn.Module)  :
                 bias = layer.bias is not None and torch.any(layer.bias)
 
                 new_layer = TritonV2QuantLinear(  ##pylint: disable=E1123
-                    bits, group_size, in_features, out_features, bias, weight_dtype=layer.weight.dtype
+                    bits=bits, group_size=group_size, desc_act=self.quantize_config.desc_act,
+                    sym=self.quantize_config.sym, infeatures=in_features, outfeatures=out_features, bias=bias,
+                    weight_dtype=layer.weight.dtype
                 )
 
                 new_layer.device = device
