@@ -9,7 +9,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig, AutoRoundQuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
@@ -94,6 +94,7 @@ class TestPerplexity(unittest.TestCase):
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
             (QUANT_METHOD.GPTQ, FORMAT.MARLIN),
             (QUANT_METHOD.GPTQ, FORMAT.BITBLAS),
+            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ),
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT):
