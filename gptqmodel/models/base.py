@@ -325,7 +325,7 @@ class BaseGPTQModel(nn.Module)  :
                 qlayer.pack(layer, scale, zero, None)
                 qlayer.to(device)
 
-                self.qlinear_kernel = qlayer
+                self.qlinear_kernel = TritonV2QuantLinear
 
             self.model = model
             self._quantized = True
@@ -635,7 +635,7 @@ class BaseGPTQModel(nn.Module)  :
             )
 
         # internal is always gptq v2 but allow users to pass gptq (v1) via config
-        if quantize_config.format == FORMAT.GPTQ and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
+        if quantize_config.format == FORMAT.GPTQ:
             # Model qzeros may be edited in place.
             # TODO: avoid inplace modification of the weights
             model = copy.deepcopy(self.model)
