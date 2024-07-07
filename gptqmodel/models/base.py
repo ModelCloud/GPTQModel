@@ -19,22 +19,22 @@ from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
-                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
+                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
+from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
-                           convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
-                           get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
-                           gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model,
-                           verify_model_hash, verify_sharded_model_hashes)
-from ..utils.device import check_cuda
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
+                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
+                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
+                           verify_sharded_model_hashes)
 from ..version import __version__
-from ._const import CPU, DEVICE, CUDA_0, SUPPORTED_MODELS
+from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -149,8 +149,21 @@ class BaseGPTQModel(nn.Module)  :
 
         return new_calibration_dataset_batched
 
-    @torch.inference_mode()
     def quantize(
+            self,
+            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+            batch_size: int = 1,
+            autotune_warmup_after_quantized: bool = False,
+            calibration_enable_gpu_cache: bool = True,
+    ):
+        if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
+            self._quantize(calibration_dataset, batch_size, autotune_warmup_after_quantized,
+                           calibration_enable_gpu_cache)
+        else:
+            with torch.inference_mode():
+                self._quantize(calibration_dataset, batch_size, autotune_warmup_after_quantized, calibration_enable_gpu_cache)
+
+    def _quantize(
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
@@ -193,7 +206,6 @@ class BaseGPTQModel(nn.Module)  :
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
                              f"{min_calibration_dataset_input_ids_avg_length}! Current AVG is {avg}.")
 
-
         device_map = self.hf_device_map
         if device_map:
             for name, device in device_map.items():
@@ -203,16 +215,130 @@ class BaseGPTQModel(nn.Module)  :
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
+
+        if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
+            from auto_round import AutoRound
+            from transformers import modeling_utils
+            weight_config = {}
+            for n, m in self.model.named_modules():
+                if isinstance(m, torch.nn.Linear) or isinstance(m, modeling_utils.Conv1D):
+                    if m.weight.shape[0] % 32 != 0 or m.weight.shape[1] % 32 != 0:
+                        weight_config[n] = {"data_type": "fp"}
+                        print(
+                            f"{n} will not be quantized due to its shape not being divisible by 32, resulting in an exporting issue to autogptq")
+
+            if self.quantize_config.lm_head:
+                weight_config['lm_head'] = {"data_type": "int"}
+
+            import torch.nn.functional as F
+            from torch.utils.data import DataLoader
+
+            @torch.no_grad()
+            def collate_batch(batch):
+                input_ids_new = []
+                attention_mask_new = []
+                for text in batch:
+                    input_ids, attention_mask = text["input_ids"][0], text["attention_mask"][0]
+
+                    input_ids = input_ids[:self.quantize_config.seqlen]
+                    input_ids_new.append(input_ids)
+
+                    attention_mask = attention_mask[:self.quantize_config.seqlen]
+                    attention_mask_new.append(attention_mask)
+
+                if len(input_ids_new) == 0:
+                    return None
+
+                input_ids_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in input_ids_new]
+                attention_mask_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in attention_mask_new]
+
+                input_ids_new = torch.vstack(input_ids_new)
+                attention_mask_new = torch.vstack(attention_mask_new)
+                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
+                return res
+
+            # we can pass batch_size=len(calibration_dataset), cause it spends less memory on GPU
+            dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=len(calibration_dataset))
+
+            self.autoround = AutoRound(self.model,
+                                  tokenizer=None,
+                                  bits=self.quantize_config.bits,
+                                  group_size=self.quantize_config.group_size,
+                                  sym=self.quantize_config.sym, batch_size=batch_size,
+                                  dataset=dataloader, seqlen=self.quantize_config.seqlen, nblocks=self.quantize_config.nblocks,
+                                  iters=self.quantize_config.iters, lr=self.quantize_config.lr,
+                                  minmax_lr=self.quantize_config.minmax_lr,
+                                  enable_quanted_input=self.quantize_config.enable_quanted_input,
+                                  device=self.hf_device_map,
+                                  amp=self.quantize_config.amp, nsamples=self.quantize_config.nsamples,
+                                  low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
+                                  seed=self.quantize_config.seed,
+                                  gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
+                                  scale_dtype=self.quantize_config.scale_dtype, weight_config=weight_config,
+                                  enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
+
+            model, _ = self.autoround.quantize()
+
+            weight_config = self.autoround.weight_config
+            for name in weight_config.keys():
+                config = weight_config[name]
+                if config["data_type"] != "int" and config["bits"] >= 16:
+                    continue
+                logger.info(f"packing {name}")
+
+                bits = config["bits"]
+                group_size = config["group_size"]
+
+                from auto_round.utils import get_module, set_module
+                layer = get_module(model, name)
+                device = layer.weight.device
+
+                from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
+
+                if isinstance(layer, nn.Linear):
+                    in_features = layer.in_features
+                    out_features = layer.out_features
+                elif isinstance(layer, nn.Conv2d):
+                    in_features = layer.in_channels
+                    out_features = layer.out_channels
+                elif isinstance(layer, transformers.pytorch_utils.Conv1D):
+                    in_features = layer.weight.shape[0]
+                    out_features = layer.weight.shape[1]
+                bias = layer.bias is not None and torch.any(layer.bias)
+
+                new_layer = TritonV2QuantLinear(  ##pylint: disable=E1123
+                    bits=bits, group_size=group_size, desc_act=self.quantize_config.desc_act,
+                    sym=self.quantize_config.sym, infeatures=in_features, outfeatures=out_features, bias=bias,
+                    weight_dtype=layer.weight.dtype
+                )
+
+                new_layer.device = device
+                set_module(model, name, new_layer)
+                qlayer = new_layer
+                scale = weight_config[name]["scale"]
+                zero = weight_config[name]["zp"]
+                # so far can only pack layer on CPU
+                qlayer.to("cpu")
+                ##force to float32 to be compatible with torch 2.0
+                layer, scale, zero = layer.to("cpu"), scale.to("cpu"), zero.to("cpu").to(torch.float32)
+                qlayer.pack(layer, scale, zero, None)
+                qlayer.to(device)
+
+                self.qlinear_kernel = TritonV2QuantLinear
+
+            self.model = model
+            self._quantized = True
+            return
+
+        forward_pass_use_cache = self.model.config.use_cache
+        self.model.config.use_cache = False
+
         layer_inputs = []
         attention_masks = []
         position_ids = []
         layer_input_kwargs = []
         layer_outputs = []
-
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
-
-        forward_pass_use_cache = self.model.config.use_cache
-        self.model.config.use_cache = False
 
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)

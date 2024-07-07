@@ -15,3 +15,4 @@ ninja>=1.11.1.1
 bitblas>=0.0.1.dev12
 protobuf>=4.25.3
 intel_extension_for_transformers>=1.4.2
+auto-round==0.2

@@ -46,6 +46,7 @@ class FORMAT:
 # quant methods
 class QUANT_METHOD:
     GPTQ = "gptq"
+    AUTO_ROUND = "auto_round"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -56,6 +57,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.BITBLAS,
         FORMAT.QBITS,
     },
+    QUANT_METHOD.AUTO_ROUND: {
+        FORMAT.GPTQ,
+    }
 }
 
 # inference only methods should go here
@@ -205,7 +209,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ}:
+                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND}:
                     raise ValueError(f"Unknown quantization method: {val}.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
@@ -300,6 +304,54 @@ class QuantizeConfig():
             FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,
         }
+
+@dataclass
+class AutoRoundQuantizeConfig(QuantizeConfig):
+    enable_full_range: bool = False  ##for symmetric, TODO support later
+    batch_size: int = 1
+    amp: bool = True
+    lr_scheduler = None
+    enable_quanted_input: bool = True
+    enable_minmax_tuning: bool = True
+    lr: float = None
+    minmax_lr: float = None
+    low_gpu_mem_usage: bool = True
+    iters: int = 200
+    seqlen: int = 2048
+    nsamples: int = 512
+    sampler: str = "rand"
+    seed: int = 42
+    nblocks: int = 1
+    gradient_accumulate_steps: int = 1
+    not_use_best_mse: bool = False
+    dynamic_max_gap: int = -1
+    data_type: str = "int"  ##only support int for now
+    scale_dtype: str = "fp16"
+    quant_method: str = QUANT_METHOD.AUTO_ROUND
+
+    def to_dict(self):
+        self.meta_set("enable_full_range", self.enable_full_range)
+        self.meta_set("batch_size", self.batch_size)
+        self.meta_set("amp", self.amp)
+        self.meta_set("lr_scheduler", self.lr_scheduler)
+        self.meta_set("enable_quanted_input", self.enable_quanted_input)
+        self.meta_set("enable_minmax_tuning", self.enable_minmax_tuning)
+        self.meta_set("lr", self.lr)
+        self.meta_set("minmax_lr", self.minmax_lr)
+        self.meta_set("low_gpu_mem_usage", self.low_gpu_mem_usage)
+        self.meta_set("iters", self.iters)
+        self.meta_set("seqlen", self.seqlen)
+        self.meta_set("nsamples", self.nsamples)
+        self.meta_set("sampler", self.sampler)
+        self.meta_set("seed", self.seed)
+        self.meta_set("nblocks", self.nblocks)
+        self.meta_set("gradient_accumulate_steps", self.gradient_accumulate_steps)
+        self.meta_set("not_use_best_mse", self.not_use_best_mse)
+        self.meta_set("dynamic_max_gap", self.dynamic_max_gap)
+        self.meta_set("data_type", self.data_type)
+        self.meta_set("scale_dtype", self.scale_dtype)
+
+        return super().to_dict()
 
 # deprecated: will be removed in future update
 @dataclass

@@ -13,8 +13,9 @@ import unittest  # noqa: E402
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, __version__  # noqa: E402
-from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
-from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL  # noqa: E402
+from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD  # noqa: E402
+from gptqmodel.quantization.config import (META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,  # noqa: E402
+                                           AutoRoundQuantizeConfig, QuantizeConfig)
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -31,20 +32,31 @@ class TestQuantization(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (BACKEND.QBITS, False, FORMAT.GPTQ),
-            (BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
-            (BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ),
-            (BACKEND.MARLIN, True, FORMAT.MARLIN),
+            (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ),
+            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
+            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ),
+            (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN),
+            (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ),
         ]
     )
-    def test_quantize(self, backend: BACKEND, sym: bool, format: FORMAT):
-        quantize_config = QuantizeConfig(
-            bits=4,
-            group_size=128,
-            desc_act=False if format == FORMAT.MARLIN else True,
-            sym=sym,
-            format=format,
-        )
+    def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT):
+        if method == QUANT_METHOD.GPTQ:
+            quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                desc_act=False if format == FORMAT.MARLIN else True,
+                sym=sym,
+                format=format,
+            )
+        elif method == QUANT_METHOD.AUTO_ROUND:
+            quantize_config = AutoRoundQuantizeConfig(
+                bits=4,
+                group_size=128,
+                sym=sym,
+                format=format,
+            )
+        else:
+            raise ValueError(f"Invalid quantization method: {method}")
 
         model = GPTQModel.from_pretrained(
             self.pretrained_model_dir,

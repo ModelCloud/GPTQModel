@@ -1,5 +1,6 @@
-from torch import device
 from enum import Enum
+
+from torch import device
 
 CPU = device("cpu")
 CUDA = device("cuda")

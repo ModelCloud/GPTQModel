@@ -9,7 +9,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
@@ -90,20 +90,29 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            FORMAT.GPTQ_V2,
-            FORMAT.GPTQ,
-            FORMAT.MARLIN,
-            FORMAT.BITBLAS,
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
+            (QUANT_METHOD.GPTQ, FORMAT.MARLIN),
+            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS),
+            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ),
         ]
     )
-    def test_quantized_perplexity(self, format: FORMAT):
-        quantize_config = QuantizeConfig(
-            bits=4,
-            group_size=128,
-            format=format,
-            # MARLIN and BITBLAS Only supported when desc_act is False.
-            desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
-        )
+    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT):
+        if method == QUANT_METHOD.GPTQ:
+            quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                format=format,
+                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
+            )
+        elif method == QUANT_METHOD.AUTO_ROUND:
+            quantize_config = AutoRoundQuantizeConfig(
+                bits=4,
+                group_size=128,
+                format=format,
+            )
+        else:
+            raise ValueError(f"Invalid quantization method: {method}")
 
         model = GPTQModel.from_pretrained(
             self.OPT_MODEL_ID if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_MODEL_ID,

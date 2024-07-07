@@ -629,3 +629,13 @@ def get_moe_layer_modules(layer_modules: List, num_experts: int) -> List:
                 new_inside_layer_modules[-1].append(n)
 
     return new_inside_layer_modules
+
+def check_to_quantized(config):
+    if isinstance(config, dict):
+        if config["bits"] > 8 or "fp" in config["data_type"] or "float" in config["data_type"]:
+            return False
+        return True
+    else:
+        if config.bits > 8 or "fp" in config.data_type or "float" in config.data_type:
+            return False
+        return True
