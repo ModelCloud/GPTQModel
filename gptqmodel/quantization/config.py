@@ -209,7 +209,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ}:
+                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND}:
                     raise ValueError(f"Unknown quantization method: {val}.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
@@ -307,7 +307,6 @@ class QuantizeConfig():
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
-    weight_config: dict = {}
     enable_full_range: bool = False  ##for symmetric, TODO support later
     batch_size: int = 1
     amp: bool = True
@@ -331,42 +330,28 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
     quant_method: str = QUANT_METHOD.AUTO_ROUND
 
     def to_dict(self):
-        return {
-            "bits": self.bits,
-            "group_size": self.group_size,
-            "desc_act": self.desc_act,
-            "static_groups": self.static_groups,
-            "sym": self.sym,
-            "lm_head": self.lm_head,
-            "damp_percent": self.damp_percent,
-            "true_sequential": self.true_sequential,
-            "model_name_or_path": self.model_name_or_path,
-            "model_file_base_name": self.model_file_base_name,
-            "quant_method": self.quant_method,
-            "format": self.format,
-            "weight_config": self.weight_config,
-            "enable_full_range": self.enable_full_range,
-            "batch_size": self.batch_size,
-            "amp": self.amp,
-            "lr_scheduler": self.lr_scheduler,
-            "enable_quanted_input": self.enable_quanted_input,
-            "enable_minmax_tuning": self.enable_minmax_tuning,
-            "lr": self.lr,
-            "minmax_lr": self.minmax_lr,
-            "low_gpu_mem_usage": self.low_gpu_mem_usage,
-            "iters": self.iters,
-            "seqlen": self.seqlen,
-            "nsamples": self.nsamples,
-            "sampler": self.sampler,
-            "seed": self.seed,
-            "nblocks": self.nblocks,
-            "gradient_accumulate_steps": self.gradient_accumulate_steps,
-            "not_use_best_mse": self.not_use_best_mse,
-            "dynamic_max_gap": self.dynamic_max_gap,
-            "data_type": self.data_type,
-            "scale_dtype": self.scale_dtype,
-            QUANT_METHOD_FIELD: self.quant_method,
-        }
+        self.meta_set("enable_full_range", self.enable_full_range)
+        self.meta_set("batch_size", self.batch_size)
+        self.meta_set("amp", self.amp)
+        self.meta_set("lr_scheduler", self.lr_scheduler)
+        self.meta_set("enable_quanted_input", self.enable_quanted_input)
+        self.meta_set("enable_minmax_tuning", self.enable_minmax_tuning)
+        self.meta_set("lr", self.lr)
+        self.meta_set("minmax_lr", self.minmax_lr)
+        self.meta_set("low_gpu_mem_usage", self.low_gpu_mem_usage)
+        self.meta_set("iters", self.iters)
+        self.meta_set("seqlen", self.seqlen)
+        self.meta_set("nsamples", self.nsamples)
+        self.meta_set("sampler", self.sampler)
+        self.meta_set("seed", self.seed)
+        self.meta_set("nblocks", self.nblocks)
+        self.meta_set("gradient_accumulate_steps", self.gradient_accumulate_steps)
+        self.meta_set("not_use_best_mse", self.not_use_best_mse)
+        self.meta_set("dynamic_max_gap", self.dynamic_max_gap)
+        self.meta_set("data_type", self.data_type)
+        self.meta_set("scale_dtype", self.scale_dtype)
+
+        return super().to_dict()
 
 # deprecated: will be removed in future update
 @dataclass
