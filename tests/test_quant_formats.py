@@ -48,14 +48,15 @@ class TestQuantization(unittest.TestCase):
                 sym=sym,
                 format=format,
             )
-        else:
+        elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
                 bits=4,
                 group_size=128,
-                desc_act=False if format == FORMAT.MARLIN else True,
                 sym=sym,
                 format=format,
             )
+        else:
+            raise ValueError(f"Invalid quantization method: {method}")
 
         model = GPTQModel.from_pretrained(
             self.pretrained_model_dir,

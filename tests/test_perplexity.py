@@ -104,12 +104,14 @@ class TestPerplexity(unittest.TestCase):
                 group_size=128,
                 format=format,
             )
-        else:
+        elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
                 bits=4,
                 group_size=128,
                 format=format,
             )
+        else:
+            raise ValueError(f"Invalid quantization method: {method}")
 
         model = GPTQModel.from_pretrained(
             self.OPT_MODEL_ID if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_MODEL_ID,
