@@ -281,24 +281,48 @@ class BaseGPTQModel(nn.Module)  :
 
             model, _ = self.autoround.quantize()
 
-            quantizers = {}
-            for key in self.autoround.weight_config:
-                info = weight_config[key]
-                if not check_to_quantized(info):
+            weight_config = self.autoround.weight_config
+            for name in weight_config.keys():
+                config = weight_config[name]
+                if config["data_type"] != "int" and config["bits"] >= 16:
                     continue
-                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32), info["g_idx"])
+                logger.info(f"packing {name}")
 
-            self.qlinear_kernel = pack_model(
-                model=self.model,
-                quantizers=quantizers,
-                bits=self.quantize_config.bits,
-                group_size=self.quantize_config.group_size,
-                backend=BACKEND.AUTO,
-                desc_act=self.quantize_config.desc_act,
-                warmup_triton=autotune_warmup_after_quantized,
-                force_layer_back_to_cpu=True,
-                format=self.quantize_config.format,
-            )
+                bits = config["bits"]
+                group_size = config["group_size"]
+
+                from auto_round.utils import get_module, set_module
+                layer = get_module(model, name)
+                device = layer.weight.device
+
+                from auto_round_extension.cuda.qliner_triton import QuantLinear as TritonQuantLinear
+
+                if isinstance(layer, nn.Linear):
+                    in_features = layer.in_features
+                    out_features = layer.out_features
+                elif isinstance(layer, nn.Conv2d):
+                    in_features = layer.in_channels
+                    out_features = layer.out_channels
+                elif isinstance(layer, transformers.pytorch_utils.Conv1D):
+                    in_features = layer.weight.shape[0]
+                    out_features = layer.weight.shape[1]
+                bias = layer.bias is not None and torch.any(layer.bias)
+
+                new_layer = TritonQuantLinear(  ##pylint: disable=E1123
+                    bits, group_size, in_features, out_features, bias, weight_dtype=layer.weight.dtype
+                )
+
+                new_layer.device = device
+                set_module(model, name, new_layer)
+                qlayer = new_layer
+                scale = weight_config[name]["scale"]
+                zero = weight_config[name]["zp"]
+                # so far can only pack layer on CPU
+                qlayer.to("cpu")
+                ##force to float32 to be compatible with torch 2.0
+                layer, scale, zero = layer.to("cpu"), scale.to("cpu"), zero.to("cpu").to(torch.float32)
+                qlayer.pack(layer, scale, zero, None)
+                qlayer.to(device)
 
             self.model = model
             self._quantized = True
