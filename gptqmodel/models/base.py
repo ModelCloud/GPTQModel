@@ -325,6 +325,8 @@ class BaseGPTQModel(nn.Module)  :
                 qlayer.pack(layer, scale, zero, None)
                 qlayer.to(device)
 
+                self.qlinear_kernel = qlayer
+
             self.model = model
             self._quantized = True
             return
