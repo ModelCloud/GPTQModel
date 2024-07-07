@@ -103,6 +103,7 @@ class TestPerplexity(unittest.TestCase):
                 bits=4,
                 group_size=128,
                 format=format,
+                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
