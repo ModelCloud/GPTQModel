@@ -294,7 +294,7 @@ class BaseGPTQModel(nn.Module)  :
                 layer = get_module(model, name)
                 device = layer.weight.device
 
-                from auto_round_extension.cuda.qliner_triton import QuantLinear as TritonQuantLinear
+                from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 
                 if isinstance(layer, nn.Linear):
                     in_features = layer.in_features
@@ -307,7 +307,7 @@ class BaseGPTQModel(nn.Module)  :
                     out_features = layer.weight.shape[1]
                 bias = layer.bias is not None and torch.any(layer.bias)
 
-                new_layer = TritonQuantLinear(  ##pylint: disable=E1123
+                new_layer = TritonV2QuantLinear(  ##pylint: disable=E1123
                     bits, group_size, in_features, out_features, bias, weight_dtype=layer.weight.dtype
                 )
 
