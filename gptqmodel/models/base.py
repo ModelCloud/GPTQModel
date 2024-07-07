@@ -19,23 +19,22 @@ from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER,
-                                   META_QUANTIZER_GPTQMODEL, MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST,
-                                   AutoRoundQuantizeConfig)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
+                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
 from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
+from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
-                           convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
-                           get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
-                           gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model, simple_dispatch_model,
-                           verify_model_hash, verify_sharded_model_hashes, check_to_quantized)
-from ..utils.device import check_cuda
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
+                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
+                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
+                           verify_sharded_model_hashes)
 from ..version import __version__
-from ._const import CPU, DEVICE, CUDA_0, SUPPORTED_MODELS
+from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -232,8 +231,8 @@ class BaseGPTQModel(nn.Module)  :
             if self.quantize_config.lm_head:
                 weight_config['lm_head'] = {"data_type": "int"}
 
-            from torch.utils.data import DataLoader
             import torch.nn.functional as F
+            from torch.utils.data import DataLoader
 
             @torch.no_grad()
             def collate_batch(batch):

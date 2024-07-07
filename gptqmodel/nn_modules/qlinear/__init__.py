@@ -3,6 +3,7 @@ import torch.nn as nn
 from ...models._const import DEVICE, get_device_by_type
 from ...utils.device import check_cuda
 
+
 class BaseQuantLinear(nn.Module):
     SUPPORTED_BITS = []
     SUPPORTED_GROUP_SIZE = []

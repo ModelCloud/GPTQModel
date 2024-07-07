@@ -5,8 +5,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.models._const import DEVICE
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 logger = getLogger(__name__)
 
@@ -123,7 +123,7 @@ class QBitsQuantLinear(BaseQuantLinear):
                 zeros = (zeros.to(torch.int32) - (2 ** (self.bits - 1))).to(torch.int8)
 
         # qbits uses and sym=False and switches to sym=True is zeros are detected in model.post_init
-        # we need to make sure the model.config.sym is following this dynamic behaavior 
+        # we need to make sure the model.config.sym is following this dynamic behaavior
         quantize_config.sym = self.sym
 
         if self.sym:

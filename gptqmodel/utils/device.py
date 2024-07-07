@@ -1,5 +1,6 @@
 import torch
 
+
 def check_cuda(raise_exception: bool = True) -> bool:
     at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
 
