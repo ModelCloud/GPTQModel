@@ -10,7 +10,9 @@
 </p>
 
 ## News
-* 07/05/2024 🚀🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): Intel QBits support added for [2,3,4,8] bit quantization/inference on CPU. Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
+* 07/08/2024 🚀🚀 [v0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
+
+* 07/05/2024 🚀🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU. Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
 
 * 07/03/2024 🚀 [v0.9.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.4): HF Transformers integration added and bug fixed Gemma 2 support.
 
@@ -43,6 +45,8 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Added `Phi-3` Model Support
 * 🚀 Added `Qwen2MoE` Model Support
 * 🚀 Added `DBRX` Model Support (Converted Model)
+* 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
+* 🚀 [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU.
 * 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
 * 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * 🚀`lm_head` module quant inference support for further VRAM reduction. 
@@ -67,7 +71,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Roadmap (Target Date: July 2024):
 
-* `lm_head` quantization support by integrating with Intel/AutoRound.
+* <del>`lm_head` quantization support by integrating with Intel/AutoRound.</del> Completed
 * Customizable callback in Per-Layer quantization.
 * <del>Add Qbits (cpu inference) support from Intel/Qbits.</del> Completed
 * Add back ROCM/AMD support once everything is validated.
