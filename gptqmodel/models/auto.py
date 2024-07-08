@@ -37,6 +37,7 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
+from .internlm2 import InternLM2GPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -55,6 +56,7 @@ MODEL_MAP = {
     "falcon": RWGPTQ,
     "baichuan": BaiChuanGPTQ,
     "internlm": InternLMGPTQ,
+    "internlm2": InternLM2GPTQ,
     "qwen": QwenGPTQ,
     "mistral": MistralGPTQ,
     "Yi": YiGPTQ,
