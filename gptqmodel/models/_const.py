@@ -31,6 +31,7 @@ SUPPORTED_MODELS = [
     "RefinedWeb",
     "baichuan",
     "internlm",
+    "internlm2",
     "qwen",
     "xverse",
     "deci",
