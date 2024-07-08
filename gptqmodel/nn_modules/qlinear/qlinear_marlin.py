@@ -98,20 +98,20 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         self.register_buffer(
             "B",
-            torch.empty((self.original_infeatures // 16, self.original_outfeatures * 16 // 8), dtype=torch.int),
+            torch.empty((self.infeatures // 16, self.outfeatures * 16 // 8), dtype=torch.int),
         )
         self.register_buffer(
             "s",
-            torch.empty((self.original_infeatures // self.group_size, self.original_outfeatures), dtype=torch.half),
+            torch.empty((self.infeatures // self.group_size, self.outfeatures), dtype=torch.half),
         )
         # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
         self.register_buffer(
             "workspace",
-            torch.zeros(self.original_outfeatures // 128 * 16, dtype=torch.int),
+            torch.zeros(self.outfeatures // 128 * 16, dtype=torch.int),
             persistent=False,
         )
         if bias:
-            self.register_buffer("bias", torch.zeros((self.original_outfeatures), dtype=torch.half))
+            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
         else:
             self.bias = None
 
@@ -197,17 +197,6 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     def post_init(self):
         self.validate_device(self.B.device.type)
-
-        # resize due to padding after model weights have been loaded
-        if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
-            self.B.resize_(self.infeatures // 16, self.outfeatures * 16 // 8)
-            self.s.resize_(
-                self.infeatures // self.group_size, self.outfeatures
-            )
-            self.workspace = torch.zeros(self.outfeatures // 128 * 16, dtype=torch.int)
-            if self.bias is not None:
-                self.bias.resize_(self.outfeatures)
-
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
 @torch.no_grad()
