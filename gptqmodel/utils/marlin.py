@@ -143,7 +143,7 @@ def convert_to_marlin(
             )
 
         # workspace is never in the state_dict, thus we need to allocate it manually.
-        new_module.workspace = torch.zeros(module.outfeatures // 128 * 16, dtype=torch.int, device=module.device)
+        new_module.workspace = torch.zeros(new_module.outfeatures // 128 * 16, dtype=torch.int, device=module.device)
 
         # Dequantize the weight.
         if repack:
