@@ -1,3 +1,5 @@
+# License: GPTQModel/licenses/LICENSE.apache
+
 import ctypes
 import operator
 import os

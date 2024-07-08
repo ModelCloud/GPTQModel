@@ -10,6 +10,8 @@
 </p>
 
 ## News
+* 07/08/2024 🚀🚀 [v0.9.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.7): InternLM 2.5 model support added.
+
 * 07/08/2024 🚀🚀 [v0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
 
 * 07/05/2024 🚀🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU. Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
@@ -36,7 +38,7 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
-
+* 🚀 Added `InternLM 2.5` Model Support
 * 🚀 Added `Gemma 2` Model Support
 * 🚀 Added `DeepSeek-V2` Model Support
 * 🚀 Added `DeepSeek-V2-Lite` Model Support
@@ -81,16 +83,16 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Model Support ( 🚀 GPTQModel only )
 
-| Model          |    |                  |    |           |    |            |    |
-|----------------|----|------------------|----|-----------|----|------------|----|
-| Baichuan       | ✅  | DeepSeek-V2-Lite | 🚀 | Llama     | ✅  | Phi/Phi-3  | 🚀 |
-| Bloom          | ✅  | Falon            | ✅  | LongLLaMA | ✅  | Qwen       | ✅  |
-| ChatGLM        | 🚀 | Gemma 2          |  🚀  | MiniCPM   | 🚀 | Qwen2MoE   | 🚀 |
-| CodeGen        | ✅  | GPTBigCod        | ✅  | Mistral   | ✅  | RefinedWeb | ✅  |
-| Cohere         | ✅  | GPTNeoX          | ✅  | Mixtral   | ✅  | StableLM   | ✅  |
-| DBRX Converted | 🚀 | GPT-2            | ✅  | MOSS      | ✅  | StarCoder2 | ✅  |
-| Deci           | ✅  | GPT-J            | ✅  | MPT       | ✅  | XVERSE     | ✅  |
-| DeepSeek-V2    | 🚀 | InternLM         | ✅  | OPT       | ✅  | Yi         | ✅  |
+| Model          |    |                       |    |           |    |            |    |
+|----------------|----|-----------------------|----|-----------|----|------------|----|
+| Baichuan       | ✅  | DeepSeek-V2-Lite      | 🚀 | Llama     | ✅  | Phi/Phi-3  | 🚀 |
+| Bloom          | ✅  | Falon                 | ✅  | LongLLaMA | ✅  | Qwen       | ✅  |
+| ChatGLM        | 🚀 | Gemma 2               |  🚀  | MiniCPM   | 🚀 | Qwen2MoE   | 🚀 |
+| CodeGen        | ✅  | GPTBigCod             | ✅  | Mistral   | ✅  | RefinedWeb | ✅  |
+| Cohere         | ✅  | GPTNeoX               | ✅  | Mixtral   | ✅  | StableLM   | ✅  |
+| DBRX Converted | 🚀 | GPT-2                 | ✅  | MOSS      | ✅  | StarCoder2 | ✅  |
+| Deci           | ✅  | GPT-J                 | ✅  | MPT       | ✅  | XVERSE     | ✅  |
+| DeepSeek-V2    | 🚀 | InternLM/InternLM 2.5 | 🚀  | OPT       | ✅  | Yi         | ✅  |
 
 ## Compatiblity 
 

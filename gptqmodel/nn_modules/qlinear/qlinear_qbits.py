@@ -1,3 +1,5 @@
+# License: GPTQModel/licenses/LICENSE.apache
+
 import math
 from logging import getLogger
 
