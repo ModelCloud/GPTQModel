@@ -2,6 +2,7 @@ name: Ruff Check
 
 on:
   push:
+  pull_request:
 
 jobs:
   ruff-check:
@@ -14,6 +15,9 @@ jobs:
   
     steps:
     - uses: actions/checkout@v4
+      with:
+        repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        ref: ${{ github.event.pull_request.head.ref || github.ref }}
     - uses: actions/setup-python@v5 
       with:
         python-version: ${{ matrix.python-version }}
@@ -21,5 +25,4 @@ jobs:
 
     - name: Ruff Check
       run: |
-        cd format
-        ./format.sh
+        format/format.sh
