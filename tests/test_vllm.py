@@ -16,38 +16,38 @@ class TestLoadVLLM(unittest.TestCase):
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-    # def test_load_vllm(self):
-    #     model = GPTQModel.from_quantized(
-    #         self.MODEL_ID,
-    #         device="cuda:0",
-    #         backend=BACKEND.VLLM,
-    #         trust_remote_code=True,
-    #     )
-    #     outputs = model.generate(
-    #         load_format="vllm",
-    #         prompts=self.prompts,
-    #         sampling_params=self.sampling_params,
-    #     )
-    #     for output in outputs:
-    #         prompt = output.prompt
-    #         generated_text = output.outputs[0].text
-    #         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    #     self.assertTrue(outputs is not None)
-
-    def test_load_sglang(self):
+    def test_load_vllm(self):
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device="cuda:0",
-            backend=BACKEND.SGLANG,
+            backend=BACKEND.VLLM,
             trust_remote_code=True,
         )
-
-        output = model.generate(
-            load_format="sglang",
+        outputs = model.generate(
+            load_format="vllm",
             prompts=self.prompts,
             sampling_params=self.sampling_params,
         )
-        text = output["text"]
-        print(f"generate text: {text}")
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        self.assertTrue(outputs is not None)
 
-        self.assertTrue(model is not None)
+    # def test_load_sglang(self):
+    #     model = GPTQModel.from_quantized(
+    #         self.MODEL_ID,
+    #         device="cuda:0",
+    #         backend=BACKEND.SGLANG,
+    #         trust_remote_code=True,
+    #     )
+    #
+    #     output = model.generate(
+    #         load_format="sglang",
+    #         prompts=self.prompts,
+    #         sampling_params=self.sampling_params,
+    #     )
+    #     text = output["text"]
+    #     print(f"generate text: {text}")
+    #
+    #     self.assertTrue(model is not None)
