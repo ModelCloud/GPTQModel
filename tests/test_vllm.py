@@ -21,11 +21,9 @@ class TestLoadVLLM(unittest.TestCase):
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
-            trust_remote_code=True,
             gpu_memory_utilization=0.2
         )
         outputs = model.generate(
-            load_format="vllm",
             prompts=self.prompts,
             sampling_params=self.sampling_params,
         )
