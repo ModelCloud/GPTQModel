@@ -174,18 +174,19 @@ class ExllamaQuantLinear(BaseQuantLinear):
     def forward(self, x):
         if x.dtype != torch.float16:
             logger.warning_once(
-                f"The exllama kernel for GPTQ requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+                f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
 
             x = x.half()
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if infeatures is padded, we need to pad the input as well
-        if x.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
+        if x.size(-1) != self.infeatures:
             x = F.pad(x, (0, self.infeatures - self.original_infeatures))
 
         out = ext_q4_matmul(x, self.q4, self.width)
 
         if self.bias is not None:
             out.add_(self.bias)
+
         return out

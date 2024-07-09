@@ -178,10 +178,13 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     def forward(self, A):
         A = A.half()
+
+        # padding
         if A.size(-1) != self.infeatures:
             A = F.pad(A, (0, self.infeatures - self.original_infeatures))
 
         C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
+
         if C.size(-1) != self.outfeatures:
             C = F.pad(C, (0, self.outfeatures - self.original_outfeatures))
 
@@ -194,10 +197,11 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
         C = C + self.bias if self.bias is not None else C
 
+        # revert padding
         if self.outfeatures != self.original_outfeatures:
-            C = C[:, :, :self.original_outfeatures]
-
-        return C
+            return C[:, :, :self.original_outfeatures]
+        else:
+            return C
 
     def post_init(self):
         self.validate_device(self.B.device.type)
