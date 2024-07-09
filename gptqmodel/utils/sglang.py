@@ -1,12 +1,10 @@
-import sglang
-from sglang.srt.server import Runtime
 import optimizer
-from sglang.srt.managers.io_struct import GenerateReqInput
-from sglang.srt.server import generate_request
+
 def load_model_by_sglang(
     model,
     trust_remote_code,
 ):
+    from sglang.srt.server import Runtime
     model = Runtime(
         model_path=model,
         tokenizer_path=model,
@@ -27,10 +25,11 @@ async def sglang_generate(
         model,
         **kwargs,
 ):
+    from sglang.srt.managers.io_struct import GenerateReqInput
+    from sglang.srt.server import generate_request
     prompts = kwargs.pop("prompts", None)
     input_ids = model.tokenizer.encode(prompts)
     sampling_params = kwargs.pop("sampling_params", None)
     req = GenerateReqInput(input_ids=input_ids, sampling_params=sampling_params, stream=False)
     output: dict = await generate_request(req)
-
     return output
