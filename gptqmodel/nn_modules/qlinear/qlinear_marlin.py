@@ -99,20 +99,20 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         self.register_buffer(
             "B",
-            torch.empty((self.original_infeatures // 16, self.original_outfeatures * 16 // 8), dtype=torch.int),
+            torch.empty((self.infeatures // 16, self.outfeatures * 16 // 8), dtype=torch.int),
         )
         self.register_buffer(
             "s",
-            torch.empty((self.original_infeatures // self.group_size, self.original_outfeatures), dtype=torch.half),
+            torch.empty((self.infeatures // self.group_size, self.outfeatures), dtype=torch.half),
         )
         # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
         self.register_buffer(
             "workspace",
-            torch.zeros(self.original_outfeatures // 128 * 16, dtype=torch.int),
+            torch.zeros(self.outfeatures // 128 * 16, dtype=torch.int),
             persistent=False,
         )
         if bias:
-            self.register_buffer("bias", torch.zeros((self.original_outfeatures), dtype=torch.half))
+            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
         else:
             self.bias = None
 
@@ -169,9 +169,6 @@ class MarlinQuantLinear(BaseQuantLinear):
             q |= res[:, i::8] << 4 * i
         q = torch.from_numpy(q.astype(np.int32)).to(w.device)
 
-        q.resize_((self.original_infeatures // 16, self.original_outfeatures * 16 // 8))
-        s.resize_((self.original_infeatures // self.group_size, self.original_outfeatures))
-
         self.B[:, :] = q.to(self.B.device)
         self.s[:, :] = s.to(self.s.device)
 
@@ -189,6 +186,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
         if C.size(-1) != self.outfeatures and self.outfeatures > self.original_outfeatures:
             C = F.pad(C, (0, self.outfeatures - self.original_outfeatures))
+
         mul(
             A.view((-1, A.shape[-1])),
             self.B,
@@ -198,20 +196,13 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
         C = C + self.bias if self.bias is not None else C
 
-        C = C[:, :, :self.original_outfeatures]
+        if self.outfeatures != self.original_outfeatures:
+            C = C[:, :, :self.original_outfeatures]
 
         return C
 
     def post_init(self):
         self.validate_device(self.B.device.type)
-        if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
-            self.B.resize_(self.infeatures // 16, self.outfeatures * 16 // 8)
-            self.s.resize_(
-                self.infeatures // self.group_size, self.outfeatures
-            )
-            self.workspace = torch.zeros(self.outfeatures // 128 * 16, dtype=torch.int)
-            if self.bias is not None:
-                self.bias.resize_(self.outfeatures)
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
 @torch.no_grad()
