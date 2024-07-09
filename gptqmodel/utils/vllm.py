@@ -4,10 +4,12 @@ from vllm import LLM, SamplingParams
 def load_model_by_vllm(
     model,
     trust_remote_code,
+    **kwargs,
 ):
     model = LLM(
         model=model,
         trust_remote_code=trust_remote_code,
+        **kwargs,
     )
 
     return model

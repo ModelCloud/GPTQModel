@@ -48,7 +48,6 @@ logger.setLevel(logging.INFO)
 
 class BaseGPTQModel(nn.Module)  :
     # these modules are non-repeating and at the root level
-    # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     base_modules: List[str] = None
 
@@ -84,6 +83,7 @@ class BaseGPTQModel(nn.Module)  :
         qlinear_kernel: nn.Module = None,
     ):
         super().__init__()
+
         self.model = model
         self.model_type = self.model.config.model_type
         self._quantized = quantized
@@ -1132,7 +1132,7 @@ class BaseGPTQModel(nn.Module)  :
             )
             load_checkpoint_in_model = True
             quantize_config.format = FORMAT.GPTQ_V2
-        if backend == BACKEND.VLLM
+        if backend == BACKEND.VLLM:
             if quantize_config.format != FORMAT.GPTQ and quantize_config.format != FORMAT.GPTQ_V2:
                 raise ValueError(f"{backend} backend only supports FORMAT.GPTQ.{quantize_config.format}")
 
@@ -1140,6 +1140,7 @@ class BaseGPTQModel(nn.Module)  :
                 model = load_model_by_vllm(
                     model=model_name_or_path,
                     trust_remote_code=trust_remote_code,
+                    **kwargs,
                 )
                 model.config = model.llm_engine.model_config
                 model.config.model_type = "vllm"

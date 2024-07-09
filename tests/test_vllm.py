@@ -22,6 +22,7 @@ class TestLoadVLLM(unittest.TestCase):
             device="cuda:0",
             backend=BACKEND.VLLM,
             trust_remote_code=True,
+            gpu_memory_utilization=0.2
         )
         outputs = model.generate(
             load_format="vllm",
@@ -33,21 +34,3 @@ class TestLoadVLLM(unittest.TestCase):
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         self.assertTrue(outputs is not None)
-
-    # def test_load_sglang(self):
-    #     model = GPTQModel.from_quantized(
-    #         self.MODEL_ID,
-    #         device="cuda:0",
-    #         backend=BACKEND.SGLANG,
-    #         trust_remote_code=True,
-    #     )
-    #
-    #     output = model.generate(
-    #         load_format="sglang",
-    #         prompts=self.prompts,
-    #         sampling_params=self.sampling_params,
-    #     )
-    #     text = output["text"]
-    #     print(f"generate text: {text}")
-    #
-    #     self.assertTrue(model is not None)
