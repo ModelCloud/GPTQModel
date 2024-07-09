@@ -137,13 +137,13 @@ def convert_to_marlin(
                 group_size=module.group_size,
                 sym=sym,
                 desc_act=desc_act,
-                infeatures=module.infeatures,
-                outfeatures=module.outfeatures,
+                infeatures=module.original_infeatures,
+                outfeatures=module.original_outfeatures,
                 bias=module.bias is not None,
             )
 
         # workspace is never in the state_dict, thus we need to allocate it manually.
-        new_module.workspace = torch.zeros(module.outfeatures // 128 * 16, dtype=torch.int, device=module.device)
+        new_module.workspace = torch.zeros(new_module.outfeatures // 128 * 16, dtype=torch.int, device=module.device)
 
         # Dequantize the weight.
         if repack:
