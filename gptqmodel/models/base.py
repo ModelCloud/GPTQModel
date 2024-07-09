@@ -1133,8 +1133,8 @@ class BaseGPTQModel(nn.Module)  :
             load_checkpoint_in_model = True
             quantize_config.format = FORMAT.GPTQ_V2
         if backend == BACKEND.VLLM:
-            if quantize_config.format != FORMAT.GPTQ and quantize_config.format != FORMAT.GPTQ_V2:
-                raise ValueError(f"{backend} backend only supports FORMAT.GPTQ.{quantize_config.format}")
+            if quantize_config.format != FORMAT.GPTQ:
+                raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
 
             if backend == BACKEND.VLLM:
                 model = load_model_by_vllm(
