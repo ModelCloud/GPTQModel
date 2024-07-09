@@ -3,12 +3,10 @@ from vllm import LLM, SamplingParams
 
 def load_model_by_vllm(
     model,
-    trust_remote_code,
     **kwargs,
 ):
     model = LLM(
         model=model,
-        trust_remote_code=trust_remote_code,
         **kwargs,
     )
 
@@ -20,5 +18,10 @@ def vllm_generate(
 ):
     prompts = kwargs.pop("prompts", None)
     sampling_params = kwargs.pop("sampling_params", None)
-    outputs = model.generate(prompts, sampling_params)
+    if isinstance(sampling_params, SamplingParams):
+        outputs = model.generate(prompts, sampling_params)
+    else:
+        # TODO: convert/extract HF generate params and convert into vllm.SamplingParams
+        raise ValueError("Please pass in vllm.SamplingParams as `sampling_params`.")
+    
     return outputs
