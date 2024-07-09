@@ -591,12 +591,12 @@ class BaseGPTQModel(nn.Module)  :
 
     def generate(self, **kwargs):
         """shortcut for model.generate"""
-        with torch.inference_mode():
-            if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
+        if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
+            with torch.inference_mode():
                 return vllm_generate(self.model, **kwargs)
-            else:
-                with torch.amp.autocast(device_type=self.device.type):
-                  return self.model.generate(**kwargs)
+        else:
+            with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
+                return self.model.generate(**kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
