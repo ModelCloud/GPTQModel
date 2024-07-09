@@ -29,6 +29,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.vllm import load_model_by_vllm, vllm_generate
+from ..utils.sglang import load_model_by_sglang, sglang_generate
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
                            find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
@@ -597,8 +598,8 @@ class BaseGPTQModel(nn.Module)  :
         with torch.inference_mode():
             if load_format == 'vllm':
                 return vllm_generate(self.model, **kwargs)
-            # elif load_format == 'sglang':
-            #     return sglang_generate_api(self.model, **kwargs)
+            elif load_format == 'sglang':
+                return sglang_generate(self.model, **kwargs)
             else:
                 torch.amp.autocast(device_type=self.device.type)
                 return self.model.generate(**kwargs)
@@ -1147,17 +1148,20 @@ class BaseGPTQModel(nn.Module)  :
                 )
                 model.config = model.llm_engine.model_config
                 model.config.model_type = "vllm"
-            # if backend == BACKEND.SGLANG:
-            #     model = load_model_by_sglang(
-            #         model=model_name_or_path,
-            #     )
-            # return model
+
+            if backend == BACKEND.SGLANG:
+                model = load_model_by_sglang(
+                    model=model_name_or_path,
+                     trust_remote_code=trust_remote_code,
+                )
+
             return cls(
                 model,
                 quantized=True,
                 quantize_config=quantize_config,
                 qlinear_kernel=None,
             )
+
         if backend == BACKEND.MARLIN:
             if is_sharded:
                 raise ValueError(

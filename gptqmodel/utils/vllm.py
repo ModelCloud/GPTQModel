@@ -9,7 +9,6 @@ def load_model_by_vllm(
         model=model,
         trust_remote_code=trust_remote_code,
     )
-    print(f"pzs-----{model}")
 
     return model
 
