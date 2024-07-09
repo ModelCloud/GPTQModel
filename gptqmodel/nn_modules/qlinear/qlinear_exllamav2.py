@@ -182,20 +182,21 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     def forward(self, x, force_cuda=False):
         if x.dtype != torch.float16:
             logger.warning_once(
-                f"The exllama v2 kernel for GPTQ requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+                f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
 
             x = x.half()
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if infeatures is padded, we need to pad the input as well
-        if x.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
+        if x.size(-1) != self.infeatures:
             x = F.pad(x, (0, self.infeatures - self.original_infeatures))
 
         output = ext_gemm_half_q_half(x, self.q_handle, self.outfeatures, force_cuda)
 
         if self.bias is not None:
             output.add_(self.bias)
+
         return output
 
     def temp_dq_size(self):
