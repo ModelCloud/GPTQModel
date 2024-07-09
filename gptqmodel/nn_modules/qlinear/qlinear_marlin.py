@@ -189,7 +189,6 @@ class MarlinQuantLinear(BaseQuantLinear):
         C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
         if C.size(-1) != self.outfeatures and self.outfeatures > self.original_outfeatures:
             C = F.pad(C, (0, self.outfeatures - self.original_outfeatures))
-
         mul(
             A.view((-1, A.shape[-1])),
             self.B,
@@ -198,6 +197,9 @@ class MarlinQuantLinear(BaseQuantLinear):
             self.workspace,
         )
         C = C + self.bias if self.bias is not None else C
+
+        C = C[:, :, :self.original_outfeatures]
+
         return C
 
     def post_init(self):
