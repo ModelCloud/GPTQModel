@@ -28,8 +28,6 @@ def mul(A, B, C, s, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
 
 
 # Precompute permutations for Marlin weight and scale shuffling
-
-
 def _get_perms():
     perm = []
     for i in range(32):
@@ -180,11 +178,11 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     def forward(self, A):
         A = A.half()
-        if A.size(-1) != self.infeatures and self.infeatures > self.original_infeatures:
+        if A.size(-1) != self.infeatures:
             A = F.pad(A, (0, self.infeatures - self.original_infeatures))
 
         C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
-        if C.size(-1) != self.outfeatures and self.outfeatures > self.original_outfeatures:
+        if C.size(-1) != self.outfeatures:
             C = F.pad(C, (0, self.outfeatures - self.original_outfeatures))
 
         mul(
