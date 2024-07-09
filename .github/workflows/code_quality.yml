@@ -21,5 +21,4 @@ jobs:
 
     - name: Ruff Check
       run: |
-        cd format
-        ./format.sh
+        format/format.sh
