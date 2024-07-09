@@ -1136,14 +1136,20 @@ class BaseGPTQModel(nn.Module)  :
             if quantize_config.format != FORMAT.GPTQ:
                 raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
 
-            if backend == BACKEND.VLLM:
-                model = load_model_by_vllm(
-                    model=model_name_or_path,
-                    trust_remote_code=trust_remote_code,
-                    **kwargs,
+            if is_sharded:
+                raise ValueError(
+                    "The loading of sharded checkpoints with BACKEND.VLLM is currently not supported."
                 )
-                model.config = model.llm_engine.model_config
-                model.config.model_type = "vllm"
+              
+            model = load_model_by_vllm(
+                model=model_name_or_path,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+
+            # TODO: do we really need the following two lines?
+            model.config = model.llm_engine.model_config
+            model.config.model_type = "vllm"
 
             return cls(
                 model,
