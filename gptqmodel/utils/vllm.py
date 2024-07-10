@@ -50,7 +50,6 @@ def vllm_generate(
     sampling_params = kwargs.pop("sampling_params", None)
 
     if not isinstance(sampling_params, SamplingParams):
-        logging.info("Please pass in vllm.SamplingParams as `sampling_params`.")
         hf_params = {key: kwargs[key] for key in [
             'num_return_sequences', 'repetition_penalty', 'temperature',
             'top_k', 'top_p', 'max_length', 'min_length',
