@@ -31,14 +31,20 @@ class TestPerplexity(unittest.TestCase):
     N_CTX = 512
     N_BATCH = 512
 
-    def calculate_avg_ppl(self, model, tokenizer, format: FORMAT):
+    def get_config_with_format(self, format: FORMAT):
+        if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
+            return self.OPT_DATASET_PATH, self.OPT_DATASET_NAME, self.OPT_DATASET_SPLIT, self.OPT_DATASET_COLUMN, self.OPT_MODEL_ID, self.opt_tokenizer
+        else:
+            return self.TINYLLAMA_DATASET_PATH, self.TINYLLAMA_DATASET_NAME, self.TINYLLAMA_DATASET_SPLIT, self.TINYLLAMA_DATASET_COLUMN, self.TINYLLAMA_MODEL_ID, self.tinyllama_tokenizer
+
+    def calculate_avg_ppl(self, path, name, split, column, model, tokenizer):
         ppl = Perplexity(
             model=model,
             tokenizer=tokenizer,
-            dataset_path=self.OPT_DATASET_PATH if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_PATH,
-            dataset_name=self.OPT_DATASET_NAME if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_NAME,
-            split=self.OPT_DATASET_SPLIT if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_SPLIT,
-            text_column=self.OPT_DATASET_COLUMN if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_COLUMN,
+            dataset_path=path,
+            dataset_name=name,
+            split=split,
+            text_column=column,
         )
 
         all = ppl.calculate(n_ctx=self.N_CTX, n_batch=self.N_BATCH)
@@ -60,28 +66,32 @@ class TestPerplexity(unittest.TestCase):
         if not self.opt_tokenizer.pad_token_id:
             self.opt_tokenizer.pad_token_id = self.opt_tokenizer.eos_token_id
 
-        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(self, self.tinyllama_tokenizer, FORMAT.GPTQ)
-        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl(self, self.opt_tokenizer, FORMAT.MARLIN)
+        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(self, FORMAT.GPTQ)
+        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl(self, FORMAT.MARLIN)
 
 
-    def calculate_native_ppl(self, tokenizer, format):
-        model_id = self.OPT_MODEL_ID if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_MODEL_ID
+    def calculate_native_ppl(self, format):
+        dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(self, format)
+
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
         )
 
-        native_ppl = self.calculate_avg_ppl(self, model, tokenizer, format)
+        native_ppl = self.calculate_avg_ppl(
+            self,
+            dataset_path,
+            dataset_name,
+            dataset_split,
+            dataset_column,
+            model,
+            tokenizer,
+        )
 
         print(f"{model_id} Native PPL: {native_ppl}")
 
         #  4090: [wikitext-2-raw-v1, test, text, 512, 512] data split, tinyllama ppl == 8.4790, opt ppl == 30.02
         # assert self.native_ppl < 30.5
-
-        dataset_path = self.OPT_DATASET_PATH if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_PATH
-        dataset_name = self.OPT_DATASET_NAME if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_NAME
-        dataset_split = self.OPT_DATASET_SPLIT if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_SPLIT
-        dataset_column = self.OPT_DATASET_COLUMN if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_DATASET_COLUMN
 
         length = 512 if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else 2048
         traindata = load_dataset(dataset_path, dataset_name, split=dataset_split).filter(lambda x: len(x[dataset_column]) >= length)
@@ -114,8 +124,10 @@ class TestPerplexity(unittest.TestCase):
         else:
             raise ValueError(f"Invalid quantization method: {method}")
 
+        dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(format)
+
         model = GPTQModel.from_pretrained(
-            self.OPT_MODEL_ID if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.TINYLLAMA_MODEL_ID,
+            model_id,
             quantize_config=quantize_config,
         )
 
@@ -134,7 +146,14 @@ class TestPerplexity(unittest.TestCase):
                 device_map="auto",
             )
 
-            quantized_ppl = self.calculate_avg_ppl(model, self.opt_tokenizer if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_tokenizer, format)
+            quantized_ppl = self.calculate_avg_ppl(
+                dataset_path,
+                dataset_name,
+                dataset_split,
+                dataset_column,
+                model,
+                tokenizer,
+            )
 
             print(f"Format {format}, Quantized PPL: {quantized_ppl}")
 
