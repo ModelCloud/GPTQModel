@@ -34,6 +34,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
                            verify_sharded_model_hashes)
 from ..utils.vllm import load_model_by_vllm, vllm_generate
+from ..utils.sglang import load_model_by_sglang, sglang_generate
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -594,6 +595,9 @@ class BaseGPTQModel(nn.Module)  :
         if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
             with torch.inference_mode():
                 return vllm_generate(self.model, **kwargs)
+        elif hasattr(self.model.config, "model_type") and self.model.config.model_type == "sglang":
+            with torch.inference_mode():
+                return sglang_generate(self.model, **kwargs)
         else:
             with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
                 return self.model.generate(**kwargs)
@@ -949,19 +953,27 @@ class BaseGPTQModel(nn.Module)  :
             if not isinstance(quantize_config, QuantizeConfig):
                 quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
 
-        if backend == BACKEND.VLLM:
+        if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
                 raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
+            if backend == BACKEND.VLLM:
+                model = load_model_by_vllm(
+                    model=model_name_or_path,
+                    trust_remote_code=trust_remote_code,
+                    **kwargs,
+                )
 
-            model = load_model_by_vllm(
-                model=model_name_or_path,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
+                model.config = model.llm_engine.model_config
+                model.config.model_type = "vllm"
 
-            model.config = model.llm_engine.model_config
-            model.config.model_type = "vllm"
-
+            elif backend == BACKEND.SGLANG:
+                model, hf_config = load_model_by_sglang(
+                    model=model_name_or_path,
+                    trust_remote_code=trust_remote_code,
+                    **kwargs,
+                )
+                model.config = hf_config
+                model.config.model_type = "sglang"
             return cls(
                 model,
                 quantized=True,

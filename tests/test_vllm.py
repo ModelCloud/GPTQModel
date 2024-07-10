@@ -33,7 +33,7 @@ class TestLoadVLLM(unittest.TestCase):
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
+        self.assertTrue(outputs is not None)
         outputs_param = model.generate(
             prompts=self.prompts,
             temperature=0.8,
@@ -43,5 +43,5 @@ class TestLoadVLLM(unittest.TestCase):
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        self.assertTrue(outputs_param is not None)
 
-        self.assertTrue(outputs is not None)
