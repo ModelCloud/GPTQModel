@@ -1149,32 +1149,32 @@ class BaseGPTQModel(nn.Module)  :
                 load_checkpoint_in_model=load_checkpoint_in_model,
             )
 
-            # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-            if quantize_config.format == FORMAT.GPTQ:
-                accelerate.load_checkpoint_in_model(
-                    model,
-                    dtype=torch_dtype,
-                    # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-                    checkpoint=model_save_name,
-                    device_map=device_map,
-                    offload_state_dict=True,
-                    offload_buffers=True,
+        # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
+        if quantize_config.format == FORMAT.GPTQ:
+            accelerate.load_checkpoint_in_model(
+                model,
+                dtype=torch_dtype,
+                # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                checkpoint=model_save_name,
+                device_map=device_map,
+                offload_state_dict=True,
+                offload_buffers=True,
+            )
+            # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
+            if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
+                raise ValueError(
+                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
-                # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-                if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
-                    raise ValueError(
-                        f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
-                    )
 
-                logger.info(
-                    f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
-                model = convert_gptq_v1_to_v2_format(
-                    model,
-                    quantize_config=quantize_config,
-                    qlinear_kernel=preload_qlinear_kernel,
-                )
-                load_checkpoint_in_model = True
-                quantize_config.format = FORMAT.GPTQ_V2
+            logger.info(
+                f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            model = convert_gptq_v1_to_v2_format(
+                model,
+                quantize_config=quantize_config,
+                qlinear_kernel=preload_qlinear_kernel,
+            )
+            load_checkpoint_in_model = True
+            quantize_config.format = FORMAT.GPTQ_V2
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
