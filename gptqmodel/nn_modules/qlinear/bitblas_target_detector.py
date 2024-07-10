@@ -31,6 +31,7 @@ def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
             encoding="utf-8",
         ).strip()
     except subprocess.CalledProcessError as e:
+        # print(f"nvidia-smi error: {e}")
         logger.info("nvidia-smi failed with error: %s", e)
         return None
 
@@ -53,9 +54,10 @@ def find_best_match(tags, query):
     """
     MATCH_THRESHOLD = 25
     best_match, score = process.extractOne(query, tags)
-    logger.info(f"TVM arch find_best_match: best_match = {best_match}, score = {score}")
+    # print(f"TVM arch find_best_match: best_match = {best_match}, score = {score}")
 
     def check_target(best, default):
+        # print(f"Target(best) = {Target(best)}, Target(default)  = {Target(default)}")
         return best if Target(best).arch == Target(default).arch else default
 
     if check_target(best_match, "cuda") == best_match:
@@ -90,6 +92,7 @@ def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
 
     # Get the current GPU model and find the best matching target
     gpu_model = get_gpu_model_from_nvidia_smi(gpu_id=gpu_id)
+    # print(f"gpu_model: {gpu_model}")
 
     # compat: Nvidia makes several oem (non-public) versions of A100 and perhaps other models that
     # do not have clearly defined TVM matching target so we need to manually map them to the correct one.
