@@ -43,7 +43,8 @@ def import_bitblas():
 
         bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
         BITBLAS_TARGET = patched_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-        # print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
+        os.environ["TVM_TARGET"] = f"{BITBLAS_TARGET}"
+        print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
         from importlib.metadata import version
