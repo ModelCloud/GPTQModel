@@ -11,7 +11,7 @@ class BACKEND(Enum):
     MARLIN = 6
     BITBLAS = 7
     QBITS = 8
-
+    VLLM = 9
 
 def get_backend(backend: str):
     try:

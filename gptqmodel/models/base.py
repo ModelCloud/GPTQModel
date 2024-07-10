@@ -33,6 +33,7 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
                            verify_sharded_model_hashes)
+from ..utils.vllm import load_model_by_vllm, vllm_generate
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -590,8 +591,12 @@ class BaseGPTQModel(nn.Module)  :
 
     def generate(self, **kwargs):
         """shortcut for model.generate"""
-        with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
-            return self.model.generate(**kwargs)
+        if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
+            with torch.inference_mode():
+                return vllm_generate(self.model, **kwargs)
+        else:
+            with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
+                return self.model.generate(**kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
@@ -943,6 +948,26 @@ class BaseGPTQModel(nn.Module)  :
         else:
             if not isinstance(quantize_config, QuantizeConfig):
                 quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
+
+        if backend == BACKEND.VLLM:
+            if quantize_config.format != FORMAT.GPTQ:
+                raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
+
+            model = load_model_by_vllm(
+                model=model_name_or_path,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+
+            model.config = model.llm_engine.model_config
+            model.config.model_type = "vllm"
+
+            return cls(
+                model,
+                quantized=True,
+                quantize_config=quantize_config,
+                qlinear_kernel=None,
+            )
 
         if quantize_config.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
