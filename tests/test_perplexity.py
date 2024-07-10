@@ -100,24 +100,26 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
-            (QUANT_METHOD.GPTQ, FORMAT.MARLIN),
-            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS),
-            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.MARLIN, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
+            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
         ]
     )
-    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT):
+    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
-                bits=4,
+                bits=bits,
                 group_size=128,
                 format=format,
                 desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
-                bits=4,
+                bits=bits,
                 group_size=128,
                 format=format,
             )

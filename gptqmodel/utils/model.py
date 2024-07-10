@@ -110,7 +110,7 @@ def make_quant(
     bits: int,
     group_size: int,
     backend: BACKEND,
-    format: str,
+    format: str | FORMAT,
     desc_act: bool = False,
     sym: bool = True,
     pack: bool = False,
