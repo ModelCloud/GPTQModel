@@ -4,8 +4,10 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
-from vllm import LLM, SamplingParams  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from vllm import SamplingParams  # noqa: E402
+
 
 class TestLoadVLLM(unittest.TestCase):
     MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"

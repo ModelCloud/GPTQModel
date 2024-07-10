@@ -19,6 +19,7 @@ from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
 from .internlm import InternLMGPTQ
+from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
 from .minicpm import MiniCPMGPTQ
@@ -37,7 +38,6 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .internlm2 import InternLM2GPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
