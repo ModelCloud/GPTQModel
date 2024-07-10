@@ -91,10 +91,6 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         self.group_size = group_size if group_size != -1 else infeatures
 
-        del infeatures
-        del outfeatures
-        del group_size
-
         self.register_buffer(
             "B",
             torch.empty((self.infeatures // 16, self.outfeatures * 16 // 8), dtype=torch.int),
@@ -132,11 +128,11 @@ class MarlinQuantLinear(BaseQuantLinear):
         w = linear.weight.data.t()
 
         if self.infeatures != self.original_infeatures or self.outfeatures != self.original_outfeatures:
-            padded_w = torch.zeros((self.infeatures, self.outfeatures))
+            padded_w = torch.zeros((self.infeatures, self.outfeatures), dtype=w.dtype, device=w.device)
             padded_w[:w.size(0), :w.size(1)] = w
             w = padded_w
 
-            padded_s = torch.zeros((s.size(0), self.outfeatures))
+            padded_s = torch.zeros((s.size(0), self.outfeatures), dtype=torch.half, device=s.device)
             padded_s[:s.size(0), :s.size(1)] = s
             s = padded_s
 
@@ -184,10 +180,6 @@ class MarlinQuantLinear(BaseQuantLinear):
             A = F.pad(A, (0, self.infeatures - self.original_infeatures))
 
         C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
-
-        if C.size(-1) != self.outfeatures:
-            C = F.pad(C, (0, self.outfeatures - self.original_outfeatures))
-
         mul(
             A.view((-1, A.shape[-1])),
             self.B,
