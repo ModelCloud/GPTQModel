@@ -27,7 +27,7 @@ def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
     try:
         # Execute nvidia-smi command to get the GPU name
         output = subprocess.check_output(
-            ["nvidia-smi", f"--id={gpu_id}", "--query-gpu=gpu_name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
             encoding="utf-8",
         ).strip()
     except subprocess.CalledProcessError as e:
