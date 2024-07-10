@@ -19,6 +19,7 @@ BITBLAS_PROPAGATE_WEIGHTS = False
 
 
 def import_bitblas():
+    # print("import_bitblas() called")
     global BITBLAS_DATABASE_PATH, BITBLAS_TARGET
 
     # guard against bitblas pip whl incompatible env
@@ -35,14 +36,14 @@ def import_bitblas():
 
     bitblas.set_log_level("INFO")
 
-    import bitblas
+    # import bitblas
 
     if BITBLAS_TARGET is None:
         from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
         bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
-        BITBLAS_TARGET = bitblas.auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
-        logger.info(f"BITBLAS_TARGET {BITBLAS_TARGET}")
+        BITBLAS_TARGET = patched_auto_detect_nvidia_target(int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")))
+        # print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
         from importlib.metadata import version
