@@ -43,7 +43,7 @@ class TestLoadSglang(unittest.TestCase):
         async for output_params in stream_params:
             buffer_params.append(output_params)
         print("".join(buffer_params))
-        
+
         model.shutdown()
         del model
 

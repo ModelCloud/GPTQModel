@@ -1,4 +1,3 @@
-import logging
 
 try:
     from vllm import LLM, SamplingParams

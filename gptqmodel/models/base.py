@@ -33,8 +33,8 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
                            verify_sharded_model_hashes)
-from ..utils.vllm import load_model_by_vllm, vllm_generate
 from ..utils.sglang import load_model_by_sglang, sglang_generate
+from ..utils.vllm import load_model_by_vllm, vllm_generate
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
