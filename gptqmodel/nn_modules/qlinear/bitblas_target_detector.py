@@ -3,7 +3,6 @@
 import logging
 import os
 import subprocess
-from functools import lru_cache
 from typing import List
 
 from thefuzz import process
@@ -18,7 +17,6 @@ TARGET_MISSING_ERROR = (
 )
 
 
-@lru_cache
 def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
     """
     Executes the 'nvidia-smi' command to fetch the name of the first available NVIDIA GPU.
@@ -49,7 +47,6 @@ def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
     return gpus[gpu_id]
 
 
-@lru_cache
 def find_best_match(tags, query):
     """
     Finds the best match for a query within a list of tags using fuzzy string matching.
@@ -59,6 +56,7 @@ def find_best_match(tags, query):
     logger.info(f"TVM arch find_best_match: best_match = {best_match}, score = {score}")
 
     def check_target(best, default):
+        logger.info(f"Target(best) = {Target(best)}, Target(default)  = {Target(default)}")
         return best if Target(best).arch == Target(default).arch else default
 
     if check_target(best_match, "cuda") == best_match:
@@ -68,7 +66,6 @@ def find_best_match(tags, query):
         return "cuda"
 
 
-@lru_cache
 def get_all_nvidia_targets() -> List[str]:
     """
     Returns all available NVIDIA targets.
@@ -77,7 +74,6 @@ def get_all_nvidia_targets() -> List[str]:
     return [tag for tag in all_tags if "nvidia" in tag]
 
 
-@lru_cache
 def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
     """
     Automatically detects the NVIDIA GPU architecture to set the appropriate TVM target.
