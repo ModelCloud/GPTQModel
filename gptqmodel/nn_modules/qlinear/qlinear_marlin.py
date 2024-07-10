@@ -180,10 +180,6 @@ class MarlinQuantLinear(BaseQuantLinear):
             A = F.pad(A, (0, self.infeatures - self.original_infeatures))
 
         C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
-
-        if C.size(-1) != self.outfeatures:
-            C = F.pad(C, (0, self.outfeatures - self.original_outfeatures))
-
         mul(
             A.view((-1, A.shape[-1])),
             self.B,
