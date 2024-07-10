@@ -16,12 +16,12 @@ class TestLoadVLLM(unittest.TestCase):
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
     def test_load_vllm(self):
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
-            gpu_memory_utilization=0.2
         )
         outputs = model.generate(
             prompts=self.prompts,
@@ -31,4 +31,15 @@ class TestLoadVLLM(unittest.TestCase):
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+        outputs_param = model.generate(
+            prompts=self.prompts,
+            temperature=0.8,
+            top_p=0.95,
+        )
+        for output in outputs_param:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
         self.assertTrue(outputs is not None)
