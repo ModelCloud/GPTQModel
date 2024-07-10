@@ -19,7 +19,6 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]) -> SamplingParams:
         'top_p': hf_params.get('top_p', 1.0),
         'max_tokens': hf_params.get('max_length', 16),
         'min_tokens': hf_params.get('min_length', 0),
-        'use_beam_search': hf_params.get('do_sample', False),
         'early_stopping': hf_params.get('early_stopping', False),
         'length_penalty': hf_params.get('length_penalty', 1.0),
         'stop_token_ids': [hf_params.get('eos_token_id'), None],
@@ -54,7 +53,7 @@ def vllm_generate(
         logging.info("Please pass in vllm.SamplingParams as `sampling_params`.")
         hf_params = {key: kwargs[key] for key in [
             'num_return_sequences', 'repetition_penalty', 'temperature',
-            'top_k', 'top_p', 'max_length', 'min_length', 'do_sample',
+            'top_k', 'top_p', 'max_length', 'min_length',
             'early_stopping', 'length_penalty', 'eos_token_id'
         ] if key in kwargs}
         sampling_params = convert_hf_params_to_vllm(hf_params)
