@@ -258,7 +258,6 @@ def pack_model(
     format: str,
     desc_act=False,
     sym: bool = True,
-    warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False,
 ):
     QuantLinear = select_quant_linear_with_pack(
@@ -313,11 +312,6 @@ def pack_model(
 
     logger.info("Model packed.")
 
-    if backend == BACKEND.TRITON and warmup_triton:
-        logger.warning(
-            "using autotune_warmup will move model to GPU, make sure you have enough VRAM to load the whole model."
-        )
-        QuantLinear.warmup(model.to(CUDA_0), seqlen=model.seqlen)
     return QuantLinear
 
 def verify_model_hash(file_path: str, verify_hash: str):
