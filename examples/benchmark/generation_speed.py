@@ -176,7 +176,6 @@ def load_model_tokenizer(
             model_basename=model_basename,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
-            warmup_triton=False,
             backend=backend,
         )
 
@@ -279,11 +278,6 @@ def main():
     logger.info(f"model quantized: {model.quantized}")
     logger.info(f"quantize config: {model.quantize_config.to_dict()}")
     logger.info(f"model device map: {model.hf_device_map}")
-
-    if args.backend == BACKEND.TRITON:
-        logger.info("warmup triton, this may take a while.")
-        model.warmup_triton()
-
     logger.info("loading data")
     examples = load_data(
         tokenizer,

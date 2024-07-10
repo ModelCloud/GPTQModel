@@ -153,21 +153,18 @@ class BaseGPTQModel(nn.Module)  :
             self,
             calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
             batch_size: int = 1,
-            autotune_warmup_after_quantized: bool = False,
             calibration_enable_gpu_cache: bool = True,
     ):
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
-            self._quantize(calibration_dataset, batch_size, autotune_warmup_after_quantized,
-                           calibration_enable_gpu_cache)
+            self._quantize(calibration_dataset, batch_size, calibration_enable_gpu_cache)
         else:
             with torch.inference_mode():
-                self._quantize(calibration_dataset, batch_size, autotune_warmup_after_quantized, calibration_enable_gpu_cache)
+                self._quantize(calibration_dataset, batch_size, calibration_enable_gpu_cache)
 
     def _quantize(
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
-        autotune_warmup_after_quantized: bool = False,
         calibration_enable_gpu_cache: bool = True,
     ):
         if self.quantized:
@@ -551,7 +548,6 @@ class BaseGPTQModel(nn.Module)  :
             # triton can support 2, 4, 8bits while exllama packer only supports 4bits
             backend=BACKEND.TRITON if not isinstance(self.quantize_config, AutoRoundQuantizeConfig) and  self.quantize_config.format in [FORMAT.GPTQ, FORMAT.GPTQ_V2] and self.quantize_config.bits != 4 else BACKEND.AUTO,
             desc_act=self.quantize_config.desc_act,
-            warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
         )
@@ -879,7 +875,6 @@ class BaseGPTQModel(nn.Module)  :
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
-        warmup_triton: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
         verify_hash: Optional[Union[str, List[str]]] = None,
@@ -1248,26 +1243,12 @@ class BaseGPTQModel(nn.Module)  :
 
         model.eval()
 
-        # == step6: (optional) warmup triton == #
-        if backend == BACKEND.TRITON and warmup_triton:
-            from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
-
-            TritonV2QuantLinear.warmup(model, seqlen=model.seqlen)
-
         return cls(
             model,
             quantized=True,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
         )
-
-    def warmup_triton(self, enabled: bool = True):
-        if not enabled:
-            return
-
-        from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
-
-        TritonV2QuantLinear.warmup(self.model, seqlen=self.model.seqlen)
 
     def __getattr__(self, item):
         try:

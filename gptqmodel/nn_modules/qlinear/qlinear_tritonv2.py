@@ -135,48 +135,5 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         out = out + self.bias if self.bias is not None else out
         return out
 
-    @classmethod
-    def warmup(cls, model, transpose=False, seqlen=2048):
-        """
-        Pre-tunes the quantized kernel
-        """
-        from tqdm import tqdm
-
-        kn_values = {}
-
-        for _, m in model.named_modules():
-            if not isinstance(m, cls):
-                continue
-
-            k = m.infeatures
-            n = m.outfeatures
-
-            if (k, n) not in kn_values:
-                kn_values[(k, n)] = (
-                    m.qweight,
-                    m.scales,
-                    m.qzeros,
-                    m.g_idx,
-                    m.bits,
-                    m.maxq,
-                )
-
-        logger.info(f"Found {len(kn_values)} unique KN Linear values.")
-        logger.info("Warming up autotune cache ...")
-        with torch.no_grad():
-            for m in tqdm(range(0, math.ceil(math.log2(seqlen)) + 1)):
-                m = 2**m
-                for (k, n), (
-                    qweight,
-                    scales,
-                    qzeros,
-                    g_idx,
-                    bits,
-                    maxq,
-                ) in kn_values.items():
-                    a = torch.randn(m, k, dtype=torch.float16, device=model.device)
-                    quant_matmul_248(a, qweight, scales, qzeros, g_idx, bits, maxq)
-        del kn_values
-
 
 __all__ = ["TritonV2QuantLinear"]

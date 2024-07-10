@@ -66,12 +66,9 @@ def get_model_and_tokenizer(
 
     model = GPTQModel.from_quantized(
         model_id,
-        disable_exllamav2=True,
-        disable_exllama=True,
         **model_kwargs,
     )
 
-    model.warmup_triton()
     return model, tokenizer
 
 
