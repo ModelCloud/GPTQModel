@@ -131,11 +131,35 @@ jobs:
           name: dist
           path: dist
 
+      - name: Print bitblas cache
+        shell: bash
+        run: |
+          ls -ahl ~/.cache || true
+          ls -ahl ~/.cache/bitblas || true
+          ls -ahl ~/.cache/bitblas/nvidia || true
+          ls -ahl ~/.cache/bitblas/nvidia/* || true
+
+      - name: Download bitblas cache
+        shell: bash
+        run: |
+          mkdir -p ~/.cache/bitblas
+          wget -P /tmp http://10.0.13.154/cache/bitblas_cache.tar.gz
+          tar -xzvf /tmp/bitblas_cache.tar.gz -C ~/.cache/bitblas/ --overwrite
+
+      - name: Print bitblas cache
+        shell: bash
+        run: |
+          ls -ahl ~/.cache || true
+          ls -ahl ~/.cache/bitblas || true
+          ls -ahl ~/.cache/bitblas/nvidia || true
+          ls -ahl ~/.cache/bitblas/nvidia/* || true
+
       - name: Install wheel
         shell: bash
         run: |
           pip install dist/*.whl
 
       - name: Run tests
+        shell: bash
         run: pytest --durations=0 tests/${{ matrix.test_script }}
 
