@@ -12,6 +12,7 @@ class BACKEND(Enum):
     BITBLAS = 7
     QBITS = 8
     VLLM = 9
+    SGLANG = 10
 
 def get_backend(backend: str):
     try:

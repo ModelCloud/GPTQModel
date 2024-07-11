@@ -45,7 +45,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-class BaseGPTQModel(nn.Module)  :
+class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     base_modules: List[str] = None
@@ -590,10 +590,13 @@ class BaseGPTQModel(nn.Module)  :
     def generate(self, **kwargs):
         """shortcut for model.generate"""
         from ..utils.vllm import vllm_generate
-
+        from ..utils.sglang import sglang_generate
         if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
             with torch.inference_mode():
                 return vllm_generate(self.model, **kwargs)
+        elif hasattr(self.model.config, "model_type") and self.model.config.model_type == "sglang":
+            with torch.inference_mode():
+                return sglang_generate(**kwargs)
         else:
             with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
                 return self.model.generate(**kwargs)
@@ -948,21 +951,31 @@ class BaseGPTQModel(nn.Module)  :
             if not isinstance(quantize_config, QuantizeConfig):
                 quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
 
-        if backend == BACKEND.VLLM:
-            from ..utils.vllm import load_model_by_vllm
-
+        if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
                 raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
+            if backend == BACKEND.VLLM:
+                from ..utils.vllm import load_model_by_vllm
 
-            model = load_model_by_vllm(
-                model=model_name_or_path,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
+                model = load_model_by_vllm(
+                    model=model_name_or_path,
+                    trust_remote_code=trust_remote_code,
+                    **kwargs,
+                )
 
-            model.config = model.llm_engine.model_config
-            model.config.model_type = "vllm"
+                model.config = model.llm_engine.model_config
+                model.config.model_type = "vllm"
 
+            elif backend == BACKEND.SGLANG:
+                from ..utils.sglang import load_model_by_sglang
+
+                model, hf_config = load_model_by_sglang(
+                    model=model_name_or_path,
+                    trust_remote_code=trust_remote_code,
+                    **kwargs,
+                )
+                model.config = hf_config
+                model.config.model_type = "sglang"
             return cls(
                 model,
                 quantized=True,

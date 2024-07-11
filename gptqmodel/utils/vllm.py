@@ -1,10 +1,7 @@
 from typing import Any, Dict
 
-VLLM_AVAILABLE: bool = False
-
 try:
     from vllm import LLM, SamplingParams
-
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
@@ -31,7 +28,6 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
     }
     return SamplingParams(**params)
 
-
 def load_model_by_vllm(
     model,
     **kwargs,
@@ -45,7 +41,6 @@ def load_model_by_vllm(
     )
 
     return model
-
 
 def vllm_generate(
         model,
