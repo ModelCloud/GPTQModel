@@ -3,9 +3,10 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import unittest  # noqa: E402
 import subprocess
 import sys
+import unittest  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 
