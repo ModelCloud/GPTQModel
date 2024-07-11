@@ -47,7 +47,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-class BaseGPTQModel(nn.Module)  :
+class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     base_modules: List[str] = None
@@ -597,7 +597,7 @@ class BaseGPTQModel(nn.Module)  :
                 return vllm_generate(self.model, **kwargs)
         elif hasattr(self.model.config, "model_type") and self.model.config.model_type == "sglang":
             with torch.inference_mode():
-                return sglang_generate(self.model, **kwargs)
+                return sglang_generate(**kwargs)
         else:
             with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
                 return self.model.generate(**kwargs)
