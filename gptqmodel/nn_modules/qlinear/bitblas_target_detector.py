@@ -61,7 +61,9 @@ def find_best_match(tags, query):
         return best if Target(best).arch == Target(default).arch else default
 
     if check_target(best_match, "cuda") == best_match:
-        return best_match if score >= MATCH_THRESHOLD else "cuda"
+        match = best_match if score >= MATCH_THRESHOLD else "cuda"
+        logger.info(f"found best match: {match}")
+        return match
     else:
         logger.warning(TARGET_MISSING_ERROR)
         return "cuda"
