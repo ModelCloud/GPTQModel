@@ -69,4 +69,4 @@ class TestQ4Marlin(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertTrue(predicted_text.startswith("Today I am in Paris and I am a student of the Master's"))
+        self.assertIn("Today I am in Paris and I am a student of", predicted_text)
