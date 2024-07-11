@@ -6,8 +6,8 @@ from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import TextGenerationPipeline
 
-pretrained_model_dir = "gpt2-xl"
-quantized_model_dir = "gpt2-large-4bit-128g"
+pretrained_model_id = "gpt2-xl"
+quantized_model_id = "gpt2-large-4bit-128g"
 
 
 # os.makedirs(quantized_model_dir, exist_ok=True)
@@ -37,9 +37,9 @@ def main():
     from transformers import AutoTokenizer
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=False)
     except Exception:
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
 
     # load un-quantized model, the model will always be force loaded into cpu
     quantize_config = QuantizeConfig(
@@ -48,7 +48,7 @@ def main():
     )
 
     # get model maximum sequence length
-    model = GPTQModel.from_pretrained(pretrained_model_dir, quantize_config)
+    model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config, torch_dtype=torch.float16)
     model_config = model.config.to_dict()
     seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
     if any(k in model_config for k in seq_len_keys):
@@ -68,19 +68,19 @@ def main():
     model.quantize(traindataset)
 
     # save quantized model
-    model.save_quantized(quantized_model_dir)
+    model.save_quantized(quantized_model_id)
 
     # save quantized model using safetensors
-    model.save_quantized(quantized_model_dir, use_safetensors=True)
+    model.save_quantized(quantized_model_id, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
+    model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0")
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))
 
     # or you can also use pipeline
-    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer, device="cuda:0")
+    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
     print(pipeline("test is")[0]["generated_text"])
 
 

@@ -5,7 +5,7 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from ..models import BaseGPTQModel
-from ..utils.data_utils import get_dataloader
+from ._utils.data_utils import get_dataloader
 
 
 class BaseTask:

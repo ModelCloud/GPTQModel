@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 from gptqmodel import GPTQModel, QuantizeConfig
 
-pretrained_model_dir = "facebook/opt-125m"
-quantized_model_dir = "opt-125m-4bit-128g"
+pretrained_model_id = "facebook/opt-125m"
+quantized_model_id = "opt-125m-4bit-128g"
 
 
 # os.makedirs(quantized_model_dir, exist_ok=True)
@@ -133,7 +133,7 @@ def opt_eval(model, testenc, dev, seqlen=2048):
 
 
 def main():
-    traindataset, testenc = get_wikitext2(128, 0, 2048, pretrained_model_dir)
+    traindataset, testenc = get_wikitext2(128, 0, 2048, pretrained_model_id)
 
     quantize_config = QuantizeConfig(
         bits=4,  # quantize model to 4-bit
@@ -141,20 +141,20 @@ def main():
     )
 
     # load un-quantized model, the model will always be force loaded into cpu
-    model = GPTQModel.from_pretrained(pretrained_model_dir, quantize_config)
+    model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
 
     # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
     model.quantize(traindataset)
 
     # save quantized model
-    model.save_quantized(quantized_model_dir)
+    model.save_quantized(quantized_model_id)
 
     # save quantized model using safetensors
-    model.save_quantized(quantized_model_dir, use_safetensors=True)
+    model.save_quantized(quantized_model_id, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
+    model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0")
 
     opt_eval(model.model, testenc, "cuda:0")
 

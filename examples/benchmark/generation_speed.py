@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 random.seed(0)
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class CustomizedMinNewTokensLogitsProcessor(LogitsProcessor):
     def __init__(
@@ -284,6 +285,8 @@ def main():
         args.num_samples,
         args.max_new_tokens,
     )
+
+    model.to(device)
 
     generation_config = GenerationConfig(
         num_beams=args.num_beams,

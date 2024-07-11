@@ -14,9 +14,9 @@ if __name__ == "__main__":
 
     Specify GPTQ quantized model:
     python examples/benchmark/perplexity.py \
-        --model_name TheBloke/open-llama-7b-open-instruct-GPTQ \
-        --model_basename gptq_model-4bit-128g \
-        --is_quantized
+        --model_name LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit \
+        --is_quantized \
+        --backend AUTO
 
     Change your dataset:
     python examples/benchmark/perplexity.py --dataset_path tiny_shakespeare
@@ -49,7 +49,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use safetensors model file",
     )
-    parser.add_argument("--use_fast_tokenizer", action="store_true", help="Wheter to use fast tokenizer")
+    parser.add_argument("--use_fast_tokenizer", action="store_true", help="Whether to use fast tokenizer")
     parser.add_argument("--trust_remote_code", action="store_true", help="Whether to use remote code")
     parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'], help="Whether to use BACKEND format")
     args = parser.parse_args()
