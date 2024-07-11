@@ -24,9 +24,9 @@ class TestQuantization(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        self.pretrained_model_dir = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
+        self.pretrained_model_id = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_dir, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
@@ -60,7 +60,7 @@ class TestQuantization(unittest.TestCase):
             raise ValueError(f"Invalid quantization method: {method}")
 
         model = GPTQModel.from_pretrained(
-            self.pretrained_model_dir,
+            self.pretrained_model_id,
             quantize_config=quantize_config,
         )
         model.quantize(self.calibration_dataset, batch_size=128)
