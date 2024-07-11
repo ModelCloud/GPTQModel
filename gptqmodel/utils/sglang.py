@@ -29,13 +29,14 @@ def load_model_by_sglang(
     )
     return runtime, hf_config
 
-@sgl.function
-def generate(s, prompt, **kwargs):
-    s += prompt
-    s += sgl.gen(
-        "result",
-        **kwargs,
-    )
+if SGLANG_AVAILABLE:
+    @sgl.function
+    def generate(s, prompt, **kwargs):
+        s += prompt
+        s += sgl.gen("result", **kwargs)
+else:
+    def generate(s, prompt, **kwargs):
+        print(SGLANG_INSTALL_HINT)
 
 def sglang_generate(
         **kwargs,
