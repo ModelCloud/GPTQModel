@@ -28,11 +28,11 @@ from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format,
-                           find_layers, get_checkpoints, get_device, get_module_by_name_prefix,
-                           get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
-                           verify_sharded_model_hashes)
+from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
+                           convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
+                           get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
+                           gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -277,52 +277,23 @@ class BaseGPTQModel(nn.Module):
 
             model, _ = self.autoround.quantize()
 
-            weight_config = self.autoround.weight_config
-            for name in weight_config.keys():
-                config = weight_config[name]
-                if config["data_type"] != "int" and config["bits"] >= 16:
+            quantizers = {}
+            for key in self.autoround.weight_config:
+                info = self.autoround.weight_config[key]
+                if not check_to_quantized(info):
                     continue
-                logger.info(f"packing {name}")
+                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32), info["g_idx"])
 
-                bits = config["bits"]
-                group_size = config["group_size"]
-
-                from auto_round.utils import get_module, set_module
-                layer = get_module(model, name)
-                device = layer.weight.device
-
-                from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
-
-                if isinstance(layer, nn.Linear):
-                    in_features = layer.in_features
-                    out_features = layer.out_features
-                elif isinstance(layer, nn.Conv2d):
-                    in_features = layer.in_channels
-                    out_features = layer.out_channels
-                elif isinstance(layer, transformers.pytorch_utils.Conv1D):
-                    in_features = layer.weight.shape[0]
-                    out_features = layer.weight.shape[1]
-                bias = layer.bias is not None and torch.any(layer.bias)
-
-                new_layer = TritonV2QuantLinear(  ##pylint: disable=E1123
-                    bits=bits, group_size=group_size, desc_act=self.quantize_config.desc_act,
-                    sym=self.quantize_config.sym, infeatures=in_features, outfeatures=out_features, bias=bias,
-                    weight_dtype=layer.weight.dtype
-                )
-
-                new_layer.device = device
-                set_module(model, name, new_layer)
-                qlayer = new_layer
-                scale = weight_config[name]["scale"]
-                zero = weight_config[name]["zp"]
-                # so far can only pack layer on CPU
-                qlayer.to("cpu")
-                ##force to float32 to be compatible with torch 2.0
-                layer, scale, zero = layer.to("cpu"), scale.to("cpu"), zero.to("cpu").to(torch.float32)
-                qlayer.pack(layer, scale, zero, None)
-                qlayer.to(device)
-
-                self.qlinear_kernel = TritonV2QuantLinear
+            self.qlinear_kernel = pack_model(
+                model=self.model,
+                quantizers=quantizers,
+                bits=self.quantize_config.bits,
+                group_size=self.quantize_config.group_size,
+                backend=BACKEND.TRITON,
+                desc_act=self.quantize_config.desc_act,
+                force_layer_back_to_cpu=True,
+                format=self.quantize_config.format,
+            )
 
             self.model = model
             self._quantized = True
