@@ -4,7 +4,7 @@ from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, BACKEND
 
 
-quantized_path = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+quantized_model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
 backend = BACKEND.QBITS
 
@@ -13,11 +13,11 @@ def main():
     prompt = "gptqmodel is an easy-to-use model and"
 
     model = GPTQModel.from_quantized(
-        quantized_path,
+        quantized_model_id,
         backend=backend,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(quantized_path)
+    tokenizer = AutoTokenizer.from_pretrained(quantized_model_id)
 
     input = tokenizer(prompt, return_tensors='pt').to(device)
 

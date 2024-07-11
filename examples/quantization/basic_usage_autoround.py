@@ -5,8 +5,8 @@ from transformers import AutoTokenizer, TextGenerationPipeline
 
 from gptqmodel.quantization.config import AutoRoundQuantizeConfig  # noqa: E402
 
-pretrained_model_dir = "facebook/opt-125m"
-quantized_model_dir = "./autoround/opt-125m-4bit-128g"
+pretrained_model_id = "facebook/opt-125m"
+quantized_model_id = "./autoround/opt-125m-4bit-128g"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
@@ -22,20 +22,20 @@ def main():
     )
 
     model = GPTQModel.from_pretrained(
-        pretrained_model_dir,
+        pretrained_model_id,
         quantize_config=quantize_config,
     )
 
     model.quantize(examples)
 
-    model.save_quantized(quantized_model_dir)
+    model.save_quantized(quantized_model_id)
 
-    tokenizer.save_pretrained(quantized_model_dir)
+    tokenizer.save_pretrained(quantized_model_id)
 
     del model
 
     model = GPTQModel.from_quantized(
-        quantized_model_dir,
+        quantized_model_id,
         device="cuda:0",
     )
 

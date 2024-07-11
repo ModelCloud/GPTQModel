@@ -5,7 +5,7 @@ from gptqmodel import GPTQModel, BACKEND
 from vllm import SamplingParams
 
 subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.5.1"])
-quantized_path = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+quantized_model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 backend = BACKEND.VLLM
 
 def main():
@@ -15,7 +15,7 @@ def main():
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    model = GPTQModel.from_quantized(quantized_path, backend=backend, device='cuda:0')
+    model = GPTQModel.from_quantized(quantized_model_id, backend=backend, device='cuda:0')
 
     outputs = model.generate(prompts=prompt, sampling_params=sampling_params)
 

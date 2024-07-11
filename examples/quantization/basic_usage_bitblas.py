@@ -4,14 +4,14 @@ from gptqmodel.quantization import QuantizeConfig
 from transformers import AutoTokenizer, TextGenerationPipeline
 
 backend = BACKEND.BITBLAS
-pretrained_model_dir = "facebook/opt-125m"
-quantized_model_dir = "./facebook/opt-125m-4bit-128g"
+pretrained_model_id = "facebook/opt-125m"
+quantized_model_id = "./facebook/opt-125m-4bit-128g"
 
 if backend == BACKEND.BITBLAS:
-    quantized_model_dir += "-bitblas"
+    quantized_model_id += "-bitblas"
 
 def main():
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
     examples = [
         tokenizer(
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
@@ -25,14 +25,14 @@ def main():
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
-    model = GPTQModel.from_pretrained(pretrained_model_dir, quantize_config)
+    model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
 
     # quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
     model.quantize(examples)
 
     # save quantized model
-    model.save_quantized(quantized_model_dir)
-    tokenizer.save_pretrained(quantized_model_dir)
+    model.save_quantized(quantized_model_id)
+    tokenizer.save_pretrained(quantized_model_id)
     # push quantized model to Hugging Face Hub.
     # to use use_auth_token=True, Login first via huggingface-cli login.
     # or pass explcit token with: use_auth_token="hf_xxxxxxx"
@@ -52,7 +52,7 @@ def main():
 
     # load quantized model to the first GPU
     model = GPTQModel.from_quantized(
-        quantized_model_dir, device="cuda:0", backend=backend,
+        quantized_model_id, device="cuda:0", backend=backend,
     )
 
     # download quantized model from Hugging Face Hub and load to the first GPU

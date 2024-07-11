@@ -2,7 +2,7 @@ from gptqmodel import GPTQModel, BACKEND
 import subprocess
 import sys
 
-quantized_path = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+quantized_model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
 backend = BACKEND.SGLANG
 
@@ -12,7 +12,7 @@ def main():
     prompt = "gptqmodel is an easy-to-use model and"
 
     model = GPTQModel.from_quantized(
-        quantized_path,
+        quantized_model_id,
         device='cuda:0',
         backend=backend,
         disable_flashinfer=True

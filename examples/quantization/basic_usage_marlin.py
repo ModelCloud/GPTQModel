@@ -2,7 +2,7 @@ from transformers import AutoTokenizer
 
 from gptqmodel import GPTQModel, BACKEND
 
-quantized_path = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+quantized_model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
 backend = BACKEND.MARLIN
 
@@ -10,12 +10,12 @@ def main():
     prompt = "gptqmodel is an easy-to-use model and"
 
     model = GPTQModel.from_quantized(
-        quantized_path,
+        quantized_model_id,
         device='cuda:0',
         backend=backend,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(quantized_path)
+    tokenizer = AutoTokenizer.from_pretrained(quantized_model_id)
 
     inp = tokenizer(prompt, return_tensors="pt").to("cuda:0")
 
