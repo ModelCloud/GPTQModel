@@ -1,14 +1,18 @@
+from typing import Any, Dict
 
 try:
     from vllm import LLM, SamplingParams
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
-from typing import Any, Dict
 
 VLLM_INSTALL_HINT = "vLLM not installed. Please install via `pip install -U vllm`."
 
-def convert_hf_params_to_vllm(hf_params: Dict[str, Any]) -> SamplingParams:
+
+# returns SamplingParams but we can't use this typehint since vLLM is optional depend
+def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
+    if not VLLM_AVAILABLE:
+        raise ValueError(VLLM_INSTALL_HINT)
 
     params = {
         'n': hf_params.get('num_return_sequences', 1),

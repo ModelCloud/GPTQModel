@@ -141,16 +141,7 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
         return pruned_configs
 
     def warmup(self, *args, **kwargs):
-        self.nargs = dict(zip(self.arg_names, args))
-        for config in self.prune_configs(kwargs):
-            self.fn.warmup(
-                *args,
-                num_warps=config.num_warps,
-                num_stages=config.num_stages,
-                **kwargs,
-                **config.kwargs,
-            )
-        self.nargs = None
+        pass
 
 
 def autotune(configs, key, prune_configs_by=None, reset_to_zero=None, nearest_power_of_two=False):

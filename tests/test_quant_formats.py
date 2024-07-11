@@ -32,17 +32,18 @@ class TestQuantization(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ),
-            (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN),
-            (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ),
+            (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
+            (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
+            (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
         ]
     )
-    def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT):
+    def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
-                bits=4,
+                bits=bits,
                 group_size=128,
                 desc_act=False if format == FORMAT.MARLIN else True,
                 sym=sym,
@@ -50,7 +51,7 @@ class TestQuantization(unittest.TestCase):
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
-                bits=4,
+                bits=bits,
                 group_size=128,
                 sym=sym,
                 format=format,
@@ -99,7 +100,7 @@ class TestQuantization(unittest.TestCase):
 
             # test compat: 1) with simple dict type 2) is_marlin_format
             compat_quantize_config = {
-                "bits": 4,
+                "bits": bits,
                 "group_size": 128,
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,
@@ -120,7 +121,7 @@ class TestQuantization(unittest.TestCase):
             os.remove(f"{tmpdirname}/{QUANT_CONFIG_FILENAME}")
 
             compat_quantize_config = {
-                "bits": 4,
+                "bits": bits,
                 "group_size": 128,
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,

@@ -116,7 +116,6 @@ class GPTQModel:
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
-        warmup_triton: bool = False,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
         # supports all hashlib hash methods
@@ -136,7 +135,6 @@ class GPTQModel:
             model_basename=model_basename,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
-            warmup_triton=warmup_triton,
             verify_hash=verify_hash,
             **kwargs,
         )

@@ -33,8 +33,6 @@ from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            get_module_by_name_suffix, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            move_to, nested_move_to, pack_model, simple_dispatch_model, verify_model_hash,
                            verify_sharded_model_hashes)
-from ..utils.sglang import load_model_by_sglang, sglang_generate
-from ..utils.vllm import load_model_by_vllm, vllm_generate
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -155,21 +153,18 @@ class BaseGPTQModel(nn.Module):
             self,
             calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
             batch_size: int = 1,
-            autotune_warmup_after_quantized: bool = False,
             calibration_enable_gpu_cache: bool = True,
     ):
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
-            self._quantize(calibration_dataset, batch_size, autotune_warmup_after_quantized,
-                           calibration_enable_gpu_cache)
+            self._quantize(calibration_dataset, batch_size, calibration_enable_gpu_cache)
         else:
             with torch.inference_mode():
-                self._quantize(calibration_dataset, batch_size, autotune_warmup_after_quantized, calibration_enable_gpu_cache)
+                self._quantize(calibration_dataset, batch_size, calibration_enable_gpu_cache)
 
     def _quantize(
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
-        autotune_warmup_after_quantized: bool = False,
         calibration_enable_gpu_cache: bool = True,
     ):
         if self.quantized:
@@ -549,12 +544,14 @@ class BaseGPTQModel(nn.Module):
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=BACKEND.AUTO,
+            # TODO: use triton for packing always? since it can support [2,4,8] bits while exllama only supports 4bits
+            # triton can support 2, 4, 8bits while exllama packer only supports 4bits
+            backend=BACKEND.TRITON if not isinstance(self.quantize_config, AutoRoundQuantizeConfig) and  self.quantize_config.format in [FORMAT.GPTQ, FORMAT.GPTQ_V2] and self.quantize_config.bits != 4 else BACKEND.AUTO,
             desc_act=self.quantize_config.desc_act,
-            warmup_triton=autotune_warmup_after_quantized,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
         )
+
         if device_map:
             self.model = remove_hook_from_module(self.model, recurse=True)
             self.model = simple_dispatch_model(self.model, device_map)
@@ -592,6 +589,8 @@ class BaseGPTQModel(nn.Module):
 
     def generate(self, **kwargs):
         """shortcut for model.generate"""
+        from ..utils.vllm import vllm_generate
+        from ..utils.sglang import sglang_generate
         if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
             with torch.inference_mode():
                 return vllm_generate(self.model, **kwargs)
@@ -879,7 +878,6 @@ class BaseGPTQModel(nn.Module):
         model_basename: Optional[str] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
-        warmup_triton: bool = False,
         format: Optional[FORMAT] = None,
         allow_unsafe_loading: bool = False,
         verify_hash: Optional[Union[str, List[str]]] = None,
@@ -957,6 +955,8 @@ class BaseGPTQModel(nn.Module):
             if quantize_config.format != FORMAT.GPTQ:
                 raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
             if backend == BACKEND.VLLM:
+                from ..utils.vllm import load_model_by_vllm
+
                 model = load_model_by_vllm(
                     model=model_name_or_path,
                     trust_remote_code=trust_remote_code,
@@ -967,6 +967,8 @@ class BaseGPTQModel(nn.Module):
                 model.config.model_type = "vllm"
 
             elif backend == BACKEND.SGLANG:
+                from ..utils.sglang import load_model_by_sglang
+
                 model, hf_config = load_model_by_sglang(
                     model=model_name_or_path,
                     trust_remote_code=trust_remote_code,
@@ -1254,26 +1256,12 @@ class BaseGPTQModel(nn.Module):
 
         model.eval()
 
-        # == step6: (optional) warmup triton == #
-        if backend == BACKEND.TRITON and warmup_triton:
-            from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
-
-            TritonV2QuantLinear.warmup(model, seqlen=model.seqlen)
-
         return cls(
             model,
             quantized=True,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
         )
-
-    def warmup_triton(self, enabled: bool = True):
-        if not enabled:
-            return
-
-        from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
-
-        TritonV2QuantLinear.warmup(self.model, seqlen=self.model.seqlen)
 
     def __getattr__(self, item):
         try:

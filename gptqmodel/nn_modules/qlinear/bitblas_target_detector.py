@@ -1,5 +1,5 @@
 # Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
+# License: GPTQModel/licenses/LICENSE.mit
 import logging
 import os
 import subprocess
@@ -16,6 +16,7 @@ TARGET_MISSING_ERROR = (
     "where <target> is one of the available targets can be found in the output of `tools/get_available_targets.py`."
 )
 
+
 def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
     """
     Executes the 'nvidia-smi' command to fetch the name of the first available NVIDIA GPU.
@@ -30,6 +31,7 @@ def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
             encoding="utf-8",
         ).strip()
     except subprocess.CalledProcessError as e:
+        # print(f"nvidia-smi error: {e}")
         logger.info("nvidia-smi failed with error: %s", e)
         return None
 
@@ -45,14 +47,17 @@ def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
 
     return gpus[gpu_id]
 
+
 def find_best_match(tags, query):
     """
     Finds the best match for a query within a list of tags using fuzzy string matching.
     """
     MATCH_THRESHOLD = 25
     best_match, score = process.extractOne(query, tags)
+    # print(f"TVM arch find_best_match: best_match = {best_match}, score = {score}")
 
     def check_target(best, default):
+        # print(f"Target(best) = {Target(best)}, Target(default)  = {Target(default)}")
         return best if Target(best).arch == Target(default).arch else default
 
     if check_target(best_match, "cuda") == best_match:
@@ -87,8 +92,8 @@ def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
 
     # Get the current GPU model and find the best matching target
     gpu_model = get_gpu_model_from_nvidia_smi(gpu_id=gpu_id)
+    # print(f"gpu_model: {gpu_model}")
 
-    # TODO: move to a more res-usable device remapping util method
     # compat: Nvidia makes several oem (non-public) versions of A100 and perhaps other models that
     # do not have clearly defined TVM matching target so we need to manually map them to the correct one.
     if gpu_model in ["NVIDIA PG506-230", "NVIDIA PG506-232"]:
