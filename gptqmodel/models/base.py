@@ -589,8 +589,8 @@ class BaseGPTQModel(nn.Module):
 
     def generate(self, **kwargs):
         """shortcut for model.generate"""
-        from ..utils.vllm import vllm_generate
         from ..utils.sglang import sglang_generate
+        from ..utils.vllm import vllm_generate
         if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
             with torch.inference_mode():
                 return vllm_generate(self.model, **kwargs)
