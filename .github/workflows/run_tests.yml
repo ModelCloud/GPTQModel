@@ -20,7 +20,7 @@ jobs:
   build:
     runs-on: self-hosted
     container:
-      image: modelcloud/gptqmodel:github-ci-v1
+      image: 10.0.23.237:5000/modelcloud/gptqmodel:github-ci-v1
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
