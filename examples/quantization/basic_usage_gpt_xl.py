@@ -48,7 +48,7 @@ def main():
     )
 
     # get model maximum sequence length
-    model = GPTQModel.from_pretrained(pretrained_model_dir, quantize_config)
+    model = GPTQModel.from_pretrained(pretrained_model_dir, quantize_config, torch_dtype=torch.float16)
     model_config = model.config.to_dict()
     seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
     if any(k in model_config for k in seq_len_keys):
@@ -80,7 +80,7 @@ def main():
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))
 
     # or you can also use pipeline
-    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer, device="cuda:0")
+    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
     print(pipeline("test is")[0]["generated_text"])
 
 

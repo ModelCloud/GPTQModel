@@ -48,7 +48,7 @@ def main():
     model = GPTQModel.from_quantized(quantized_model_dir, device="cuda:0")
 
     # load quantized model to CPU with QBits kernel linear.
-    model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
+    # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
 
     # download quantized model from Hugging Face Hub and load to the first GPU
     # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True,)
