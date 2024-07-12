@@ -49,6 +49,10 @@ jobs:
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
       - name: List files
         id: files
         shell: bash
@@ -70,6 +74,10 @@ jobs:
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
       - name: List files
         id: files
         shell: bash
