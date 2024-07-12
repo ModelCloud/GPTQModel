@@ -340,7 +340,7 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
         self.meta_set("low_gpu_mem_usage", self.low_gpu_mem_usage)
         self.meta_set("iters", self.iters)
         self.meta_set("seqlen", self.seqlen)
-        self.meta_set("nsamples", self.nsamples)
+        # self.meta_set("nsamples", self.nsamples)
         self.meta_set("sampler", self.sampler)
         self.meta_set("seed", self.seed)
         self.meta_set("nblocks", self.nblocks)
