@@ -9,7 +9,7 @@ pretrained_model_id = "facebook/opt-125m"
 quantized_model_id = "./autoround/opt-125m-4bit-128g"
 
 def main():
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
     examples = [
         tokenizer(
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."

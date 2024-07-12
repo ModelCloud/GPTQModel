@@ -19,10 +19,50 @@ python basic_usage_wikitext2.py
 ```
 > Note: There is about 0.6 ppl degrade on opt-125m model using GPTQModel, compared to GPTQ-for-LLaMa.
 
-### Quantize with Alpaca
-To Execute `quant_with_alpaca.py`, using command like this:
+### Quantize with different backend
+To Execute `basic_usage_autoround.py`, using command like this:
 ```shell
-python quant_with_alpaca.py --pretrained_model_dir "facebook/opt-125m" --per_gpu_max_memory 4 --quant_batch_size 16
+python basic_usage_autoround.py
+```
+
+To Execute `basic_usage_bitblas.py`, using command like this:
+```shell
+python basic_usage_bitblas.py
+```
+
+To Execute `basic_usage_exllama.py`, using command like this:
+```shell
+python basic_usage_exllama.py --backend EXLLAMA/EXLLAMA_V2
+```
+
+To Execute `basic_usage_marlin.py`, using command like this:
+```shell
+python basic_usage_marlin.py
+```
+
+To Execute `basic_usage_qbits.py`, using command like this:
+```shell
+python basic_usage_qbits.py
+```
+
+To Execute `basic_usage_sglang.py`, using command like this:
+```shell
+python basic_usage_sglang.py
+```
+
+To Execute `basic_usage_triton.py`, using command like this:
+```shell
+python basic_usage_triton.py
+```
+
+To Execute `basic_usage_vllm.py`, using command like this:
+```shell
+python basic_usage_vllm.py
+```
+
+To Execute `basic_usage_autoround.py`, using command like this:
+```shell
+python basic_usage_autoround.py
 ```
 
 Use `--help` flag to see detailed descriptions for more command arguments.
