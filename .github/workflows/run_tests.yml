@@ -116,8 +116,7 @@ jobs:
 
       - name: Install wheel
         shell: bash
-        run: |
-          pip install dist/*.whl
+        run: pip install dist/*.whl parameterized
 
       - name: Find suitable GPU
         shell: bash
