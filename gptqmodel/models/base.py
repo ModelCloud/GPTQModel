@@ -268,7 +268,7 @@ class BaseGPTQModel(nn.Module):
                                   minmax_lr=self.quantize_config.minmax_lr,
                                   enable_quanted_input=self.quantize_config.enable_quanted_input,
                                   device=self.hf_device_map,
-                                  amp=self.quantize_config.amp, nsamples=self.quantize_config.nsamples,
+                                  amp=self.quantize_config.amp,
                                   low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
                                   seed=self.quantize_config.seed,
                                   gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,

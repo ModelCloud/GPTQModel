@@ -315,10 +315,9 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
     enable_minmax_tuning: bool = True
     lr: float = None
     minmax_lr: float = None
-    low_gpu_mem_usage: bool = True
+    low_gpu_mem_usage: bool = False
     iters: int = 200
     seqlen: int = 2048
-    nsamples: int = 512
     sampler: str = "rand"
     seed: int = 42
     nblocks: int = 1
