@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.cpu-test-files.outputs.files) }}
+        test_script: ${{ fromJSON(needs.gpu-test-files.outputs.files) }}
 
     steps:
       - name: Checkout Codes
