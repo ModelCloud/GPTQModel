@@ -61,6 +61,7 @@ jobs:
           scripts=$(find tests -type f -name "test_*.py" $exclude_files | sed 's|tests/||')
           json_array=$(echo "[\"$(echo $scripts | sed 's/ /", "/g')\"]")
           echo "files=$json_array" >> "$GITHUB_OUTPUT"
+          echo "GPU test files: $json_array"
 
   cpu-test-files:
     runs-on: ubuntu-latest
@@ -77,6 +78,7 @@ jobs:
           json_array=$(printf '"%s",' "${cpu_test_files[@]}")
           json_array="[${json_array%,}]"
           echo "files=$json_array" >> "$GITHUB_OUTPUT"
+          echo "CPU test files: $json_array"
 
   test_gpu:
     needs:
