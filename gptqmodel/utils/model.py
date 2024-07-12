@@ -15,7 +15,7 @@ from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, CUDA_0, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear

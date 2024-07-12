@@ -60,7 +60,8 @@ class TestQ4Marlin(unittest.TestCase):
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_proj.bias) > 0)
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_attn.bias) > 0)
 
-        tokenizer = AutoTokenizer.from_pretrained("Xenova/starcoderbase-1b")
+        model_id = "Xenova/starcoderbase-1b"
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         prompt = "Today I am in Paris and"
         inp = tokenizer(prompt, return_tensors="pt").to("cuda:0")

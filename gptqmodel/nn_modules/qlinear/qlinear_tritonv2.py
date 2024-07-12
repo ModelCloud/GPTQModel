@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import transformers
 
-from ..triton_utils.dequant import QuantLinearFunction, quant_matmul_248
+from ..triton_utils.dequant import QuantLinearFunction
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
 

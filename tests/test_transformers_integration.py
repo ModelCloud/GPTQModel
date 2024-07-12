@@ -19,10 +19,6 @@ from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear 
 
 
 class TestTransformersIntegration(unittest.TestCase):
-    DATASET_PATH = "wikitext"
-    DATASET_NAME = "wikitext-2-raw-v1"
-    DATASET_SPLIT = "test"
-    DATASET_COLUMN = "text"
 
     def setUp(self):
         from gptqmodel.integration.optimum import monkey_patch_gptqmodel_into_transformers
@@ -39,13 +35,13 @@ class TestTransformersIntegration(unittest.TestCase):
         ]
     )
     def test_load_gptq_model_with_exllama(self, exllama_version):
-        model_path = "LnL-AI/opt-125M-autoround-lm_head-false-symTrue"
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model_id = "LnL-AI/opt-125M-autoround-lm_head-false-symTrue"
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
         gptq_config = GPTQConfig(bits=4, exllama_config={
             "version": exllama_version,
         })
         model = AutoModelForCausalLM.from_pretrained(
-            model_path,
+            model_id,
             device_map="auto",
             quantization_config=gptq_config
         )
@@ -59,8 +55,8 @@ class TestTransformersIntegration(unittest.TestCase):
         ]
     )
     def test_quant_and_load(self, exllama_version):
-        model_path = "facebook/opt-125m"
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+        model_id = "facebook/opt-125m"
+        tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         calibration_dataset = [example["text"] for example in traindata.select(range(1024))]
 
@@ -73,7 +69,7 @@ class TestTransformersIntegration(unittest.TestCase):
                                      "version": exllama_version,
                                  }, dataset=calibration_dataset)
         model = AutoModelForCausalLM.from_pretrained(
-            model_path,
+            model_id,
             device_map="auto",
             quantization_config=gptq_config
         )
