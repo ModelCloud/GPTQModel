@@ -515,9 +515,7 @@ class BaseGPTQModel(nn.Module):
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            # TODO: use triton for packing always? since it can support [2,4,8] bits while exllama only supports 4bits
-            # triton can support 2, 4, 8bits while exllama packer only supports 4bits
-            backend=BACKEND.TRITON if not isinstance(self.quantize_config, AutoRoundQuantizeConfig) and  self.quantize_config.format in [FORMAT.GPTQ, FORMAT.GPTQ_V2] and self.quantize_config.bits != 4 else BACKEND.AUTO,
+            backend=BACKEND.AUTO,
             desc_act=self.quantize_config.desc_act,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
