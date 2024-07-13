@@ -1,9 +1,7 @@
 import torch
-
 from gptqmodel import GPTQModel
-from transformers import AutoTokenizer, TextGenerationPipeline
-
 from gptqmodel.quantization.config import AutoRoundQuantizeConfig  # noqa: E402
+from transformers import AutoTokenizer, TextGenerationPipeline
 
 pretrained_model_id = "facebook/opt-125m"
 quantized_model_id = "./autoround/opt-125m-4bit-128g"

@@ -1,13 +1,11 @@
-import subprocess
-
 import os
-import torch
+import subprocess
 from argparse import ArgumentParser
+
 from future.moves import sys
-from gptqmodel import get_backend, QuantizeConfig, BACKEND, GPTQModel
-from transformers import AutoTokenizer, TextGenerationPipeline
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
+from transformers import AutoTokenizer
 from vllm import SamplingParams
-import multiprocessing as mp
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 pretrained_model_id = "facebook/opt-125m"

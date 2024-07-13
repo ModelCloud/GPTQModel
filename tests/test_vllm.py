@@ -9,6 +9,7 @@ import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
+
 class TestLoadVLLM(unittest.TestCase):
 
     @classmethod
