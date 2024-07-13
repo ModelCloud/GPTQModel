@@ -92,7 +92,7 @@ jobs:
           json_array="[${json_array%,}]"
 
           IFS=',' read -r -a filter_array <<<"${{ github.event.inputs.test_names }}"
-          
+
           filtered_json_array="["
 
           for item in "${cpu_test_files[@]/.py/}"; do
@@ -108,7 +108,7 @@ jobs:
           filtered_json_array="[${filtered_json_array%,}]"
 
           # If filtered_json_array is empty, set it to an empty array
-          if [[ "$filtered_json_array" == "[" ]]; then
+          if [[ "$filtered_json_array" == "[[]" ]]; then
             filtered_json_array="[]"
           fi
 
