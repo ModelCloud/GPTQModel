@@ -19,9 +19,6 @@ def main():
 
     backend = get_backend(args.backend)
 
-    if backend == BACKEND.SGLANG:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang>=0.1.19"])
-
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
     examples = [
         tokenizer(
