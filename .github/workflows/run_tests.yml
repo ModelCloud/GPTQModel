@@ -61,15 +61,19 @@ jobs:
         id: files
         shell: bash
         run: |
-          IFS=', ' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
-          exclude_files=""
-          for file in "${cpu_test_files[@]}"; do
-            exclude_files+="! -name $file "
-          done
-          scripts=$(find tests -type f -name "test_*.py" $exclude_files | sed 's|tests/||')
-          json_array=$(echo "[\"$(echo $scripts | sed 's/ /", "/g')\"]")
-          echo "files=$json_array" >> "$GITHUB_OUTPUT"
-          echo "GPU test files: $json_array"
+          script="
+          import json
+          import os
+          cpu_file_list = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',')]
+          test_files_list = [file.strip().removesuffix('.py') for file in '${{ github.event.inputs.test_names }}'.split(',') if file.strip()]
+          all_tests = [file.removesuffix('.py') for file in os.listdir('tests/') if file.startswith('test_') and file.endswith('.py')]
+          all_tests = [file for file in all_tests if file not in cpu_file_list]
+          result = [file for file in all_tests if file in test_files_list] if test_files_list else all_tests
+          print(json.dumps(result))
+          "
+          result=$(python3 -c "$script")
+          echo "files=$result" >> "$GITHUB_OUTPUT"
+          echo "Test files: $result"
 
   cpu-test-files:
     runs-on: ubuntu-latest
@@ -86,11 +90,16 @@ jobs:
         id: files
         shell: bash
         run: |
-          IFS=',' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
-          json_array=$(printf '"%s",' "${cpu_test_files[@]}")
-          json_array="[${json_array%,}]"
-          echo "files=$json_array" >> "$GITHUB_OUTPUT"
-          echo "CPU test files: $json_array"
+          script="
+          import json
+          cpu_file_list = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
+          test_files_list = [file.strip().removesuffix('.py') for file in '${{ github.event.inputs.test_names }}'.split(',') if file.strip()]
+          result = [file for file in cpu_file_list if file in test_files_list] if test_files_list else cpu_file_list
+          print(json.dumps(result))
+          "
+          result=$(python3 -c "$script")
+          echo "files=$result" >> "$GITHUB_OUTPUT"
+          echo "Test files: $result"
 
   test_gpu:
     needs:
@@ -146,10 +155,10 @@ jobs:
         shell: bash
         run: |
           gpu_id=-1
-          
+
           while [ "$gpu_id" -lt 0 ]; do
             gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}")
-          
+
             if [ "$gpu_id" -lt 0 ]; then
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
@@ -162,7 +171,7 @@ jobs:
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}
+        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
         if: always()
@@ -201,5 +210,4 @@ jobs:
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}
-
+        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
