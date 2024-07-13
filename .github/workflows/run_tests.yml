@@ -12,6 +12,10 @@ on:
         description: 'Branch, Tag or Commit SHA'
         required: false
         default: ''
+      test_names:
+        description: 'Input Test(s) to Run (default all)'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -21,7 +25,7 @@ jobs:
   build:
     runs-on: self-hosted
     container:
-      image: 10.0.13.154:5000/modelcloud/gptqmodel:github-ci-v2
+      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -94,7 +98,7 @@ jobs:
       - gpu-test-files
     runs-on: self-hosted
     container:
-      image: 10.0.13.154:5000/modelcloud/gptqmodel:github-ci-v2
+      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
@@ -132,7 +136,7 @@ jobs:
           gpu_id=-1
           
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://10.0.13.154/gpu/get?id=${{ github.run_id }}")
+            gpu_id=$(curl -s "http://10.0.13.31/gpu/get?id=${{ github.run_id }}")
           
             if [ "$gpu_id" -lt 0 ]; then
               echo "No available GPU, waiting 5 seconds..."
@@ -145,12 +149,13 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
       - name: Run tests
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}
 
       - name: Release GPU
         if: always()
         shell: bash
-        run: curl -X GET "http://10.0.13.154/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
+        run: curl -X GET "http://10.0.13.31/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
 
   test_cpu:
     needs:
@@ -187,5 +192,6 @@ jobs:
           pip install dist/*.whl
 
       - name: Run tests
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}
 
