@@ -14,9 +14,9 @@ class TestLoadSglang(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang>=0.1.19"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "uvloop>=0.19.0"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "fastapi"])
+        # sglang set disable_flashinfer=True still import flashinfer
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", "https://flashinfer.ai/whl/cu121/torch2.3"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.1.19"])
         
         self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         self.prompt = "Hello, my name is"
@@ -26,7 +26,6 @@ class TestLoadSglang(unittest.TestCase):
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.SGLANG,
-            disable_flashinfer=True,
         )
         output = model.generate(
             prompts=self.prompt,
