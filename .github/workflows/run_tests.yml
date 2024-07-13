@@ -61,18 +61,19 @@ jobs:
         id: files
         shell: bash
         run: |
-          scripts="
+          script="
           import json
           import os
-          cpu_file_list = [file.strip() for file in '${CPU_TEST_FILES}'.split(',')]
-          test_names_str = '${{ github.event.inputs.test_names }}'
-          test_files = [file.strip().removesuffix('.py') for file in test_names_str.split(',') if file.strip()]
+          cpu_files_str = '${{ github.event.inputs.test_names }}'
+          cpu_file_list = [file.strip() for file in cpu_files_str.split(',')]
+          test_names_str = 'test_lm_head.py, test_qbits'
+          test_files = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
           all_tests = [file.removesuffix('.py') for file in os.listdir('tests/') if file.startswith('test_') and file.endswith('.py')]
           all_tests = [file for file in all_tests if file not in cpu_file_list]
           result = [file for file in all_tests if file in test_files] if test_files else all_tests
           print(json.dumps(result))
           "
-          result=$(python3 -c "$scripts")
+          result=$(python3 -c "$script")
           echo "files=$result" >> "$GITHUB_OUTPUT"
           echo "Test files: $result"
 
@@ -91,7 +92,7 @@ jobs:
         id: files
         shell: bash
         run: |
-          scripts="
+          script="
           import json
           test_names_str = '${{ github.event.inputs.test_names }}'
           cpu_file_list = [file.strip() for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
@@ -99,7 +100,7 @@ jobs:
           result = [file for file in cpu_file_list if file in test_files] if test_files else cpu_file_list
           print(json.dumps(result))
           "
-          result=$(python3 -c "$scripts")
+          result=$(python3 -c "$script")
           echo "files=$result" >> "$GITHUB_OUTPUT"
           echo "Test files: $result"
 
