@@ -91,22 +91,30 @@ jobs:
           json_array=$(printf '"%s",' "${cpu_test_files[@]/.py/}")
           json_array="[${json_array%,}]"
 
-          IFS=',' read -r -a filter_array <<< "${{ github.event.inputs.test_names }}"
-
+          IFS=',' read -r -a filter_array <<<"${{ github.event.inputs.test_names }}"
+          
           filtered_json_array="["
 
           for item in "${cpu_test_files[@]/.py/}"; do
-          for filter in "${filter_array[@]}"; do
-          if [[ "$item" == "$filter" ]]; then
-          filtered_json_array+="\"$item\","
-          break
-          fi
-          done
+            for filter in "${filter_array[@]}"; do
+              if [[ "$item" == "$filter" ]]; then
+                filtered_json_array+="\"$item\","
+                break
+              fi
+            done
           done
 
+          # Remove trailing comma and ensure proper formatting
           filtered_json_array="[${filtered_json_array%,}]"
+
+          # If filtered_json_array is empty, set it to an empty array
+          if [[ "$filtered_json_array" == "[" ]]; then
+            filtered_json_array="[]"
+          fi
+
           echo "files=$filtered_json_array" >> "$GITHUB_OUTPUT"
           echo "Filtered CPU test files: $filtered_json_array"
+
 
 
   test_gpu:
