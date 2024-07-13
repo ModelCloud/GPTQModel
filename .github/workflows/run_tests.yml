@@ -92,7 +92,7 @@ jobs:
         run: |
           script="
           import json
-          cpu_file_list = [file.strip() for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
+          cpu_file_list = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
           test_files_list = [file.strip().removesuffix('.py') for file in '${{ github.event.inputs.test_names }}'.split(',') if file.strip()]
           result = [file for file in cpu_file_list if file in test_files_list] if test_files_list else cpu_file_list
           print(json.dumps(result))
