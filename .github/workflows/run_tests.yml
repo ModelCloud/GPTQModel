@@ -69,6 +69,12 @@ jobs:
           all_tests = [file.removesuffix('.py') for file in os.listdir('tests/') if file.startswith('test_') and file.endswith('.py')]
           all_tests = [file for file in all_tests if file not in cpu_file_list]
           result = [file for file in all_tests if file in test_files_list] if test_files_list else all_tests
+
+          print('${{ github.event.inputs.test_names }}')
+          print('${{ github.event.inputs.test_names }}')
+          print('${{ github.event.inputs.test_names }}')
+          print('${{ github.event.inputs.test_names }}')
+          
           print(json.dumps(result))
           "
           result=$(python3 -c "$script")
