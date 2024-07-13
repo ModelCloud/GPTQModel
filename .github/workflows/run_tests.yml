@@ -139,7 +139,7 @@ jobs:
           else
             ip="10.0.13.31"
           fi
-          echo "GPU_IP=ip" >> $GITHUB_ENV
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Find suitable GPU
         shell: bash
