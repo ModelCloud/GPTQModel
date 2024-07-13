@@ -64,16 +64,10 @@ jobs:
           script="
           import json
           import os
-          cpu_file_list = [file.strip() for file in '${CPU_TEST_FILES}'.split(',')]
+          cpu_file_list = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',')]
           test_files_list = [file.strip().removesuffix('.py') for file in '${{ github.event.inputs.test_names }}'.split(',') if file.strip()]
           all_tests = [file.removesuffix('.py') for file in os.listdir('tests/') if file.startswith('test_') and file.endswith('.py')]
           all_tests = [file for file in all_tests if file not in cpu_file_list]
-          print(cpu_file_list)
-          print(cpu_file_list)
-          print(cpu_file_list)
-          print(json.dumps(cpu_file_list))
-          print(json.dumps(cpu_file_list))
-          print(json.dumps(cpu_file_list))
           result = [file for file in all_tests if file in test_files_list] if test_files_list else all_tests
           print(json.dumps(result))
           "
