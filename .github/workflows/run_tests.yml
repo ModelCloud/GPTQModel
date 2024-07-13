@@ -101,6 +101,7 @@ jobs:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         test_script: ${{ fromJSON(needs.gpu-test-files.outputs.files) }}
 
