@@ -61,15 +61,22 @@ jobs:
         id: files
         shell: bash
         run: |
-          IFS=', ' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
-          exclude_files=""
-          for file in "${cpu_test_files[@]}"; do
-            exclude_files+="! -name $file "
-          done
-          scripts=$(find tests -type f -name "test_*.py" $exclude_files | sed 's|tests/||')
-          json_array=$(echo "[\"$(echo $scripts | sed 's/ /", "/g')\"]")
-          echo "files=$json_array" >> "$GITHUB_OUTPUT"
-          echo "GPU test files: $json_array"
+          if [[ -n "${{ github.event.inputs.test_names }}" ]]; then
+            IFS=',' read -r -a test_files <<< "${{ github.event.inputs.test_names }}"
+            json_array=$(printf '"%s",' "${test_files[@]}")
+            json_array="[${json_array%,}]"
+            echo "files=$json_array" >> "$GITHUB_OUTPUT"
+            echo "Test files: $json_array"
+          else
+            IFS=', ' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
+            exclude_files=""
+            for file in "${cpu_test_files[@]}"; do
+              exclude_files+="! -name $file "
+            done
+            scripts=$(find tests -type f -name "test_*.py" $exclude_files | sed 's|tests/||')
+            json_array=$(echo "[\"$(echo $scripts | sed 's/ /", "/g')\"]")
+            echo "files=$json_array" >> "$GITHUB_OUTPUT"
+            echo "GPU test files: $json_array"
 
   cpu-test-files:
     runs-on: ubuntu-latest
@@ -86,12 +93,18 @@ jobs:
         id: files
         shell: bash
         run: |
-          IFS=',' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
-          json_array=$(printf '"%s",' "${cpu_test_files[@]}")
-          json_array="[${json_array%,}]"
-          echo "files=$json_array" >> "$GITHUB_OUTPUT"
-          echo "CPU test files: $json_array"
-
+          if [[ -n "${{ github.event.inputs.test_names }}" ]]; then
+            IFS=',' read -r -a test_files <<< "${{ github.event.inputs.test_names }}"
+            json_array=$(printf '"%s",' "${test_files[@]}")
+            json_array="[${json_array%,}]"
+            echo "files=$json_array" >> "$GITHUB_OUTPUT"
+            echo "Test files: $json_array"
+          else
+            IFS=',' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
+            json_array=$(printf '"%s",' "${cpu_test_files[@]}")
+            json_array="[${json_array%,}]"
+            echo "files=$json_array" >> "$GITHUB_OUTPUT"
+            echo "CPU test files: $json_array"
   test_gpu:
     needs:
       - build
@@ -161,7 +174,6 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
 
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}
 
       - name: Release GPU
@@ -200,6 +212,5 @@ jobs:
           pip install dist/*.whl
 
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}
 
