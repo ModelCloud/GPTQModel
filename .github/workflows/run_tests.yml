@@ -135,7 +135,7 @@ jobs:
         run: |
           vendor=$(lscpu | grep 'Vendor ID')
           if [[ $vendor == *"Intel"* ]]; then
-            ip="10.0.23.237"
+            ip="10.0.23.62"
           else
             ip="10.0.13.31"
           fi
