@@ -19,7 +19,7 @@ class TestLoadSglang(unittest.TestCase):
         subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.1.19"])
         
         self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-        self.prompt = "Hello, my name is"
+        self.prompt = "The capital of France is"
 
     def test_load_sglang(self):
         model = GPTQModel.from_quantized(
@@ -34,7 +34,7 @@ class TestLoadSglang(unittest.TestCase):
         )
         print(f"Prompt: {self.prompt!r}, Generated text: {output!r}")
 
-        self.assertTrue(output is not None)
+        self.assertTrue(len(output)>5)
         model.shutdown()
         del model
 
