@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: [self-hosted, intel]
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -131,13 +131,24 @@ jobs:
         shell: bash
         run: pip install dist/*.whl parameterized uvicorn
 
+      - name: Check platform
+        shell: bash
+        run: |
+          vendor=$(lscpu | grep 'Vendor ID')
+          if [[ $vendor == *"Intel"* ]]; then
+            ip="10.0.23.62"
+          else
+            ip="10.0.13.31"
+          fi
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
+
       - name: Find suitable GPU
         shell: bash
         run: |
           gpu_id=-1
           
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://10.0.13.31/gpu/get?id=${{ github.run_id }}")
+            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}")
           
             if [ "$gpu_id" -lt 0 ]; then
               echo "No available GPU, waiting 5 seconds..."
@@ -156,13 +167,15 @@ jobs:
       - name: Release GPU
         if: always()
         shell: bash
-        run: curl -X GET "http://10.0.13.31/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
+        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=$CUDA_VISIBLE_DEVICES"
 
   test_cpu:
     needs:
       - build
       - cpu-test-files
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, intel]
+    container:
+      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
@@ -174,12 +187,6 @@ jobs:
         with:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
-
-      - name: Setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
 
       - name: Download artifact
         uses: actions/download-artifact@v4
