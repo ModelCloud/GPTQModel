@@ -172,7 +172,9 @@ jobs:
     needs:
       - build
       - cpu-test-files
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, intel]
+    container:
+      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
