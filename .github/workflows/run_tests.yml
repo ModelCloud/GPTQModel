@@ -173,7 +173,7 @@ jobs:
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}
+        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
         if: always()
@@ -212,5 +212,5 @@ jobs:
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}
+        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
