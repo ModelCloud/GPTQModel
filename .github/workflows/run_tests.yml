@@ -64,12 +64,39 @@ jobs:
           IFS=', ' read -r -a cpu_test_files <<< "${CPU_TEST_FILES}"
           exclude_files=""
           for file in "${cpu_test_files[@]}"; do
-          exclude_files+="! -name $file "
+            exclude_files+="! -name $file "
           done
+          
           scripts=$(find tests -type f -name "test_*.py" $exclude_files | sed 's|tests/||' | sed 's/.py//')
           json_array=$(echo "[\"$(echo $scripts | sed 's/ /", "/g')\"]")
-          echo "files=$json_array" >> "$GITHUB_OUTPUT"
-          echo "GPU test files: $json_array"
+          
+          IFS=',' read -r -a filter_array <<< "${{ github.event.inputs.test_names }}"
+          
+          # Convert json_array to an array
+          json_array=($(echo $json_array | sed 's/\[\"//;s/\"\]//;s/\", \"/ /g'))
+          
+          filtered_json_array="["
+          
+          for item in "${json_array[@]}"; do
+            for filter in "${filter_array[@]}"; do
+              if [[ "$item" == "$filter" ]]; then
+                filtered_json_array+="\"$item\", "
+                break
+              fi
+            done
+          done
+          
+          # Remove trailing comma and ensure proper formatting
+          filtered_json_array="[${filtered_json_array%, }]"
+          
+          # If filtered_json_array is empty, set it to an empty array
+          if [[ "$filtered_json_array" == "[[]" ]]; then
+            filtered_json_array="[]"
+          fi
+          
+          echo "files=$filtered_json_array" >> "$GITHUB_OUTPUT"
+          echo "GPU test files: $filtered_json_array"
+
 
 
   cpu-test-files:
@@ -91,7 +118,7 @@ jobs:
           json_array=$(printf '"%s",' "${cpu_test_files[@]/.py/}")
           json_array="[${json_array%,}]"
 
-          IFS=',' read -r -a filter_array <<<"${{ github.event.inputs.test_names }}"
+          IFS=',' read -r -a filter_array <<< "${{ github.event.inputs.test_names }}"
 
           filtered_json_array="["
 
