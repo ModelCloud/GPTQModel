@@ -74,7 +74,7 @@ jobs:
           "
           result=$(python3 -c "$scripts")
           echo "files=$result" >> "$GITHUB_OUTPUT"
-          echo "CPU test files: result"
+          echo "CPU test files: $result"
 
   cpu-test-files:
     runs-on: ubuntu-latest
@@ -101,7 +101,7 @@ jobs:
           "
           result=$(python3 -c "$scripts")
           echo "files=$result" >> "$GITHUB_OUTPUT"
-          echo "CPU test files: result"
+          echo "CPU test files: $result"
 
   test_gpu:
     needs:
