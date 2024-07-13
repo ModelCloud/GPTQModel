@@ -1,9 +1,9 @@
-import subprocess
-
 import os
+import subprocess
 from argparse import ArgumentParser
+
 from future.moves import sys
-from gptqmodel import get_backend, QuantizeConfig, BACKEND, GPTQModel
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 
