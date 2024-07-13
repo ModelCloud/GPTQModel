@@ -10,6 +10,10 @@
 </p>
 
 ## News
+* 07/13/2024 🚀🚀🚀 [v0.9.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.8):
+Run quantized models directly using GPTQModel using fast `vLLM` or `SGLang` backend! Both vLLM and SGLang are optimized for dyanamic batching inference for maximum `TPS` (check usage under examples). Marlin backend also
+got full end-to-end in/out features padding to enhance current/future model compatibility. 
+
 * 07/08/2024 🚀 [v0.9.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.7): InternLM 2.5 model support added.
 
 * 07/08/2024 🚀🚀 [v0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
