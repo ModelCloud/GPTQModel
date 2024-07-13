@@ -73,7 +73,7 @@ jobs:
           print(json.dumps(result))
           "
           result=$(python3 -c "$scripts")
-          echo "files=result" >> "$GITHUB_OUTPUT"
+          echo "files=$result" >> "$GITHUB_OUTPUT"
           echo "CPU test files: result"
 
   cpu-test-files:
@@ -100,7 +100,7 @@ jobs:
           print(json.dumps(result))
           "
           result=$(python3 -c "$scripts")
-          echo "files=result" >> "$GITHUB_OUTPUT"
+          echo "files=$result" >> "$GITHUB_OUTPUT"
           echo "CPU test files: result"
 
   test_gpu:
