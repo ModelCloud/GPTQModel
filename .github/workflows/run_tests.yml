@@ -61,10 +61,10 @@ jobs:
         id: files
         shell: bash
         run: |
-          scripts2="
+          scripts="
           import json
           import os
-          cpu_file_list = [file.strip() for file in ${CPU_TEST_FILES}.split(',')]
+          cpu_file_list = [file.strip() for file in '${CPU_TEST_FILES}'.split(',')]
           test_names_str = '${{ github.event.inputs.test_names }}'
           test_files = [file.strip() for file in test_names_str.split(',') if file.strip()]
           all_tests = [file.removesuffix('.py') for file in os.listdir('tests/') if file.startswith('test_') and file.endswith('.py')]
@@ -94,7 +94,7 @@ jobs:
           scripts="
           import json
           test_names_str = '${{ github.event.inputs.test_names }}'
-          cpu_file_list = [file.strip() for file in ${CPU_TEST_FILES}.split(',') if file.strip()]
+          cpu_file_list = [file.strip() for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
           test_files = [file.strip() for file in test_names_str.split(',') if file.strip()]
           result = [file for file in cpu_file_list if file in test_files] if test_files else cpu_file_list
           print(json.dumps(result))
