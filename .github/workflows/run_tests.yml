@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: [self-hosted, intel]
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
