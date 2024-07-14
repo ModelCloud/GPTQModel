@@ -8,13 +8,14 @@ import copy  # noqa: E402
 import unittest  # noqa: E402
 
 # isort: off
-import torch # noqa: E402
-import torch.nn as nn # noqa: E402
-import gptqmodel_marlin_cuda # noqa: E402
+import torch  # noqa: E402
+import torch.nn as nn  # noqa: E402
+import gptqmodel_marlin_cuda  # noqa: E402
 # isort: on
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms, dequantize_weight  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 
 
 def gen_quant4(k, n, groupsize=-1):
@@ -42,7 +43,6 @@ def gen_quant4(k, n, groupsize=-1):
     ref = (w - (maxq + 1) // 2).half() * s
 
     if groupsize != -1:
-
         def reshape(w):
             w = w.reshape((groupsize, -1, n))
             w = w.permute(1, 0, 2)
@@ -60,49 +60,60 @@ def gen_quant4(k, n, groupsize=-1):
 
 
 class TestRepacking(unittest.TestCase):
-    def test_marlin_fast_repacking(self):
+    def test_triton_compare_exllama(self):
         k = 2048
         n = 1024
-        m = 5
         group_size = 128
 
         _, linear, s = gen_quant4(k, n, group_size)
-        use_act_order = False
+        zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
+
         exllama_linear = ExllamaQuantLinear(
             bits=4,
             group_size=group_size,
             sym=True,
-            desc_act=use_act_order,
+            desc_act=True,
             infeatures=k,
             outfeatures=n,
             bias=False)
 
-        exllama_linear._use_act_order = use_act_order
-
-        zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
-
         exllama_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
-        exllama_linear = exllama_linear.to("cuda")
+        triton_v2_linear = TritonV2QuantLinear(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=True,
+            infeatures=k,
+            outfeatures=n,
+            bias=False)
 
-        exllama_linear.post_init()
+        triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
-        # Adapted from utils.marlin_utils.convert_to_marlin
-        dequantized_weight, dequantized_qzeros = dequantize_weight(exllama_linear)
-        dequantized_weight = dequantized_weight.to(torch.float16)
+        self.assertTrue(torch.allclose(exllama_linear.qweight, triton_v2_linear.qweight))
+        self.assertTrue(torch.allclose(exllama_linear.scales, triton_v2_linear.scales))
+        self.assertTrue(torch.allclose(exllama_linear.qzeros, triton_v2_linear.qzeros))
 
-        self.assertTrue(torch.all(dequantized_qzeros == 8))
 
-        linear_module = torch.nn.Linear(
-            in_features=k,
-            out_features=n,
-            bias=False,
-            dtype=torch.float16,
-            device="cuda",
-        )
-        linear_module.weight.data.copy_(linear.weight.data)  # Not using dequantized_weight to avoid approx
+    def test_marlin_gptq_repack(self):
+        k = 2048
+        n = 1024
+        group_size = 128
 
-        # Create new linear method and copy to model.
+        _, linear, s = gen_quant4(k, n, group_size)
+        zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
+
+        triton_v2_linear = TritonV2QuantLinear(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=True,
+            infeatures=k,
+            outfeatures=n,
+            bias=False)
+
+        triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=None)
+
         marlin_linear = MarlinQuantLinear(
             bits=4,
             group_size=group_size,
@@ -113,30 +124,19 @@ class TestRepacking(unittest.TestCase):
             bias=False,
         )
 
-        marlin_linear.pack(linear_module.to("cuda"), scales=copy.deepcopy(exllama_linear.scales.data.t()).to("cuda"))
+        marlin_linear.pack(linear.to("cuda"), scales=copy.deepcopy(triton_v2_linear.scales.data.t()).to("cuda"))
 
-        inp = torch.rand(m, k, dtype=torch.float16, device="cuda")
+        # make sure triton_v2_linear and marlin_linear on same device
+        triton_v2_linear.to("cuda")
+        marlin_linear.to("cuda")
 
-        exllama_linear = exllama_linear.to("cuda")
-        marlin_linear = marlin_linear.to("cuda")
-        with torch.no_grad():
-            res_exllama = exllama_linear(inp)
-            res_marlin = marlin_linear(inp)
-
-        reldiff = (res_exllama - res_marlin).abs() / (res_exllama.abs() + 1e-12)
-        print(f"reldiff = {reldiff}, ",torch.mean(reldiff))
-        # torch.mean(reldiff) 100 times:
-        # Max: 0.010498046875
-        # Min: 0.00415802001953125
-        # Average: 0.006191991990612399
-        self.assertLess(torch.mean(reldiff).item(), 0.0068)
-
-        weight_repacked = gptqmodel_marlin_cuda.gptq_repack(exllama_linear.qweight)
-        self.assertTrue(torch.allclose(weight_repacked, marlin_linear.B))
+        # repack the qweight using triton_v2_linear pack, then check if it is allclose to B from the marlin pack.
+        weight_repacked = gptqmodel_marlin_cuda.gptq_repack(triton_v2_linear.qweight)
 
         _, _scale_perm, _scale_perm_single = _get_perms()
 
-        s = exllama_linear.scales.data.clone()
+        # adjust the scales of triton_v2_linear to make them compatible with marlin, then check if they are allclose to the scales after marlin pack.
+        s = triton_v2_linear.scales.data.clone()
         if group_size != k:
             s = s.reshape((1, -1))
             s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
@@ -144,4 +144,5 @@ class TestRepacking(unittest.TestCase):
             s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
         s = s.reshape((-1, n)).contiguous()
 
+        self.assertTrue(torch.allclose(weight_repacked, marlin_linear.B))
         self.assertTrue(torch.allclose(s, marlin_linear.s))
