@@ -13,8 +13,7 @@ import torch.nn as nn  # noqa: E402
 import gptqmodel_marlin_cuda  # noqa: E402
 # isort: on
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import _get_perms  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, dequantize_weight  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 
 
@@ -79,6 +78,12 @@ class TestRepacking(unittest.TestCase):
 
         exllama_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
+        dequantized_weight, dequantized_qzeros = dequantize_weight(exllama_linear)
+        dequantized_weight = dequantized_weight.to(torch.float16)
+
+        self.assertTrue(torch.equal(dequantized_weight, linear.weight))
+        self.assertTrue(torch.all(dequantized_qzeros == 8))
+
         triton_v2_linear = TritonV2QuantLinear(
             bits=4,
             group_size=group_size,
@@ -89,6 +94,12 @@ class TestRepacking(unittest.TestCase):
             bias=False)
 
         triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=None)
+
+        dequantized_weight, dequantized_qzeros = dequantize_weight(triton_v2_linear)
+        dequantized_weight = dequantized_weight.to(torch.float16)
+
+        self.assertTrue(torch.equal(dequantized_weight, linear.weight))
+        self.assertTrue(torch.all(dequantized_qzeros == 8))
 
         self.assertTrue(torch.allclose(exllama_linear.qweight, triton_v2_linear.qweight))
         self.assertTrue(torch.allclose(exllama_linear.scales, triton_v2_linear.scales))
@@ -113,6 +124,12 @@ class TestRepacking(unittest.TestCase):
             bias=False)
 
         triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=None)
+
+        dequantized_weight, dequantized_qzeros = dequantize_weight(triton_v2_linear)
+        dequantized_weight = dequantized_weight.to(torch.float16)
+
+        self.assertTrue(torch.equal(dequantized_weight, linear.weight))
+        self.assertTrue(torch.all(dequantized_qzeros == 8))
 
         marlin_linear = MarlinQuantLinear(
             bits=4,
