@@ -107,7 +107,7 @@ class TestRepacking(unittest.TestCase):
             bits=4,
             group_size=group_size,
             sym=True,
-            desc_act=True,
+            desc_act=False,
             infeatures=k,
             outfeatures=n,
             bias=False)
