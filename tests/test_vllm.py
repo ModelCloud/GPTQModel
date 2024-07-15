@@ -9,6 +9,7 @@ import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
+
 class TestLoadVLLM(unittest.TestCase):
 
     @classmethod
@@ -17,10 +18,7 @@ class TestLoadVLLM(unittest.TestCase):
         from vllm import SamplingParams  # noqa: E402
         self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         self.prompts = [
-            "Hello, my name is",
-            "The president of the United States is",
             "The capital of France is",
-            "The future of AI is",
         ]
         self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -38,7 +36,7 @@ class TestLoadVLLM(unittest.TestCase):
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        self.assertTrue(outputs is not None)
+            self.assertEquals(generated_text, " Paris, which is also the capital of France.")
         outputs_param = model.generate(
             prompts=self.prompts,
             temperature=0.8,
@@ -48,5 +46,5 @@ class TestLoadVLLM(unittest.TestCase):
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        self.assertTrue(outputs_param is not None)
+            self.assertEquals(generated_text, " Paris. 2. Name the capital of the United States. 3.")
 
