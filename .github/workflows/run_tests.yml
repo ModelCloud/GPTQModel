@@ -96,7 +96,7 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        test_script: ${{ fromJSON(needs.gpu-test-files.outputs.gpu-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
     steps:
       - name: Checkout Codes
@@ -172,7 +172,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script:  ${{ fromJSON(needs.cpu-test-files.outputs.cpu-files) }}
+        test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
 
     steps:
       - name: Checkout Codes
