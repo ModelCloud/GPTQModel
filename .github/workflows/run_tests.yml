@@ -82,6 +82,7 @@ jobs:
   build-intel:
     runs-on: self-hosted
     needs: check-vm
+    if: needs.check-vm.outputs.tag == 'intel'
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -103,6 +104,7 @@ jobs:
   build-amd:
     runs-on: self-hosted
     needs: check-vm
+    if: needs.check-vm.outputs.tag == 'amd'
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
