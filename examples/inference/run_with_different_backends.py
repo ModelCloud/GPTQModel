@@ -58,7 +58,7 @@ def main():
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
         examples = [
             tokenizer(
-                "I am in Paris and I can't wait to explore its beautiful landmarks."
+                "I am in Paris and I can't wait to explore its beautiful"
             )
         ]
 
