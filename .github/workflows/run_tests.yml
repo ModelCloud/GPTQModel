@@ -19,13 +19,79 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
+  AMD_SERVER: 10.0.13.31
+  INTEL_SERVER: 10.0.23.62
   CPU_TEST_FILES: "test_qbits.py"
 
 jobs:
-  build:
+  check-vm:
     runs-on: self-hosted
+    outputs:
+      ip: ${{ steps.get_ip.outputs.ip }}
+      tag: ${{ steps.get_ip.outputs.tag }}
+    steps:
+      - name: Select server
+        id: get_ip
+        shell: bash
+        run: |
+          json=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.RUNNER_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runners)
+
+          result=$(python3 - <<EOF
+          import json
+          runners = json.loads('''$json''')['runners']
+          result = all(
+              (runner['status'] == 'offline' or runner['busy'])
+              for runner in runners
+              if any(label['name'] == 'self-hosted' for label in runner['labels']) and
+                 any(label['name'] == 'X64' for label in runner['labels'])
+          )
+          print(result)
+          EOF
+          )
+
+          if [ "$result" == "True" ]; then
+            tag="amd"
+          elif [ "$result" == "False" ]; then
+            tag="intel"
+          else
+            echo "Error: Unexpected result - $result"
+            exit 1
+          fi
+
+          echo "Runner tag: $tag"
+
+          if [ "$tag" == "intel" ]; then
+            if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
+              echo "Intel server is online."
+              ip=${INTEL_SERVER}
+            else
+              echo "Intel server is offline."
+              exit 1
+            fi
+          elif [ "$tag" == "amd" ]; then
+            if curl -s --head --request GET http://${AMD_SERVER} | grep "200 OK" > /dev/null; then
+              echo "AMD server is online."
+              ip=${AMD_SERVER}
+            else
+              echo "AMD server is offline."
+              exit 1
+            fi
+          fi
+
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          echo "tag: $tag, ip: $ip"
+  build-intel:
+    runs-on: self-hosted
+    needs: check-vm
+    if: needs.check-vm.outputs.tag == 'intel'
     container:
-      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -37,8 +103,27 @@ jobs:
         shell: bash
         run: python setup.py bdist_wheel
 
-      - name: Show dist folder
-        run: ls -alh dist
+      - name: Upload to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+  build-amd:
+    runs-on: self-hosted
+    needs: check-vm
+    if: needs.check-vm.outputs.tag == 'amd'
+    container:
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Compile
+        shell: bash
+        run: python setup.py bdist_wheel
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -87,11 +172,13 @@ jobs:
 
   test_gpu:
     needs:
-      - build
+      - build-intel
+      - build-amd
       - list-test-files
     runs-on: self-hosted
+    if: success() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
-      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -129,9 +216,9 @@ jobs:
         run: |
           vendor=$(lscpu | grep 'Vendor ID')
           if [[ $vendor == *"Intel"* ]]; then
-            ip="10.0.23.62"
+            ip=${INTEL_SERVER}
           else
-            ip="10.0.13.31"
+            ip=${AMD_SERVER}
           fi
           echo "GPU_IP=$ip" >> $GITHUB_ENV
 
@@ -164,11 +251,14 @@ jobs:
 
   test_cpu:
     needs:
-      - build
+      - build-intel
+      - build-amd
       - list-test-files
+      - check-vm
     runs-on: self-hosted
+    if: success() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
-      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
