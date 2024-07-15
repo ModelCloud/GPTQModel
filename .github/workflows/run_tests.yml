@@ -24,14 +24,6 @@ env:
   CPU_TEST_FILES: "test_qbits.py"
 
 jobs:
-  list-runners:
-    runs-on: ubuntu-latest
-    steps:
-      - name: List self-hosted runners
-        run: |
-          curl -H "Authorization: token ${{ github.token }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          https://api.github.com/repos/${{ github.repository }}/actions/runners
   check-vm:
     runs-on: self-hosted
     outputs:
@@ -42,15 +34,38 @@ jobs:
         id: get_ip
         shell: bash
         run: |
+          json=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runners)
+
+          result=$(python3 - <<EOF
+          import json
+          runners = json.loads('''$json''')['runners']
+          result = all(
+              (runner['status'] == 'offline' or runner['busy'])
+              for runner in runners
+              if any(label['name'] == 'self-hosted' for label in runner['labels']) and
+                 any(label['name'] == 'X64' for label in runner['labels'])
+          )
+          print(result)
+          EOF
+          )
+
+          if [ "$result" == "True" ]; then
+            tag=intel
+          else
+            tag=amd
+          fi
+
           if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
             echo "Intel server is online."
             ip=${INTEL_SERVER}
-            tag=intel
           else
             if curl -s --head --request GET http://${AMD_SERVER} | grep "200 OK" > /dev/null; then
               echo "AMD server is online."
               ip=${AMD_SERVER}
-              tag=amd
             else
                 echo "Both servers are offline."
                 exit 1
