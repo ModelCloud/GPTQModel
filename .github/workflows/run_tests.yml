@@ -71,7 +71,7 @@ jobs:
           "
           cpu_test_files=$(python3 -c "$cpu_script")
           echo "cpu_files=$cpu_test_files" >> "$GITHUB_OUTPUT"
-          echo "CPU Test files: $result"
+          echo "CPU Test files: $cpu_test_files"
 
 
           gpu_script="
@@ -86,7 +86,7 @@ jobs:
           "
           gpu_test_files=$(python3 -c "$gpu_script")
           echo "gpu_files=$gpu_test_files" >> "$GITHUB_OUTPUT"
-          echo "GPU Test files: $result"
+          echo "GPU Test files: $gpu_test_files"
 
   test_gpu:
     needs:
