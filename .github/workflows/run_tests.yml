@@ -22,7 +22,7 @@ env:
   CPU_TEST_FILES: "test_qbits.py"
 
 jobs:
-  check:
+  check-vm:
     runs-on: self-hosted
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
@@ -31,13 +31,13 @@ jobs:
       - name: Get IP Address
         id: get_ip
         run: |
-          echo "ip=10.0.23.62" >> "$GITHUB_OUTPUT"
+          echo "ip=10.0.13.31" >> "$GITHUB_OUTPUT"
           echo "tag=intel" >> "$GITHUB_OUTPUT"
   build:
-    runs-on: self-hosted
-    needs: check
+    runs-on: [self-hosted, ${{ needs.check-vm.outputs.tag }}]
+    needs: check-vm
     container:
-      image:  ${{ needs.prebuild.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -178,7 +178,8 @@ jobs:
     needs:
       - build
       - list-test-files
-    runs-on: self-hosted
+      - check-vm
+    runs-on: [self-hosted, ${{ needs.check-vm.outputs.tag }}]
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
