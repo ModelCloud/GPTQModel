@@ -143,7 +143,7 @@ jobs:
       - list-test-files
     runs-on: self-hosted
     container:
-      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -181,9 +181,9 @@ jobs:
         run: |
           vendor=$(lscpu | grep 'Vendor ID')
           if [[ $vendor == *"Intel"* ]]; then
-            ip="10.0.23.62"
+            ip=${INTEL_SERVER}
           else
-            ip="10.0.13.31"
+            ip=${AMD_SERVER}
           fi
           echo "GPU_IP=$ip" >> $GITHUB_ENV
 
@@ -221,7 +221,7 @@ jobs:
       - check-vm
     runs-on: self-hosted
     container:
-      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
