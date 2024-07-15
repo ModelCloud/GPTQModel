@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    runs-on: [self-hosted, intel]
+    runs-on: self-hosted
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -46,10 +46,11 @@ jobs:
           name: dist
           path: dist
 
-  gpu-test-files:
+  list-test-files:
     runs-on: ubuntu-latest
     outputs:
-      files: ${{ steps.files.outputs.files }}
+      cpu-files: ${{ steps.files.outputs.cpu-files }}
+      gpu-files: ${{ steps.files.outputs.gpu-files }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -64,47 +65,30 @@ jobs:
           script="
           import json
           import os
-          cpu_file_list = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',')]
-          test_files_list = [file.strip().removesuffix('.py') for file in '${{ github.event.inputs.test_names }}'.split(',') if file.strip()]
-          all_tests = [file.removesuffix('.py') for file in os.listdir('tests/') if file.startswith('test_') and file.endswith('.py')]
-          all_tests = [file for file in all_tests if file not in cpu_file_list]
-          result = [file for file in all_tests if file in test_files_list] if test_files_list else all_tests
-          print(json.dumps(result))
-          "
-          result=$(python3 -c "$script")
-          echo "files=$result" >> "$GITHUB_OUTPUT"
-          echo "Test files: $result"
 
-  cpu-test-files:
-    runs-on: ubuntu-latest
-    outputs:
-      files: ${{ steps.files.outputs.files }}
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          cpu_file_list = [f.strip().removesuffix('.py') for f in '${CPU_TEST_FILES}'.split(',') if f.strip()]
+          test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
+          cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
 
-      - name: List files
-        id: files
-        shell: bash
-        run: |
-          script="
-          import json
-          cpu_file_list = [file.strip().removesuffix('.py') for file in '${CPU_TEST_FILES}'.split(',') if file.strip()]
-          test_files_list = [file.strip().removesuffix('.py') for file in '${{ github.event.inputs.test_names }}'.split(',') if file.strip()]
-          result = [file for file in cpu_file_list if file in test_files_list] if test_files_list else cpu_file_list
-          print(json.dumps(result))
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py')]
+          gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
+
+          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
           "
-          result=$(python3 -c "$script")
-          echo "files=$result" >> "$GITHUB_OUTPUT"
-          echo "Test files: $result"
+
+          test_files=$(python3 -c "$script")
+          IFS='|' read -r cpu_test_files gpu_test_files <<< "$test_files"
+          echo "cpu-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
+          echo "gpu-files=$gpu_test_files" >> "$GITHUB_OUTPUT"
+
+          echo "Test files: $test_files"
+          echo "CPU Test files: $cpu_test_files"
+          echo "GPU Test files: $gpu_test_files"
 
   test_gpu:
     needs:
       - build
-      - gpu-test-files
+      - list-test-files
     runs-on: self-hosted
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
@@ -112,7 +96,7 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        test_script: ${{ fromJSON(needs.gpu-test-files.outputs.files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
     steps:
       - name: Checkout Codes
@@ -181,14 +165,14 @@ jobs:
   test_cpu:
     needs:
       - build
-      - cpu-test-files
-    runs-on: [self-hosted, intel]
+      - list-test-files
+    runs-on: self-hosted
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
-        test_script:  ${{ fromJSON(needs.cpu-test-files.outputs.files) }}
+        test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
 
     steps:
       - name: Checkout Codes
