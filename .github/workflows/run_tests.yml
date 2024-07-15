@@ -30,7 +30,7 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
     steps:
-      - name: Get IP Address
+      - name: Select server
         id: get_ip
         shell: bash
         run: |
