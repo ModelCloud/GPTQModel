@@ -62,16 +62,21 @@ jobs:
             exit 1
           fi
 
-          if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
-            echo "Intel server is online."
-            ip=${INTEL_SERVER}
-          else
+          if [ "$tag" == "intel" ]; then
+            if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
+              echo "Intel server is online."
+              ip=${INTEL_SERVER}
+            else
+              echo "Intel server is offline."
+              exit 1
+            fi
+          elif [ "$tag" == "amd" ]; then
             if curl -s --head --request GET http://${AMD_SERVER} | grep "200 OK" > /dev/null; then
               echo "AMD server is online."
               ip=${AMD_SERVER}
             else
-                echo "Both servers are offline."
-                exit 1
+              echo "AMD server is offline."
+              exit 1
             fi
           fi
 
