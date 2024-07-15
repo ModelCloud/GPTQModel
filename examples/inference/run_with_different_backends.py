@@ -58,7 +58,7 @@ def main():
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
         examples = [
             tokenizer(
-                "I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
+                "I am in Paris and I can't wait to explore its beautiful landmarks."
             )
         ]
 
@@ -87,7 +87,7 @@ def main():
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
-        res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
+        res = model.generate(**inp, num_beams=1, max_new_tokens=10)
         output = tokenizer.decode(res[0])
 
     print(f"Prompt: {prompt}, Generated text: {output}")
