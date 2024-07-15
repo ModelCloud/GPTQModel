@@ -49,7 +49,8 @@ jobs:
   list-test-files:
     runs-on: ubuntu-latest
     outputs:
-      files: ${{ steps.files.outputs.files }}
+      cpu-files: ${{ steps.files.outputs.cpu-files }}
+      gpu-files: ${{ steps.files.outputs.gpu-files }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
