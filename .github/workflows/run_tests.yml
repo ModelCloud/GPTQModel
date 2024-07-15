@@ -76,7 +76,28 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
           echo "tag: $tag, ip: $ip"
-  build:
+  build-intel:
+    runs-on: self-hosted
+    needs: check-vm
+    container:
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Compile
+        shell: bash
+        run: python setup.py bdist_wheel
+
+      - name: Upload to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+  build-amd:
     runs-on: self-hosted
     needs: check-vm
     container:
@@ -139,9 +160,11 @@ jobs:
 
   test_gpu:
     needs:
-      - build
+      - build-intel
+      - build-amd
       - list-test-files
     runs-on: self-hosted
+    if: success() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
@@ -216,10 +239,12 @@ jobs:
 
   test_cpu:
     needs:
-      - build
+      - build-intel
+      - build-amd
       - list-test-files
       - check-vm
     runs-on: self-hosted
+    if: success() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
