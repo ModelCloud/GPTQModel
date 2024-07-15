@@ -26,15 +26,18 @@ jobs:
     runs-on: self-hosted
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
+      tag: ${{ steps.get_ip.outputs.tag }}
     steps:
       - name: Get IP Address
         id: get_ip
-        run: echo "ip=10.0.23.62" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "ip=10.0.23.62" >> "$GITHUB_OUTPUT"
+          echo "tag=intel" >> "$GITHUB_OUTPUT"
   build:
     runs-on: self-hosted
     needs: check
     container:
-      image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
+      image:  ${{ needs.prebuild.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
