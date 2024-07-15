@@ -81,7 +81,8 @@ jobs:
           IFS='\n' read -r cpu_files gpu_files <<< "$test_files"
           echo "cpu_files=$cpu_test_files" >> "$GITHUB_OUTPUT"
           echo "gpu_files=$gpu_test_files" >> "$GITHUB_OUTPUT"
-          echo "Test files: $test_files"
+          echo "CPU Test files: ~~$cpu_test_files~~"
+          echo "GPU Test files: ~~$gpu_test_files~~"
 
   test_gpu:
     needs:
