@@ -19,6 +19,8 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
+  AMD_SERVER: 10.0.13.31
+  INTEL_SERVER: 10.0.23.62
   CPU_TEST_FILES: "test_qbits.py"
 
 jobs:
@@ -30,9 +32,27 @@ jobs:
     steps:
       - name: Get IP Address
         id: get_ip
+        shell: bash
         run: |
-          echo "ip=10.0.13.31" >> "$GITHUB_OUTPUT"
-          echo "tag=intel" >> "$GITHUB_OUTPUT"
+          if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
+            echo "Intel server is online."
+            ip=${INTEL_SERVER}
+            tag=intel
+          else
+            if curl -s --head --request GET http://${AMD_SERVER} | grep "200 OK" > /dev/null; then
+              echo "AMD server is online."
+              ip=${AMD_SERVER}
+              tag=amd
+            else
+                echo "Both servers are offline."
+                exit 1
+            fi
+          fi
+
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          echo "tag: $tag, ip: $ip"
   build:
     runs-on: self-hosted
     needs: check-vm
@@ -48,9 +68,6 @@ jobs:
       - name: Compile
         shell: bash
         run: python setup.py bdist_wheel
-
-      - name: Show dist folder
-        run: ls -alh dist
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
