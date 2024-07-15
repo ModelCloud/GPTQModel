@@ -69,7 +69,7 @@ jobs:
           result = [file for file in cpu_file_list if file in test_files_list] if test_files_list else cpu_file_list
           print(json.dumps(result))
           "
-          cpu_test_files=$(python3 -c "cpu_script")
+          cpu_test_files=$(python3 -c cpu_script)
           echo "cpu_files=$cpu_test_files" >> "$GITHUB_OUTPUT"
           echo "CPU Test files: $result"
 
@@ -84,7 +84,7 @@ jobs:
           result = [file for file in all_tests if file in test_files_list] if test_files_list else all_tests
           print(json.dumps(result))
           "
-          gpu_test_files=$(python3 -c "gpu_script")
+          gpu_test_files=$(python3 -c gpu_script)
           echo "gpu_files=$gpu_test_files" >> "$GITHUB_OUTPUT"
           echo "GPU Test files: $result"
 
