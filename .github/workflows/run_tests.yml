@@ -54,13 +54,15 @@ jobs:
           )
 
           if [ "$result" == "True" ]; then
-            tag="intel"
-          elif [ "$result" == "False" ]; then
             tag="amd"
+          elif [ "$result" == "False" ]; then
+            tag="intel"
           else
             echo "Error: Unexpected result - $result"
             exit 1
           fi
+
+          echo "Runner tag: $tag"
 
           if [ "$tag" == "intel" ]; then
             if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
