@@ -68,22 +68,22 @@ jobs:
 
           cpu_file_list = [f.strip().removesuffix('.py') for f in '${CPU_TEST_FILES}'.split(',') if f.strip()]
           test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
-
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
-          print(json.dumps(cpu_test_files))
 
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py')]
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
-          print(json.dumps(gpu_test_files))
+
+          print(f"{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}")
           "
 
           test_files=$(python3 -c "$script")
-          IFS='\n' read -r cpu_files gpu_files <<< "$test_files"
+          IFS='|' read -r cpu_files gpu_files <<< "$test_files"
           echo "cpu_files=$cpu_test_files" >> "$GITHUB_OUTPUT"
           echo "gpu_files=$gpu_test_files" >> "$GITHUB_OUTPUT"
+
           echo "Test files: $test_files"
-          echo "CPU Test files: ~~$cpu_test_files~~"
-          echo "GPU Test files: ~~$gpu_test_files~~"
+          echo "CPU Test files: $cpu_test_files"
+          echo "GPU Test files: $gpu_test_files"
 
   test_gpu:
     needs:
