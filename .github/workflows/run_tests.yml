@@ -34,7 +34,7 @@ jobs:
           echo "ip=10.0.13.31" >> "$GITHUB_OUTPUT"
           echo "tag=intel" >> "$GITHUB_OUTPUT"
   build:
-    runs-on: [self-hosted, ${{ needs.check-vm.outputs.tag }}]
+    runs-on: self-hosted
     needs: check-vm
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
@@ -179,7 +179,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [self-hosted, ${{ needs.check-vm.outputs.tag }}]
+    runs-on: self-hosted
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
