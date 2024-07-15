@@ -77,7 +77,7 @@ jobs:
           print(json.dumps(gpu_test_files))
           "
 
-          test_files=$(python3 -c "script")
+          test_files=$(python3 -c "$script")
           IFS='\n' read -r cpu_files gpu_files <<< "$test_files"
           echo "cpu_files=$cpu_test_files" >> "$GITHUB_OUTPUT"
           echo "gpu_files=$gpu_test_files" >> "$GITHUB_OUTPUT"
