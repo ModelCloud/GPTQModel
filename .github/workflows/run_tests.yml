@@ -22,8 +22,17 @@ env:
   CPU_TEST_FILES: "test_qbits.py"
 
 jobs:
+  check:
+    runs-on: self-hosted
+    outputs:
+      ip: ${{ steps.get_ip.outputs.ip }}
+    steps:
+      - name: Get IP Address
+        id: get_ip
+        run: echo "ip=10.0.23.62" >> "$GITHUB_OUTPUT"
   build:
     runs-on: self-hosted
+    needs: check
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
