@@ -34,24 +34,15 @@ jobs:
         id: get_ip
         shell: bash
         run: |
-          json=$(curl -sL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ secrets.RUNNER_TOKEN }}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/${{ github.repository }}/actions/runners)
-
-          result=$(python3 - <<EOF
-          import json
-          runners = json.loads('''$json''')['runners']
-          result = all(
-              (runner['status'] == 'offline' or runner['busy'])
-              for runner in runners
-              if any(label['name'] == 'self-hosted' for label in runner['labels']) and
-                 any(label['name'] == 'X64' for label in runner['labels'])
-          )
-          print(result)
-          EOF
-          )
+          response=$(curl --silent --fail http://${INTEL_SERVER}/gpu/runner/status/available)
+          if [[ $? -ne 0 ]]; then
+            response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
+          fi
+          if [[ $response -eq -1 ]]; then
+            tag="amd"
+          elif [[ $response -eq 0 ]]; then
+            tag="intel"
+          fi
 
           if [ "$result" == "True" ]; then
             tag="amd"
