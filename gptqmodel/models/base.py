@@ -150,18 +150,6 @@ class BaseGPTQModel(nn.Module):
         return new_calibration_dataset_batched
 
     def quantize(
-            self,
-            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-            batch_size: int = 1,
-            calibration_enable_gpu_cache: bool = True,
-    ):
-        if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
-            self._quantize(calibration_dataset, batch_size, calibration_enable_gpu_cache)
-        else:
-            with torch.inference_mode():
-                self._quantize(calibration_dataset, batch_size, calibration_enable_gpu_cache)
-
-    def _quantize(
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
@@ -440,7 +428,8 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs["position_ids"] = layer_position_ids
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-                    layer(*layer_input, **additional_layer_inputs)
+                    with torch.no_grad():
+                        layer(*layer_input, **additional_layer_inputs)
                 for h in handles:
                     h.remove()
 
@@ -490,11 +479,12 @@ class BaseGPTQModel(nn.Module):
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
                     additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-                layer_output = move_to(
-                    layer(*layer_input, **additional_layer_inputs)[0],
-                    cur_layer_device if calibration_enable_gpu_cache else CPU,
-                )
-                layer_outputs.append([layer_output])
+                with torch.no_grad():
+                    layer_output = move_to(
+                        layer(*layer_input, **additional_layer_inputs)[0],
+                        cur_layer_device if calibration_enable_gpu_cache else CPU,
+                    )
+                    layer_outputs.append([layer_output])
 
             layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
             del layer
