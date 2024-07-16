@@ -34,7 +34,8 @@ jobs:
         id: get_ip
         shell: bash
         run: |
-          response=$(curl --silent --fail http://${INTEL_SERVER}/gpu/runner/status/available)
+          response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available)
+
           if [[ $? -ne 0 ]]; then
             response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
           fi
@@ -44,29 +45,33 @@ jobs:
             tag="intel"
           fi
 
-          if [ "$result" == "True" ]; then
-            tag="amd"
-          elif [ "$result" == "False" ]; then
+          if [ "$response" == "0" ]; then
             tag="intel"
+          elif [ "$response" == "-1" ]; then
+            tag="amd"
           else
-            echo "Error: Unexpected result - $result"
+            echo "Error: Unexpected result - $response"
             exit 1
           fi
 
           echo "Runner tag: $tag"
 
           if [ "$tag" == "intel" ]; then
-            if curl -s --head --request GET http://${INTEL_SERVER} | grep "200 OK" > /dev/null; then
-              echo "Intel server is online."
+            response=$(curl -s --head --request GET http://${INTEL_SERVER}/gpu/status)
+            #  echo "Intel server response: $response"
+            if echo "$response" | grep "200 OK" > /dev/null; then
+              echo "Intel server is online. set ip to $ip"
               ip=${INTEL_SERVER}
             else
               echo "Intel server is offline."
               exit 1
             fi
           elif [ "$tag" == "amd" ]; then
-            if curl -s --head --request GET http://${AMD_SERVER} | grep "200 OK" > /dev/null; then
-              echo "AMD server is online."
+            response=$(curl -s --head --request GET http://${AMD_SERVER}/gpu/status)
+            #  echo "AMD server response: '$response'"
+            if echo "$response" | grep "200 OK" > /dev/null; then
               ip=${AMD_SERVER}
+              echo "AMD server is online. set ip to $ip"
             else
               echo "AMD server is offline."
               exit 1
@@ -75,6 +80,8 @@ jobs:
 
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          echo "tag: $tag, ip: $ip"
 
           echo "tag: $tag, ip: $ip"
   build-intel:
