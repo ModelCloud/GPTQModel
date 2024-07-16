@@ -61,6 +61,7 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
+    @torch.inference_mode()
     def fasterquant(
         self,
         blocksize=128,
