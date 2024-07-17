@@ -94,7 +94,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         shell: bash
@@ -122,7 +122,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         shell: bash
@@ -214,7 +214,7 @@ jobs:
 
       - name: Install wheel
         shell: bash
-        run: pip install dist/*.whl parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/
+        run: pip install dist/*.whl parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Check platform
         shell: bash
@@ -284,7 +284,7 @@ jobs:
       - name: Install wheel
         shell: bash
         run: |
-          pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/
+          pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
