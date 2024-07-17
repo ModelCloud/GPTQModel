@@ -182,7 +182,7 @@ jobs:
       - build-amd
       - list-test-files
     runs-on: self-hosted
-    if: success() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
@@ -261,7 +261,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: success() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
