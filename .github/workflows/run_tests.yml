@@ -35,13 +35,18 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.name }}" == *"intel"* ]]; then
+            echo "current ci is intel"
             response=0
           else
-            response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available)
-            if [[ $? -ne 0 ]]; then
+            echo "test intel vm status"
+            response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available) || response=error
+            if [ "$response" == "error" ]; then
+              echo "test amd vm status"
               response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
             fi
           fi
+
+          echo "response: $response"
 
           if [ "$response" == "0" ]; then
             tag="intel"
