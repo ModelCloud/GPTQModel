@@ -42,7 +42,7 @@ jobs:
             response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available) || response=error
             if [ "$response" == "error" ]; then
               echo "test amd vm status"
-              response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
+              response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available) || response=error
             fi
           fi
 
@@ -59,19 +59,12 @@ jobs:
 
           echo "Runner tag: $tag"
 
-          if [ "$tag" == "intel" ]; then
-            response=$(curl -s --head --request GET http://${INTEL_SERVER}/gpu/status)
-            #  echo "Intel server response: $response"
-            if echo "$response" | grep "200 OK" > /dev/null; then
-              echo "Intel server is online. set ip to $ip"
-              ip=${INTEL_SERVER}
-            else
-              echo "Intel server is offline."
-              exit 1
-            fi
-          elif [ "$tag" == "amd" ]; then
-            response=$(curl -s --head --request GET http://${AMD_SERVER}/gpu/status)
-            #  echo "AMD server response: '$response'"
+          response=$(curl -s --head --fail http://${INTEL_SERVER}/gpu/status) || response=error
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "Intel server is online. set ip to $ip"
+            ip=${INTEL_SERVER}
+          else
+            response=$(curl -s --head --request GET http://${AMD_SERVER}/gpu/status) || response=error
             if echo "$response" | grep "200 OK" > /dev/null; then
               ip=${AMD_SERVER}
               echo "AMD server is online. set ip to $ip"
