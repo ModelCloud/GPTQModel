@@ -34,15 +34,13 @@ jobs:
         id: get_ip
         shell: bash
         run: |
-          response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available)
-
-          if [[ $? -ne 0 ]]; then
-            response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
-          fi
-          if [[ $response -eq -1 ]]; then
-            tag="amd"
-          elif [[ $response -eq 0 ]]; then
-            tag="intel"
+          if [[ "${{ runner.name }}" == *"intel"* ]]; then
+            response=0
+          else
+            response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available)
+            if [[ $? -ne 0 ]]; then
+              response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
+            fi
           fi
 
           if [ "$response" == "0" ]; then
@@ -222,8 +220,7 @@ jobs:
       - name: Check platform
         shell: bash
         run: |
-          vendor=$(lscpu | grep 'Vendor ID')
-          if [[ $vendor == *"Intel"* ]]; then
+          if [[ "${{ runner.name }}" == *"intel"* ]]; then
             ip=${INTEL_SERVER}
           else
             ip=${AMD_SERVER}
