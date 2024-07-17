@@ -181,6 +181,7 @@ jobs:
       - build-intel
       - build-amd
       - list-test-files
+      - check-vm
     runs-on: self-hosted
     if: always() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
