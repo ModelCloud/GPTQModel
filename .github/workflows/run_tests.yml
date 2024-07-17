@@ -96,6 +96,10 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
+      - name: Install requirements
+        shell: bash
+        run: pip install -r requirements.txt
+
       - name: Compile
         shell: bash
         run: python setup.py bdist_wheel
@@ -119,6 +123,10 @@ jobs:
         with:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
+
+      - name: Install requirements
+        shell: bash
+        run: pip install -r requirements.txt
 
       - name: Compile
         shell: bash
