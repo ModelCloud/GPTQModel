@@ -119,21 +119,25 @@ ROCM/AMD support will be re-added in a future version after everything on ROCM h
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # compile and install
+# You can optionally include specific modules like vllm, sglang, or bitblas by adding them in brackets. Example: pip install -vvv --no-build-isolation .[vllm,sglang,bitblas]
 pip install -vvv --no-build-isolation .
 
 # If you have `uv` package version 0.1.16 or higher, you can use `uv pip` for potentially better dependency management
+# Include modules as needed: uv pip install -vvv --no-build-isolation .[vllm,sglang,bitblas]
 uv pip install -vvv --no-build-isolation .
 ```
 
 ### Script installation  
 ```bash
+# You can pass modules as arguments, e.g., --vllm --sglang --bitblas. Example: bash install.sh --vllm --sglang --bitblas
 bash install.sh
 ```
 
 ### PIP (PENDING RELEASE) 
 
 ```bash
-pip install gptq-model --no-build-isolation
+# Include any specific modules needed using brackets. Example: pip install gptqmodel[sglang,vllm,bitblas] --no-build-isolation
+pip install gptqmodel --no-build-isolation
 ```
 
 ### Quantization and Inference
