@@ -39,8 +39,8 @@ jobs:
             response=0
           else
             echo "test intel vm status"
-            response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available)
-            if [[ $? -ne 0 ]]; then
+            response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available) || response=error
+            if [ "$response" == "error" ]; then
               echo "test amd vm status"
               response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
             fi
