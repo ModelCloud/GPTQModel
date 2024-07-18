@@ -133,7 +133,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: pip install -r requirements.txt -d ./offline_packages -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Cache pip
         shell: bash
