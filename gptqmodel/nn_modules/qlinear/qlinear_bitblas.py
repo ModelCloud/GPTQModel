@@ -23,16 +23,7 @@ def import_bitblas():
     global BITBLAS_DATABASE_PATH, BITBLAS_TARGET
 
     # guard against bitblas pip whl incompatible env
-    try:
-        import bitblas
-    except Exception as e:
-        from packaging import version
-        if version.parse(torch.version.cuda) < version.parse("12.1"):
-            raise EnvironmentError(
-                "Bitblas must be manually compiled for CUDA version < 12.1. Please follow the source compile instructions at:\n"
-                "https://github.com/microsoft/BitBLAS/blob/main/docs/Installation.md#building-from-source")
-        else:
-            raise e
+    import bitblas
 
     bitblas.set_log_level("INFO")
 
