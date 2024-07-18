@@ -1,6 +1,8 @@
 name: Unit Tests
 
 on:
+  schedule:
+    - cron: '0 19 * * *'
   repository_dispatch:
   workflow_dispatch:
     inputs:
