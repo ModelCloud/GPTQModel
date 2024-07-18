@@ -221,7 +221,9 @@ jobs:
 
       - name: Install wheel
         shell: bash
-        run: pip install dist/*.whl parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: |
+          pip install bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install dist/*.whl
 
       - name: Check platform
         shell: bash
