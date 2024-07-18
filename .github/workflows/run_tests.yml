@@ -68,7 +68,7 @@ jobs:
             echo "Intel server is online. set ip to $ip"
             ip=${INTEL_SERVER}
           else
-            response=$(curl -s --head  -max-time 5 http://${AMD_SERVER}/gpu/status) || response=error
+            response=$(curl -s --head --max-time 5 http://${AMD_SERVER}/gpu/status) || response=error
             if echo "$response" | grep "200 OK" > /dev/null; then
               ip=${AMD_SERVER}
               echo "AMD server is online. set ip to $ip"
