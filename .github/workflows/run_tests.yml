@@ -43,10 +43,10 @@ jobs:
             response=0
           else
             echo "test intel vm status"
-            response=$(curl --silent --fail --max-time 5 http://$INTEL_SERVER/gpu/runner/status/available) || response=error
+            response=$(curl --silent --fail --max-time 5 http://$INTEL_SERVER/gpu/runner/status/intel) || response=error
             if [ "$response" == "error" ]; then
               echo "test amd vm status"
-              response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/available) || response=error
+              response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/intel) || response=error
             fi
           fi
 
