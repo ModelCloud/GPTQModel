@@ -20,12 +20,18 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   AMD_SERVER: 10.0.13.31
-  INTEL_SERVER: 10.0.23.62
+  INTEL_SERVER: 10.0.23.35
   CPU_TEST_FILES: "test_qbits.py"
+
+concurrency:
+  group: ${{ github.ref }}-workflow
+  cancel-in-progress: true
 
 jobs:
   check-vm:
     runs-on: self-hosted
+    container:
+      image:  modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
@@ -39,10 +45,10 @@ jobs:
             response=0
           else
             echo "test intel vm status"
-            response=$(curl --silent --fail http://$INTEL_SERVER/gpu/runner/status/available) || response=error
+            response=$(curl --silent --fail --max-time 5 http://$INTEL_SERVER/gpu/runner/status/intel) || response=error
             if [ "$response" == "error" ]; then
               echo "test amd vm status"
-              response=$(curl --silent --fail http://${AMD_SERVER}/gpu/runner/status/available)
+              response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/intel) || response=error
             fi
           fi
 
@@ -59,19 +65,12 @@ jobs:
 
           echo "Runner tag: $tag"
 
-          if [ "$tag" == "intel" ]; then
-            response=$(curl -s --head --request GET http://${INTEL_SERVER}/gpu/status)
-            #  echo "Intel server response: $response"
-            if echo "$response" | grep "200 OK" > /dev/null; then
-              echo "Intel server is online. set ip to $ip"
-              ip=${INTEL_SERVER}
-            else
-              echo "Intel server is offline."
-              exit 1
-            fi
-          elif [ "$tag" == "amd" ]; then
-            response=$(curl -s --head --request GET http://${AMD_SERVER}/gpu/status)
-            #  echo "AMD server response: '$response'"
+          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response=error
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "Intel server is online. set ip to $ip"
+            ip=${INTEL_SERVER}
+          else
+            response=$(curl -s --head --max-time 5 http://${AMD_SERVER}/gpu/status) || response=error
             if echo "$response" | grep "200 OK" > /dev/null; then
               ip=${AMD_SERVER}
               echo "AMD server is online. set ip to $ip"
@@ -101,7 +100,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         shell: bash
@@ -129,7 +128,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         shell: bash
@@ -188,7 +187,8 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    timeout-minutes: 30
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
@@ -221,7 +221,7 @@ jobs:
 
       - name: Install wheel
         shell: bash
-        run: pip install dist/*.whl parameterized uvicorn
+        run: pip install dist/*.whl parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Check platform
         shell: bash
@@ -242,6 +242,7 @@ jobs:
             gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}")
 
             if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
@@ -291,7 +292,7 @@ jobs:
       - name: Install wheel
         shell: bash
         run: |
-          pip install dist/*.whl
+          pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
