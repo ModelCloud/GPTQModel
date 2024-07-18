@@ -131,12 +131,15 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
+      - name: Install pv
+        shell: bash
+        run: apt update && apt install pv -y
+
       - name: Install requirements
         shell: bash
         run: |
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           ls -alh .
-          apt update && apt install pv -y
           requirements_hash=$(sha256sum requirements.txt | awk '{ print $1 }')
           tar cf - -C $(pip cache dir) . | pv -pterb | xz -z > ${requirements_hash}.tar.xz
           curl --progress-bar -F "file=@${requirements_hash}.tar.xz" http://${{ needs.check-vm.outputs.ip }}/gpu/cache/upload/
