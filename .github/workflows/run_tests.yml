@@ -101,10 +101,10 @@ jobs:
       - name: Install requirements
         shell: bash
         run: |
-          pip install -r requirements.txt --cache-dir ./offline_packages -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           ls -alh .
           requirements_hash=$(sha256sum requirements.txt | awk '{ print $1 }')
-          tar -cJf ${requirements_hash}.tar.xz -C ./offline_packages .
+          tar -cJf ${requirements_hash}.tar.xz -C $(pip cache dir) .
           curl -F "file=@${requirements_hash}.tar.xz" http://${{ needs.check-vm.outputs.ip }}/gpu/cache/upload/
 
       - name: Compile
@@ -134,10 +134,10 @@ jobs:
       - name: Install requirements
         shell: bash
         run: |
-          pip install -r requirements.txt --cache-dir ./offline_packages -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           ls -alh .
           requirements_hash=$(sha256sum requirements.txt | awk '{ print $1 }')
-          tar -cJf ${requirements_hash}.tar.xz -C ./offline_packages .
+          tar -cJf ${requirements_hash}.tar.xz -C $(pip cache dir) .
           curl -F "file=@${requirements_hash}.tar.xz" http://${{ needs.check-vm.outputs.ip }}/gpu/cache/upload/
 
       - name: Compile
