@@ -30,6 +30,8 @@ concurrency:
 jobs:
   check-vm:
     runs-on: self-hosted
+    container:
+      image:  modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
