@@ -16,10 +16,14 @@ except ImportError as e:
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from util import check_bitblas_available
 
 
 class TestQ4BitBLAS(unittest.TestCase):
     def test_generation(self):
+        if check_bitblas_available() is False:
+            return
+
         reference_output = "</s>I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
 
         prompt = "I am in Paris and"
@@ -50,6 +54,9 @@ class TestQ4BitBLAS(unittest.TestCase):
         self.assertEqual(predicted_text, reference_output)
 
     def test_bias(self):
+        if check_bitblas_available() is False:
+            return
+
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "s3nh/starcoderbase-1b-GPTQ"
         try:

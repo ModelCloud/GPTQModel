@@ -13,6 +13,7 @@ from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantiz
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+from util import check_bitblas_available
 
 
 class TestPerplexity(unittest.TestCase):
@@ -110,6 +111,9 @@ class TestPerplexity(unittest.TestCase):
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
+        if format == FORMAT.BITBLAS and check_bitblas_available() is False:
+            return
+
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,

@@ -10,6 +10,7 @@ import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from util import check_bitblas_available
 
 
 class TestSharded(unittest.TestCase):
@@ -76,6 +77,9 @@ class TestSharded(unittest.TestCase):
             self.assertGreater(len(result), 0)
 
     def test_save_and_load_unsupports_shard(self):
+        if check_bitblas_available() is False:
+            return
+
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device_map="auto",
