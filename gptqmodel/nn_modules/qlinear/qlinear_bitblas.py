@@ -25,6 +25,10 @@ def import_bitblas():
     # guard against bitblas pip whl incompatible env
     try:
         import bitblas
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+        "The 'bitblas' module is not installed but is required for qliner_bitblas."
+        "Please install it using the command: pip install bitblas")
     except Exception as e:
         from packaging import version
         if version.parse(torch.version.cuda) < version.parse("12.1"):
