@@ -235,6 +235,7 @@ jobs:
             gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}")
 
             if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
