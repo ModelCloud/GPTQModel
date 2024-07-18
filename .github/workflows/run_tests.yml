@@ -23,6 +23,10 @@ env:
   INTEL_SERVER: 10.0.23.35
   CPU_TEST_FILES: "test_qbits.py"
 
+concurrency:
+  group: ${{ github.ref }}-workflow
+  cancel-in-progress: true
+
 jobs:
   check-vm:
     runs-on: self-hosted
@@ -182,6 +186,7 @@ jobs:
       - check-vm
     runs-on: self-hosted
     if: always() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    timeout-minutes: 30
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
