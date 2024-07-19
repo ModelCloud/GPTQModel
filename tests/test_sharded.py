@@ -76,7 +76,12 @@ class TestSharded(unittest.TestCase):
             self.assertGreater(len(result), 0)
 
     def test_save_and_load_unsupports_shard(self):
-        if check_bitblas_installation() is not None:
+        error = check_bitblas_installation()
+        if error is not None:
+            if isinstance(error, ModuleNotFoundError):
+                print("[WARNING] bitblas not installed, Please install via `pip install bitblas`.")
+            else:
+                print(f"[WARNING] Could not load module bitblas: {error}")
             return
 
         model = GPTQModel.from_quantized(

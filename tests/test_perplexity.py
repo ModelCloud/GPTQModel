@@ -110,7 +110,12 @@ class TestPerplexity(unittest.TestCase):
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
-        if check_bitblas_installation() is not None:
+        error = check_bitblas_installation()
+        if error is not None:
+            if isinstance(error, ModuleNotFoundError):
+                print("[WARNING] bitblas not installed, Please install via `pip install bitblas`.")
+            else:
+                print(f"[WARNING] Could not load module bitblas: {error}")
             return
 
         if method == QUANT_METHOD.GPTQ:

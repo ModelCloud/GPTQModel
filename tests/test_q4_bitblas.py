@@ -20,7 +20,12 @@ from gptqmodel.utils.bitblas import check_bitblas_installation
 
 class TestQ4BitBLAS(unittest.TestCase):
     def test_generation(self):
-        if check_bitblas_installation() is not None:
+        error = check_bitblas_installation()
+        if error is not None:
+            if isinstance(error, ModuleNotFoundError):
+                print("[WARNING] bitblas not installed, Please install via `pip install bitblas`.")
+            else:
+                print(f"[WARNING] Could not load module bitblas: {error}")
             return
 
         reference_output = "</s>I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
@@ -53,7 +58,12 @@ class TestQ4BitBLAS(unittest.TestCase):
         self.assertEqual(predicted_text, reference_output)
 
     def test_bias(self):
-        if check_bitblas_installation() is not None:
+        error = check_bitblas_installation()
+        if error is not None:
+            if isinstance(error, ModuleNotFoundError):
+                print("[WARNING] bitblas not installed, Please install via `pip install bitblas`.")
+            else:
+                print(f"[WARNING] Could not load module bitblas: {error}")
             return
 
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
