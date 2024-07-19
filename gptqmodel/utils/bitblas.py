@@ -135,3 +135,11 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
     quant_config.format = FORMAT.BITBLAS
 
     return model
+
+
+def check_bitblas_installation():
+    try:
+        import bitblas
+        return None
+    except Exception as e:
+        return e

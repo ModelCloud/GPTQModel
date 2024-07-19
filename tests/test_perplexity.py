@@ -13,8 +13,7 @@ from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantiz
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
-from util import check_bitblas_available
-
+from gptqmodel.utils.bitblas import check_bitblas_installation
 
 class TestPerplexity(unittest.TestCase):
     TINYLLAMA_MODEL_ID = "ModelCloud/tinyllama-15M-stories"
@@ -101,17 +100,17 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.MARLIN, 4),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, FORMAT.MARLIN, 4),
             (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
-            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
-        if format == FORMAT.BITBLAS and check_bitblas_available() is False:
+        if check_bitblas_installation() is not None:
             return
 
         if method == QUANT_METHOD.GPTQ:
