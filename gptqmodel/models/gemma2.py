@@ -26,11 +26,12 @@ class Gemma2GPTQ(BaseGPTQModel):
 
         # There is an issue with duplicate outputs in the quantized gemma-2 model 27b with transformers.
         # Until this issue is fixed, quantized gemma-2 27b model only support vLLM load.
-        num_hidden_layers = getattr(self.model.config, "num_hidden_layers")
-        # The gemma-2 model 9b has 42 hidden layers, while the gemma-2 model 27b has 46 hidden layers.
-        if num_hidden_layers > 42:
-            if self.quantized:
-                raise ValueError("Currently, only vllm can load the quantized gemma2-27b for proper inference. https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit is a quantized gemma-2-27b-it model, along with an example of loading it using vLLM.")
-            else:
-                logger.warning("Currently, only vllm can load the quantized gemma2-27b for proper inference. https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit is a quantized gemma-2-27b-it model, along with an example of loading it using vLLM.")
+        if hasattr(self.model.config, "num_hidden_layers"):
+            num_hidden_layers = getattr(self.model.config, "num_hidden_layers")
+            # The gemma-2 model 9b has 42 hidden layers, while the gemma-2 model 27b has 46 hidden layers.
+            if num_hidden_layers > 42:
+                if self.quantized:
+                    raise ValueError("Currently, only vllm can load the quantized gemma2-27b for proper inference. https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit is a quantized gemma-2-27b-it model, along with an example of loading it using vLLM.")
+                else:
+                    logger.warning("Currently, only vllm can load the quantized gemma2-27b for proper inference. https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit is a quantized gemma-2-27b-it model, along with an example of loading it using vLLM.")
 
