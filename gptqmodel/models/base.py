@@ -849,6 +849,11 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+        if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
+            import os
+            # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
+            os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
+
         if backend == BACKEND.QBITS:
             device = CPU
             try:
