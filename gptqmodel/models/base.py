@@ -191,14 +191,18 @@ class BaseGPTQModel(nn.Module):
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
-        for e in calibration_dataset:
-            input_ids_length = len(e["input_ids"])
+        for row in calibration_dataset:
+            input_ids = row["input_ids"]
+            if isinstance(input_ids, torch.Tensor):
+                input_ids_length = input_ids.shape[1]
+            else:
+                input_ids_length = len(input_ids)
             total_input_ids_length += input_ids_length
         avg = total_input_ids_length / len(calibration_dataset)
 
         if avg < min_calibration_dataset_input_ids_avg_length:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                             f"{min_calibration_dataset_input_ids_avg_length}! Current AVG is {avg}.")
+                             f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
         device_map = self.hf_device_map
         if device_map:

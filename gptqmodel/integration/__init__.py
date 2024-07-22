@@ -1,0 +1,1 @@
+from .optimum import monkey_patch_gptqmodel_into_transformers

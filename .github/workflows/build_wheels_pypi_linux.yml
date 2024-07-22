@@ -18,7 +18,7 @@ jobs:
         CUDA_VERSION: "12.1"
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Free disk space
         run: |
@@ -63,12 +63,12 @@ jobs:
           sudo rm -rf /usr/local/share/chromium > /dev/null 2>&1
           df -h
 
-      - uses: actions/setup-python@v3
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.pyver }}
 
       - name: Setup Miniconda
-        uses: conda-incubator/setup-miniconda@v2.2.0
+        uses: conda-incubator/setup-miniconda@v3.0.4
         with:
           activate-environment: "build"
           python-version: ${{ matrix.pyver }}
@@ -110,7 +110,7 @@ jobs:
 
           python setup.py sdist bdist_wheel
       
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: 'linux-cuda-wheels-pypi'
           path: ./dist/*.whl
