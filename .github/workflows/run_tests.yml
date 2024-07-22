@@ -240,13 +240,14 @@ jobs:
       - name: Find suitable GPU
         shell: bash
         run: |
+          timestamp=$(date +%s%3N)
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}")
+            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }} returned $gpu_id"
+              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
@@ -254,7 +255,8 @@ jobs:
             fi
           done
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
+          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
@@ -263,7 +265,7 @@ jobs:
       - name: Release GPU
         if: always()
         shell: bash
-        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}"
+        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   test_cpu:
     needs:
