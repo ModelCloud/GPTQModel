@@ -22,7 +22,6 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
-from ..utils.bitblas import check_bitblas_installation
 from ..utils.data import collate_data
 from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
@@ -172,14 +171,6 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
-
-        if self.quantize_config.format == FORMAT.BITBLAS:
-            error = check_bitblas_installation()
-            if error is not None:
-                if isinstance(error, ModuleNotFoundError):
-                    raise ValueError("bitblas not installed, Please install via `pip install bitblas`.")
-                else:
-                    raise ValueError(f"Could not load module bitblas: {error}")
 
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
@@ -975,14 +966,6 @@ class BaseGPTQModel(nn.Module):
             if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
             backend = BACKEND.BITBLAS
-
-        if backend == BACKEND.BITBLAS:
-            error = check_bitblas_installation()
-            if error is not None:
-                if isinstance(error, ModuleNotFoundError):
-                    raise ValueError("bitblas not installed, Please install via `pip install bitblas`.")
-                else:
-                    raise ValueError(f"Could not load module bitblas: {error}")
 
         if model_basename is None:
             if quantize_config.model_file_base_name:

@@ -11,7 +11,6 @@ from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
-from gptqmodel.utils.bitblas import check_bitblas_installation
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -101,24 +100,16 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            # (QUANT_METHOD.GPTQ, FORMAT.MARLIN, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.MARLIN, 4),
             (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
-            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
-        error = check_bitblas_installation()
-        if error is not None:
-            if isinstance(error, ModuleNotFoundError):
-                print("[WARNING] bitblas not installed, Please install via `pip install bitblas`.")
-            else:
-                print(f"[WARNING] Could not load module bitblas: {error}")
-            return
-
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
