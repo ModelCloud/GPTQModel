@@ -179,6 +179,11 @@ class BaseGPTQModel(nn.Module):
             logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
                              f"Current size: {len(calibration_dataset)}.")
 
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
+
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
         for row in calibration_dataset:
@@ -966,6 +971,11 @@ class BaseGPTQModel(nn.Module):
             if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
             backend = BACKEND.BITBLAS
+
+        if backend == BACKEND.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
 
         if model_basename is None:
             if quantize_config.model_file_base_name:
