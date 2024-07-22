@@ -263,7 +263,7 @@ jobs:
       - name: Release GPU
         if: always()
         shell: bash
-        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${ env.CUDA_VISIBLE_DEVICES }"
+        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}"
 
   test_cpu:
     needs:
