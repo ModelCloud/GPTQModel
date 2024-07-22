@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from os.path import isfile, join
+from os.path import isfile, join, basename
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -12,6 +12,7 @@ import torch.nn as nn
 import transformers
 from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
+from safetensors.torch import _remove_duplicate_names
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
@@ -618,20 +619,30 @@ class BaseGPTQModel(nn.Module):
 
         state_dict = model.state_dict()
 
+        to_removes = _remove_duplicate_names(state_dict)
+        for kept_name, to_remove_group in to_removes.items():
+            for to_remove in to_remove_group:
+                if metadata is None:
+                    metadata = {}
+
+                if to_remove not in metadata:
+                    # Do not override user data
+                    metadata[to_remove] = kept_name
+                del state_dict[to_remove]
+
         if quantize_config.model_file_base_name is None:
             if use_safetensors:
                 model_base_name = "model"
             else:
                 model_base_name = "pytorch_model"
         else:
-            model_base_name = quantize_config.model_file_base_name
+            model_base_name = basename(quantize_config.model_file_base_name)
 
         if use_safetensors:
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
             model_save_name = model_base_name + ".safetensors"
         else:
             model_save_name = model_base_name + ".bin"
-
         if not self.qlinear_kernel.SUPPORTED_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
