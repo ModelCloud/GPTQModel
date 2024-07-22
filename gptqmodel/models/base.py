@@ -22,7 +22,6 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
-from ..utils.bitblas import convert_to_bitblas, prepare_model_for_bitblas_load
 from ..utils.data import collate_data
 from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
@@ -179,6 +178,11 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) < min_calibration_dataset_size:
             logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
                              f"Current size: {len(calibration_dataset)}.")
+
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -529,6 +533,7 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
+            from ..utils.bitblas import convert_to_bitblas
 
             # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
             logger.info("Converting model to BitBlas Format...")
@@ -975,6 +980,11 @@ class BaseGPTQModel(nn.Module):
                 raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
             backend = BACKEND.BITBLAS
 
+        if backend == BACKEND.BITBLAS:
+            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
+
         if model_basename is None:
             if quantize_config.model_file_base_name:
                 possible_model_basenames = [quantize_config.model_file_base_name]
@@ -1168,6 +1178,8 @@ class BaseGPTQModel(nn.Module):
             )
 
         if backend == BACKEND.BITBLAS:
+            from ..utils.bitblas import prepare_model_for_bitblas_load
+
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")

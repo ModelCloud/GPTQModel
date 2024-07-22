@@ -17,6 +17,14 @@ BITBLAS_TARGET = None
 BITBLAS_DATABASE_PATH = None
 BITBLAS_PROPAGATE_WEIGHTS = False
 
+try:
+    import bitblas
+    BITBLAS_AVAILABLE = True
+except Exception:
+    BITBLAS_AVAILABLE = False
+
+BITBLAS_INSTALL_HINT = "bitblas not installed. Please install via `pip install bitblas`."
+
 
 def import_bitblas():
     # print("import_bitblas() called")
