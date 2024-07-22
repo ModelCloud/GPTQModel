@@ -11,9 +11,10 @@ from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
+from gptqmodel.utils.bitblas import check_bitblas_installation
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
-from gptqmodel.utils.bitblas import check_bitblas_installation
+
 
 class TestPerplexity(unittest.TestCase):
     TINYLLAMA_MODEL_ID = "ModelCloud/tinyllama-15M-stories"

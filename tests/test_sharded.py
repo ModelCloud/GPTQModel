@@ -9,8 +9,9 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel.utils.bitblas import check_bitblas_installation
+from transformers import AutoTokenizer  # noqa: E402
+
 
 class TestSharded(unittest.TestCase):
     MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"

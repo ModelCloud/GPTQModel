@@ -2,7 +2,6 @@ import copy
 import json
 import logging
 import os
-import sys
 import re
 from os.path import isfile, join
 from typing import Dict, List, Optional, Union
@@ -534,8 +533,8 @@ class BaseGPTQModel(nn.Module):
         torch.cuda.empty_cache()
 
         if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..utils.bitblas import convert_to_bitblas
             from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
+            from ..utils.bitblas import convert_to_bitblas
 
             # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
             logger.info("Converting model to BitBlas Format...")

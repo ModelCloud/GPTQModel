@@ -15,8 +15,9 @@ except ImportError as e:
     print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel.utils.bitblas import check_bitblas_installation
+from transformers import AutoTokenizer  # noqa: E402
+
 
 class TestQ4BitBLAS(unittest.TestCase):
     def test_generation(self):
