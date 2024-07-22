@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from os.path import isfile, join
+from os.path import basename, isfile, join
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -632,14 +632,13 @@ class BaseGPTQModel(nn.Module):
             else:
                 model_base_name = "pytorch_model"
         else:
-            model_base_name = quantize_config.model_file_base_name
+            model_base_name = basename(quantize_config.model_file_base_name)
 
         if use_safetensors:
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
             model_save_name = model_base_name + ".safetensors"
         else:
             model_save_name = model_base_name + ".bin"
-
         if not self.qlinear_kernel.SUPPORTED_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None

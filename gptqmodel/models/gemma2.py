@@ -1,6 +1,7 @@
-from .base import BaseGPTQModel
 import logging
 from logging import getLogger
+
+from .base import BaseGPTQModel
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
