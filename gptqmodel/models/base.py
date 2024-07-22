@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 import transformers
 from accelerate.hooks import remove_hook_from_module
-from safetensors.torch import _remove_duplicate_names
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
@@ -618,17 +617,6 @@ class BaseGPTQModel(nn.Module):
         model.to(CPU)
 
         state_dict = model.state_dict()
-
-        to_removes = _remove_duplicate_names(state_dict)
-        for kept_name, to_remove_group in to_removes.items():
-            for to_remove in to_remove_group:
-                if metadata is None:
-                    metadata = {}
-
-                if to_remove not in metadata:
-                    # Do not override user data
-                    metadata[to_remove] = kept_name
-                del state_dict[to_remove]
 
         if quantize_config.model_file_base_name is None:
             if use_safetensors:
