@@ -185,7 +185,10 @@ class BaseGPTQModel(nn.Module):
         for row in calibration_dataset:
             input_ids = row["input_ids"]
             if isinstance(input_ids, torch.Tensor):
-                input_ids_length = input_ids.shape[1]
+                if input_ids.dim() == 1:
+                    input_ids_length = input_ids.shape[0]
+                else:
+                    raise ValueError("Expected a 1-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(input_ids.dim()))
             else:
                 input_ids_length = len(input_ids)
             total_input_ids_length += input_ids_length
