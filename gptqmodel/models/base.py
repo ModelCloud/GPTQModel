@@ -614,8 +614,7 @@ class BaseGPTQModel(nn.Module):
     ):
         """save quantized model and configs to local disk"""
         if self.from_quantized:
-            raise NotImplementedError("Saving a quantized model again is not supported. \n"
-                                      "If you need to shard the model file, refer to shard_quantized().")
+            raise NotImplementedError("Saving a loaded quantized model is not supported. If you need to re-shard the model, please use `GPTQModel.shard_quantized()` api.")
 
         os.makedirs(save_dir, exist_ok=True)
 
