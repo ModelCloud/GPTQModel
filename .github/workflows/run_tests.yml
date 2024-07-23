@@ -200,7 +200,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') && ${{ needs.list-test-files.outputs.gpu-files  != '[]' }} 
     timeout-minutes: 30
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
@@ -291,7 +291,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') && ${{ needs.list-test-files.outputs.gpu-files  != '[]' }} 
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
