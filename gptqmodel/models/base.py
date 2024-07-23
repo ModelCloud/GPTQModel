@@ -1211,6 +1211,10 @@ class BaseGPTQModel(nn.Module):
         if backend == BACKEND.BITBLAS:
             from ..utils.bitblas import prepare_model_for_bitblas_load
 
+            if is_sharded:
+                raise ValueError(
+                    "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
+            
             # Prepare model for bitblas load.
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
