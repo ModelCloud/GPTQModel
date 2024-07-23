@@ -2,9 +2,8 @@ import tempfile
 import unittest
 
 import torch
-from transformers import AutoTokenizer
-
 from gptqmodel import GPTQModel
+from transformers import AutoTokenizer
 
 
 class TestShardQuantized(unittest.TestCase):
