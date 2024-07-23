@@ -139,3 +139,23 @@ class GPTQModel:
             **kwargs,
         )
 
+    @classmethod
+    def shard_quantized(cls,
+                        quantized_model_path_or_id: str,
+                        max_shard_size: str,
+                        save_dir: str,
+                        safetensors_metadata: Optional[Dict[str, str]] = None,
+                        use_safetensors: bool = True,
+                        model_base_name: Optional[str] = None):
+        model_type = check_and_get_model_type(quantized_model_path_or_id)
+        shard_quantized_func = MODEL_MAP[model_type].shard_quantized
+
+        return shard_quantized_func(
+            quantized_model_path_or_id=quantized_model_path_or_id,
+            save_dir=save_dir,
+            max_shard_size=max_shard_size,
+            safetensors_metadata=safetensors_metadata,
+            use_safetensors=use_safetensors,
+            model_base_name=model_base_name,
+        )
+
