@@ -211,6 +211,18 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
     steps:
+      - name: Print CPU files
+        shell: bash
+        run: |
+           echo ${{ needs.list-test-files.outputs.cpu-files }} 
+           echo ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
+
+      - name: Print GPU files
+        shell: bash
+        run: |
+           echo ${{ needs.list-test-files.outputs.gpu-files }} 
+           echo ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
+
       - name: Print Env
         shell: bash
         run: |
@@ -297,13 +309,13 @@ jobs:
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
     steps:
-      - name: Print Env
+      - name: Print CPU files
         shell: bash
         run: |
            echo ${{ needs.list-test-files.outputs.cpu-files }} 
            echo ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
 
-      - name: Print Env
+      - name: Print GPU files
         shell: bash
         run: |
            echo ${{ needs.list-test-files.outputs.gpu-files }} 
