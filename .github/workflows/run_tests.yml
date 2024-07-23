@@ -213,7 +213,10 @@ jobs:
         shell: bash
         run: |
            echo ${{ needs.list-test-files.outputs.cpu-files }} 
+           echo "---"
            echo ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
+           echo "---"
+           echo ${{ needs.list-test-files.outputs.cpu-files != '[]' }}
 
       - name: Print GPU files
         shell: bash
