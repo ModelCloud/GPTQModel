@@ -38,12 +38,6 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
     steps:
-      - name: Print Env
-        shell: bash
-        run: |
-          python --version
-          nvcc --version
-
       - name: Select server
         id: get_ip
         shell: bash
@@ -100,6 +94,12 @@ jobs:
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
+      - name: Print Env
+        shell: bash
+        run: |
+          python --version
+          nvcc --version
+    
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -126,8 +126,13 @@ jobs:
     if: needs.check-vm.outputs.tag == 'amd'
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
-
     steps:
+      - name: Print Env
+        shell: bash
+        run: |
+          python --version
+          nvcc --version
+    
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
