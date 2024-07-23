@@ -26,7 +26,7 @@ class TestTransformersIntegration(unittest.TestCase):
         monkey_patch_gptqmodel_into_transformers()
 
         self.device = torch.device("cuda:0")
-        self.prompt = "I am in Paris and"
+        self.prompt = "The International Space Station (ISS) is a large"
 
     @parameterized.expand(
         [
@@ -45,7 +45,7 @@ class TestTransformersIntegration(unittest.TestCase):
             device_map="auto",
             quantization_config=gptq_config
         )
-        reference_output = "</s>I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
+        reference_output = "</s>The International Space Station (ISS) is a large space station that is located in the International"
         self.assertResult(model, tokenizer, True, exllama_version, reference_output)
 
     @parameterized.expand(
@@ -76,7 +76,7 @@ class TestTransformersIntegration(unittest.TestCase):
 
         print("model", model)
 
-        reference_output = "</s>I am in Paris and I am not sure if I can get a refund. I am not sure if I can get a refund. I am not sure if I can get a refund. I am not sure if I can get a refund. I am not sure if I can get a refund. I am not sure if"
+        reference_output = "</s>The International Space Station (ISS) is a large space station that is located in the International Space Station"
         self.assertResult(model, tokenizer, False, exllama_version, reference_output)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
