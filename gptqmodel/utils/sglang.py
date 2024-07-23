@@ -1,5 +1,6 @@
 import multiprocessing as mp
 
+import torch
 from transformers import AutoConfig
 
 try:
@@ -38,7 +39,9 @@ else:
     def generate(s, prompt, **kwargs):
         print(SGLANG_INSTALL_HINT)
 
+@torch.inference_mode
 def sglang_generate(
+        model,
         **kwargs,
 ):
     if not SGLANG_AVAILABLE:
