@@ -77,7 +77,8 @@ QUANT_CONFIG_ARG_SYNONYMS = {
 @dataclass
 class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
-    group_size: int = field(default=-1)
+    # 128 offer good balance between inference speed and quantization quality
+    group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
     damp_percent: float = field(default=0.005)
     desc_act: bool = field(default=True)
