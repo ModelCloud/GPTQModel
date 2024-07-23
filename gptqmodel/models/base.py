@@ -85,7 +85,6 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
-        self.model_type = self.model.config.model_type
         self._quantized = quantized
         self.quantize_config = quantize_config
         self.config = self.model.config
@@ -565,18 +564,8 @@ class BaseGPTQModel(nn.Module):
         return self.model(*args, **kwargs)
 
     def generate(self, **kwargs):
-        """shortcut for model.generate"""
-        from ..utils.sglang import sglang_generate
-        from ..utils.vllm import vllm_generate
-        if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
-            with torch.inference_mode():
-                return vllm_generate(self.model, **kwargs)
-        elif hasattr(self.model.config, "model_type") and self.model.config.model_type == "sglang":
-            with torch.inference_mode():
-                return sglang_generate(**kwargs)
-        else:
-            with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
-                return self.model.generate(**kwargs)
+        with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
+            return self.model.generate(**kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
@@ -859,7 +848,7 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
-        if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
+        if backend == BACKEND.VLLM:
             import os
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
@@ -936,7 +925,7 @@ class BaseGPTQModel(nn.Module):
             if quantize_config.format != FORMAT.GPTQ:
                 raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
             if backend == BACKEND.VLLM:
-                from ..utils.vllm import load_model_by_vllm
+                from ..utils.vllm import load_model_by_vllm, vllm_generate
 
                 model = load_model_by_vllm(
                     model=model_name_or_path,
@@ -945,10 +934,11 @@ class BaseGPTQModel(nn.Module):
                 )
 
                 model.config = model.llm_engine.model_config
-                model.config.model_type = "vllm"
+
+                cls.generate = lambda self, **kwargs: vllm_generate(self.model, **kwargs)
 
             elif backend == BACKEND.SGLANG:
-                from ..utils.sglang import load_model_by_sglang
+                from ..utils.sglang import load_model_by_sglang, sglang_generate
 
                 model, hf_config = load_model_by_sglang(
                     model=model_name_or_path,
@@ -956,7 +946,7 @@ class BaseGPTQModel(nn.Module):
                     **kwargs,
                 )
                 model.config = hf_config
-                model.config.model_type = "sglang"
+                cls.generate = lambda self, **kwargs: sglang_generate(self.model, **kwargs)
             return cls(
                 model,
                 quantized=True,

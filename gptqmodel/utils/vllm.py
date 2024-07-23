@@ -1,5 +1,7 @@
 from typing import Any, Dict
 
+import torch
+
 try:
     from vllm import LLM, SamplingParams
     VLLM_AVAILABLE = True
@@ -42,6 +44,7 @@ def load_model_by_vllm(
 
     return model
 
+@torch.inference_mode
 def vllm_generate(
         model,
         **kwargs,
