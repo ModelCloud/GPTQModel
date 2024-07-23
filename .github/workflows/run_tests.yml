@@ -301,11 +301,13 @@ jobs:
         shell: bash
         run: |
            echo ${{ needs.list-test-files.outputs.cpu-files }} 
+           echo ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
 
       - name: Print Env
         shell: bash
         run: |
            echo ${{ needs.list-test-files.outputs.gpu-files }} 
+           echo ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
       - name: Print Env
         shell: bash
