@@ -14,8 +14,10 @@ from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers import __version__ as transformers_version
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
+from packaging import version
 
 from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
@@ -164,6 +166,10 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throwError=True)
+
+        if batch_size > 1 and not version.parse(transformers_version) < version.parse("4.43.0"):
+            logger.warning("According to the issue https://github.com/ModelCloud/GPTQModel/issues/278, transformers version 4.43.0 has broken batch_size. until the issue is resolved, hard set the batch_size to 1.")
+            batch_size = 1
 
         # TODO: lm_head quantization is yet ready but pending
         if self.quantize_config.lm_head:
@@ -1182,7 +1188,7 @@ class BaseGPTQModel(nn.Module):
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
-            
+
             # Prepare model for bitblas load.
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
