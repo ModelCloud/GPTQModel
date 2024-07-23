@@ -211,6 +211,12 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
     steps:
+      - name: Print Env
+        shell: bash
+        run: |
+          python --version
+          nvcc --version
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -285,15 +291,20 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
-
     steps:
+      - name: Print Env
+        shell: bash
+        run: |
+          python --version
+          nvcc --version
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
