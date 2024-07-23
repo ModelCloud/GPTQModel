@@ -139,3 +139,39 @@ class GPTQModel:
             **kwargs,
         )
 
+    @classmethod
+    def shard_quantized(cls,
+                        model_name_or_path: str,
+                        save_dir: str,
+                        max_shard_size: str,
+                        device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+                        max_memory: Optional[dict] = None,
+                        device: Optional[Union[str, int]] = None,
+                        quantize_config: Optional[QuantizeConfig] = None,
+                        model_basename: Optional[str] = None,
+                        use_safetensors: bool = True,
+                        trust_remote_code: bool = False,
+                        allow_unsafe_loading: bool = False,
+                        verify_hash: Optional[Union[str, List[str]]] = None,
+                        safetensors_metadata: Optional[Dict[str, str]] = None,
+                        **kwargs,):
+        model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
+        shard_quantized_func = MODEL_MAP[model_type].shard_quantized
+
+        return shard_quantized_func(
+            model_name_or_path=model_name_or_path,
+            save_dir=save_dir,
+            max_shard_size=max_shard_size,
+            device_map=device_map,
+            max_memory=max_memory,
+            device=device,
+            quantize_config=quantize_config,
+            model_basename=model_basename,
+            use_safetensors=use_safetensors,
+            trust_remote_code=trust_remote_code,
+            allow_unsafe_loading=allow_unsafe_loading,
+            verify_hash=verify_hash,
+            safetensors_metadata=safetensors_metadata,
+            **kwargs,
+        )
+

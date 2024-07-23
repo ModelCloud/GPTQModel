@@ -79,12 +79,14 @@ class BaseGPTQModel(nn.Module):
         quantized: bool,
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
+        from_quantized: bool = False,
     ):
         super().__init__()
 
         self.model = model
         self.model_type = self.model.config.model_type
         self._quantized = quantized
+        self.from_quantized = from_quantized
         self.quantize_config = quantize_config
         self.config = self.model.config
 
@@ -576,6 +578,33 @@ class BaseGPTQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
+    @classmethod
+    def shard_quantized(cls,
+                        model_name_or_path: str,
+                        save_dir: str,
+                        max_shard_size: str,
+                        device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+                        max_memory: Optional[dict] = None,
+                        device: Optional[Union[str, int]] = None,
+                        torch_dtype: [str | torch.dtype] = "auto",
+                        quantize_config: Optional[QuantizeConfig] = None,
+                        model_basename: Optional[str] = None,
+                        use_safetensors: bool = True,
+                        trust_remote_code: bool = False,
+                        format: Optional[FORMAT] = None,
+                        allow_unsafe_loading: bool = False,
+                        verify_hash: Optional[Union[str, List[str]]] = None,
+                        safetensors_metadata: Optional[Dict[str, str]] = None,
+                        **kwargs,
+                        ):
+        quantized_model = cls.from_quantized(model_name_or_path, device_map=device_map, max_memory=max_memory, device=device,  backend=BACKEND.TRITON, torch_dtype=torch_dtype,
+                                 quantize_config=quantize_config, model_basename=model_basename, use_safetensors=use_safetensors,trust_remote_code=trust_remote_code,
+                                 format=format,allow_unsafe_loading=allow_unsafe_loading,verify_hash=verify_hash,safetensors_metadata=safetensors_metadata,**kwargs)
+        # Skip from_quantized check
+        quantized_model.from_quantized = False
+        quantized_model.save_quantized(save_dir, safetensors_metadata=safetensors_metadata, use_safetensors=use_safetensors,
+                           max_shard_size=max_shard_size, model_base_name=model_basename)
+
     def save_quantized(
         self,
         save_dir: str,
@@ -585,6 +614,10 @@ class BaseGPTQModel(nn.Module):
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
+        if self.from_quantized:
+            raise NotImplementedError("Saving a quantized model again is not supported. \n"
+                                      "If you need to shard the model file, refer to shard_quantized().")
+
         os.makedirs(save_dir, exist_ok=True)
 
         # write gptqmodel tooling fingerprint to config
@@ -838,7 +871,7 @@ class BaseGPTQModel(nn.Module):
     @classmethod
     def from_quantized(
         cls,
-        model_name_or_path: Optional[str],
+        model_name_or_path: str,
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
