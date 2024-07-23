@@ -587,11 +587,15 @@ class BaseGPTQModel(nn.Module):
                         use_safetensors: bool = True,
                         model_base_name: Optional[str] = None
                         ):
+        # gptqmodel_post_init will check if the device matches.
+        # Here, the CPU is always used, so you need to skip it.
         quantized_model = cls.from_quantized(quantized_model_path_or_id,
+                                             device="cpu",
                                              backend=BACKEND.TRITON,
                                              use_safetensors=use_safetensors,
                                              safetensors_metadata=safetensors_metadata,
-                                             model_basename=model_base_name)
+                                             model_basename=model_base_name,
+                                             skip_gptqmodel_post_init=True,)
         # Skip from_quantized check
         quantized_model.from_quantized = False
         quantized_model.save_quantized(save_dir,
@@ -1257,8 +1261,10 @@ class BaseGPTQModel(nn.Module):
             logger.warning("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
 
-        # Any post-initialization that require device information, for example buffers initialization on device.
-        model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act, quantize_config=quantize_config)
+        skip_gptqmodel_post_init = kwargs.pop("skip_gptqmodel_post_init", None)
+        if skip_gptqmodel_post_init is None:
+            # Any post-initialization that require device information, for example buffers initialization on device.
+            model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act, quantize_config=quantize_config)
 
         model.eval()
 
