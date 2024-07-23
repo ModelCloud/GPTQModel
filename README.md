@@ -51,6 +51,8 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Added `Phi-3` Model Support
 * 🚀 Added `Qwen2MoE` Model Support
 * 🚀 Added `DBRX` Model Support (Converted Model)
+* 🚀🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
+* 🚀🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
 * 🚀 [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU.
 * 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
