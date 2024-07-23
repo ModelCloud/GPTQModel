@@ -39,6 +39,6 @@ class Gemma2GPTQ(BaseGPTQModel):
                     return
 
                 # quantized gemma-2 27b model only support vLLM/SGLang load.
-                if self.backend != BACKEND.VLLM and self.backend != BACKEND.SGLANG:
+                if self.backend not in [BACKEND.VLLM,  BACKEND.SGLANG]:
                     raise ValueError(SUPPORT_ERR)
 
