@@ -144,34 +144,18 @@ class GPTQModel:
                         quantized_model_path_or_id: str,
                         max_shard_size: str,
                         save_dir: str,
-                        device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-                        max_memory: Optional[dict] = None,
-                        device: Optional[Union[str, int]] = None,
-                        quantize_config: Optional[QuantizeConfig] = None,
-                        model_basename: Optional[str] = None,
-                        use_safetensors: bool = True,
-                        trust_remote_code: bool = False,
-                        allow_unsafe_loading: bool = False,
-                        verify_hash: Optional[Union[str, List[str]]] = None,
                         safetensors_metadata: Optional[Dict[str, str]] = None,
-                        **kwargs,):
-        model_type = check_and_get_model_type(quantized_model_path_or_id, trust_remote_code)
+                        use_safetensors: bool = True,
+                        model_base_name: Optional[str] = None):
+        model_type = check_and_get_model_type(quantized_model_path_or_id)
         shard_quantized_func = MODEL_MAP[model_type].shard_quantized
 
         return shard_quantized_func(
-            model_name_or_path=quantized_model_path_or_id,
+            quantized_model_path_or_id=quantized_model_path_or_id,
             save_dir=save_dir,
             max_shard_size=max_shard_size,
-            device_map=device_map,
-            max_memory=max_memory,
-            device=device,
-            quantize_config=quantize_config,
-            model_basename=model_basename,
-            use_safetensors=use_safetensors,
-            trust_remote_code=trust_remote_code,
-            allow_unsafe_loading=allow_unsafe_loading,
-            verify_hash=verify_hash,
             safetensors_metadata=safetensors_metadata,
-            **kwargs,
+            use_safetensors=use_safetensors,
+            model_base_name=model_base_name,
         )
 

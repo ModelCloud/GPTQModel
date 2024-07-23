@@ -580,30 +580,25 @@ class BaseGPTQModel(nn.Module):
 
     @classmethod
     def shard_quantized(cls,
-                        model_name_or_path: str,
-                        save_dir: str,
+                        quantized_model_path_or_id: str,
                         max_shard_size: str,
-                        device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-                        max_memory: Optional[dict] = None,
-                        device: Optional[Union[str, int]] = None,
-                        torch_dtype: [str | torch.dtype] = "auto",
-                        quantize_config: Optional[QuantizeConfig] = None,
-                        model_basename: Optional[str] = None,
-                        use_safetensors: bool = True,
-                        trust_remote_code: bool = False,
-                        format: Optional[FORMAT] = None,
-                        allow_unsafe_loading: bool = False,
-                        verify_hash: Optional[Union[str, List[str]]] = None,
+                        save_dir: str,
                         safetensors_metadata: Optional[Dict[str, str]] = None,
-                        **kwargs,
+                        use_safetensors: bool = True,
+                        model_base_name: Optional[str] = None
                         ):
-        quantized_model = cls.from_quantized(model_name_or_path, device_map=device_map, max_memory=max_memory, device=device,  backend=BACKEND.TRITON, torch_dtype=torch_dtype,
-                                 quantize_config=quantize_config, model_basename=model_basename, use_safetensors=use_safetensors,trust_remote_code=trust_remote_code,
-                                 format=format,allow_unsafe_loading=allow_unsafe_loading,verify_hash=verify_hash,safetensors_metadata=safetensors_metadata,**kwargs)
+        quantized_model = cls.from_quantized(quantized_model_path_or_id,
+                                             backend=BACKEND.TRITON,
+                                             use_safetensors=use_safetensors,
+                                             safetensors_metadata=safetensors_metadata,
+                                             model_basename=model_base_name)
         # Skip from_quantized check
         quantized_model.from_quantized = False
-        quantized_model.save_quantized(save_dir, safetensors_metadata=safetensors_metadata, use_safetensors=use_safetensors,
-                           max_shard_size=max_shard_size, model_base_name=model_basename)
+        quantized_model.save_quantized(save_dir,
+                                       safetensors_metadata=safetensors_metadata,
+                                       use_safetensors=use_safetensors,
+                                       max_shard_size=max_shard_size,
+                                       model_base_name=model_base_name)
 
     def save_quantized(
         self,
@@ -1272,6 +1267,7 @@ class BaseGPTQModel(nn.Module):
             quantized=True,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
+            from_quantized=True,
         )
 
     def __getattr__(self, item):
