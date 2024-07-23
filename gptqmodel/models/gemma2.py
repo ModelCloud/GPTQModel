@@ -3,7 +3,6 @@ from logging import getLogger
 
 from .base import BaseGPTQModel
 from ..utils import BACKEND
-
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
 formatter = logging.Formatter("%(levelname)s - %(message)s")
@@ -11,8 +10,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-SUPPORT_ERR =  "Currently, only vLLM/SGLang with flashinfer enabled can correctly inference a quantized Gemma2-27B model. Pre-quantized model with sample vLLM code: https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit ."
-                  
+SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly inference a quantized Gemma2-27B model. Pre-quantized model with sample vLLM code: https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit ."
 
 class Gemma2GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
@@ -39,6 +37,18 @@ class Gemma2GPTQ(BaseGPTQModel):
                     return
 
                 # quantized gemma-2 27b model only support vLLM/SGLang load.
-                if self.backend not in [BACKEND.VLLM,  BACKEND.SGLANG]:
+                from ..utils.vllm import VLLM_AVAILABLE
+                if VLLM_AVAILABLE:
+                    from vllm import LLM
+                    if isinstance(self.model, LLM):
+                        backend = BACKEND.VLLM
+
+                from ..utils.sglang import SGLANG_AVAILABLE
+                if SGLANG_AVAILABLE:
+                    from sglang.srt.server import Runtime
+                    if isinstance(self.model, Runtime):
+                        backend = BACKEND.SGLANG
+
+                if backend not in [BACKEND.VLLM,  BACKEND.SGLANG]:
                     raise ValueError(SUPPORT_ERR)
 

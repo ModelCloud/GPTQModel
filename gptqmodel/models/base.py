@@ -960,7 +960,8 @@ class BaseGPTQModel(nn.Module):
                 )
 
                 model.config = model.llm_engine.model_config
-                cls.generate = vllm_generate
+
+                cls.generate = lambda self, **kwargs: vllm_generate(self.model, **kwargs)
 
             elif backend == BACKEND.SGLANG:
                 from ..utils.sglang import load_model_by_sglang, sglang_generate
@@ -971,7 +972,7 @@ class BaseGPTQModel(nn.Module):
                     **kwargs,
                 )
                 model.config = hf_config
-                cls.generate = sglang_generate
+                cls.generate = lambda self, **kwargs: sglang_generate(self.model, **kwargs)
             return cls(
                 model,
                 quantized=True,
