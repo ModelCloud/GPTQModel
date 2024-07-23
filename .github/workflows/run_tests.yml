@@ -38,6 +38,12 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
     steps:
+      - name: Print Env
+        shell: bash
+        run: |
+          python --version
+          nvcc --version
+
       - name: Select server
         id: get_ip
         shell: bash
