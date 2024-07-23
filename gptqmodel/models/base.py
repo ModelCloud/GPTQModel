@@ -591,7 +591,7 @@ class BaseGPTQModel(nn.Module):
         # Here, the CPU is always used, so you need to skip it.
         quantized_model = cls.from_quantized(quantized_model_path_or_id,
                                              device="cpu",
-                                             backend=BACKEND.AUTO,
+                                             backend=BACKEND.TRITON,
                                              use_safetensors=use_safetensors,
                                              safetensors_metadata=safetensors_metadata,
                                              model_basename=model_base_name,

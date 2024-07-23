@@ -45,4 +45,4 @@ class TestShardQuantized(unittest.TestCase):
 
             print("catch exception:", raise_exception.exception)
 
-            self.assertTrue('Saving a loaded quantized model is not supported' in str(raise_exception.exception))
+            self.assertTrue('Saving a quantized model again is not supported' in str(raise_exception.exception))
