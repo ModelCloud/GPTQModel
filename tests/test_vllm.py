@@ -7,6 +7,7 @@ import subprocess  # noqa: E402
 import sys  # noqa: E402
 import unittest  # noqa: E402
 
+import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 
@@ -14,6 +15,7 @@ class TestLoadVLLM(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
         subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.5.1"])
         from vllm import SamplingParams  # noqa: E402
         self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
