@@ -141,9 +141,9 @@ class GPTQModel:
 
     @classmethod
     def shard_quantized(cls,
-                        model_name_or_path: str,
-                        save_dir: str,
+                        quantized_model_path_or_id: str,
                         max_shard_size: str,
+                        save_dir: str,
                         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
                         max_memory: Optional[dict] = None,
                         device: Optional[Union[str, int]] = None,
@@ -155,11 +155,11 @@ class GPTQModel:
                         verify_hash: Optional[Union[str, List[str]]] = None,
                         safetensors_metadata: Optional[Dict[str, str]] = None,
                         **kwargs,):
-        model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
+        model_type = check_and_get_model_type(quantized_model_path_or_id, trust_remote_code)
         shard_quantized_func = MODEL_MAP[model_type].shard_quantized
 
         return shard_quantized_func(
-            model_name_or_path=model_name_or_path,
+            model_name_or_path=quantized_model_path_or_id,
             save_dir=save_dir,
             max_shard_size=max_shard_size,
             device_map=device_map,
