@@ -171,7 +171,7 @@ class BaseGPTQModel(nn.Module):
             batch_size = 1
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
-            raise ValueError("lm_head quantization is currently inference only and not applicable for gptq quantization. Please set `lm_head=False`.")
+            raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
