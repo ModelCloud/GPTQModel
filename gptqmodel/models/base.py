@@ -79,11 +79,12 @@ class BaseGPTQModel(nn.Module):
         quantized: bool,
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
+        backend: BACKEND = BACKEND.AUTO,
     ):
         super().__init__()
 
         self.model = model
-        self.model_type = self.model.config.model_type
+        self.backend = backend
         self._quantized = quantized
         self.quantize_config = quantize_config
         self.config = self.model.config
@@ -560,12 +561,14 @@ class BaseGPTQModel(nn.Module):
 
     def generate(self, **kwargs):
         """shortcut for model.generate"""
-        from ..utils.sglang import sglang_generate
-        from ..utils.vllm import vllm_generate
-        if hasattr(self.model.config, "model_type") and self.model.config.model_type == "vllm":
+        if self.backend == BACKEND.VLLM:
+            from ..utils.vllm import vllm_generate
+
             with torch.inference_mode():
                 return vllm_generate(self.model, **kwargs)
-        elif hasattr(self.model.config, "model_type") and self.model.config.model_type == "sglang":
+        elif self.backend == BACKEND.SGLANG:
+            from ..utils.sglang import sglang_generate
+
             with torch.inference_mode():
                 return sglang_generate(**kwargs)
         else:
@@ -853,7 +856,7 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
-        if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
+        if backend == BACKEND.VLLM:
             import os
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
@@ -939,7 +942,6 @@ class BaseGPTQModel(nn.Module):
                 )
 
                 model.config = model.llm_engine.model_config
-                model.config.model_type = "vllm"
 
             elif backend == BACKEND.SGLANG:
                 from ..utils.sglang import load_model_by_sglang
@@ -950,11 +952,11 @@ class BaseGPTQModel(nn.Module):
                     **kwargs,
                 )
                 model.config = hf_config
-                model.config.model_type = "sglang"
             return cls(
                 model,
                 quantized=True,
                 quantize_config=quantize_config,
+                backend=backend,
                 qlinear_kernel=None,
             )
 
@@ -1237,6 +1239,7 @@ class BaseGPTQModel(nn.Module):
         return cls(
             model,
             quantized=True,
+            backend=backend,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
         )
