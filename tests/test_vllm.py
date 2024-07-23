@@ -1,3 +1,4 @@
+import gc
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -9,7 +10,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-
+from vllm.distributed.parallel_state import destroy_model_parallel
 
 class TestLoadVLLM(unittest.TestCase):
 
@@ -52,6 +53,12 @@ class TestLoadVLLM(unittest.TestCase):
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             self.assertEquals(generated_text, " Paris. 2. Name the capital of the United States. 3.")
 
+        destroy_model_parallel()
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
     def test_load_shared_vllm(self):
         model = GPTQModel.from_quantized(
             self.SHARDED_MODEL_ID,
@@ -70,3 +77,8 @@ class TestLoadVLLM(unittest.TestCase):
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             self.assertEquals(generated_text,
                               " Paris.\n2. Who has a national flag with a white field surrounded by")
+
+        destroy_model_parallel()
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
