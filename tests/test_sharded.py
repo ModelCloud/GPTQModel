@@ -75,7 +75,7 @@ class TestSharded(unittest.TestCase):
             print(result)
             self.assertGreater(len(result), 0)
 
-    def test_save_and_load_unsupports_shard(self):
+    def test_save_and_load_bitblas_shard(self):
         model = GPTQModel.from_quantized(
             self.MODEL_ID,
             device_map="auto",
@@ -98,6 +98,7 @@ class TestSharded(unittest.TestCase):
             model = GPTQModel.from_quantized(
                 tmp_dir,
                 device_map="auto",
+                backend=BACKEND.BITBLAS,
             )
 
             tokens = model.generate(**tokenizer("1337", return_tensors="pt").to(model.device), max_new_tokens=20)[0]
