@@ -286,12 +286,10 @@ jobs:
 
   test_cpu:
     needs:
-      - build-intel
-      - build-amd
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') && ${{ needs.list-test-files.outputs.cpu-files != '[]' }} 
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
@@ -299,6 +297,16 @@ jobs:
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
     steps:
+      - name: Print Env
+        shell: bash
+        run: |
+           echo ${{ needs.list-test-files.outputs.cpu-files }} 
+
+      - name: Print Env
+        shell: bash
+        run: |
+           echo ${{ needs.list-test-files.outputs.gpu-files }} 
+
       - name: Print Env
         shell: bash
         run: |
