@@ -195,8 +195,6 @@ jobs:
 
   test_gpu:
     needs:
-      - build-intel
-      - build-amd
       - list-test-files
       - check-vm
     runs-on: self-hosted
