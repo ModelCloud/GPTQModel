@@ -79,14 +79,12 @@ class BaseGPTQModel(nn.Module):
         quantized: bool,
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
-        from_quantized: bool = False,
     ):
         super().__init__()
 
         self.model = model
         self.model_type = self.model.config.model_type
         self._quantized = quantized
-        self.from_quantized = from_quantized
         self.quantize_config = quantize_config
         self.config = self.model.config
 
@@ -578,32 +576,6 @@ class BaseGPTQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
-    @classmethod
-    def shard_quantized(cls,
-                        quantized_model_path_or_id: str,
-                        max_shard_size: str,
-                        save_dir: str,
-                        safetensors_metadata: Optional[Dict[str, str]] = None,
-                        use_safetensors: bool = True,
-                        model_base_name: Optional[str] = None
-                        ):
-        # gptqmodel_post_init will check if the device matches.
-        # Here, the CPU is always used, so you need to skip it.
-        quantized_model = cls.from_quantized(quantized_model_path_or_id,
-                                             device="cpu",
-                                             backend=BACKEND.TRITON,
-                                             use_safetensors=use_safetensors,
-                                             safetensors_metadata=safetensors_metadata,
-                                             model_basename=model_base_name,
-                                             skip_gptqmodel_post_init=True,)
-        # Skip from_quantized check
-        quantized_model.from_quantized = False
-        quantized_model.save_quantized(save_dir,
-                                       safetensors_metadata=safetensors_metadata,
-                                       use_safetensors=use_safetensors,
-                                       max_shard_size=max_shard_size,
-                                       model_base_name=model_base_name)
-
     def save_quantized(
         self,
         save_dir: str,
@@ -613,9 +585,6 @@ class BaseGPTQModel(nn.Module):
         model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
-        if self.from_quantized:
-            raise NotImplementedError("Saving a loaded quantized model is not supported. If you need to re-shard the model, please use `GPTQModel.shard_quantized()` api.")
-
         os.makedirs(save_dir, exist_ok=True)
 
         # write gptqmodel tooling fingerprint to config
@@ -869,7 +838,7 @@ class BaseGPTQModel(nn.Module):
     @classmethod
     def from_quantized(
         cls,
-        model_name_or_path: str,
+        model_name_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
@@ -886,7 +855,6 @@ class BaseGPTQModel(nn.Module):
     ):
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             import os
-
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
@@ -1265,10 +1233,8 @@ class BaseGPTQModel(nn.Module):
             logger.warning("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
 
-        skip_gptqmodel_post_init = kwargs.pop("skip_gptqmodel_post_init", None)
-        if skip_gptqmodel_post_init is None:
-            # Any post-initialization that require device information, for example buffers initialization on device.
-            model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act, quantize_config=quantize_config)
+        # Any post-initialization that require device information, for example buffers initialization on device.
+        model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act, quantize_config=quantize_config)
 
         model.eval()
 
@@ -1277,7 +1243,6 @@ class BaseGPTQModel(nn.Module):
             quantized=True,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
-            from_quantized=True,
         )
 
     def __getattr__(self, item):
