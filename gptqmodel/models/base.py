@@ -134,11 +134,9 @@ class BaseGPTQModel(nn.Module):
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
             if tokenizer:
-                pad_token_list = ["<pad>", "<|pad|>", "<|finetune_right_pad_id|>"]
-
                 vocab = tokenizer.get_vocab()
 
-                for token in pad_token_list:
+                for token in ["<pad>", "<|pad|>", "<|finetune_right_pad_id|>"]:
                     token_id = vocab.get(token)
                     if token_id is not None:
                         pad_token_id = token_id
