@@ -13,11 +13,9 @@ import transformers
 from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, AutoTokenizer
-from transformers import __version__ as transformers_version
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
-from packaging import version
 
 from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
@@ -104,6 +102,7 @@ class BaseGPTQModel(nn.Module):
             self,
             calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
             batch_size: int = 1,
+            tokenizer = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -134,14 +133,15 @@ class BaseGPTQModel(nn.Module):
             )
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            pad_token_list = ["<pad>", "<|pad|>", "<|finetune_right_pad_id|>"]
+            if tokenizer:
+                pad_token_list = ["<pad>", "<|pad|>", "<|finetune_right_pad_id|>"]
 
-            tokenizer = AutoTokenizer.from_pretrained(self.model.name_or_path)
-            added_tokens = tokenizer.get_vocab()
+                vocab = tokenizer.get_vocab()
 
-            for token in pad_token_list:
-                if added_tokens.get(token):
-                    pad_token_id = added_tokens[token]
+                for token in pad_token_list:
+                    token_id = vocab.get(token)
+                    if token_id is not None:
+                        pad_token_id = token_id
 
             if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
                 pad_token_id = self.config.eos_token_id[0]
@@ -166,6 +166,7 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
+        tokenizer = None,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -223,7 +224,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
@@ -857,6 +858,7 @@ class BaseGPTQModel(nn.Module):
     ):
         if backend == BACKEND.VLLM:
             import os
+
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
