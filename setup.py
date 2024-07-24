@@ -88,7 +88,8 @@ extras_require = {
     "quality": ["ruff==0.4.9", "isort==5.13.2"],
     'vllm': ["vllm>=0.5.3.post1", "flashinfer==0.1.1"],
     'sglang': ["sglang>=0.1.21", "flashinfer==0.1.1"],
-    'bitblas': ["bitblas>=0.0.1.dev13"]
+    'bitblas': ["bitblas>=0.0.1.dev13"],
+    'hf': ["optimum>=1.21.2"]
 }
 
 include_dirs = ["gptqmodel_cuda"]

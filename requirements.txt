@@ -15,4 +15,3 @@ ninja>=1.11.1.1
 protobuf>=4.25.3
 intel_extension_for_transformers>=1.4.2
 auto-round==0.2
-optimum>=1.21.2
