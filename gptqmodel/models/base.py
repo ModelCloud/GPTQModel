@@ -1139,7 +1139,7 @@ class BaseGPTQModel(nn.Module):
                 offload_buffers=True,
             )
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-            if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
+            if not quantize_config.sym and not quantize_config.is_quantized_by_v2():
                 raise ValueError(
                     f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
