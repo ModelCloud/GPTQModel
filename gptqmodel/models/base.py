@@ -178,10 +178,6 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throwError=True)
 
-        # if batch_size > 1 and not version.parse(transformers_version) < version.parse("4.43.0"):
-        #     logger.warning("According to the issue https://github.com/ModelCloud/GPTQModel/issues/278, transformers version 4.43.0 has broken batch_size. until the issue is resolved, hard set the batch_size to 1.")
-        #     batch_size = 1
-
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
 
