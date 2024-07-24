@@ -351,7 +351,7 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
         r = super().to_dict()
 
         # override quant_method from AUTO_ROUND to GPTQ in json output for max compat with vllm/sglang
-        r[QUANT_METHOD_FIELD] = METHOD.GPTQ
+        r[QUANT_METHOD_FIELD] = QUANT_METHOD.GPTQ
         return r
 
 # deprecated: will be removed in future update
