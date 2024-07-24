@@ -5,6 +5,7 @@ from os.path import isdir, join
 from typing import Any, Dict, Optional, Tuple
 
 from packaging import version
+from importlib.metadata import version as pkg_version
 from transformers.utils.hub import cached_file
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,7 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
 
     def to_dict(self):
         # inject auto-round specific meta data
-        self.meta_set("auto_round", version(PKG_AUTO_ROUND))
+        self.meta_set("auto_round", pkg_version(PKG_AUTO_ROUND))
         self.meta_set("enable_full_range", self.enable_full_range)
         self.meta_set("batch_size", self.batch_size)
         self.meta_set("amp", self.amp)
