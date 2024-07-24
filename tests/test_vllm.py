@@ -10,7 +10,8 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from vllm.distributed.parallel_state import destroy_model_parallel
+from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
+
 
 class TestLoadVLLM(unittest.TestCase):
 
