@@ -131,7 +131,7 @@ class BaseGPTQModel(nn.Module):
                     "labels": labels,
                 }
             )
-          
+
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
             if tokenizer:

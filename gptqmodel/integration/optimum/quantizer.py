@@ -24,7 +24,7 @@ from torch import nn
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
-from transformers.utils.quantization_config import QuantizationMethod, GPTQConfig
+from transformers.utils.quantization_config import GPTQConfig, QuantizationMethod
 
 from .constants import GPTQ_CONFIG
 from .data import get_dataset, prepare_dataset

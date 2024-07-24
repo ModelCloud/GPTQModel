@@ -9,10 +9,9 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+from gptqmodel.integration.optimum.quantizer import GPTQConfig  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
-
-from gptqmodel.integration.optimum.quantizer import GPTQConfig  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
