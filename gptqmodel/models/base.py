@@ -13,7 +13,7 @@ import transformers
 from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
@@ -102,7 +102,7 @@ class BaseGPTQModel(nn.Module):
             self,
             calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
             batch_size: int = 1,
-            tokenizer = None,
+            tokenizer: PreTrainedTokenizerBase = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -166,7 +166,7 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
-        tokenizer = None,
+        tokenizer: PreTrainedTokenizerBase = None,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
