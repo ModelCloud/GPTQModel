@@ -142,13 +142,16 @@ class BaseGPTQModel(nn.Module):
                         pad_token_id = token_id
                         break
 
+            if not pad_token_id:
+                logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to def qunatize() so GPTQModel can auto-select the best pad token.")
+
             if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
                 pad_token_id = self.config.eos_token_id[0]
             elif not pad_token_id:
                 pad_token_id = self.config.eos_token_id
 
         if pad_token_id is None:
-            raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.\nModel config does not have pad token mapped. Please pass in tokenizer to def qunatize() so GPTQModel can auto-select the best pad token.")
+            raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
 
         new_calibration_dataset_batched = [
             collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
