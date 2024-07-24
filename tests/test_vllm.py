@@ -10,7 +10,6 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
 
 
 class TestLoadVLLM(unittest.TestCase):
@@ -26,6 +25,13 @@ class TestLoadVLLM(unittest.TestCase):
             "The capital of France is",
         ]
         self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    def release_vllm_model(self):
+        from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
+
+        destroy_model_parallel()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def test_load_vllm(self):
         model = GPTQModel.from_quantized(
@@ -54,11 +60,8 @@ class TestLoadVLLM(unittest.TestCase):
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             self.assertEquals(generated_text, " Paris. 2. Name the capital of the United States. 3.")
 
-        destroy_model_parallel()
         del model
-        gc.collect()
-        torch.cuda.empty_cache()
-
+        self.release_vllm_model()
 
     def test_load_shared_vllm(self):
         model = GPTQModel.from_quantized(
@@ -79,7 +82,5 @@ class TestLoadVLLM(unittest.TestCase):
             self.assertEquals(generated_text,
                               " Paris.\n2. Who has a national flag with a white field surrounded by")
 
-        destroy_model_parallel()
         del model
-        gc.collect()
-        torch.cuda.empty_cache()
+        self.release_vllm_model()
