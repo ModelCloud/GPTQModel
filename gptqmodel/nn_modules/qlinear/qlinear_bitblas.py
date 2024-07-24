@@ -18,7 +18,7 @@ BITBLAS_DATABASE_PATH = None
 BITBLAS_PROPAGATE_WEIGHTS = False
 
 try:
-    import bitblas
+    import bitblas  # noqa: F401
     BITBLAS_AVAILABLE = True
 except Exception:
     BITBLAS_AVAILABLE = False
