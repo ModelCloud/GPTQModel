@@ -13,9 +13,8 @@
 # limitations under the License.
 from typing import TYPE_CHECKING, Optional
 
-from transformers.quantizers.base import HfQuantizer
-
 from gptqmodel.integration.optimum.quantizer import GPTQConfig
+from transformers.quantizers.base import HfQuantizer
 
 if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel
