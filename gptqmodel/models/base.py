@@ -142,6 +142,7 @@ class BaseGPTQModel(nn.Module):
                     token_id = vocab.get(token)
                     if token_id is not None:
                         pad_token_id = token_id
+                        break
 
             if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
                 pad_token_id = self.config.eos_token_id[0]
