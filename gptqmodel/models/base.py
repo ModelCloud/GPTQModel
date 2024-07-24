@@ -141,8 +141,7 @@ class BaseGPTQModel(nn.Module):
                     if token_id is not None:
                         pad_token_id = token_id
                         break
-
-            if not pad_token_id:
+            else:
                 logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to def qunatize() so GPTQModel can auto-select the best pad token.")
 
             if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
