@@ -137,7 +137,7 @@ class BaseGPTQModel(nn.Module):
             pad_token_list = ["<pad>", "<|pad|>", "<|finetune_right_pad_id|>"]
 
             tokenizer = AutoTokenizer.from_pretrained(self.model.name_or_path)
-            added_tokens = tokenizer.get_added_vocab()
+            added_tokens = tokenizer.get_vocab()
 
             for token in pad_token_list:
                 if added_tokens.get(token):
