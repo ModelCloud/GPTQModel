@@ -19,8 +19,6 @@ from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from optimum.utils import is_accelerate_available
-from optimum.utils.modeling_utils import recurse_getattr
 from torch import nn
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -31,7 +29,14 @@ from .constants import GPTQ_CONFIG
 from .data import get_dataset, prepare_dataset
 from .utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
 
-if is_accelerate_available():
+try:
+    from optimum.utils import is_accelerate_available
+    from optimum.utils.modeling_utils import recurse_getattr
+    OPTIMUM_AVAILABLE = True
+except ImportError:
+    OPTIMUM_AVAILABLE = False
+
+if OPTIMUM_AVAILABLE and is_accelerate_available():
     from accelerate import (
         cpu_offload_with_hook,
         load_checkpoint_and_dispatch,
@@ -45,6 +50,8 @@ from ...utils.importer import select_quant_linear
 from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
 
 logger = getLogger(__name__)
+
+OPTIMUM_INSTALL_HINT = "optimum not installed. Please install via `pip install optimum`."
 
 
 class ExllamaVersion(int, Enum):
@@ -127,6 +134,9 @@ class GPTQModelQuantizer(object):
                 The block to quantize can be specified by setting `block_name_to_quantize`. We will quantize each list sequentially.
                 If not set, we will quantize all linear layers. Example: `inside_layer_modules=[["self_attention.query_key_value"], ["mlp.dense_h_to_4h"]]`
         """
+
+        if not OPTIMUM_AVAILABLE:
+            raise ValueError(OPTIMUM_INSTALL_HINT)
 
         if disable_exllama:
             logger.warning("gptqmodel does not support parameter: disable_exllama=True. Setting `disable_exllama=False.")
@@ -744,6 +754,10 @@ def load_quantized_model(
     Returns:
         `nn.Module`: The quantized model
     """
+
+    if not OPTIMUM_AVAILABLE:
+        raise ValueError(OPTIMUM_INSTALL_HINT)
+
     if not torch.cuda.is_available():
         raise RuntimeError("No GPU found. A GPU is needed to run quantized model.")
     if not is_accelerate_available():
