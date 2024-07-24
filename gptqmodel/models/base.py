@@ -102,7 +102,7 @@ class BaseGPTQModel(nn.Module):
             self,
             calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
             batch_size: int = 1,
-            tokenizer: PreTrainedTokenizerBase = None,
+            tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -167,7 +167,7 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
-        tokenizer: PreTrainedTokenizerBase = None,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
