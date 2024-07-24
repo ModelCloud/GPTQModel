@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import os
+from dataclasses import dataclass
 from enum import Enum
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -23,7 +24,7 @@ from torch import nn
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
-from transformers.utils.quantization_config import QuantizationMethod
+from transformers.utils.quantization_config import QuantizationMethod, GPTQConfig
 
 from .constants import GPTQ_CONFIG
 from .data import get_dataset, prepare_dataset
@@ -53,6 +54,60 @@ logger = getLogger(__name__)
 
 OPTIMUM_INSTALL_HINT = "optimum not installed. Please install via `pip install optimum`."
 
+
+@dataclass
+class GPTQConfig(GPTQConfig):
+
+    def __init__(
+            self,
+            bits: int,
+            tokenizer: Any = None,
+            dataset: Optional[Union[List[str], str]] = None,
+            group_size: int = 128,
+            damp_percent: float = 0.1,
+            desc_act: bool = False,
+            sym: bool = True,
+            true_sequential: bool = True,
+            use_cuda_fp16: bool = False,
+            model_seqlen: Optional[int] = None,
+            block_name_to_quantize: Optional[str] = None,
+            module_name_preceding_first_block: Optional[List[str]] = None,
+            batch_size: int = 1,
+            pad_token_id: Optional[int] = None,
+            use_exllama: Optional[bool] = None,
+            max_input_length: Optional[int] = None,
+            exllama_config: Optional[Dict[str, Any]] = None,
+            cache_block_outputs: bool = True,
+            modules_in_block_to_quantize: Optional[List[List[str]]] = None,
+            **kwargs,
+    ):
+        self.quant_method = QuantizationMethod.GPTQ
+        self.bits = bits
+        self.tokenizer = tokenizer
+        self.dataset = dataset
+        self.group_size = group_size
+        self.damp_percent = damp_percent
+        self.desc_act = desc_act
+        self.sym = sym
+        self.true_sequential = true_sequential
+        self.use_cuda_fp16 = use_cuda_fp16
+        self.model_seqlen = model_seqlen
+        self.block_name_to_quantize = block_name_to_quantize
+        self.module_name_preceding_first_block = module_name_preceding_first_block
+        self.batch_size = batch_size
+        self.pad_token_id = pad_token_id
+        self.use_exllama = use_exllama
+        self.max_input_length = max_input_length
+        self.exllama_config = exllama_config
+        self.disable_exllama = kwargs.pop("disable_exllama", None)
+        self.cache_block_outputs = cache_block_outputs
+        self.modules_in_block_to_quantize = modules_in_block_to_quantize
+        self.post_init()
+
+    def post_init(self):
+        if not OPTIMUM_AVAILABLE:
+            raise ValueError(OPTIMUM_INSTALL_HINT)
+        super().post_init()
 
 class ExllamaVersion(int, Enum):
     ONE = 1
