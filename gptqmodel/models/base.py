@@ -13,7 +13,7 @@ import transformers
 from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, AutoTokenizer
 from transformers import __version__ as transformers_version
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
@@ -134,7 +134,19 @@ class BaseGPTQModel(nn.Module):
             )
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            pad_token_id = self.config.eos_token_id
+            pad_token_list = ["<pad>", "<|pad|>", "<|finetune_right_pad_id|>"]
+
+            tokenizer = AutoTokenizer.from_pretrained(self.model.name_or_path)
+            added_tokens = tokenizer.get_added_vocab()
+
+            for token in pad_token_list:
+                if added_tokens.get(token):
+                    pad_token_id = added_tokens[token]
+
+            if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
+                pad_token_id = self.config.eos_token_id[0]
+            elif not pad_token_id:
+                pad_token_id = self.config.eos_token_id
 
         if pad_token_id is None:
             raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
@@ -166,9 +178,9 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throwError=True)
 
-        if batch_size > 1 and not version.parse(transformers_version) < version.parse("4.43.0"):
-            logger.warning("According to the issue https://github.com/ModelCloud/GPTQModel/issues/278, transformers version 4.43.0 has broken batch_size. until the issue is resolved, hard set the batch_size to 1.")
-            batch_size = 1
+        # if batch_size > 1 and not version.parse(transformers_version) < version.parse("4.43.0"):
+        #     logger.warning("According to the issue https://github.com/ModelCloud/GPTQModel/issues/278, transformers version 4.43.0 has broken batch_size. until the issue is resolved, hard set the batch_size to 1.")
+        #     batch_size = 1
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
