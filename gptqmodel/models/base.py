@@ -212,7 +212,9 @@ class BaseGPTQModel(nn.Module):
                     raise ValueError("Expected a 1-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(input_ids.dim()))
             else:
                 input_ids_length = len(input_ids)
-            max_input_id_length = input_ids_length if input_ids_length > max_input_id_length else max_input_id_length
+
+            if input_ids_length > max_input_id_length:
+                max_input_id_length = input_ids_length
             total_input_ids_length += input_ids_length
         avg = total_input_ids_length / len(calibration_dataset)
 
