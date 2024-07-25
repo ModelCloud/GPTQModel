@@ -201,7 +201,7 @@ jobs:
       - check-vm
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
-    timeout-minutes: 30
+    timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
