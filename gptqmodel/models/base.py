@@ -270,14 +270,15 @@ class BaseGPTQModel(nn.Module):
                 res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
                 return res
 
-            # we can pass batch_size=len(calibration_dataset), cause it spends less memory on GPU
-            dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=len(calibration_dataset))
+            # set the nsamples according to the actual size of the calibration_dataset.
+            nsamples = len(calibration_dataset)
+            dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
                                   tokenizer=None,
                                   bits=self.quantize_config.bits,
                                   group_size=self.quantize_config.group_size,
-                                  sym=self.quantize_config.sym, batch_size=batch_size,
+                                  sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
                                   dataset=dataloader, seqlen=self.quantize_config.seqlen, nblocks=self.quantize_config.nblocks,
                                   iters=self.quantize_config.iters, lr=self.quantize_config.lr,
                                   minmax_lr=self.quantize_config.minmax_lr,
