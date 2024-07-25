@@ -140,6 +140,18 @@ if BUILD_CUDA_EXT:
             )
         )
 
+        extensions.append(
+            cpp_ext.CUDAExtension(
+                "gptqmodel_marlin_cuda_24",
+                [
+                    "gptqmodel_ext/marlin_2_4/marlin_cuda_24.cpp",
+                    "gptqmodel_ext/marlin_2_4/marlin_cuda_kernel_24.cu",
+                    "gptqmodel_ext/marlin_2_4/marlin_repack_24.cu",
+                ],
+                extra_compile_args=extra_compile_args,
+            )
+        )
+
     extensions.append(
         cpp_ext.CUDAExtension(
             "gptqmodel_exllama_kernels",
