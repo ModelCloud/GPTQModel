@@ -314,7 +314,6 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
     minmax_lr: float = None
     low_gpu_mem_usage: bool = False
     iters: int = 200
-    seqlen: int = 2048
     sampler: str = "rand"
     seed: int = 42
     nblocks: int = 1
@@ -338,8 +337,6 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
         self.meta_set("minmax_lr", self.minmax_lr)
         self.meta_set("low_gpu_mem_usage", self.low_gpu_mem_usage)
         self.meta_set("iters", self.iters)
-        self.meta_set("seqlen", self.seqlen)
-        # self.meta_set("nsamples", self.nsamples)
         self.meta_set("sampler", self.sampler)
         self.meta_set("seed", self.seed)
         self.meta_set("nblocks", self.nblocks)
