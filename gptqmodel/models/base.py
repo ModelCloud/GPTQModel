@@ -17,7 +17,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
+from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype, QBitsQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
@@ -79,11 +79,13 @@ class BaseGPTQModel(nn.Module):
         quantized: bool,
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
+        load_quantized_model: bool = False,
     ):
         super().__init__()
 
         self.model = model
         self._quantized = quantized
+        self.load_quantized_model = load_quantized_model
         self.quantize_config = quantize_config
         self.config = self.model.config
 
@@ -603,7 +605,6 @@ class BaseGPTQModel(nn.Module):
         # The config, quantize_config and model may be edited in place in save_quantized.
         config = copy.deepcopy(self.model.config)
         quantize_config = copy.deepcopy(self.quantize_config)
-        model = self.model
 
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
@@ -619,17 +620,20 @@ class BaseGPTQModel(nn.Module):
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        # internal is always gptq v2 but allow users to pass gptq (v1) via config
-        if quantize_config.format == FORMAT.GPTQ:
-            # Model qzeros may be edited in place.
-            # TODO: avoid inplace modification of the weights
-            model = copy.deepcopy(self.model)
-            model = convert_gptq_v2_to_v1_format(
-                model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
-            )
-
+        # The model saved during bitblas format quantization uses BitblasQuantLinear, which can be used directly.
+        if not self.load_quantized_model or quantize_config.format == FORMAT.BITBLAS:
+            model = self.model
+            # # internal is always gptq v2 but allow users to pass gptq (v1) via config
+            if quantize_config.format == FORMAT.GPTQ:
+                # Model qzeros may be edited in place.
+                # TODO: avoid inplace modification of the weights
+                model = copy.deepcopy(self.model)
+                model = convert_gptq_v2_to_v1_format(
+                    model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
+                )
+        else:
+            model = self.get_model_with_quantize(quantize_config)
         model.to(CPU)
-
         state_dict = model.state_dict()
 
         if quantize_config.model_file_base_name is None:
@@ -758,6 +762,70 @@ class BaseGPTQModel(nn.Module):
         quantize_config.model_name_or_path = save_dir
         quantize_config.model_file_base_name = model_base_name
         quantize_config.save_pretrained(save_dir)
+
+    def get_model_with_quantize(self, quantize_config):
+        config = AutoConfig.from_pretrained(
+            quantize_config.model_name_or_path,
+            trust_remote_code=True,
+        )
+
+        def skip(*args, **kwargs):
+            pass
+
+        torch.nn.init.kaiming_uniform_ = skip
+        torch.nn.init.uniform_ = skip
+        torch.nn.init.normal_ = skip
+        transformers.modeling_utils._init_weights = False
+        init_contexts = [no_init_weights()]
+        with ContextManagers(init_contexts):
+            model = AutoModelForCausalLM.from_config(
+                config, torch_dtype=torch.float16
+            )
+
+            if self.dynamic_expert_index is not None:
+                num_experts = getattr(config, self.dynamic_expert_index)
+                self.layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+                                                           num_experts=num_experts)
+
+            layers = find_layers(model)
+            ignore_layers = [self.lm_head] + self.base_modules
+
+            for name in list(layers.keys()):
+                # allow loading of quantized lm_head
+                if quantize_config.lm_head and name == self.lm_head:
+                    continue
+
+                if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
+                        not name.endswith(ignore_layer) for sublist in self.layer_modules for ignore_layer in sublist
+                ):
+                    # log non-lm-head quantizerd layers only
+                    if name is not self.lm_head:
+                        logger.info(f"The layer {name} is not quantized.")
+                    del layers[name]
+
+            make_quant(
+                model,
+                layers,
+                quantize_config.bits,
+                quantize_config.group_size,
+                backend=BACKEND.AUTO,
+                format=quantize_config.format,
+                desc_act=quantize_config.desc_act,
+                pack=True,
+            )
+            model.tie_weights()
+
+        accelerate.load_checkpoint_in_model(
+            model,
+            dtype=torch.float16,
+            # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+            checkpoint=self.checkpoint_file_name,
+            # device_map=device_map,
+            # offload_state_dict=True,
+            # offload_buffers=True,
+        )
+        torch.cuda.empty_cache()
+        return model
 
     def save_pretrained(
         self,
@@ -1033,6 +1101,7 @@ class BaseGPTQModel(nn.Module):
                 )
 
         quantize_config.model_file_base_name = true_model_basename
+        quantize_config.runtime_format = quantize_config.format
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
         if verify_hash:
@@ -1059,6 +1128,7 @@ class BaseGPTQModel(nn.Module):
             model = AutoModelForCausalLM.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
+            model.checkpoint_file_name = model_save_name
 
             if cls.dynamic_expert_index is not None:
                 num_experts = getattr(config, cls.dynamic_expert_index)
@@ -1090,6 +1160,8 @@ class BaseGPTQModel(nn.Module):
                 format=FORMAT.GPTQ_V2,
                 desc_act=quantize_config.desc_act,
             )
+            if preload_qlinear_kernel == QBitsQuantLinear:
+                quantize_config.runtime_format = FORMAT.QBITS
             model.tie_weights()
 
         # == step3: load checkpoint and dispatch == #
@@ -1152,7 +1224,7 @@ class BaseGPTQModel(nn.Module):
                 qlinear_kernel=preload_qlinear_kernel,
             )
             load_checkpoint_in_model = True
-            quantize_config.format = FORMAT.GPTQ_V2
+            quantize_config.runtime_format = FORMAT.GPTQ_V2
 
         if backend == BACKEND.MARLIN:
             if is_sharded:
@@ -1251,6 +1323,7 @@ class BaseGPTQModel(nn.Module):
             quantized=True,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
+            load_quantized_model=True,
         )
 
     def __getattr__(self, item):
