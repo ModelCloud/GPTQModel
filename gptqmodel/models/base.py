@@ -480,8 +480,8 @@ class BaseGPTQModel(nn.Module):
                             static_groups=self.quantize_config.static_groups,
                         )
 
-                        stat = {"layer": i + 1, "module": name, "avg_loss": f"{avg_loss:.4f}",
-                                "time": f"{duration:.4f}"}
+                        stat = {"layer": i + 1, "module": name, "avg_loss": f"{avg_loss:.5f}",
+                                "time": f"{duration:.3f}"}
 
                         quant_log.append(stat)
                         logger.info(stat)
