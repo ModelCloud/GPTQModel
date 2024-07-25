@@ -252,6 +252,10 @@ class BaseGPTQModel(nn.Module):
             import torch.nn.functional as F
             from torch.utils.data import DataLoader
 
+            # set the nsamples/seqlen according to the actual size of the calibration_dataset.
+            nsamples = len(calibration_dataset)
+            seqlen = max_input_id_length
+
             @torch.no_grad()
             def collate_batch(batch):
                 input_ids_new = []
@@ -259,26 +263,23 @@ class BaseGPTQModel(nn.Module):
                 for text in batch:
                     input_ids, attention_mask = text["input_ids"][0], text["attention_mask"][0]
 
-                    input_ids = input_ids[:self.quantize_config.seqlen]
+                    input_ids = input_ids[:seqlen]
                     input_ids_new.append(input_ids)
 
-                    attention_mask = attention_mask[:self.quantize_config.seqlen]
+                    attention_mask = attention_mask[:seqlen]
                     attention_mask_new.append(attention_mask)
 
                 if len(input_ids_new) == 0:
                     return None
 
-                input_ids_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in input_ids_new]
-                attention_mask_new = [F.pad(t, (0, self.quantize_config.seqlen - t.size(0))) for t in attention_mask_new]
+                input_ids_new = [F.pad(t, (0, seqlen - t.size(0))) for t in input_ids_new]
+                attention_mask_new = [F.pad(t, (0, seqlen - t.size(0))) for t in attention_mask_new]
 
                 input_ids_new = torch.vstack(input_ids_new)
                 attention_mask_new = torch.vstack(attention_mask_new)
                 res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
                 return res
 
-            # set the nsamples/seqlen according to the actual size of the calibration_dataset.
-            nsamples = len(calibration_dataset)
-            seqlen = max_input_id_length
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
