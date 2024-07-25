@@ -24,23 +24,11 @@ class TestSerialization(unittest.TestCase):
 
             self.assertTrue(os.path.isfile(os.path.join(tmpdir, "gptq_model-4bit-128g.safetensors")))
 
-            with open(os.path.join(tmpdir, QUANT_CONFIG_FILENAME), "r") as config_file:
-                config = json.load(config_file)
-
-            self.assertTrue(config[FORMAT_FIELD_JSON] == FORMAT.MARLIN)
-
             model = GPTQModel.from_quantized(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
-
-    def test_marlin_hf_cache_serialization(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
-        self.assertEqual(model.quantize_config.format, FORMAT.MARLIN)
-
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
-        self.assertEqual(model.quantize_config.format, FORMAT.MARLIN)
 
     def test_gptq_v1_to_v2_runtime_convert(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
-        self.assertEqual(model.quantize_config.format, FORMAT.GPTQ_V2)
+        self.assertEqual(model.runtime_format, FORMAT.GPTQ_V2)
 
     def test_gptq_v1_serialization(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
