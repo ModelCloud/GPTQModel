@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 import torch
@@ -30,15 +31,16 @@ class TestSave(unittest.TestCase):
         origin_model_res = origin_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
         origin_model_predicted_text = tokenizer.decode(origin_model_res[0])
 
-        origin_model.save_quantized("./test_reshard")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            origin_model.save_quantized(tmpdir)
 
-        # saved model produce wrong output
-        new_model = GPTQModel.from_quantized("./test_reshard", backend=backend)
+            # saved model produce wrong output
+            new_model = GPTQModel.from_quantized(tmpdir, backend=backend)
 
-        new_model_res = new_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-        new_model_predicted_text = tokenizer.decode(new_model_res[0])
+            new_model_res = new_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
+            new_model_predicted_text = tokenizer.decode(new_model_res[0])
 
-        print("origin_model_predicted_text",origin_model_predicted_text)
-        print("new_model_predicted_text",new_model_predicted_text)
+            print("origin_model_predicted_text",origin_model_predicted_text)
+            print("new_model_predicted_text",new_model_predicted_text)
 
-        self.assertEqual(origin_model_predicted_text[:20], new_model_predicted_text[:20])
+            self.assertEqual(origin_model_predicted_text[:20], new_model_predicted_text[:20])

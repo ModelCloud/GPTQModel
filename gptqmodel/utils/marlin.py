@@ -199,6 +199,6 @@ def convert_to_marlin(
         gc.collect()
 
     # Set quantization config to be Marlin.
-    # quantization_config.format = FORMAT.MARLIN
+    quantization_config.runtime_format = FORMAT.MARLIN
 
     return model

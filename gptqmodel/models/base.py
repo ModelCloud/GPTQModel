@@ -17,7 +17,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
+from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype, QBitsQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
@@ -620,7 +620,8 @@ class BaseGPTQModel(nn.Module):
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        if not self.load_quantized_model:
+        # The model saved during bitblas format quantization uses BitblasQuantLinear, which can be used directly.
+        if not self.load_quantized_model or quantize_config.format == FORMAT.BITBLAS:
             model = self.model
             # # internal is always gptq v2 but allow users to pass gptq (v1) via config
             if quantize_config.format == FORMAT.GPTQ:
@@ -824,16 +825,6 @@ class BaseGPTQModel(nn.Module):
             # offload_buffers=True,
         )
         torch.cuda.empty_cache()
-        if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
-            from ..utils.bitblas import convert_to_bitblas
-
-            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
-            logger.info("Converting model to BitBlas Format...")
-            self.model = convert_to_bitblas(self.model, self.qlinear_kernel, self.quantize_config,
-                                            self.quantize_config.sym,
-                                            self.quantize_config.desc_act, repack=True)
-            self.qlinear_kernel = BitBLASQuantLinear
         return model
 
     def save_pretrained(
@@ -1110,6 +1101,7 @@ class BaseGPTQModel(nn.Module):
                 )
 
         quantize_config.model_file_base_name = true_model_basename
+        quantize_config.runtime_format = quantize_config.format
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
         if verify_hash:
@@ -1168,6 +1160,8 @@ class BaseGPTQModel(nn.Module):
                 format=FORMAT.GPTQ_V2,
                 desc_act=quantize_config.desc_act,
             )
+            if preload_qlinear_kernel == QBitsQuantLinear:
+                quantize_config.runtime_format = FORMAT.QBITS
             model.tie_weights()
 
         # == step3: load checkpoint and dispatch == #
@@ -1230,7 +1224,7 @@ class BaseGPTQModel(nn.Module):
                 qlinear_kernel=preload_qlinear_kernel,
             )
             load_checkpoint_in_model = True
-            model.runtime_format = FORMAT.GPTQ_V2
+            quantize_config.runtime_format = FORMAT.GPTQ_V2
 
         if backend == BACKEND.MARLIN:
             if is_sharded:

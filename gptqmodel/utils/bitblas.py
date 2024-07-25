@@ -132,6 +132,6 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
             gc.collect()
 
     # Set quantization config to be BitBLAS.
-    # quant_config.format = FORMAT.BITBLAS
+    quant_config.runtime_format = FORMAT.BITBLAS
 
     return model
