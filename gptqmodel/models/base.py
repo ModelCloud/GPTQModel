@@ -202,6 +202,7 @@ class BaseGPTQModel(nn.Module):
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
+        max_input_id_length = 0
         for row in calibration_dataset:
             input_ids = row["input_ids"]
             if isinstance(input_ids, torch.Tensor):
@@ -211,6 +212,7 @@ class BaseGPTQModel(nn.Module):
                     raise ValueError("Expected a 1-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(input_ids.dim()))
             else:
                 input_ids_length = len(input_ids)
+            max_input_id_length = input_ids_length if input_ids_length > max_input_id_length else max_input_id_length
             total_input_ids_length += input_ids_length
         avg = total_input_ids_length / len(calibration_dataset)
 
@@ -270,8 +272,9 @@ class BaseGPTQModel(nn.Module):
                 res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
                 return res
 
-            # set the nsamples according to the actual size of the calibration_dataset.
+            # set the nsamples/seqlen according to the actual size of the calibration_dataset.
             nsamples = len(calibration_dataset)
+            seqlen = max_input_id_length
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
@@ -279,7 +282,7 @@ class BaseGPTQModel(nn.Module):
                                   bits=self.quantize_config.bits,
                                   group_size=self.quantize_config.group_size,
                                   sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
-                                  dataset=dataloader, seqlen=self.quantize_config.seqlen, nblocks=self.quantize_config.nblocks,
+                                  dataset=dataloader, seqlen=seqlen, nblocks=self.quantize_config.nblocks,
                                   iters=self.quantize_config.iters, lr=self.quantize_config.lr,
                                   minmax_lr=self.quantize_config.minmax_lr,
                                   enable_quanted_input=self.quantize_config.enable_quanted_input,
