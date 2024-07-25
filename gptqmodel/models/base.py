@@ -763,7 +763,6 @@ class BaseGPTQModel(nn.Module):
         quantize_config.save_pretrained(save_dir)
 
     def get_model_with_quantize(self, quantize_config):
-        print("quantize_config.c", quantize_config)
         config = AutoConfig.from_pretrained(
             quantize_config.model_name_or_path,
             trust_remote_code=True,

@@ -10,7 +10,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON, QUANT_CONFIG_FILENAME  # noqa: E402
+from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):

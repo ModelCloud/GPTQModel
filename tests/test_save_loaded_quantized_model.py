@@ -1,8 +1,9 @@
 import unittest
+
 import torch
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
+from gptqmodel import BACKEND, GPTQModel
 from parameterized import parameterized
-from gptqmodel import GPTQModel,BACKEND
+from transformers import AutoTokenizer
 
 MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
