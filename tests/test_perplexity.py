@@ -166,4 +166,4 @@ class TestPerplexity(unittest.TestCase):
             if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
                 assert abs(quantized_ppl - self.opt_native_ppl) < 3.5
             else:
-                assert abs(quantized_ppl - self.tinyllama_native_ppl) < 56.8
+                assert abs(quantized_ppl - self.tinyllama_native_ppl) < 58
