@@ -1,8 +1,9 @@
 import logging
 from logging import getLogger
 
-from .base import BaseGPTQModel
 from ..utils import BACKEND
+from .base import BaseGPTQModel
+
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
 formatter = logging.Formatter("%(levelname)s - %(message)s")

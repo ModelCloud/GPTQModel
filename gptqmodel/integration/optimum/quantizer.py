@@ -14,24 +14,30 @@
 # limitations under the License.
 import json
 import os
+from dataclasses import dataclass
 from enum import Enum
 from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from optimum.utils import is_accelerate_available
-from optimum.utils.modeling_utils import recurse_getattr
 from torch import nn
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
-from transformers.utils.quantization_config import QuantizationMethod
+from transformers.utils.quantization_config import GPTQConfig, QuantizationMethod
 
 from .constants import GPTQ_CONFIG
 from .data import get_dataset, prepare_dataset
 from .utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
 
-if is_accelerate_available():
+try:
+    from optimum.utils import is_accelerate_available
+    from optimum.utils.modeling_utils import recurse_getattr
+    OPTIMUM_AVAILABLE = True
+except ImportError:
+    OPTIMUM_AVAILABLE = False
+
+if OPTIMUM_AVAILABLE and is_accelerate_available():
     from accelerate import (
         cpu_offload_with_hook,
         load_checkpoint_and_dispatch,
@@ -46,6 +52,62 @@ from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_f
 
 logger = getLogger(__name__)
 
+OPTIMUM_INSTALL_HINT = "optimum not installed. Please install via `pip install optimum`."
+
+
+@dataclass
+class GPTQConfig(GPTQConfig):
+
+    def __init__(
+            self,
+            bits: int,
+            tokenizer: Any = None,
+            dataset: Optional[Union[List[str], str]] = None,
+            group_size: int = 128,
+            damp_percent: float = 0.1,
+            desc_act: bool = False,
+            sym: bool = True,
+            true_sequential: bool = True,
+            use_cuda_fp16: bool = False,
+            model_seqlen: Optional[int] = None,
+            block_name_to_quantize: Optional[str] = None,
+            module_name_preceding_first_block: Optional[List[str]] = None,
+            batch_size: int = 1,
+            pad_token_id: Optional[int] = None,
+            use_exllama: Optional[bool] = None,
+            max_input_length: Optional[int] = None,
+            exllama_config: Optional[Dict[str, Any]] = None,
+            cache_block_outputs: bool = True,
+            modules_in_block_to_quantize: Optional[List[List[str]]] = None,
+            **kwargs,
+    ):
+        self.quant_method = QuantizationMethod.GPTQ
+        self.bits = bits
+        self.tokenizer = tokenizer
+        self.dataset = dataset
+        self.group_size = group_size
+        self.damp_percent = damp_percent
+        self.desc_act = desc_act
+        self.sym = sym
+        self.true_sequential = true_sequential
+        self.use_cuda_fp16 = use_cuda_fp16
+        self.model_seqlen = model_seqlen
+        self.block_name_to_quantize = block_name_to_quantize
+        self.module_name_preceding_first_block = module_name_preceding_first_block
+        self.batch_size = batch_size
+        self.pad_token_id = pad_token_id
+        self.use_exllama = use_exllama
+        self.max_input_length = max_input_length
+        self.exllama_config = exllama_config
+        self.disable_exllama = kwargs.pop("disable_exllama", None)
+        self.cache_block_outputs = cache_block_outputs
+        self.modules_in_block_to_quantize = modules_in_block_to_quantize
+        self.post_init()
+
+    def post_init(self):
+        if not OPTIMUM_AVAILABLE:
+            raise ValueError(OPTIMUM_INSTALL_HINT)
+        super().post_init()
 
 class ExllamaVersion(int, Enum):
     ONE = 1
@@ -127,6 +189,9 @@ class GPTQModelQuantizer(object):
                 The block to quantize can be specified by setting `block_name_to_quantize`. We will quantize each list sequentially.
                 If not set, we will quantize all linear layers. Example: `inside_layer_modules=[["self_attention.query_key_value"], ["mlp.dense_h_to_4h"]]`
         """
+
+        if not OPTIMUM_AVAILABLE:
+            raise ValueError(OPTIMUM_INSTALL_HINT)
 
         if disable_exllama:
             logger.warning("gptqmodel does not support parameter: disable_exllama=True. Setting `disable_exllama=False.")
@@ -744,6 +809,10 @@ def load_quantized_model(
     Returns:
         `nn.Module`: The quantized model
     """
+
+    if not OPTIMUM_AVAILABLE:
+        raise ValueError(OPTIMUM_INSTALL_HINT)
+
     if not torch.cuda.is_available():
         raise RuntimeError("No GPU found. A GPU is needed to run quantized model.")
     if not is_accelerate_available():

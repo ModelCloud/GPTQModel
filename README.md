@@ -10,6 +10,7 @@
 </p>
 
 ## News
+* 07/25/2024 🚀 [v0.9.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.9): Added Llama-3.1 support, Gemma2 27B quant inference support via vLLM, auto pad_token normalization, fixed auto-round quant compat for vLLM/SGLang, and more.  
 * 07/13/2024 🚀🚀🚀 [v0.9.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.8):
 Run quantized models directly using GPTQModel using fast `vLLM` or `SGLang` backend! Both vLLM and SGLang are optimized for dyanamic batching inference for maximum `TPS` (check usage under examples). Marlin backend also
 got full end-to-end in/out features padding to enhance current/future model compatibility. 

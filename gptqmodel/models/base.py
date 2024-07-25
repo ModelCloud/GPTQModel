@@ -13,11 +13,9 @@ import transformers
 from accelerate.hooks import remove_hook_from_module
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
-from transformers import __version__ as transformers_version
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
-from packaging import version
 
 from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
@@ -106,6 +104,7 @@ class BaseGPTQModel(nn.Module):
             self,
             calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
             batch_size: int = 1,
+            tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -134,9 +133,25 @@ class BaseGPTQModel(nn.Module):
                     "labels": labels,
                 }
             )
+
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            pad_token_id = self.config.eos_token_id
+            if tokenizer:
+                vocab = tokenizer.get_vocab()
+
+                # auto select the best pad token to use
+                for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
+                    token_id = vocab.get(token)
+                    if token_id is not None:
+                        pad_token_id = token_id
+                        break
+            else:
+                logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
+
+            if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
+                pad_token_id = self.config.eos_token_id[0]
+            elif not pad_token_id:
+                pad_token_id = self.config.eos_token_id
 
         if pad_token_id is None:
             raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
@@ -156,6 +171,7 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -167,10 +183,6 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throwError=True)
-
-        if batch_size > 1 and not version.parse(transformers_version) < version.parse("4.43.0"):
-            logger.warning("According to the issue https://github.com/ModelCloud/GPTQModel/issues/278, transformers version 4.43.0 has broken batch_size. until the issue is resolved, hard set the batch_size to 1.")
-            batch_size = 1
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
@@ -217,7 +229,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
@@ -927,6 +939,7 @@ class BaseGPTQModel(nn.Module):
     ):
         if backend == BACKEND.VLLM:
             import os
+
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
@@ -1205,7 +1218,7 @@ class BaseGPTQModel(nn.Module):
                 offload_buffers=True,
             )
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-            if not quantize_config.sym and not quantize_config.is_quantized_or_packed_by_v2():
+            if not quantize_config.sym and not quantize_config.is_quantized_by_v2():
                 raise ValueError(
                     f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )

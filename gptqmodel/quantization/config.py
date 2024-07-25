@@ -5,6 +5,7 @@ from os.path import isdir, join
 from typing import Any, Dict, Optional, Tuple
 
 from packaging import version
+from importlib.metadata import version as pkg_version
 from transformers.utils.hub import cached_file
 
 logger = logging.getLogger(__name__)
@@ -27,11 +28,11 @@ MIN_VERSION_WITH_V2 = "0.9.0"
 META_FIELD = "meta"
 # quantizer is the tool that did the quantization
 META_FIELD_QUANTIZER = "quantizer"
-# packer is the tool that packed the weights post quantization
-META_FIELD_PACKER = "packer"
 
 META_QUANTIZER_GPTQMODEL = "gptqmodel"
 
+# pkg names
+PKG_AUTO_ROUND = "auto-round"
 
 # saved formats
 class FORMAT:
@@ -150,17 +151,10 @@ class QuantizeConfig():
         return parts[0].lower(), parts[1].lower() if len(parts) >= 2 else None
 
     # is quantized model quantized or packed by gptqmodel version with v2 format code
-    def is_quantized_or_packed_by_v2(self) -> bool:
+    def is_quantized_by_v2(self) -> bool:
         # check meta.quantizer
         producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
         by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
-
-        # fallback to meta.packer
-        if not by_v2:
-            producer, _version = self.meta_get_versionable(META_FIELD_PACKER)
-            by_v2 = producer == META_QUANTIZER_GPTQMODEL and version.parse(_version) >= version.parse(
-                MIN_VERSION_WITH_V2
-            )
 
         return by_v2
 
@@ -331,6 +325,8 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
     quant_method: str = QUANT_METHOD.AUTO_ROUND
 
     def to_dict(self):
+        # inject auto-round specific meta data
+        self.meta_set("auto_round", pkg_version(PKG_AUTO_ROUND))
         self.meta_set("enable_full_range", self.enable_full_range)
         self.meta_set("batch_size", self.batch_size)
         self.meta_set("amp", self.amp)
@@ -352,7 +348,11 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
         self.meta_set("data_type", self.data_type)
         self.meta_set("scale_dtype", self.scale_dtype)
 
-        return super().to_dict()
+        r = super().to_dict()
+
+        # override quant_method from AUTO_ROUND to GPTQ in json output for max compat with vllm/sglang
+        r[QUANT_METHOD_FIELD] = QUANT_METHOD.GPTQ
+        return r
 
 # deprecated: will be removed in future update
 @dataclass

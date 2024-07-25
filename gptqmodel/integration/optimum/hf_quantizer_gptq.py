@@ -13,13 +13,14 @@
 # limitations under the License.
 from typing import TYPE_CHECKING, Optional
 
+from gptqmodel.integration.optimum.quantizer import GPTQConfig
 from transformers.quantizers.base import HfQuantizer
 
 if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel
 
 from transformers.utils import is_optimum_available, is_torch_available, logging
-from transformers.utils.quantization_config import GPTQConfig, QuantizationConfigMixin
+from transformers.utils.quantization_config import QuantizationConfigMixin
 
 if is_torch_available():
     import torch
