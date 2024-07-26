@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from os.path import basename, isfile, join
 from typing import Dict, List, Optional, Union
 
@@ -31,7 +32,7 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
                            get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, copy_py_files)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -80,6 +81,8 @@ class BaseGPTQModel(nn.Module):
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
+        trust_remote_code: bool = False,
+        model_name_or_path: str = None,
     ):
         super().__init__()
 
@@ -91,6 +94,8 @@ class BaseGPTQModel(nn.Module):
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
+        self.trust_remote_code = trust_remote_code
+        self.model_name_or_path = model_name_or_path
 
     @property
     def quantized(self):
@@ -770,6 +775,10 @@ class BaseGPTQModel(nn.Module):
         quantize_config.model_file_base_name = model_base_name
         quantize_config.save_pretrained(save_dir)
 
+        # need to copy .py files for model/tokenizers not yet merged to HF transformers
+        if self.trust_remote_code:
+            copy_py_files(save_dir, model_id_or_path=self.model_name_or_path)
+
     def get_model_with_quantize(self, quantize_config):
         config = AutoConfig.from_pretrained(
             quantize_config.model_name_or_path,
@@ -913,8 +922,13 @@ class BaseGPTQModel(nn.Module):
             logger.warning("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
         model.eval()
-
-        return cls(model, quantized=False, quantize_config=quantize_config)
+        return cls(
+            model,
+            quantized=False,
+            quantize_config=quantize_config,
+            trust_remote_code=trust_remote_code,
+            model_name_or_path=pretrained_model_name_or_path
+        )
 
     @classmethod
     def from_quantized(
@@ -1331,6 +1345,8 @@ class BaseGPTQModel(nn.Module):
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
+            trust_remote_code=trust_remote_code,
+            model_name_or_path=model_name_or_path,
         )
 
     def __getattr__(self, item):

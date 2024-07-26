@@ -5,7 +5,8 @@ import logging
 import os
 from logging import getLogger
 from typing import List, Optional
-
+from huggingface_hub import HfApi, hf_hub_download
+import shutil
 import accelerate
 import threadpoolctl as tctl
 import torch
@@ -633,3 +634,18 @@ def check_to_quantized(config):
         if config.bits > 8 or "fp" in config.data_type or "float" in config.data_type:
             return False
         return True
+
+def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
+    os.makedirs(save_dir, exist_ok=True)
+
+    if os.path.isdir(model_id_or_path):
+        py_files = [f for f in os.listdir(model_id_or_path) if f.endswith('.py')]
+        for file in py_files:
+            shutil.copy2(os.path.join(model_id_or_path, file), save_dir)
+    else:
+        api = HfApi()
+        model_info = api.model_info(model_id_or_path)
+        for file in model_info.siblings:
+            if file.rfilename.endswith(file_extension):
+                _ = hf_hub_download(repo_id=model_id_or_path, filename=file.rfilename,
+                                                  local_dir=save_dir)
