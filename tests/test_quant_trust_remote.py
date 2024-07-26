@@ -12,7 +12,7 @@ from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-class TestTransformerUnsupportQuant(unittest.TestCase):
+class TestQuantWithTrustRemoteTrue(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "openbmb/MiniCPM-2B-dpo-bf16"
