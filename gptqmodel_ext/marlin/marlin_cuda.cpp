@@ -47,7 +47,7 @@ void mul(
   if (workspace.numel() < prob_n / 128 * max_par)
     AT_ERROR("workspace must be of size at least ", prob_n / 128 * max_par, ".");
   int dev = A.get_device();
-  int err = marlin_cuda(
+  marlin_cuda(
     A.data_ptr(),
     B.data_ptr(),
     C.data_ptr(),
@@ -62,16 +62,16 @@ void mul(
     sms,
     max_par
   );
-  if (err == ERR_PROB_SHAPE) {
-    AT_ERROR(
-      "Problem (m=", prob_m, ", n=", prob_n, ", k=", prob_k, ")",
-      " not compatible with thread_k=", thread_k, ", thread_n=", thread_n, "."
-    );
-  } else if (err == ERR_KERN_SHAPE) {
-    AT_ERROR(
-      "No kernel implementation for thread_k=", thread_k, ", thread_n=", thread_n, ", groupsize=", groupsize, "."
-    );
-  }
+//  if (err == ERR_PROB_SHAPE) {
+//    AT_ERROR(
+//      "Problem (m=", prob_m, ", n=", prob_n, ", k=", prob_k, ")",
+//      " not compatible with thread_k=", thread_k, ", thread_n=", thread_n, "."
+//    );
+//  } else if (err == ERR_KERN_SHAPE) {
+//    AT_ERROR(
+//      "No kernel implementation for thread_k=", thread_k, ", thread_n=", thread_n, ", groupsize=", groupsize, "."
+//    );
+//  }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

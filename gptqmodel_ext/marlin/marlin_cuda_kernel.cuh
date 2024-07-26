@@ -1,7 +1,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-int marlin_cuda(
+void marlin_cuda(
   const void* A,
   const void* B,
         void* C,
