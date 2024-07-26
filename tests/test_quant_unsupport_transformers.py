@@ -16,7 +16,7 @@ class TestTransformerUnsupportQuant(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "openbmb/MiniCPM-2B-dpo-bf16"
-        self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True, trust_remote_code=True)
 
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
@@ -46,7 +46,7 @@ class TestTransformerUnsupportQuant(unittest.TestCase):
 
             del model
             py_files = [f for f in os.listdir(tmp_dir) if f.endswith('.py')]
-            self.assertTrue(len(py_files) > 0, f"No .py files found in the directory: {tmp_dir}")
-
+            expected_files = ["modeling_minicpm.py", "configuration_minicpm.py"]
+            self.assertEqual(py_files, expected_files)
 
 

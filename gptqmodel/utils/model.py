@@ -635,7 +635,7 @@ def check_to_quantized(config):
             return False
         return True
 
-def copy_remote_file(save_dir, file_extension=".py", model_id_or_path=""):
+def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
     os.makedirs(save_dir, exist_ok=True)
 
     if os.path.isdir(model_id_or_path):

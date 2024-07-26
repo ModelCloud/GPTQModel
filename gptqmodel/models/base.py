@@ -32,7 +32,7 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
                            get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, copy_remote_file)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, copy_py_files)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -82,7 +82,7 @@ class BaseGPTQModel(nn.Module):
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
-        original_model_name_or_path: str = None,
+        model_name_or_path: str = None,
     ):
         super().__init__()
 
@@ -95,7 +95,7 @@ class BaseGPTQModel(nn.Module):
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
-        self.original_model_name_or_path = original_model_name_or_path
+        self.model_name_or_path = model_name_or_path
 
     @property
     def quantized(self):
@@ -776,7 +776,7 @@ class BaseGPTQModel(nn.Module):
         quantize_config.save_pretrained(save_dir)
 
         if self.trust_remote_code:
-            copy_remote_file(save_dir, model_id_or_path=self.original_model_name_or_path)
+            copy_py_files(save_dir, model_id_or_path=self.model_name_or_path)
 
     def get_model_with_quantize(self, quantize_config):
         config = AutoConfig.from_pretrained(
@@ -926,7 +926,7 @@ class BaseGPTQModel(nn.Module):
             quantized=False,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            original_model_name_or_path=pretrained_model_name_or_path
+            model_name_or_path=pretrained_model_name_or_path
         )
 
     @classmethod
@@ -1345,7 +1345,7 @@ class BaseGPTQModel(nn.Module):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
-            original_model_name_or_path=model_name_or_path,
+            model_name_or_path=model_name_or_path,
         )
 
     def __getattr__(self, item):
