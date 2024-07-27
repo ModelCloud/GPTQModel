@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
-from transformers import TextGenerationPipeline
 
 pretrained_model_id = "gpt2-xl"
 quantized_model_id = "gpt2-large-4bit-128g"
@@ -78,10 +77,6 @@ def main():
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))
-
-    # or you can also use pipeline
-    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-    print(pipeline("test is")[0]["generated_text"])
 
 
 if __name__ == "__main__":

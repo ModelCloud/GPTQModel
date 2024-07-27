@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 from gptqmodel import GPTQModel, QuantizeConfig
@@ -8,39 +7,26 @@ quantized_model_id = "opt-125m-4bit-128g"
 
 
 # os.makedirs(quantized_model_dir, exist_ok=True)
-def get_wikitext2(nsamples, seed, seqlen, model):
+def get_wikitext2(nsamples, seqlen, model):
     from datasets import load_dataset
-
-    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-
     from transformers import AutoTokenizer
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
-    except Exception:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
-    trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
-    testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
+    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
 
-    import random
+    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(
+        lambda x: len(x["text"]) >= seqlen)
 
-    random.seed(seed)
-    np.random.seed(0)
-    torch.random.manual_seed(0)
+    testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test").filter(
+        lambda x: len(x["text"]) >= seqlen)
 
-    traindataset = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        attention_mask = torch.ones_like(inp)
-        traindataset.append({"input_ids": inp, "attention_mask": attention_mask})
-    return traindataset, testenc
+    traindataset = [tokenizer(example["text"]) for example in traindata.select(range(nsamples))]
+    testdataset = [tokenizer(example["text"]) for example in testdata.select(range(nsamples))]
+
+    return traindataset, testdataset
 
 
 @torch.no_grad()
-def opt_eval(model, testenc, dev, seqlen=2048):
+def opt_eval(model, testenc, dev, seqlen=1024):
     print("Evaluating ...")
 
     testenc = testenc.input_ids
@@ -133,7 +119,7 @@ def opt_eval(model, testenc, dev, seqlen=2048):
 
 
 def main():
-    traindataset, testenc = get_wikitext2(128, 0, 2048, pretrained_model_id)
+    traindataset, testenc = get_wikitext2(128, 1024, pretrained_model_id)
 
     quantize_config = QuantizeConfig(
         bits=4,  # quantize model to 4-bit

@@ -1,5 +1,6 @@
 from gptqmodel import GPTQModel, QuantizeConfig
-from transformers import AutoTokenizer, TextGenerationPipeline
+from gptqmodel.quantization import FORMAT
+from transformers import AutoTokenizer
 
 pretrained_model_id = "facebook/opt-125m"
 quantized_model_id = "opt-125m-4bit-128g"
@@ -16,6 +17,7 @@ def main():
     quantize_config = QuantizeConfig(
         bits=4,  # quantize model to 4-bit
         group_size=128,  # it is recommended to set the value to 128
+        format=FORMAT.GPTQ_V2
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
@@ -55,10 +57,6 @@ def main():
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
-
-    # or you can also use pipeline
-    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-    print(pipeline("gptqmodel is")[0]["generated_text"])
 
 
 if __name__ == "__main__":
