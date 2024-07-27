@@ -1,6 +1,5 @@
 import random
 
-import numpy as np
 import torch
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
@@ -10,26 +9,11 @@ quantized_model_id = "gpt2-large-4bit-128g"
 
 
 # os.makedirs(quantized_model_dir, exist_ok=True)
-def get_wikitext2(nsamples, seed, seqlen, tokenizer):
-    # set seed
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.random.manual_seed(seed)
+def get_wikitext2(tokenizer, nsamples, seqlen):
+    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(
+        lambda x: len(x["text"]) >= seqlen)
 
-    # load dataset and preprocess
-    traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
-    testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
-
-    traindataset = []
-    for _ in range(nsamples):
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        attention_mask = torch.ones_like(inp)
-        traindataset.append({"input_ids": inp, "attention_mask": attention_mask})
-    return traindataset, testenc
+    return [tokenizer(example["text"]) for example in traindata.select(range(nsamples))]
 
 
 def main():
@@ -60,7 +44,7 @@ def main():
         model.seqlen = 2048
 
     # load train dataset for quantize
-    traindataset, testenc = get_wikitext2(128, 0, model.seqlen, tokenizer)
+    traindataset = get_wikitext2(tokenizer, nsamples=128, seqlen=model.seqlen)
 
     # quantize model, the calibration_dataset should be list of dict whose keys contains "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
