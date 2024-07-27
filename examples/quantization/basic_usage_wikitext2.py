@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer
+from datasets import load_dataset
 
 pretrained_model_id = "facebook/opt-125m"
 quantized_model_id = "opt-125m-4bit-128g"
