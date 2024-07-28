@@ -17,7 +17,6 @@ def main():
     quantize_config = QuantizeConfig(
         bits=4,  # quantize model to 4-bit
         group_size=128,  # it is recommended to set the value to 128
-        format=FORMAT.GPTQ_V2
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
