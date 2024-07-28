@@ -1,8 +1,9 @@
 from gptqmodel import GPTQModel, QuantizeConfig
-from transformers import AutoTokenizer, TextGenerationPipeline
+from gptqmodel.quantization import FORMAT
+from transformers import AutoTokenizer
 
-pretrained_model_id = "facebook/opt-125m"
-quantized_model_id = "opt-125m-4bit-128g"
+pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 
 def main():
@@ -55,10 +56,6 @@ def main():
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
-
-    # or you can also use pipeline
-    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-    print(pipeline("gptqmodel is")[0]["generated_text"])
 
 
 if __name__ == "__main__":

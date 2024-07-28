@@ -1,10 +1,10 @@
 import torch
 from gptqmodel import GPTQModel
 from gptqmodel.quantization.config import AutoRoundQuantizeConfig  # noqa: E402
-from transformers import AutoTokenizer, TextGenerationPipeline
+from transformers import AutoTokenizer
 
-pretrained_model_id = "facebook/opt-125m"
-quantized_model_id = "./autoround/opt-125m-4bit-128g"
+pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+quantized_model_id = "./autoround/TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
@@ -48,10 +48,6 @@ def main():
             )[0]
         )
     )
-
-    # or you can also use pipeline
-    pipeline = TextGenerationPipeline(model=model, tokenizer=tokenizer)
-    print(pipeline("gptqmodel is")[0]["generated_text"])
 
 
 if __name__ == "__main__":
