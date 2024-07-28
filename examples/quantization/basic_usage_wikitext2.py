@@ -4,8 +4,8 @@ from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer
 from datasets import load_dataset
 
-pretrained_model_id = "facebook/opt-125m"
-quantized_model_id = "opt-125m-4bit-128g"
+pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 
 # os.makedirs(quantized_model_dir, exist_ok=True)

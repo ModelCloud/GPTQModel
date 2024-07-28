@@ -7,8 +7,8 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-pretrained_model_id = "facebook/opt-125m"
-quantized_model_id = "./facebook/opt-125m-4bit-128g"
+pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+quantized_model_id = "./TinyLlama/TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     global quantized_model_id
