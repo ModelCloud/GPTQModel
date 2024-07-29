@@ -1,5 +1,5 @@
 # Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
-# ModelGPTQ/licences/LICENSE.apache
+# GPTQModel/licences/LICENSE.apache
 
 from logging import getLogger
 
