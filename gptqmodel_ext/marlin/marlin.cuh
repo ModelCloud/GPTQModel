@@ -9,6 +9,8 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
+namespace marlin {
+
 // Marlin params
 
 // 8 warps are a good choice since every SM has 4 schedulers and having more
@@ -81,3 +83,5 @@ __device__ inline void cp_async_wait() {
 }
 
 #endif
+
+}  // namespace marlin

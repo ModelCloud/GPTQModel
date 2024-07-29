@@ -1,5 +1,6 @@
 import gc
 from logging import getLogger
+from typing import Tuple
 
 import accelerate
 import torch
@@ -131,7 +132,7 @@ def convert_to_marlin(
         # loading weights from checkpoints holding zero bias.
         with torch.device("meta"):
             new_module = MarlinQuantLinear(
-                bits=4,
+                bits=quantization_config.bits,
                 group_size=module.group_size,
                 sym=sym,
                 desc_act=desc_act,
@@ -153,7 +154,20 @@ def convert_to_marlin(
                 padded_qweight[:module.qweight.size(0), :module.qweight.size(1)] = qweight
                 qweight = padded_qweight
 
-            marlin_repacked_weight = gptqmodel_marlin_cuda.gptq_repack(qweight)
+            # Handle sorting for activation reordering if needed.
+            if quantization_config.desc_act:
+                g_idx, g_idx_sort_indices = marlin_sort_g_idx(module.g_idx)
+                module.g_idx_sort_indices = g_idx_sort_indices
+                replace_tensor(module, "g_idx", g_idx)
+            else:
+                module.g_idx = marlin_make_empty_g_idx(torch.device("cuda"))
+                module.g_idx_sort_indices = marlin_make_empty_g_idx(torch.device("cuda"))
+
+            marlin_repacked_weight = gptqmodel_marlin_cuda.gptq_marlin_repack(qweight,
+                                                                              module.g_idx_sort_indices,
+                                                                              module.infeatures,
+                                                                              module.outfeatures,
+                                                                              quantization_config.bits)
 
             if strict:
                 dequantized_qzeros = unpack_qzeros(module.qzeros)
@@ -200,3 +214,23 @@ def convert_to_marlin(
     quantization_config.runtime_format = FORMAT.MARLIN
 
     return model
+
+
+def marlin_sort_g_idx(
+        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
+    return g_idx[g_idx_sort_indices], g_idx_sort_indices
+
+# Newly generated tensors need to replace existing tensors that are
+# already registered as parameters by vLLM (and won't be freed)
+def replace_tensor(layer: torch.nn.Module, name: str,
+                   new_t: torch.Tensor) -> None:
+    # It is important to use resize_() here since it ensures
+    # the same buffer is reused
+    getattr(layer, name).resize_(new_t.shape)
+    getattr(layer, name).copy_(new_t)
+    del new_t
+
+def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
+    return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
+                              requires_grad=False)
