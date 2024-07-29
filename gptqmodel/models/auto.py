@@ -83,9 +83,9 @@ MODEL_MAP = {
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
-            "ModelGPTQ is not designed to be instantiated\n"
-            "use `ModelGPTQ.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
-            "use `ModelGPTQ.from_quantized` to inference with post-quantized model."
+            "GPTQModel is not designed to be instantiated\n"
+            "use `GPTQModel.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
+            "use `GPTQModel.from_quantized` to inference with post-quantized model."
         )
 
     @classmethod
