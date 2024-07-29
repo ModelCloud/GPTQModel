@@ -1,115 +1,179 @@
-name: Build GPTQModel Wheels with CUDA for Linux
+name: Release
 
-on: workflow_dispatch
+defaults:
+  run:
+    shell: bash -le {0}
+on:
+  push:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'GitHub repo {owner}/{repo}'
+        required: false
+        default: ''
+      ref:
+        description: 'Branch, Tag or Commit SHA'
+        required: false
+        default: ''
+      test_names:
+        description: 'Input Test(s) to Run (default all)'
+        required: false
+        default: ''
+
+env:
+  CUDA_DEVICE_ORDER: PCI_BUS_ID
+  AMD_SERVER: 10.0.13.31
+  INTEL_SERVER: 10.0.23.35
+
+concurrency:
+  group: ${{ github.ref }}-workflow
+  cancel-in-progress: true
 
 jobs:
-  build_wheels:
-    if: ${{ github.repository_owner == 'ModelCloud' }}
-    name: Build wheels for ${{ matrix.os }} and Python ${{ matrix.python }} and CUDA ${{ matrix.cuda }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-22.04]
-        pyver: ["3.8", "3.9", "3.10", "3.11", "3.12"]
-        cuda: ["11.8"]  # wheel for 12.1 are built in build_wheels_pypi.yml
-    defaults:
-      run:
-        shell: bash
-    env:
-        CUDA_VERSION: ${{ matrix.cuda }}
-
+  check-vm:
+    runs-on: self-hosted
+    container:
+      image: modelcloud/gptqmodel:alpine-ci-v1
+    outputs:
+      ip: ${{ steps.get_ip.outputs.ip }}
+      tag: ${{ steps.get_ip.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Free disk space
+      - name: Select server
+        id: get_ip
         run: |
-          # Go from 19G to 54G free disk space in 3min
-          df -h
-          sudo apt-get update
-          sudo apt-get purge -y '^apache.*'
-          sudo apt-get purge -y '^imagemagick.*'
-          sudo apt-get purge -y '^dotnet.*'
-          sudo apt-get purge -y '^aspnetcore.*'
-          sudo apt-get purge -y 'php.*'
-          sudo apt-get purge -y '^temurin.*'
-          sudo apt-get purge -y '^mysql.*'
-          sudo apt-get purge -y '^java.*'
-          sudo apt-get purge -y '^openjdk.*'
-          sudo apt-get purge -y microsoft-edge-stable google-cloud-cli azure-cli google-chrome-stable firefox powershell mono-devel
-          df -h
-          sudo apt-get autoremove -y >/dev/null 2>&1
-          sudo apt-get clean
-          df -h
-          echo "https://github.com/actions/virtual-environments/issues/709"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          df -h
-          echo "remove big /usr/local"
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf /usr/local/lib/android >/dev/null 2>&1
-          df -h
-          echo "remove /usr/share leftovers"
-          sudo rm -rf /usr/share/dotnet/sdk > /dev/null 2>&1
-          sudo rm -rf /usr/share/dotnet/shared > /dev/null 2>&1
-          sudo rm -rf /usr/share/swift > /dev/null 2>&1
-          df -h
-          echo "remove other leftovers"
-          sudo rm -rf /var/lib/mysql > /dev/null 2>&1
-          sudo rm -rf /home/runner/.dotnet > /dev/null 2>&1
-          sudo rm -rf /home/runneradmin/.dotnet > /dev/null 2>&1
-          sudo rm -rf /etc/skel/.dotnet > /dev/null 2>&1
-          sudo rm -rf /usr/local/.ghcup > /dev/null 2>&1
-          sudo rm -rf /usr/local/aws-cli > /dev/null 2>&1
-          sudo rm -rf /usr/local/lib/node_modules > /dev/null 2>&1
-          sudo rm -rf /usr/lib/heroku > /dev/null 2>&1
-          sudo rm -rf /usr/local/share/chromium > /dev/null 2>&1
-          df -h
+          if [[ "${{ runner.name }}" == *"intel"* ]]; then
+            echo "current ci is intel"
+            response=0
+          else
+            echo "test intel vm status"
+            response=$(curl --silent --fail --max-time 5 http://$INTEL_SERVER/gpu/runner/status/intel) || response=error
+            if [ "$response" == "error" ]; then
+              echo "test amd vm status"
+              response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/intel) || response=error
+            fi
+          fi
 
-      - uses: actions/setup-python@v5
+          echo "response: $response"
+
+          if [ "$response" == "0" ]; then
+            tag="intel"
+          elif [ "$response" == "-1" ]; then
+            tag="amd"
+          else
+            echo "Error: Unexpected result - $response"
+            exit 1
+          fi
+
+          echo "Runner tag: $tag"
+
+          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response=error
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "Intel server is online. set ip to $ip"
+            ip=${INTEL_SERVER}
+          else
+            response=$(curl -s --head --max-time 5 http://${AMD_SERVER}/gpu/status) || response=error
+            if echo "$response" | grep "200 OK" > /dev/null; then
+              ip=${AMD_SERVER}
+              echo "AMD server is online. set ip to $ip"
+            else
+              echo "AMD server is offline."
+              exit 1
+            fi
+          fi
+
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          echo "tag: $tag, ip: $ip"
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: [ "11.8", "12.1", "12.4" ]
+        torch: [ "2.1", "2.2", "2.3", "2.4" ]
+        python: [ "3.9", "3.10", "3.11" ]
+        exclude:
+          - cuda: "12.4"
+            torch: "2.1"
+          - cuda: "12.4"
+            torch: "2.2"
+          - cuda: "12.4"
+            torch: "2.3"
+          - torch: "2.4"
+            cuda: "11.8"
+          - torch: "2.4"
+            cuda: "12.1"
+      max-parallel: 6
+    runs-on: [ self-hosted ]
+    needs: check-vm
+    #    if: needs.check-vm.outputs.tag == 'intel'
+    container:
+      image: 10.0.13.31:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
+    steps:
+
+      - name: Print Env
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+
+          env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
+          echo "env: $env_name"
+
+          pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
+
+          echo "========="
+          python --version
+          echo "========="
+          nvcc --version
+          echo "========="
+          pip show torch
+
+      - name: Checkout Codes
+        uses: actions/checkout@v4
         with:
-          python-version: ${{ matrix.pyver }}
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
 
-      - name: Setup Miniconda
-        uses: conda-incubator/setup-miniconda@v3.0.4
+      - name: Install requirements
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+
+          env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
+          echo "env: $env_name"
+
+          pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
+
+          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+
+      - name: Compile
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+
+          env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
+          echo "env: $env_name"
+
+          pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
+
+          python setup.py bdist_wheel
+
+      - name: List build dir
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+
+          env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
+          echo "env: $env_name"
+
+          pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
+
+          cd dist
+          ls -alh .
+          whl=$(ls -t *.whl | head -n 1)
+          twine check $whl
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          activate-environment: "build"
-          python-version: ${{ matrix.pyver }}
-          mamba-version: "*"
-          use-mamba: false
-          channels: conda-forge,defaults
-          channel-priority: true
-          add-pip-as-python-dependency: true
-          auto-activate-base: false
-
-      - name: Install Dependencies
-        run: |
-          conda install cuda-toolkit -c "nvidia/label/cuda-${CUDA_VERSION}.0"
-
-          # Refer to https://pytorch.org/get-started/locally/
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cu118
-          python -m pip install --upgrade build setuptools wheel ninja numpy gekko pandas
-
-      - name: Check install
-        run: |
-          python -c "import torch; print('torch version:', torch.__version__)"
-
-      - name: Build Wheel
-        run: |
-          # For some reason $CONDA_PREFIX is empty.
-          export CUDA_HOME=/usr/share/miniconda
-          export CUDA_PATH=/usr/share/miniconda
-          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${CONDA_PREFIX}/lib"
-
-          export TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 8.9 9.0+PTX"
-
-          echo "CUDA_PATH:"
-          echo $CUDA_PATH
-
-          echo "PYPI_RELEASE:"
-          echo $PYPI_RELEASE
-
-          python setup.py sdist bdist_wheel
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: 'linux-cuda-wheels'
-          path: ./dist/*.whl
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}
