@@ -1177,8 +1177,8 @@ class BaseGPTQModel(nn.Module):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend.AUTO if backend == BACKEND.MARLIN or backend == BACKEND.BITBLAS else backend,
-                format=FORMAT.GPTQ_V2,
+                backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
             )
             if preload_qlinear_kernel == QBitsQuantLinear:
@@ -1247,7 +1247,7 @@ class BaseGPTQModel(nn.Module):
             load_checkpoint_in_model = True
             quantize_config.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN:
+        if backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."
