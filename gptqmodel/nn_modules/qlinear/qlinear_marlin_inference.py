@@ -1,12 +1,9 @@
-from logging import getLogger
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-import torch
 import gptqmodel_marlin_cuda_inference
-import torch.nn.functional as F
-from torch.nn.parameter import Parameter
+import torch
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from torch.nn.parameter import Parameter
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64

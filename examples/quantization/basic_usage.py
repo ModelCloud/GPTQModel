@@ -1,5 +1,4 @@
 from gptqmodel import GPTQModel, QuantizeConfig
-from gptqmodel.quantization import FORMAT
 from transformers import AutoTokenizer
 
 pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
