@@ -1,5 +1,5 @@
-# License: GPTQModel/licenses/LICENSE.apache
-# Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/csrc/quantization/gptq_marlin/marlin.cuh
+// License: GPTQModel/licenses/LICENSE.apache
+// Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/csrc/quantization/gptq_marlin/marlin.cuh
 
 #pragma once
 
