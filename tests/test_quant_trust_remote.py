@@ -12,6 +12,7 @@ from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+
 class TestQuantWithTrustRemoteTrue(unittest.TestCase):
     @classmethod
     def setUpClass(self):
