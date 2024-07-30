@@ -141,6 +141,11 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
 
         self.pack_factor = 32 // bits  # packed into int32
 
+        if desc_act and group_size == -1:
+            # In this case, act_order == True is the same as act_order == False
+            # (since we have only one group per output channel)
+            desc_act = False
+
         # Normalize group_size
         if group_size != -1:
             group_size = group_size
