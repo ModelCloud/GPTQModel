@@ -94,3 +94,38 @@ class TestQuantBatch(unittest.TestCase):
             batch_size_256_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
         assert abs(batch_size_1_ppl - batch_size_256_ppl) < 0.1
+
+    def test_dynamic_bits(self):
+        dynamic_bits = {
+            "17": 8,
+            "19": 8,
+            "20": 8,
+            "21": 8,
+            "22": 8,
+        }
+        quantize_config = QuantizeConfig(
+            bits=4,
+            dynamic_bits=dynamic_bits,
+            group_size=128,
+            format=FORMAT.GPTQ,
+        )
+        model = GPTQModel.from_pretrained(
+            self.NATIVE_MODEL_ID,
+            quantize_config=quantize_config,
+        )
+        model.quantize(self.calibration_dataset, batch_size=256)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save_quantized(
+                tmp_dir,
+            )
+
+            del model
+
+            model = GPTQModel.from_quantized(
+                tmp_dir,
+                device_map="auto",
+            )
+
+            dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            assert dynamic_bits_ppl > 0

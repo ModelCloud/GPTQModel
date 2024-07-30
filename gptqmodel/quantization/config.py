@@ -78,6 +78,8 @@ QUANT_CONFIG_ARG_SYNONYMS = {
 @dataclass
 class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
+    # allow dynamic bitsize per layer, if None or some layer not set, use bits
+    dynamic_bits: Optional[Dict[str, int]] = field(default=None)
     # 128 offer good balance between inference speed and quantization quality
     group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
@@ -116,6 +118,12 @@ class QuantizeConfig():
 
         if self.bits not in fields_info[0].metadata["choices"]:
             raise ValueError(f"only support quantize to {fields_info[0].metadata['choices']} bits.")
+
+        if self.dynamic_bits is not None:
+            for layer, bits in self.dynamic_bits.items():
+                if bits not in fields_info[0].metadata["choices"]:
+                    raise ValueError(
+                        f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
 
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("unless equal to -1, group_size must greater then 0.")
@@ -287,6 +295,7 @@ class QuantizeConfig():
     def to_dict(self):
         return {
             "bits": self.bits,
+            "dynamic_bits": self.dynamic_bits,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
             "static_groups": self.static_groups,
