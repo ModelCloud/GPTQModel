@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from logging import getLogger
-from typing import List, Optional
+from typing import List, Optional, Dict
 from huggingface_hub import HfApi, hf_hub_download
 import shutil
 import accelerate
@@ -115,6 +115,7 @@ def make_quant(
     desc_act: bool = False,
     sym: bool = True,
     pack: bool = False,
+    dynamic_bits: Optional[Dict[str, int]] = None,
 ) -> BaseQuantLinear:
     select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
     QuantLinear = select_quant_linear_func(
@@ -125,12 +126,14 @@ def make_quant(
         backend=backend,
         format=format,
         pack=pack,
+        dynamic_bits=dynamic_bits,
     )
 
     if isinstance(module, QuantLinear):
         return QuantLinear
-
+    print(f"pzs----------==========={names}===={dynamic_bits}")
     for name, submodule in module.named_modules():
+
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
 
@@ -147,8 +150,14 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
+            d_bits = bits
+            if dynamic_bits is not None:
+                split_array = name.split(".")
+                if len(split_array) > 2:
+                    d_bits = dynamic_bits.get(split_array[2], bits)
+                print(f"pzs------{split_array}-----{d_bits}-")
             new_layer = QuantLinear(
-                bits=bits,
+                bits=d_bits,
                 group_size=group_size,
                 desc_act=desc_act,
                 sym=sym,
@@ -232,7 +241,8 @@ def select_quant_linear_with_pack(bits: int,
                                   group_size: int,
                                   desc_act: bool,
                                   sym: bool,
-                                  backend: BACKEND, format: str, pack: bool):
+                                  backend: BACKEND, format: str, pack: bool,
+                                  dynamic_bits: Optional[Dict[str, int]]=None):
     # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
     # and the format is converted to BitBLAS in save_quantized().
     if format == FORMAT.BITBLAS:
@@ -247,6 +257,7 @@ def select_quant_linear_with_pack(bits: int,
         backend=backend,
         format=format,
         pack=pack,
+        dynamic_bits=dynamic_bits,
     )
     return QuantLinear
 
@@ -260,9 +271,11 @@ def pack_model(
     desc_act=False,
     sym: bool = True,
     force_layer_back_to_cpu: bool = False,
+    dynamic_bits=None,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
+        dynamic_bits=dynamic_bits,
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
@@ -286,6 +299,7 @@ def pack_model(
         format=format,
         desc_act=desc_act,
         pack=True,
+        dynamic_bits=dynamic_bits,
     )
     qlayers = find_layers(model, [QuantLinear])
 

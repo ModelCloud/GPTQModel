@@ -317,6 +317,7 @@ class BaseGPTQModel(nn.Module):
                 model=self.model,
                 quantizers=quantizers,
                 bits=self.quantize_config.bits,
+                dynamic_bits=self.quantize_config.dynamic_bits,
                 group_size=self.quantize_config.group_size,
                 backend=BACKEND.TRITON,
                 desc_act=self.quantize_config.desc_act,
@@ -553,6 +554,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
+            dynamic_bits=self.quantize_config.dynamic_bits,
         )
 
         if device_map:
