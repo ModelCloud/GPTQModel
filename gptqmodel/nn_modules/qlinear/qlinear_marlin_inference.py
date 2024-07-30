@@ -1,3 +1,6 @@
+# License: GPTQModel/licenses/LICENSE.apache
+# Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
+
 from typing import Any, Dict, List, Optional, Tuple
 
 import gptqmodel_marlin_cuda_inference

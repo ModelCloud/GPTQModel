@@ -1,3 +1,5 @@
+# License: GPTQModel/licenses/LICENSE.apache
+# Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/csrc/quantization/gptq_marlin/marlin_dtypes.cuh
 
 #ifndef _data_types_cuh
 #define _data_types_cuh

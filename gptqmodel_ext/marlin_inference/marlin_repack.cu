@@ -1,3 +1,6 @@
+# License: GPTQModel/licenses/LICENSE.apache
+# Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/csrc/quantization/gptq_marlin/gptq_marlin_repack.cu
+
 #include "marlin.cuh"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
