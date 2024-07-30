@@ -246,6 +246,11 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
         self.outfeatures = outfeatures
         self.is_k_full = marlin_is_k_full(desc_act, is_row_parallel=False)
 
+        if bias:
+            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
+        else:
+            self.bias = None
+
     def post_init(self):
         device = self.qweight.device
         self.validate_device(device.type)
@@ -283,8 +288,10 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
             group_size=self.group_size)
         replace_tensor(self, "scales", marlin_scales)
 
-    def forward(self, A: torch.Tensor, bias: Optional[torch.Tensor] = None,):
-        print("fff new marlin")
+    def forward(self, A: torch.Tensor):
+        if A.dtype != torch.float16:
+            A = A.half()
+
         return apply_gptq_marlin_linear(
             input=A,
             weight=self.qweight,
@@ -297,4 +304,4 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.outfeatures,
             input_size_per_partition=self.infeatures,
             is_k_full=self.is_k_full,
-            bias=bias)
+            bias=self.bias)
