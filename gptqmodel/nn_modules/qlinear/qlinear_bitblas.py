@@ -324,6 +324,9 @@ class BitBLASQuantLinear(BaseQuantLinear):
                 f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
             )
 
+        if self.bias is not None:
+            self.bias = self.bias.data.to(torch.float16).contiguous()
+
     def repack_from_gptq(self, gptq_module):
         from bitblas.quantization.utils import general_compress
 
