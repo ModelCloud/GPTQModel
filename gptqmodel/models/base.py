@@ -568,16 +568,6 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
-        if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
-            from ..utils.bitblas import convert_to_bitblas
-
-            # BitBLASQuantLinear does not have a pack method and needs to be converted to BitBLAS format when saving.
-            logger.info("Converting model to BitBlas Format...")
-            self.model = convert_to_bitblas(self.model, self.qlinear_kernel, self.quantize_config, self.quantize_config.sym,
-                                       self.quantize_config.desc_act, repack=True)
-            self.qlinear_kernel = BitBLASQuantLinear
-
         return quant_log
 
     @property
@@ -639,8 +629,7 @@ class BaseGPTQModel(nn.Module):
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        # The model saved during bitblas format quantization uses BitblasQuantLinear, which can be used directly.
-        if not self.load_quantized_model or quantize_config.format == FORMAT.BITBLAS:
+        if not self.load_quantized_model:
             model = self.model
             # # internal is always gptq v2 but allow users to pass gptq (v1) via config
             if quantize_config.format == FORMAT.GPTQ:
@@ -1287,10 +1276,6 @@ class BaseGPTQModel(nn.Module):
 
         if backend == BACKEND.BITBLAS:
             from ..utils.bitblas import prepare_model_for_bitblas_load
-
-            if is_sharded:
-                raise ValueError(
-                    "The loading of sharded checkpoints with BitBLAS is currently not supported. Please raise an issue in GPTQModel repository.")
 
             # Prepare model for bitblas load.
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.

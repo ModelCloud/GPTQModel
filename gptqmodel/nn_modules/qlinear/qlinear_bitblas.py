@@ -7,6 +7,7 @@ from functools import reduce
 from logging import getLogger
 from typing import List, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -74,7 +75,7 @@ def unpack_qzeros(qzeros, bits):
 class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [1, 2, 4]
     SUPPORTED_DESC_ACT = [False]
-    SUPPORTED_SHARDS = False
+    SUPPORTED_SHARDS = True
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -162,6 +163,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
                     (outfeatures, infeatures // self.group_size), dtype=self.TORCH_DTYPE
                 ),
             )
+
         if bias:
             self.register_buffer(
                 "bias", torch.zeros((outfeatures), dtype=self.TORCH_DTYPE)
@@ -246,6 +248,84 @@ class BitBLASQuantLinear(BaseQuantLinear):
         if self.bitblas_matmul.config.with_bias:
             param_list.append(self.bias)
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
+
+    def pack(self, linear, scales, zeros, g_idx=None):
+        from bitblas.quantization.utils import general_compress
+
+        W = linear.weight.data.clone()
+
+        scales = scales.t().contiguous()
+        zeros = zeros.t().contiguous()
+        scale_zeros = zeros * scales
+        self.scales = scales.clone().half()
+        if linear.bias is not None:
+            self.bias = linear.bias.clone().half()
+
+        intweight = []
+        for idx in range(self.infeatures):
+            g_idx = idx // self.group_size
+            intweight.append(
+                torch.round((W[:, idx] + scale_zeros[g_idx]) / self.scales[g_idx]).to(torch.int)[
+                    :, None
+                ]
+            )
+        intweight = torch.cat(intweight, dim=1)
+        intweight = intweight.t().contiguous()
+        intweight = intweight.numpy().astype(np.uint32)
+
+        i = 0
+        row = 0
+        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
+        while row < qweight.shape[0]:
+            for j in range(i, i + (32 // self.bits)):
+                qweight[row] |= intweight[j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            row += 1
+
+        qweight = qweight.astype(np.int32)
+        qweight = torch.from_numpy(qweight)
+        qweight = qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
+        if self.bitblas_matmul.weight_transform is not None:
+            qweight = self.bitblas_matmul.weight_transform(qweight.cpu()).cuda()
+        self.qweight = qweight
+
+        scales = self.scales.T.contiguous().view(self.TORCH_DTYPE)
+        self.scales = scales
+
+        zeros = zeros.numpy().astype(np.uint32)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
+        i = 0
+        col = 0
+        while col < qzeros.shape[1]:
+            for j in range(i, i + (32 // self.bits)):
+                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            col += 1
+
+        qzeros = qzeros.astype(np.int32)
+        self.qzeros = torch.from_numpy(qzeros)
+
+        intzeros = unpack_qzeros(self.qzeros, self.bits).T.contiguous()
+        if self.bitblas_matmul.config.zeros_mode == "original":
+            self.zeros = intzeros.to(torch.float16).contiguous()
+        elif self.bitblas_matmul.config.zeros_mode == "rescale":
+            self.zeros[:, :] = intzeros.to(torch.float16)[:, :] * self.scales[:, :]
+        elif self.bitblas_matmul.config.zeros_mode == "quantized":
+            self.zeros = (
+                torch.Tensor(
+                    general_compress(intzeros.T.contiguous().cpu().numpy(), self.bits)
+                )
+                .to(self.qweight.device)
+                .to(self.zeros.dtype)
+                .contiguous()
+            )
+        else:
+            raise ValueError(
+                f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
+            )
+
+        if self.bias is not None:
+            self.bias = self.bias.data.to(torch.float16).contiguous()
 
     def repack_from_gptq(self, gptq_module):
         from bitblas.quantization.utils import general_compress

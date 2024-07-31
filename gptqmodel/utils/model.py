@@ -244,11 +244,6 @@ def select_quant_linear_with_pack(bits: int,
                                   sym: bool,
                                   backend: BACKEND, format: str, pack: bool,
                                   dynamic_bits: Optional[Dict[str, int]]=None):
-    # If Format is BitBLAS, BitBLASQuantLinear is not used during packing,
-    # and the format is converted to BitBLAS in save_quantized().
-    if format == FORMAT.BITBLAS:
-        backend = BACKEND.AUTO
-        format = FORMAT.GPTQ_V2
 
     QuantLinear = select_quant_linear(
         bits=bits,
