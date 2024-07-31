@@ -132,7 +132,6 @@ def make_quant(
 
     if isinstance(module, QuantLinear):
         return QuantLinear
-    print(f"pzs----------==========={names}===={dynamic_bits}")
     for name, submodule in module.named_modules():
 
         if name in names:
@@ -157,7 +156,6 @@ def make_quant(
                     if re.match(pattern, name):
                         d_bits = dm_bits
                         break
-                print(f"pzs------{name}-----{d_bits}-")
             new_layer = QuantLinear(
                 bits=d_bits,
                 group_size=group_size,
