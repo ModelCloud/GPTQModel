@@ -6,7 +6,7 @@ import os
 from functools import reduce
 from logging import getLogger
 from typing import List, Union
-
+import numpy as np
 import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -162,6 +162,12 @@ class BitBLASQuantLinear(BaseQuantLinear):
                     (outfeatures, infeatures // self.group_size), dtype=self.TORCH_DTYPE
                 ),
             )
+
+        self.register_buffer(
+            "g_idx",
+            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
+        )
+
         if bias:
             self.register_buffer(
                 "bias", torch.zeros((outfeatures), dtype=self.TORCH_DTYPE)
@@ -246,6 +252,82 @@ class BitBLASQuantLinear(BaseQuantLinear):
         if self.bitblas_matmul.config.with_bias:
             param_list.append(self.bias)
         self.q_params = [ctypes.c_void_p(arr.data_ptr()) for arr in param_list]
+
+    def pack(self, linear, scales, zeros, g_idx=None):
+        from bitblas.quantization.utils import general_compress
+
+        W = linear.weight.data.clone()
+
+        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+
+        scales = scales.t().contiguous()
+        zeros = zeros.t().contiguous()
+        scale_zeros = zeros * scales
+        self.scales = scales.clone().half()
+        if linear.bias is not None:
+            self.bias = linear.bias.clone().half()
+
+        intweight = []
+        for idx in range(self.infeatures):
+            intweight.append(
+                torch.round((W[:, idx] + scale_zeros[self.g_idx[idx]]) / self.scales[self.g_idx[idx]]).to(torch.int)[
+                    :, None
+                ]
+            )
+        intweight = torch.cat(intweight, dim=1)
+        intweight = intweight.t().contiguous()
+        intweight = intweight.numpy().astype(np.uint32)
+
+        i = 0
+        row = 0
+        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
+        while row < qweight.shape[0]:
+            for j in range(i, i + (32 // self.bits)):
+                qweight[row] |= intweight[j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            row += 1
+
+        qweight = qweight.astype(np.int32)
+        qweight = torch.from_numpy(qweight)
+        qweight = qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
+        if self.bitblas_matmul.weight_transform is not None:
+            qweight = self.bitblas_matmul.weight_transform(qweight.cpu()).cuda()
+        self.qweight = qweight
+
+        scales = self.scales.T.contiguous().view(self.TORCH_DTYPE)
+        self.scales = scales
+
+        zeros = zeros.numpy().astype(np.uint32)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
+        i = 0
+        col = 0
+        while col < qzeros.shape[1]:
+            for j in range(i, i + (32 // self.bits)):
+                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            col += 1
+
+        qzeros = qzeros.astype(np.int32)
+        self.qzeros = torch.from_numpy(qzeros)
+
+        intzeros = unpack_qzeros(self.qzeros, self.bits).T.contiguous()
+        if self.bitblas_matmul.config.zeros_mode == "original":
+            self.zeros = intzeros.to(torch.float16).contiguous()
+        elif self.bitblas_matmul.config.zeros_mode == "rescale":
+            self.zeros[:, :] = intzeros.to(torch.float16)[:, :] * self.scales[:, :]
+        elif self.bitblas_matmul.config.zeros_mode == "quantized":
+            self.zeros = (
+                torch.Tensor(
+                    general_compress(intzeros.T.contiguous().cpu().numpy(), self.bits)
+                )
+                .to(self.qweight.device)
+                .to(self.zeros.dtype)
+                .contiguous()
+            )
+        else:
+            raise ValueError(
+                f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
+            )
 
     def repack_from_gptq(self, gptq_module):
         from bitblas.quantization.utils import general_compress
