@@ -8,7 +8,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import GPTQModel, BACKEND  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -128,4 +128,4 @@ class TestQuantBatch(unittest.TestCase):
             )
 
             dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
-            assert dynamic_bits_ppl > 0
+            assert dynamic_bits_ppl < 10

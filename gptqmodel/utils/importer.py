@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from logging import getLogger
 from typing import Dict, Optional
+
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
