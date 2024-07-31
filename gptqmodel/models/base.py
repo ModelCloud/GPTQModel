@@ -1188,6 +1188,7 @@ class BaseGPTQModel(nn.Module):
                 backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
+                dynamic_bits=quantize_config.dynamic_bits,
             )
             if preload_qlinear_kernel == QBitsQuantLinear:
                 quantize_config.runtime_format = FORMAT.QBITS
