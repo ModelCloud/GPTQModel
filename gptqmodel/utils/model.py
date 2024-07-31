@@ -153,6 +153,8 @@ def make_quant(
             bias = submodule.bias is not None
             d_bits = bits
             if dynamic_bits is not None:
+                # TODO fix me: layers_node: str should be passed to make_quant()
+                # temp fix is to strip all prefix before a numeric digit which is the layer id
                 remove_prefix = r'^.*?(?=\d)'
                 match_name = re.sub(remove_prefix, '', name)
                 for pattern, dm_bits in dynamic_bits.items():
