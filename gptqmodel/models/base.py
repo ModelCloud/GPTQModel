@@ -316,6 +316,7 @@ class BaseGPTQModel(nn.Module):
                 model=self.model,
                 quantizers=quantizers,
                 bits=self.quantize_config.bits,
+                dynamic_bits=self.quantize_config.dynamic_bits,
                 group_size=self.quantize_config.group_size,
                 backend=BACKEND.TRITON,
                 desc_act=self.quantize_config.desc_act,
@@ -428,15 +429,21 @@ class BaseGPTQModel(nn.Module):
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
-
             full = find_layers(layer)
             for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
                 gptq = {}
                 for name in subset:
+                    bits = self.quantize_config.bits
+                    if self.quantize_config.dynamic_bits is not None:
+                        key = f"{i}.{name}"
+                        for pattern, d_bits in self.quantize_config.dynamic_bits.items():
+                            if re.match(pattern, key):
+                                bits = d_bits
+                                break
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
-                        self.quantize_config.bits,
+                        bits,
                         perchannel=True,
                         sym=self.quantize_config.sym,
                         mse=False,
@@ -549,6 +556,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
+            dynamic_bits=self.quantize_config.dynamic_bits,
         )
 
         if device_map:
@@ -1168,6 +1176,7 @@ class BaseGPTQModel(nn.Module):
                 backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
+                dynamic_bits=quantize_config.dynamic_bits,
             )
             if preload_qlinear_kernel == QBitsQuantLinear:
                 quantize_config.runtime_format = FORMAT.QBITS

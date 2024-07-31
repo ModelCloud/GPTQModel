@@ -8,7 +8,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -94,3 +94,39 @@ class TestQuantBatch(unittest.TestCase):
             batch_size_256_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
         assert abs(batch_size_1_ppl - batch_size_256_ppl) < 0.1
+
+    def test_dynamic_bits(self):
+        # layer starting point of 0
+        dynamic_bits = {
+            r"^18\..*gate.*": 8,
+            r"^19\..*gate.*": 8,
+            r"^20\..*gate.*": 8,
+            r"^21\..*gate.*": 8,
+        }
+        quantize_config = QuantizeConfig(
+            bits=4,
+            dynamic_bits=dynamic_bits,
+            group_size=128,
+            format=FORMAT.GPTQ,
+        )
+        model = GPTQModel.from_pretrained(
+            self.NATIVE_MODEL_ID,
+            quantize_config=quantize_config,
+        )
+        model.quantize(self.calibration_dataset, batch_size=256)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save_quantized(
+                tmp_dir,
+            )
+
+            del model
+
+            model = GPTQModel.from_quantized(
+                tmp_dir,
+                device_map="auto",
+                backend=BACKEND.TRITON,
+            )
+
+            dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            assert dynamic_bits_ppl < 10

@@ -3,9 +3,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from logging import getLogger
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import accelerate
 import threadpoolctl as tctl
@@ -116,6 +117,7 @@ def make_quant(
     desc_act: bool = False,
     sym: bool = True,
     pack: bool = False,
+    dynamic_bits: Optional[Dict[str, int]] = None,
 ) -> BaseQuantLinear:
     select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
     QuantLinear = select_quant_linear_func(
@@ -126,12 +128,13 @@ def make_quant(
         backend=backend,
         format=format,
         pack=pack,
+        dynamic_bits=dynamic_bits,
     )
 
     if isinstance(module, QuantLinear):
         return QuantLinear
-
     for name, submodule in module.named_modules():
+
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
 
@@ -148,8 +151,18 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
+            d_bits = bits
+            if dynamic_bits is not None:
+                # TODO fix me: layers_node: str should be passed to make_quant()
+                # temp fix is to strip all prefix before a numeric digit which is the layer id
+                remove_prefix = r'^.*?(?=\d)'
+                match_name = re.sub(remove_prefix, '', name)
+                for pattern, dm_bits in dynamic_bits.items():
+                    if re.match(pattern, match_name):
+                        d_bits = dm_bits
+                        break
             new_layer = QuantLinear(
-                bits=bits,
+                bits=d_bits,
                 group_size=group_size,
                 desc_act=desc_act,
                 sym=sym,
@@ -233,7 +246,8 @@ def select_quant_linear_with_pack(bits: int,
                                   group_size: int,
                                   desc_act: bool,
                                   sym: bool,
-                                  backend: BACKEND, format: str, pack: bool):
+                                  backend: BACKEND, format: str, pack: bool,
+                                  dynamic_bits: Optional[Dict[str, int]]=None):
 
     QuantLinear = select_quant_linear(
         bits=bits,
@@ -243,6 +257,7 @@ def select_quant_linear_with_pack(bits: int,
         backend=backend,
         format=format,
         pack=pack,
+        dynamic_bits=dynamic_bits,
     )
     return QuantLinear
 
@@ -256,9 +271,11 @@ def pack_model(
     desc_act=False,
     sym: bool = True,
     force_layer_back_to_cpu: bool = False,
+    dynamic_bits=None,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
+        dynamic_bits=dynamic_bits,
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
@@ -282,6 +299,7 @@ def pack_model(
         format=format,
         desc_act=desc_act,
         pack=True,
+        dynamic_bits=dynamic_bits,
     )
     qlayers = find_layers(model, [QuantLinear])
 
