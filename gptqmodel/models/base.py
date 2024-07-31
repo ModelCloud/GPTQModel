@@ -430,15 +430,18 @@ class BaseGPTQModel(nn.Module):
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
-            if self.quantize_config.dynamic_bits is not None:
-                bits = self.quantize_config.dynamic_bits.get(f"{i + 1}", self.quantize_config.bits)
-            else:
-                bits = self.quantize_config.bits
             full = find_layers(layer)
             for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
                 gptq = {}
                 for name in subset:
+                    bits = self.quantize_config.bits
+                    if self.quantize_config.dynamic_bits is not None:
+                        key = f"{i + 1}.{name}"
+                        for pattern, d_bits in self.quantize_config.dynamic_bits.items():
+                            if re.match(pattern, key):
+                                bits = d_bits
+                        print(f"-------pzs-----{key}----{bits}")
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
                         bits,

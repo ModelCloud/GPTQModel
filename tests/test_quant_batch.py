@@ -97,11 +97,11 @@ class TestQuantBatch(unittest.TestCase):
 
     def test_dynamic_bits(self):
         dynamic_bits = {
-            "17": 8,
-            "19": 8,
-            "20": 8,
-            "21": 8,
-            "22": 8,
+            r".*1\..*gate.*": 8,
+            r".*19\..*gate.*": 8,
+            r".*20\..*gate.*": 8,
+            r".*21\..*gate.*": 8,
+            r".*22\..*gate.*": 8,
         }
         quantize_config = QuantizeConfig(
             bits=4,

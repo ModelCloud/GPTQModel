@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from logging import getLogger
 from typing import List, Optional, Dict
 from huggingface_hub import HfApi, hf_hub_download
@@ -152,10 +153,10 @@ def make_quant(
             bias = submodule.bias is not None
             d_bits = bits
             if dynamic_bits is not None:
-                split_array = name.split(".")
-                if len(split_array) > 2:
-                    d_bits = dynamic_bits.get(split_array[2], bits)
-                print(f"pzs------{split_array}-----{d_bits}-")
+                for pattern, dm_bits in dynamic_bits.items():
+                    if re.match(pattern, name):
+                        d_bits = dm_bits
+                print(f"pzs------{name}-----{d_bits}-")
             new_layer = QuantLinear(
                 bits=d_bits,
                 group_size=group_size,
