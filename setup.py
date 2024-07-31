@@ -87,7 +87,7 @@ extras_require = {
     "test": ["pytest>=8.2.2", "parameterized"],
     "quality": ["ruff==0.4.9", "isort==5.13.2"],
     'vllm': ["vllm>=0.5.3.post1", "flashinfer==0.1.1"],
-    'sglang': ["sglang>=0.1.21", "flashinfer==0.1.1"],
+    'sglang': ["sglang>=0.2.7", "flashinfer==0.1.2"],
     'bitblas': ["bitblas>=0.0.1.dev13"],
     'hf': ["optimum>=1.21.2"]
 }
@@ -135,6 +135,18 @@ if BUILD_CUDA_EXT:
                     "gptqmodel_ext/marlin/marlin_cuda.cpp",
                     "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
                     "gptqmodel_ext/marlin/marlin_repack.cu",
+                ],
+                extra_compile_args=extra_compile_args,
+            )
+        )
+
+        extensions.append(
+            cpp_ext.CUDAExtension(
+                "gptqmodel_marlin_cuda_inference",
+                [
+                    "gptqmodel_ext/marlin_inference/marlin_cuda.cpp",
+                    "gptqmodel_ext/marlin_inference/marlin_cuda_kernel.cu",
+                    "gptqmodel_ext/marlin_inference/marlin_repack.cu",
                 ],
                 extra_compile_args=extra_compile_args,
             )

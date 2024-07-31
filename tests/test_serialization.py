@@ -26,13 +26,6 @@ class TestSerialization(unittest.TestCase):
 
             model = GPTQModel.from_quantized(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
 
-    def test_marlin_hf_cache_serialization(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
-        self.assertEqual(model.quantize_config.runtime_format, FORMAT.MARLIN)
-
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
-        self.assertEqual(model.quantize_config.runtime_format, FORMAT.MARLIN)
-
     def test_gptq_v1_to_v2_runtime_convert(self):
         model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
         self.assertEqual(model.quantize_config.runtime_format, FORMAT.GPTQ_V2)

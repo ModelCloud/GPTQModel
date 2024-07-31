@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import re
-import shutil
 from os.path import basename, isfile, join
 from typing import Dict, List, Optional, Union
 
@@ -18,7 +17,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype, QBitsQuantLinear
+from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
@@ -29,10 +28,10 @@ from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
-                           convert_gptq_v2_to_v1_format, find_layers, get_checkpoints, get_device,
+                           convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
                            get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, copy_py_files)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -1185,8 +1184,8 @@ class BaseGPTQModel(nn.Module):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend.AUTO if backend == BACKEND.MARLIN or backend == BACKEND.BITBLAS else backend,
-                format=FORMAT.GPTQ_V2,
+                backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
             )
             if preload_qlinear_kernel == QBitsQuantLinear:
@@ -1255,7 +1254,7 @@ class BaseGPTQModel(nn.Module):
             load_checkpoint_in_model = True
             quantize_config.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN:
+        if backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."

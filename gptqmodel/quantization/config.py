@@ -1,11 +1,11 @@
 import json
 import logging
 from dataclasses import dataclass, field, fields
+from importlib.metadata import version as pkg_version
 from os.path import isdir, join
 from typing import Any, Dict, Optional, Tuple
 
 from packaging import version
-from importlib.metadata import version as pkg_version
 from transformers.utils.hub import cached_file
 
 logger = logging.getLogger(__name__)
