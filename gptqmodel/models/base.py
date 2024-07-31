@@ -436,7 +436,7 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     bits = self.quantize_config.bits
                     if self.quantize_config.dynamic_bits is not None:
-                        key = f"{self.layers_node}.{i}.{name}"
+                        key = f"{i+1}.{name}"
                         for pattern, d_bits in self.quantize_config.dynamic_bits.items():
                             if re.match(pattern, key):
                                 bits = d_bits
