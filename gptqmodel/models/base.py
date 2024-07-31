@@ -440,6 +440,7 @@ class BaseGPTQModel(nn.Module):
                         for pattern, d_bits in self.quantize_config.dynamic_bits.items():
                             if re.match(pattern, key):
                                 bits = d_bits
+                                break
                         print(f"-------pzs-----{key}----{bits}")
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(

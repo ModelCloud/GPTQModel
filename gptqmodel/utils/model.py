@@ -6,8 +6,7 @@ import os
 import re
 import shutil
 from logging import getLogger
-from typing import List, Optional
-
+from typing import List, Optional, Dict
 import accelerate
 import threadpoolctl as tctl
 import torch
@@ -157,6 +156,7 @@ def make_quant(
                 for pattern, dm_bits in dynamic_bits.items():
                     if re.match(pattern, name):
                         d_bits = dm_bits
+                        break
                 print(f"pzs------{name}-----{d_bits}-")
             new_layer = QuantLinear(
                 bits=d_bits,
