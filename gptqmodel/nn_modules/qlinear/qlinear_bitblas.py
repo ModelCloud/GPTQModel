@@ -164,11 +164,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
                 ),
             )
 
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
-        )
-
         if bias:
             self.register_buffer(
                 "bias", torch.zeros((outfeatures), dtype=self.TORCH_DTYPE)
@@ -259,8 +254,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
 
         W = linear.weight.data.clone()
 
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales
@@ -270,8 +263,9 @@ class BitBLASQuantLinear(BaseQuantLinear):
 
         intweight = []
         for idx in range(self.infeatures):
+            g_idx = idx // self.group_size
             intweight.append(
-                torch.round((W[:, idx] + scale_zeros[self.g_idx[idx]]) / self.scales[self.g_idx[idx]]).to(torch.int)[
+                torch.round((W[:, idx] + scale_zeros[g_idx]) / self.scales[g_idx]).to(torch.int)[
                     :, None
                 ]
             )
