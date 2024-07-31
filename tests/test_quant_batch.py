@@ -96,11 +96,12 @@ class TestQuantBatch(unittest.TestCase):
         assert abs(batch_size_1_ppl - batch_size_256_ppl) < 0.1
 
     def test_dynamic_bits(self):
+        # layer starting point of 0
         dynamic_bits = {
-            r".*18\..*gate.*": 8,
-            r".*19\..*gate.*": 8,
-            r".*20\..*gate.*": 8,
-            r".*21\..*gate.*": 8,
+            r"^18\..*gate.*": 8,
+            r"^19\..*gate.*": 8,
+            r"^20\..*gate.*": 8,
+            r"^21\..*gate.*": 8,
         }
         quantize_config = QuantizeConfig(
             bits=4,
