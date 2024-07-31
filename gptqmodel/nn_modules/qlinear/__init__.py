@@ -46,7 +46,7 @@ class BaseQuantLinear(nn.Module):
             for layer, bits in dynamic_bits.items():
                 if bits not in cls.SUPPORTED_BITS:
                     validate = False
-                    err = f"{cls} only supports `{cls.SUPPORTED_BITS}` bits: actual dynamic_bits contain bits = `{bits}`"
+                    err = f"{cls} only supports `{cls.SUPPORTED_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
         return validate, err
 
     @classmethod
