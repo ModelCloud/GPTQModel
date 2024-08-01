@@ -19,7 +19,7 @@ from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_FIELD_DAMP_PERCENT, META_QUANTIZER_GPTQMODEL,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
@@ -486,7 +486,7 @@ class BaseGPTQModel(nn.Module):
 
                     try:
                         scale, zero, g_idx, duration, avg_loss, bits = gptq[name].fasterquant(
-                            percdamp=self.quantize_config.damp_percent,
+                            percdamp=self.quantize_config.meta_get(META_FIELD_DAMP_PERCENT),
                             group_size=self.quantize_config.group_size,
                             actorder=self.quantize_config.desc_act,
                             static_groups=self.quantize_config.static_groups,
