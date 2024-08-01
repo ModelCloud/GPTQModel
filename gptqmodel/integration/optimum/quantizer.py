@@ -588,7 +588,7 @@ class GPTQModelQuantizer(object):
                     h.remove()
                 for name in subset_name_list:
                     logger.info(f"Quantizing {name} in block {i + 1}/{len(blocks)}...")
-                    scale, zero, g_idx, duration, avg_loss = gptq[name].fasterquant(
+                    scale, zero, g_idx, duration, avg_loss, _ = gptq[name].fasterquant(
                         percdamp=self.damp_percent, group_size=self.group_size, actorder=self.desc_act
                     )
                     stat = {"layer": i + 1, "module": name, "avg_loss": f"{avg_loss:.4f}",

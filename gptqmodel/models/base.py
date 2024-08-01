@@ -419,10 +419,10 @@ class BaseGPTQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         quant_log = []
 
-        layer_count = len(layers)
+        layer_count = len(layers) - 1
         layer_pb = tqdm(range(layer_count))
         for i in layer_pb:
-            layer_pb.set_description(f"Quantizing layer {i + 1} of {layer_count}")
+            layer_pb.set_description(f"Quantizing layer {i} of {layer_count}")
             layer = layers[i]
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU:
@@ -481,18 +481,21 @@ class BaseGPTQModel(nn.Module):
                     h.remove()
 
                 for name in subset:
-                    layer_pb.set_description(f"Quantizing {name} in layer {i + 1} of {layer_count}")
+                    layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count}")
 
                     try:
-                        scale, zero, g_idx, duration, avg_loss = gptq[name].fasterquant(
+                        scale, zero, g_idx, duration, avg_loss, bits = gptq[name].fasterquant(
                             percdamp=self.quantize_config.damp_percent,
                             group_size=self.quantize_config.group_size,
                             actorder=self.quantize_config.desc_act,
                             static_groups=self.quantize_config.static_groups,
                         )
-
-                        stat = {"layer": i + 1, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                                "time": f"{duration:.3f}"}
+                        if self.quantize_config.dynamic_bits is not None:
+                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "bits": bits,
+                                    "time": f"{duration:.3f}"}
+                        else:
+                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
+                                    "time": f"{duration:.3f}"}
 
                         quant_log.append(stat)
                         logger.info(stat)
