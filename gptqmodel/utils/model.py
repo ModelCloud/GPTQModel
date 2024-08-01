@@ -118,6 +118,7 @@ def make_quant(
     sym: bool = True,
     pack: bool = False,
     dynamic_bits: Optional[Dict[str, int]] = None,
+    prefix: str = None,
 ) -> BaseQuantLinear:
     select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
     QuantLinear = select_quant_linear_func(
@@ -153,10 +154,7 @@ def make_quant(
             bias = submodule.bias is not None
             d_bits = bits
             if dynamic_bits is not None:
-                # TODO fix me: layers_node: str should be passed to make_quant()
-                # temp fix is to strip all prefix before a numeric digit which is the layer id
-                remove_prefix = r'^.*?(?=\d)'
-                match_name = re.sub(remove_prefix, '', name)
+                match_name = name.removeprefix(f"{prefix}.")
                 for pattern, dm_bits in dynamic_bits.items():
                     if re.match(pattern, match_name):
                         d_bits = dm_bits
@@ -272,6 +270,7 @@ def pack_model(
     sym: bool = True,
     force_layer_back_to_cpu: bool = False,
     dynamic_bits=None,
+    prefix: str = None,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
@@ -300,6 +299,7 @@ def pack_model(
         desc_act=desc_act,
         pack=True,
         dynamic_bits=dynamic_bits,
+        prefix=prefix,
     )
     qlayers = find_layers(model, [QuantLinear])
 
