@@ -705,6 +705,9 @@ class BaseGPTQModel(nn.Module):
                 logger.warning(
                     "We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
                 torch.save(model.state_dict(), join(save_dir, model_save_name))
+            total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
+            total_size_gb = total_size_mb / 1024
+            logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
         else:
             # Shard checkpoint
             shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
@@ -725,6 +728,7 @@ class BaseGPTQModel(nn.Module):
                 ):
                     os.remove(full_filename)
 
+            total_size_mb = 0
             # Save the model
             for shard_file, shard in shards.items():
                 if use_safetensors:
@@ -761,6 +765,10 @@ class BaseGPTQModel(nn.Module):
                     safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
                 else:
                     torch.save(shard, join(save_dir, shard_file))
+                shard_size_mb = os.path.getsize(join(save_dir, shard_file)) / (1024 * 1024)
+                total_size_mb += shard_size_mb
+            total_size_gb = total_size_mb / 1024
+            logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
 
             if index is not None:
                 index_save_name = model_save_name + ".index.json"
