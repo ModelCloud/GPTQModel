@@ -13,7 +13,7 @@ from ..quantization import FORMAT
 from .backend import BACKEND
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: [MarlinQuantLinear, MarlinInferenceQuantLinear],
+    BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.EXLLAMA: [ExllamaQuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
