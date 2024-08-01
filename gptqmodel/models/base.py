@@ -322,6 +322,7 @@ class BaseGPTQModel(nn.Module):
                 desc_act=self.quantize_config.desc_act,
                 force_layer_back_to_cpu=True,
                 format=self.quantize_config.format,
+                prefix=self.layers_node,
             )
 
             self.model = model
@@ -419,10 +420,10 @@ class BaseGPTQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         quant_log = []
 
-        layer_count = len(layers) - 1
+        layer_count = len(layers)
         layer_pb = tqdm(range(layer_count))
         for i in layer_pb:
-            layer_pb.set_description(f"Quantizing layer {i} of {layer_count}")
+            layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU:
@@ -481,7 +482,7 @@ class BaseGPTQModel(nn.Module):
                     h.remove()
 
                 for name in subset:
-                    layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count}")
+                    layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
                     try:
                         scale, zero, g_idx, duration, avg_loss, bits = gptq[name].fasterquant(
@@ -560,6 +561,7 @@ class BaseGPTQModel(nn.Module):
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
             dynamic_bits=self.quantize_config.dynamic_bits,
+            prefix=self.layers_node,
         )
 
         if device_map:
@@ -827,6 +829,7 @@ class BaseGPTQModel(nn.Module):
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 pack=True,
+                prefix=self.layers_node,
             )
             model.tie_weights()
 
@@ -1180,6 +1183,7 @@ class BaseGPTQModel(nn.Module):
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 dynamic_bits=quantize_config.dynamic_bits,
+                prefix=cls.layers_node,
             )
             if preload_qlinear_kernel == QBitsQuantLinear:
                 quantize_config.runtime_format = FORMAT.QBITS
