@@ -17,6 +17,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 class TestDynamic(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    tmp_dir = None
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
@@ -71,7 +72,7 @@ class TestDynamic(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmp_dir.cleanup()
-        assert os.path.exists(cls.tmp_dir.name)
+        assert not os.path.exists(cls.tmp_dir.name)
 
     @parameterized.expand(
         [
