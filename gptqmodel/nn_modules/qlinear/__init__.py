@@ -22,12 +22,12 @@ class BaseQuantLinear(nn.Module):
             check_cuda()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic_bits=None) -> bool:
-        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic_bits=dynamic_bits)
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> bool:
+        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic)
         return validate, err
 
     @classmethod
-    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic_bits=None):
+    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None):
         validate = True
         err = ""
         if cls.SUPPORTED_BITS and bits not in cls.SUPPORTED_BITS:
@@ -42,16 +42,45 @@ class BaseQuantLinear(nn.Module):
         elif cls.SUPPORTED_DESC_ACT and desc_act not in cls.SUPPORTED_DESC_ACT:
             validate = False
             err = f"{cls} only supports `{cls.SUPPORTED_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
-        elif cls.SUPPORTED_BITS and dynamic_bits is not None:
-            if len(cls.SUPPORTED_BITS) == 1:
-                validate = False
-                err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTED_BITS}` bits"
-            else:
-                for layer, bits in dynamic_bits.items():
-                    if bits not in cls.SUPPORTED_BITS:
+        elif dynamic is not None:
+            if cls.SUPPORTED_BITS:
+                dynamic_bits = {}
+                for pattern, pattern_dict in dynamic.items():
+                    dynamic_bits[pattern] = pattern_dict.get("bits", bits)
+                if len(cls.SUPPORTED_BITS) == 1:
+                    validate = False
+                    err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTED_BITS}` bits"
+                else:
+                    for layer, bits in dynamic_bits.items():
+                        if bits not in cls.SUPPORTED_BITS:
+                            validate = False
+                            err = f"{cls} only supports `{cls.SUPPORTED_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
+                            break
+            if cls.SUPPORTED_GROUP_SIZE:
+                dynamic_group_size = {}
+                for pattern, pattern_dict in dynamic.items():
+                    dynamic_group_size[pattern] = pattern_dict.get("group_size", group_size)
+                for layer, group_size in dynamic_group_size.items():
+                    if group_size not in cls.SUPPORTED_GROUP_SIZE:
                         validate = False
-                        err = f"{cls} only supports `{cls.SUPPORTED_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
+                        err = f"{cls} only supports `{cls.SUPPORTED_GROUP_SIZE}` group_size: actual group_size = `{group_size}` for layer `{layer}`"
                         break
+            if cls.SUPPORTED_SYM:
+                dynamic_sym = {}
+                for pattern, pattern_dict in dynamic.items():
+                    dynamic_sym[pattern] = pattern_dict.get("sym", sym)
+                for layer, sym in dynamic_sym.items():
+                    if sym not in cls.SUPPORTED_SYM:
+                        validate = False
+                        err = f"{cls} only supports `{cls.SUPPORTED_SYM}` bits: actual sym = `{sym}` for layer `{layer}`"
+            if cls.SUPPORTED_DESC_ACT:
+                dynamic_desc_act = {}
+                for pattern, pattern_dict in dynamic.items():
+                    dynamic_desc_act[pattern] = pattern_dict.get("desc_act", desc_act)
+                for layer, desc_act in dynamic_desc_act.items():
+                    if desc_act not in cls.SUPPORTED_DESC_ACT:
+                        validate = False
+                        err = f"{cls} only supports `{cls.SUPPORTED_DESC_ACT}` bits: actual desc_act = `{desc_act}` for layer `{layer}`"
         return validate, err
 
     @classmethod

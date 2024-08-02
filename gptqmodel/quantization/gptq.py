@@ -71,7 +71,6 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
-        bits = self.quantizer.bits
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -209,7 +208,8 @@ class GPTQ:
             zero.append(self.quantizer.zero)
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
-        return scale, zero, g_idx, duration, avg_loss, bits, percdamp
+
+        return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
         if os.environ.get("DEBUG"):

@@ -1,6 +1,5 @@
 from collections import OrderedDict
 from logging import getLogger
-from typing import Dict, Optional
 
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
@@ -41,22 +40,24 @@ def select_quant_linear(
         backend: BACKEND,
         format: FORMAT,
         pack: bool = False,
-        dynamic_bits: Optional[Dict[str, int]] = None,
+        dynamic=None,
 ):
     # Handle the case where backend is AUTO.
     if backend == BACKEND.AUTO:
         allow_backends = format_dict[format]
+        err = None
         for k, values in backend_dict.items():
+
             for v in values:
                 in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic_bits=dynamic_bits)
+                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
                 check_pack_func = hasattr(v, "pack") if pack else True
                 if in_allow_backends:
-                    if err:
-                        raise NotImplementedError(err)
-                    elif validate and check_pack_func:
+                    if validate and check_pack_func:
                         logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                         return v
+        if err:
+            raise NotImplementedError(err)
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
         return TritonV2QuantLinear

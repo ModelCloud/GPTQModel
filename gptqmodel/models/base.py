@@ -29,9 +29,9 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
                            convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
-                           get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
-                           gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, get_model_files_size)
+                           get_model_files_size, get_module_by_name_prefix, get_module_by_name_suffix,
+                           get_moe_layer_modules, gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -197,7 +197,7 @@ class BaseGPTQModel(nn.Module):
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
-            dynamic_bits=self.quantize_config.dynamic_bits,
+            dynamic=self.quantize_config.dynamic,
             group_size=self.quantize_config.group_size,
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
@@ -327,7 +327,7 @@ class BaseGPTQModel(nn.Module):
                 model=self.model,
                 quantizers=quantizers,
                 bits=self.quantize_config.bits,
-                dynamic_bits=self.quantize_config.dynamic_bits,
+                dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
                 backend=BACKEND.TRITON,
                 desc_act=self.quantize_config.desc_act,
@@ -446,17 +446,16 @@ class BaseGPTQModel(nn.Module):
                 gptq = {}
                 for name in subset:
                     bits = self.quantize_config.bits
-                    if self.quantize_config.dynamic_bits is not None:
-                        key = f"{self.layers_node}.{i}.{name}"
-                        for pattern, d_bits in self.quantize_config.dynamic_bits.items():
-                            if re.match(pattern, key):
-                                bits = d_bits
-                                break
+                    sym = self.quantize_config.sym
+                    if self.quantize_config.dynamic is not None:
+                        layer_name = f"{self.layers_node}.{i}.{name}"
+                        bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
+                        sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
                         bits,
                         perchannel=True,
-                        sym=self.quantize_config.sym,
+                        sym=sym,
                         mse=False,
                     )
 
@@ -494,16 +493,23 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
-                    scale, zero, g_idx, duration, avg_loss, bits, damp_percent = gptq[name].fasterquant(
+                    group_size = self.quantize_config.group_size
+                    actorder = self.quantize_config.desc_act
+                    if self.quantize_config.dynamic is not None:
+                        layer_name = f"{self.layers_node}.{i}.{name}"
+                        group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
+                        actorder = self.quantize_config.dynamic_get(layer_name, "actorder", actorder)
+
+                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].fasterquant(
                         percdamp=self.quantize_config.damp_percent,
-                        damp_auto_increment=self.quantize_config.damp_auto_increment,
-                        group_size=self.quantize_config.group_size,
-                        actorder=self.quantize_config.desc_act,
+                        group_size=group_size,
+                        actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
-                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
-                    if self.quantize_config.dynamic_bits is not None:
-                        stat["bits"]=f"{bits}"
+                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
+                            "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
+                    if self.quantize_config.dynamic is not None:
+                        stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
                     quant_log.append(stat)
                     logger.info(stat)
@@ -560,7 +566,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
-            dynamic_bits=self.quantize_config.dynamic_bits,
+            dynamic=self.quantize_config.dynamic,
         )
 
         if device_map:
@@ -1196,7 +1202,7 @@ class BaseGPTQModel(nn.Module):
                 backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
-                dynamic_bits=quantize_config.dynamic_bits,
+                dynamic=quantize_config.dynamic,
             )
             if preload_qlinear_kernel == QBitsQuantLinear:
                 quantize_config.runtime_format = FORMAT.QBITS
@@ -1328,7 +1334,7 @@ class BaseGPTQModel(nn.Module):
 
         qlinear_kernel = select_quant_linear(
             bits=quantize_config.bits,
-            dynamic_bits=quantize_config.dynamic_bits,
+            dynamic=quantize_config.dynamic,
             group_size=quantize_config.group_size,
             desc_act=quantize_config.desc_act,
             sym=quantize_config.sym,

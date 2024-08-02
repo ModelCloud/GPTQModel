@@ -10,7 +10,7 @@ from parameterized import parameterized
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
+from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -47,16 +47,17 @@ class TestDynamic(unittest.TestCase):
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         cls.calibration_dataset = [cls.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-        dynamic_bits = {
+        # support dynamic set bits, group_size, desc_act, sym for each layer
+        dynamic = {
             # `.*\.` matches the layers_node prefix
-            r".*\.18\..*gate.*": 8,  # match layer 18 (index start at 0) gate module
-            r".*\.19\..*gate.*": 8,  # match layer 19 (index start at 0) gate module
-            r".*\.20\..*gate.*": 8,  # match layer 21 (index start at 0) gate module
-            r".*\.21\..*gate.*": 8,  # match layer 22 (index start at 0) gate module
+            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 18 (index start at 0) gate module
+            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 19 (index start at 0) gate module
+            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 20 (index start at 0) gate module
+            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 21 (index start at 0) gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
-            dynamic_bits=dynamic_bits,
+            dynamic=dynamic,
             group_size=128,
         )
         model = GPTQModel.from_pretrained(
@@ -80,6 +81,7 @@ class TestDynamic(unittest.TestCase):
             (BACKEND.MARLIN),
         ]
     )
+
     def test_dynamic_bits(self, backend):
         model = GPTQModel.from_quantized(
             self.tmp_dir.name,
