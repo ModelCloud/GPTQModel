@@ -494,29 +494,19 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
-                    try:
-                        scale, zero, g_idx, duration, avg_loss, bits = gptq[name].fasterquant(
-                            percdamp=self.quantize_config.damp_percent,
-                            group_size=self.quantize_config.group_size,
-                            actorder=self.quantize_config.desc_act,
-                            static_groups=self.quantize_config.static_groups,
-                        )
-                        if self.quantize_config.dynamic_bits is not None:
-                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "bits": bits,
-                                    "time": f"{duration:.3f}"}
-                        else:
-                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                                    "time": f"{duration:.3f}"}
+                    scale, zero, g_idx, duration, avg_loss, bits, damp_percent = gptq[name].fasterquant(
+                        percdamp=self.quantize_config.damp_percent,
+                        damp_auto_increment=self.quantize_config.damp_auto_increment,
+                        group_size=self.quantize_config.group_size,
+                        actorder=self.quantize_config.desc_act,
+                        static_groups=self.quantize_config.static_groups,
+                    )
+                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
+                    if self.quantize_config.dynamic_bits is not None:
+                        stat["bits"]=f"{bits}"
 
-                        quant_log.append(stat)
-                        logger.info(stat)
-
-                    except torch._C._LinAlgError as e:
-                        if "not positive-definite" in str(e).lower():
-                            logger.warning(
-                                "Please increase damp or nsamples for calibration data to avoid the following quant error. "
-                            )
-                        raise e
+                    quant_log.append(stat)
+                    logger.info(stat)
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
