@@ -79,7 +79,7 @@ jobs:
       matrix:
         cuda: [ "11.8", "12.1", "12.4" ]
         torch: [ "2.1", "2.2", "2.3", "2.4" ]
-        python: [ "3.9", "3.10", "3.11" ]
+        python: [ "3.9", "3.10", "3.11" , "3.12" ]
         exclude:
           - cuda: "12.4"
             torch: "2.1"
@@ -91,6 +91,8 @@ jobs:
             cuda: "11.8"
           - torch: "2.4"
             cuda: "12.1"
+          - torch: "2.0"
+            python: "3.12"
       max-parallel: 6
     runs-on: [ self-hosted ]
     needs: check-vm
