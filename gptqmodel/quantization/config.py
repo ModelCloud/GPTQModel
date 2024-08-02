@@ -28,7 +28,7 @@ MIN_VERSION_WITH_V2 = "0.9.0"
 META_FIELD = "meta"
 # quantizer is the tool that did the quantization
 META_FIELD_QUANTIZER = "quantizer"
-META_FIELD_DAMP_PERCENT = "damp_percent"
+
 META_QUANTIZER_GPTQMODEL = "gptqmodel"
 
 # pkg names
@@ -83,6 +83,7 @@ class QuantizeConfig():
     # 128 offer good balance between inference speed and quantization quality
     group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
+    damp_percent: float = field(default=0.005)
     desc_act: bool = field(default=True)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
@@ -127,6 +128,9 @@ class QuantizeConfig():
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("unless equal to -1, group_size must greater then 0.")
 
+        if not (0 < self.damp_percent < 1):
+            raise ValueError("damp_percent must between 0 and 1.")
+
         # validate meta
         if self.meta is not None:
             if not isinstance(self.meta, dict):
@@ -134,11 +138,8 @@ class QuantizeConfig():
             for key, value in self.meta.items():
                 if not isinstance(key, str):
                     raise ValueError("Keys in the meta dictionary must be strings")
-                if key is META_FIELD_DAMP_PERCENT:
-                    if not (0 < value < 1):
-                        raise ValueError(f"{META_FIELD_DAMP_PERCENT} must between 0 and 1.")
         else:
-            self.meta = {META_FIELD_DAMP_PERCENT: 0.005}
+            self.meta = {}
 
     def meta_set(self, key: str, value: Any):
         self.meta[key] = value
@@ -300,6 +301,7 @@ class QuantizeConfig():
             "static_groups": self.static_groups,
             "sym": self.sym,
             "lm_head": self.lm_head,
+            "damp_percent": self.damp_percent,
             "true_sequential": self.true_sequential,
             # TODO: deprecate?
             "model_name_or_path": self.model_name_or_path,
