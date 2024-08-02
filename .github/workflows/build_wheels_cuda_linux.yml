@@ -141,34 +141,34 @@ jobs:
 
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
-      - name: Compile
-        run: |
-          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+      # - name: Compile
+      #   run: |
+      #     export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
 
-          env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
-          echo "env: $env_name"
+      #     env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
+      #     echo "env: $env_name"
 
-          pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
+      #     pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
 
-          python setup.py bdist_wheel
+      #     python setup.py bdist_wheel
 
-      - name: List build dir
-        run: |
-          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+      # - name: List build dir
+      #   run: |
+      #     export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
 
-          env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
-          echo "env: $env_name"
+      #     env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
+      #     echo "env: $env_name"
 
-          pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
+      #     pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
 
-          cd dist
-          ls -alh .
-          whl=$(ls -t *.whl | head -n 1)
-          twine check $whl
-          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+      #     cd dist
+      #     ls -alh .
+      #     whl=$(ls -t *.whl | head -n 1)
+      #     twine check $whl
+      #     echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.WHL_NAME }}
-          path: dist/${{ env.WHL_NAME }}
+      # - name: Upload artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ env.WHL_NAME }}
+      #     path: dist/${{ env.WHL_NAME }}
