@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from logging import getLogger
-from typing import Dict, List, Optional, Union
+from typing import List, Optional
 
 import accelerate
 import threadpoolctl as tctl

@@ -29,9 +29,9 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
                            convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
-                           get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
-                           gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, get_model_files_size)
+                           get_model_files_size, get_module_by_name_prefix, get_module_by_name_suffix,
+                           get_moe_layer_modules, gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 

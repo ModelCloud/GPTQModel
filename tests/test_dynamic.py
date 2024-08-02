@@ -9,7 +9,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
+from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
