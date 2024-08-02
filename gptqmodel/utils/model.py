@@ -152,16 +152,17 @@ def make_quant(
 
             bias = submodule.bias is not None
 
+            real_bits = bits
             # bits be different for each layer/module
             if dynamic_bits is not None:
                 # check if any dynamic bits regex match module `name`
                 for pattern, dm_bits in dynamic_bits.items():
                     if re.match(pattern, name):
-                        bits = dm_bits
+                        print("re.match(pattern, name) old bit", real_bits, re.match(pattern, name))
+                        real_bits = dm_bits
                         break
-
             new_layer = QuantLinear(
-                bits=bits,
+                bits=real_bits,
                 group_size=group_size,
                 desc_act=desc_act,
                 sym=sym,
