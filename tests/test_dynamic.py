@@ -49,15 +49,19 @@ class TestDynamic(unittest.TestCase):
             # `.*\.` matches the layers_node prefix
             r".*\.18\..*gate.*": { # match layer 18 (index start at 0) gate module
                 "bits": 8,
+                "group_size": 256,
             },
             r".*\.19\..*gate.*": { # match layer 19 (index start at 0) gate module
                 "bits": 8,
+                "group_size": 256,
             },
             r".*\.20\..*gate.*": { # match layer 20 (index start at 0) gate module
                 "bits": 8,
+                "group_size": 256,
             },
             r".*\.21\..*gate.*":  { # match layer 21 (index start at 0) gate module
                 "bits": 8,
+                "group_size": 256,
             },
         }
         quantize_config = QuantizeConfig(
