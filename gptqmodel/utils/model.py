@@ -118,7 +118,6 @@ def make_quant(
     sym: bool = True,
     pack: bool = False,
     dynamic_bits: Optional[Dict[str, int]] = None,
-    prefix: str = None,
 ) -> BaseQuantLinear:
     select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
     QuantLinear = select_quant_linear_func(
@@ -152,15 +151,17 @@ def make_quant(
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             bias = submodule.bias is not None
-            d_bits = bits
+
+            # bits be different for each layer/module
             if dynamic_bits is not None:
-                match_name = name.removeprefix(f"{prefix}.")
+                # check if any dynamic bits regex match module `name`
                 for pattern, dm_bits in dynamic_bits.items():
-                    if re.match(pattern, match_name):
-                        d_bits = dm_bits
+                    if re.match(pattern, name):
+                        bits = dm_bits
                         break
+
             new_layer = QuantLinear(
-                bits=d_bits,
+                bits=bits,
                 group_size=group_size,
                 desc_act=desc_act,
                 sym=sym,
@@ -270,7 +271,6 @@ def pack_model(
     sym: bool = True,
     force_layer_back_to_cpu: bool = False,
     dynamic_bits=None,
-    prefix: str = None,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
@@ -299,7 +299,6 @@ def pack_model(
         desc_act=desc_act,
         pack=True,
         dynamic_bits=dynamic_bits,
-        prefix=prefix,
     )
     qlayers = find_layers(model, [QuantLinear])
 

@@ -14,7 +14,7 @@ from gptqmodel.utils import Perplexity  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
-class TestQuantBatch(unittest.TestCase):
+class TestDynamic(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
     def calculate_avg_ppl(self, model, tokenizer):
@@ -44,38 +44,25 @@ class TestQuantBatch(unittest.TestCase):
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-    def test_diff_batch(self):
+    def test_dynamic_bits(self):
+        dynamic_bits = {
+            # `.*\.` matches the layers_node prefix
+            r".*\.18\..*gate.*": 8, # match layer 18 (index start at 0) gate module
+            r".*\.19\..*gate.*": 8, # match layer 19 (index start at 0) gate module
+            r".*\.20\..*gate.*": 8, # match layer 21 (index start at 0) gate module
+            r".*\.21\..*gate.*": 8, # match layer 22 (index start at 0) gate module
+        }
         quantize_config = QuantizeConfig(
             bits=4,
+            dynamic_bits=dynamic_bits,
             group_size=128,
         )
-
         model = GPTQModel.from_pretrained(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-
-        model.quantize(self.calibration_dataset, batch_size=1)
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
-                tmp_dir,
-            )
-
-            del model
-
-            model = GPTQModel.from_quantized(
-                tmp_dir,
-            )
-
-            batch_size_1_ppl = self.calculate_avg_ppl(model, self.tokenizer)
-
-        model = GPTQModel.from_pretrained(
-            self.NATIVE_MODEL_ID,
-            quantize_config=quantize_config,
-        )
-
         model.quantize(self.calibration_dataset, batch_size=4)
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save_quantized(
                 tmp_dir,
@@ -85,10 +72,10 @@ class TestQuantBatch(unittest.TestCase):
 
             model = GPTQModel.from_quantized(
                 tmp_dir,
+                backend=BACKEND.TRITON,
             )
 
-            batch_size_256_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
             del model
-
-        assert abs(batch_size_1_ppl - batch_size_256_ppl) < 0
+            assert dynamic_bits_ppl < 10
