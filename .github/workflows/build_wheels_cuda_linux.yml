@@ -4,6 +4,7 @@ defaults:
   run:
     shell: bash -le {0}
 on:
+  push:
   repository_dispatch:
   workflow_dispatch:
 
