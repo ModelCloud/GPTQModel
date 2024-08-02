@@ -127,7 +127,7 @@ class GPTQ:
                 break
             except torch._C._LinAlgError as e:
                 if damp_auto_increment != 0:
-                    logger.warning(f"current percdamp={percdamp} is too low, increased by {damp_auto_increment}")
+                    logger.warning(f"Current damp={percdamp:.5f} is too low, increased by {damp_auto_increment:.5f}")
                     percdamp += damp_auto_increment
                 else:
                     logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error. ")
