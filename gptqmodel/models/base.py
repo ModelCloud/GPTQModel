@@ -194,6 +194,17 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
+        # Validate quant linear before quantization starts
+        _ = select_quant_linear(
+            bits=self.quantize_config.bits,
+            dynamic_bits=self.quantize_config.dynamic_bits,
+            group_size=self.quantize_config.group_size,
+            desc_act=self.quantize_config.desc_act,
+            sym=self.quantize_config.sym,
+            backend=BACKEND.AUTO,
+            format=self.quantize_config.format,
+        )
+
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
 
@@ -1327,6 +1338,7 @@ class BaseGPTQModel(nn.Module):
 
         qlinear_kernel = select_quant_linear(
             bits=quantize_config.bits,
+            dynamic_bits=quantize_config.dynamic_bits,
             group_size=quantize_config.group_size,
             desc_act=quantize_config.desc_act,
             sym=quantize_config.sym,

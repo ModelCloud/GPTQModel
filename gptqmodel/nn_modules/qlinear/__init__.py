@@ -23,8 +23,8 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic_bits=None) -> bool:
-        validate, _ = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic_bits=dynamic_bits)
-        return validate
+        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic_bits=dynamic_bits)
+        return validate, err
 
     @classmethod
     def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic_bits=None):
@@ -43,10 +43,15 @@ class BaseQuantLinear(nn.Module):
             validate = False
             err = f"{cls} only supports `{cls.SUPPORTED_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
         elif cls.SUPPORTED_BITS and dynamic_bits is not None:
-            for layer, bits in dynamic_bits.items():
-                if bits not in cls.SUPPORTED_BITS:
-                    validate = False
-                    err = f"{cls} only supports `{cls.SUPPORTED_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
+            if len(cls.SUPPORTED_BITS) == 1:
+                validate = False
+                err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTED_BITS}` bits"
+            else:
+                for layer, bits in dynamic_bits.items():
+                    if bits not in cls.SUPPORTED_BITS:
+                        validate = False
+                        err = f"{cls} only supports `{cls.SUPPORTED_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
+                        break
         return validate, err
 
     @classmethod
