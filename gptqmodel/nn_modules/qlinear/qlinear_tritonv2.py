@@ -15,6 +15,7 @@ logger = getLogger(__name__)
 
 class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTED_BITS = [2, 4, 8]
+    SUPPORTED_DYNAMIC_BITS = True
     """
     Triton v2 quantized linear layer.
 
