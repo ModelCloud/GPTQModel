@@ -139,6 +139,8 @@ jobs:
 
           pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
 
+          pip install cmake
+
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       # - name: Compile
