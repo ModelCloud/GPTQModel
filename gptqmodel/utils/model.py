@@ -162,7 +162,7 @@ def make_quant(
                         d_bits = pattern_dict.get("bits", bits)
                         d_group_size = pattern_dict.get("group_size", group_size)
                         d_sym = pattern_dict.get("sym", sym)
-
+                        break
             new_layer = QuantLinear(
                 bits=d_bits,
                 group_size=d_group_size,

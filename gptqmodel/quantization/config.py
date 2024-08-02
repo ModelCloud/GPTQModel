@@ -85,6 +85,7 @@ class QuantizeConfig():
     group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
     damp_percent: float = field(default=0.005)
+    damp_auto_increment: float = field(default=0.0015)
     desc_act: bool = field(default=True)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
@@ -130,10 +131,13 @@ class QuantizeConfig():
                         raise ValueError("unless equal to -1, group_size must greater then 0.")
 
         if self.group_size != -1 and self.group_size <= 0:
-            raise ValueError("unless equal to -1, group_size must greater then 0.")
+            raise ValueError("unless equal to -1, group_size must greater than 0.")
 
         if not (0 < self.damp_percent < 1):
             raise ValueError("damp_percent must between 0 and 1.")
+
+        if self.damp_auto_increment < 0:
+            raise ValueError("damp_auto_increment must greater than 0.")
 
         # validate meta
         if self.meta is not None:
@@ -315,6 +319,7 @@ class QuantizeConfig():
             "sym": self.sym,
             "lm_head": self.lm_head,
             "damp_percent": self.damp_percent,
+            "damp_auto_increment": self.damp_auto_increment,
             "true_sequential": self.true_sequential,
             # TODO: deprecate?
             "model_name_or_path": self.model_name_or_path,

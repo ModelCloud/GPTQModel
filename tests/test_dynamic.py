@@ -6,6 +6,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
+from parameterized import parameterized
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
@@ -16,6 +17,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 class TestDynamic(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    tmp_dir = None
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
@@ -35,16 +37,16 @@ class TestDynamic(unittest.TestCase):
         return avg
 
     @classmethod
-    def setUpClass(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
+    def setUpClass(cls):
+        cls.tmp_dir = tempfile.TemporaryDirectory()
+        cls.tokenizer = AutoTokenizer.from_pretrained(cls.NATIVE_MODEL_ID, use_fast=True)
 
-        if not self.tokenizer.pad_token_id:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        if not cls.tokenizer.pad_token_id:
+            cls.tokenizer.pad_token_id = cls.tokenizer.eos_token_id
 
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        cls.calibration_dataset = [cls.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-        self.tmp_dir = tempfile.TemporaryDirectory()
         # support dynamic set bits, group_size, desc_act, sym for each layer
         dynamic = {
             # `.*\.` matches the layers_node prefix
@@ -58,33 +60,32 @@ class TestDynamic(unittest.TestCase):
             dynamic=dynamic,
             group_size=128,
         )
-        self.model = GPTQModel.from_pretrained(
-            self.NATIVE_MODEL_ID,
+        model = GPTQModel.from_pretrained(
+            cls.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        self.model.quantize(self.calibration_dataset, batch_size=4)
-        self.model.save_quantized(self.tmp_dir.name)
-        del self.model
+        model.quantize(cls.calibration_dataset, batch_size=4)
 
-    @classmethod
-    def tearDownClass(self):
-        self.tmp_dir.cleanup()
-
-    def test_dynamic_bits(self):
-        model = GPTQModel.from_quantized(
-            self.tmp_dir.name,
-            backend=BACKEND.TRITON,
+        model.save_quantized(
+            cls.tmp_dir.name,
         )
 
-        dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp_dir.cleanup()
+        assert not os.path.exists(cls.tmp_dir.name)
 
-        del model
-        assert dynamic_bits_ppl < 10
+    @parameterized.expand(
+        [
+            (BACKEND.TRITON),
+            (BACKEND.MARLIN),
+        ]
+    )
 
-    def test_marlin_dynamic_bits(self):
+    def test_dynamic_bits(self, backend):
         model = GPTQModel.from_quantized(
             self.tmp_dir.name,
-            backend=BACKEND.MARLIN,
+            backend=backend,
         )
 
         dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)

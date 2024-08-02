@@ -66,6 +66,7 @@ class GPTQ:
         self,
         blocksize=128,
         percdamp=0.01,
+        damp_auto_increment=0.0015,
         group_size=-1,
         actorder=False,
         static_groups=False,
@@ -113,13 +114,26 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=self.dev)
-        H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+        while 1 > percdamp > 0:
+            try:
+                damp = percdamp * torch.mean(torch.diag(H))
+                diag = torch.arange(self.columns, device=self.dev)
+                H[diag, diag] += damp
+                H = torch.linalg.cholesky(H)
+                H = torch.cholesky_inverse(H)
+                H = torch.linalg.cholesky(H, upper=True)
+                Hinv = H
+                break
+            except torch._C._LinAlgError as e:
+                if damp_auto_increment != 0:
+                    logger.warning(f"Current damp={percdamp:.5f} is too low, increased by {damp_auto_increment:.5f}")
+                    percdamp += damp_auto_increment
+                else:
+                    logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error. ")
+                    raise e
+
+        if not (0 < percdamp < 1):
+            raise ValueError(f"damp_percent must between 0 and 1. current is {percdamp}")
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -194,7 +208,8 @@ class GPTQ:
             zero.append(self.quantizer.zero)
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
-        return scale, zero, g_idx, duration, avg_loss
+
+        return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
         if os.environ.get("DEBUG"):

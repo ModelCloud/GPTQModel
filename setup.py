@@ -26,7 +26,6 @@ common_setup_kwargs = {
     "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
     "platforms": ["linux"],
     "classifiers": [
-        "Environment :: GPU :: NVIDIA CUDA :: 11.7",
         "Environment :: GPU :: NVIDIA CUDA :: 11.8",
         "Environment :: GPU :: NVIDIA CUDA :: 12",
         "Environment :: GPU :: NVIDIA CUDA :: 12.1",
@@ -35,7 +34,6 @@ common_setup_kwargs = {
         "Environment :: GPU :: NVIDIA CUDA :: 12.4",
         "License :: OSI Approved :: MIT License",
         "Natural Language :: English",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -63,7 +61,7 @@ if BUILD_CUDA_EXT:
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if not PYPI_RELEASE:
-        common_setup_kwargs["version"] += f"+cu{CUDA_VERSION}"
+        common_setup_kwargs["version"] += f"+torch{torch.version.__version__}"
 
 
 with open('requirements.txt') as f:

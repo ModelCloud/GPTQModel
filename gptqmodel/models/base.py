@@ -492,35 +492,27 @@ class BaseGPTQModel(nn.Module):
 
                 for name in subset:
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
+
                     group_size = self.quantize_config.group_size
                     actorder = self.quantize_config.desc_act
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         actorder = self.quantize_config.dynamic_get(layer_name, "actorder", actorder)
-                    try:
-                        scale, zero, g_idx, duration, avg_loss = gptq[name].fasterquant(
-                            percdamp=self.quantize_config.damp_percent,
-                            group_size=group_size,
-                            actorder=actorder,
-                            static_groups=self.quantize_config.static_groups,
-                        )
-                        if self.quantize_config.dynamic is not None:
-                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "dynamic": self.quantize_config.dynamic_get(layer_name=layer_name),
-                                    "time": f"{duration:.3f}"}
-                        else:
-                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                                    "time": f"{duration:.3f}"}
 
-                        quant_log.append(stat)
-                        logger.info(stat)
+                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].fasterquant(
+                        percdamp=self.quantize_config.damp_percent,
+                        group_size=group_size,
+                        actorder=actorder,
+                        static_groups=self.quantize_config.static_groups,
+                    )
+                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
+                            "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
+                    if self.quantize_config.dynamic is not None:
+                        stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
-                    except torch._C._LinAlgError as e:
-                        if "not positive-definite" in str(e).lower():
-                            logger.warning(
-                                "Please increase damp or nsamples for calibration data to avoid the following quant error. "
-                            )
-                        raise e
+                    quant_log.append(stat)
+                    logger.info(stat)
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
