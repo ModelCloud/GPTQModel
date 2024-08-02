@@ -49,11 +49,14 @@ def select_quant_linear(
         for k, values in backend_dict.items():
             for v in values:
                 in_allow_backends = k in allow_backends
-                validate = v.validate(bits, group_size, desc_act, sym, dynamic_bits=dynamic_bits)
+                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic_bits=dynamic_bits)
                 check_pack_func = hasattr(v, "pack") if pack else True
-                if in_allow_backends and validate and check_pack_func:
-                    logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
-                    return v
+                if in_allow_backends:
+                    if err:
+                        raise NotImplementedError(err)
+                    elif validate and check_pack_func:
+                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        return v
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
         return TritonV2QuantLinear
