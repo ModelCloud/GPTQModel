@@ -31,7 +31,7 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
                            get_module_by_name_prefix, get_module_by_name_suffix, get_moe_layer_modules,
                            gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, get_model_files_size)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
 
@@ -607,6 +607,9 @@ class BaseGPTQModel(nn.Module):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
+        pre_quantized_size_mb = get_model_files_size(self.model_name_or_path)
+        pre_quantized_size_gb = pre_quantized_size_mb / 1024
+
         # write gptqmodel tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
@@ -703,6 +706,7 @@ class BaseGPTQModel(nn.Module):
                 logger.warning(
                     "We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
                 torch.save(model.state_dict(), join(save_dir, model_save_name))
+            total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
         else:
             # Shard checkpoint
             shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
@@ -723,6 +727,7 @@ class BaseGPTQModel(nn.Module):
                 ):
                     os.remove(full_filename)
 
+            total_size_mb = 0
             # Save the model
             for shard_file, shard in shards.items():
                 if use_safetensors:
@@ -759,6 +764,8 @@ class BaseGPTQModel(nn.Module):
                     safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
                 else:
                     torch.save(shard, join(save_dir, shard_file))
+                shard_size_mb = os.path.getsize(join(save_dir, shard_file)) / (1024 * 1024)
+                total_size_mb += shard_size_mb
 
             if index is not None:
                 index_save_name = model_save_name + ".index.json"
@@ -767,6 +774,15 @@ class BaseGPTQModel(nn.Module):
                 with open(index_save_path, "w", encoding="utf-8") as f:
                     content = json.dumps(index, indent=2, sort_keys=True) + "\n"
                     f.write(content)
+
+        total_size_gb = total_size_mb / 1024
+        size_diff_mb = pre_quantized_size_mb - total_size_mb
+        size_diff_gb = size_diff_mb / 1024
+        percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
+        logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
+        logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+        logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
 
