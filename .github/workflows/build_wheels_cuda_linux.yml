@@ -4,22 +4,8 @@ defaults:
   run:
     shell: bash -le {0}
 on:
-  push:
   repository_dispatch:
   workflow_dispatch:
-    inputs:
-      repo:
-        description: 'GitHub repo {owner}/{repo}'
-        required: false
-        default: ''
-      ref:
-        description: 'Branch, Tag or Commit SHA'
-        required: false
-        default: ''
-      test_names:
-        description: 'Input Test(s) to Run (default all)'
-        required: false
-        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
