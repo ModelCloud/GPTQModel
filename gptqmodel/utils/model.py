@@ -662,3 +662,24 @@ def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
             if file.rfilename.endswith(file_extension):
                 _ = hf_hub_download(repo_id=model_id_or_path, filename=file.rfilename,
                                                   local_dir=save_dir)
+
+def get_model_files_size(pre_quantized_model_path, file_extension=['.bin', '.safetensors', '.pth', '.pt', '.ckpt', '.h5', '.pb', '.onnx']):
+    if os.path.isdir(pre_quantized_model_path):
+        pre_quantized_size_bytes = sum(
+            os.path.getsize(os.path.join(pre_quantized_model_path, f))
+            for f in os.listdir(pre_quantized_model_path)
+            if os.path.isfile(os.path.join(pre_quantized_model_path, f)) and os.path.splitext(f)[
+                1] in file_extension
+        )
+    else:
+        api = HfApi()
+        files_data = api.list_repo_files(pre_quantized_model_path)
+        pre_quantized_size_bytes = 0
+        for file_info in files_data:
+            if any(file_info.endswith(ext) for ext in file_extension):
+                file_metadata = api.model_info(pre_quantized_model_path, files_metadata=True)
+                for file_data in file_metadata.siblings:
+                    if file_data.rfilename == file_info:
+                        pre_quantized_size_bytes += file_data.size
+    pre_quantized_size_mb = pre_quantized_size_bytes / (1024 * 1024)
+    return pre_quantized_size_mb
