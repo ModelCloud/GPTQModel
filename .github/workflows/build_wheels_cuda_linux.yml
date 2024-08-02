@@ -96,7 +96,7 @@ jobs:
     needs: check-vm
     #    if: needs.check-vm.outputs.tag == 'intel'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
     steps:
 
       - name: Print Env
