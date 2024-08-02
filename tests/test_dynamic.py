@@ -47,13 +47,14 @@ class TestDynamic(unittest.TestCase):
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         cls.calibration_dataset = [cls.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-        # support dynamic set bits, group_size, desc_act, sym for each layer
+        # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         dynamic = {
             # `.*\.` matches the layers_node prefix
-            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 18 (index start at 0) gate module
-            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 19 (index start at 0) gate module
-            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 20 (index start at 0) gate module
-            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 21 (index start at 0) gate module
+            # layer index start at 0
+            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 18 gate module
+            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 19 gate module
+            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 20 gate module
+            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 21 gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
