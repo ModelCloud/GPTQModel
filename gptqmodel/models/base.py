@@ -493,30 +493,32 @@ class BaseGPTQModel(nn.Module):
 
                 for name in subset:
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
-
-                    try:
-                        scale, zero, g_idx, duration, avg_loss, bits = gptq[name].fasterquant(
-                            percdamp=self.quantize_config.damp_percent,
-                            group_size=self.quantize_config.group_size,
-                            actorder=self.quantize_config.desc_act,
-                            static_groups=self.quantize_config.static_groups,
-                        )
-                        if self.quantize_config.dynamic_bits is not None:
-                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "bits": bits,
-                                    "time": f"{duration:.3f}"}
-                        else:
-                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                                    "time": f"{duration:.3f}"}
-
-                        quant_log.append(stat)
-                        logger.info(stat)
-
-                    except torch._C._LinAlgError as e:
-                        if "not positive-definite" in str(e).lower():
-                            logger.warning(
-                                "Please increase damp or nsamples for calibration data to avoid the following quant error. "
+                    damp_percent = self.quantize_config.damp_percent
+                    while 1 > damp_percent > 0:
+                        try:
+                            scale, zero, g_idx, duration, avg_loss, bits = gptq[name].fasterquant(
+                                percdamp=damp_percent,
+                                group_size=self.quantize_config.group_size,
+                                actorder=self.quantize_config.desc_act,
+                                static_groups=self.quantize_config.static_groups,
                             )
-                        raise e
+                            stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "time": f"{duration:.3f}"}
+                            if self.quantize_config.dynamic_bits is not None:
+                                stat["bits"] = bits
+
+                            quant_log.append(stat)
+                            logger.info(stat)
+                            break
+                        except torch._C._LinAlgError as e:
+                            if self.quantize_config.damp_auto_increment != 0:
+                                logger.warning(f"current percdamp={damp_percent} is too low, increased by {self.quantize_config.damp_auto_increment}")
+                                damp_percent += self.quantize_config.damp_auto_increment
+                            else:
+                                logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error. ")
+                                raise e
+
+                    if not (0 < damp_percent < 1):
+                        raise ValueError(f"damp_percent must between 0 and 1. current is {damp_percent}")
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),

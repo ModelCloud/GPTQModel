@@ -65,6 +65,7 @@ class GPTQConfig(GPTQConfig):
             dataset: Optional[Union[List[str], str]] = None,
             group_size: int = 128,
             damp_percent: float = 0.1,
+            damp_auto_increment: float = 0.0015,
             desc_act: bool = False,
             sym: bool = True,
             true_sequential: bool = True,
@@ -87,6 +88,7 @@ class GPTQConfig(GPTQConfig):
         self.dataset = dataset
         self.group_size = group_size
         self.damp_percent = damp_percent
+        self.damp_auto_increment = damp_auto_increment
         self.desc_act = desc_act
         self.sym = sym
         self.true_sequential = true_sequential
@@ -125,6 +127,7 @@ class GPTQModelQuantizer(object):
         dataset: Optional[Union[List[str], str]] = None,
         group_size: int = 128,
         damp_percent: float = 0.1,
+        damp_auto_increment: float = 0.0015,
         desc_act: bool = False,
         sym: bool = True,
         true_sequential: bool = True,
@@ -200,6 +203,7 @@ class GPTQModelQuantizer(object):
         self.dataset = dataset
         self.group_size = group_size
         self.damp_percent = damp_percent
+        self.damp_auto_increment = damp_auto_increment
         self.desc_act = desc_act
         self.sym = sym
         self.true_sequential = true_sequential
@@ -218,6 +222,7 @@ class GPTQModelQuantizer(object):
         quantize_config = QuantizeConfig()
         quantize_config.group_size = self.group_size
         quantize_config.damp_percent = self.damp_percent
+        quantize_config.damp_auto_increment = self.damp_auto_increment
         quantize_config.desc_act = self.desc_act
         quantize_config.sym = self.sym
         quantize_config.true_sequential = self.true_sequential
@@ -229,6 +234,7 @@ class GPTQModelQuantizer(object):
             "dataset",
             "group_size",
             "damp_percent",
+            "damp_auto_increment",
             "desc_act",
             "sym",
             "true_sequential",
@@ -242,6 +248,9 @@ class GPTQModelQuantizer(object):
             raise ValueError("group_size must be greater than 0 or equal to -1")
         if not (0 < self.damp_percent < 1):
             raise ValueError("damp_percent must between 0 and 1.")
+
+        if self.damp_auto_increment < 0:
+            raise ValueError("damp_auto_increment must greater than 0.")
 
         if self.exllama_config is None:
             self.exllama_config = {"version": ExllamaVersion.TWO}
