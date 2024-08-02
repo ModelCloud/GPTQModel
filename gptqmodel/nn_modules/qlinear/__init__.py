@@ -73,6 +73,14 @@ class BaseQuantLinear(nn.Module):
                     if sym not in cls.SUPPORTED_SYM:
                         validate = False
                         err = f"{cls} only supports `{cls.SUPPORTED_SYM}` bits: actual sym = `{sym}` for layer `{layer}`"
+            if cls.SUPPORTED_DESC_ACT:
+                dynamic_desc_act = {}
+                for pattern, pattern_dict in dynamic.items():
+                    dynamic_desc_act[pattern] = pattern_dict.get("desc_act", desc_act)
+                for layer, desc_act in dynamic_desc_act.items():
+                    if desc_act not in cls.SUPPORTED_DESC_ACT:
+                        validate = False
+                        err = f"{cls} only supports `{cls.SUPPORTED_DESC_ACT}` bits: actual desc_act = `{desc_act}` for layer `{layer}`"
         return validate, err
 
     @classmethod

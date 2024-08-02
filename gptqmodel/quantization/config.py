@@ -154,13 +154,10 @@ class QuantizeConfig():
     def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
             if re.match(pattern, layer_name):
-                print("pzs-----match")
                 if key is None:
                     return pattern_dict
                 else:
-                    v = pattern_dict.get(key, default_value)
-                    print(f"pzs------{v}")
-                    return v
+                    return pattern_dict.get(key, default_value)
         return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"

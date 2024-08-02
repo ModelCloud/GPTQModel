@@ -447,12 +447,10 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
-                    print(f"pzs-----{bits} {self.quantize_config.dynamic}")
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
-                        print(f"pzs-----{bits} {layer_name} {sym}")
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
                         bits,
@@ -495,17 +493,17 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
                     group_size = self.quantize_config.group_size
-                    static_groups = self.quantize_config.static_groups
+                    actorder = self.quantize_config.desc_act
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
-                        static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
+                        actorder = self.quantize_config.dynamic_get(layer_name, "actorder", actorder)
                     try:
                         scale, zero, g_idx, duration, avg_loss = gptq[name].fasterquant(
                             percdamp=self.quantize_config.damp_percent,
                             group_size=group_size,
-                            actorder=self.quantize_config.desc_act,
-                            static_groups=static_groups,
+                            actorder=actorder,
+                            static_groups=self.quantize_config.static_groups,
                         )
                         if self.quantize_config.dynamic is not None:
                             stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}", "dynamic": self.quantize_config.dynamic_get(layer_name=layer_name),
