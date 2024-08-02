@@ -45,16 +45,24 @@ class TestDynamic(unittest.TestCase):
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     def test_dynamic_bits(self):
-        dynamic_bits = {
+        dynamic = {
             # `.*\.` matches the layers_node prefix
-            r".*\.18\..*gate.*": 8, # match layer 18 (index start at 0) gate module
-            r".*\.19\..*gate.*": 8, # match layer 19 (index start at 0) gate module
-            r".*\.20\..*gate.*": 8, # match layer 21 (index start at 0) gate module
-            r".*\.21\..*gate.*": 8, # match layer 22 (index start at 0) gate module
+            r".*\.18\..*gate.*": { # match layer 18 (index start at 0) gate module
+                "bits": 8,
+            },
+            r".*\.19\..*gate.*": { # match layer 19 (index start at 0) gate module
+                "bits": 8,
+            },
+            r".*\.20\..*gate.*": { # match layer 20 (index start at 0) gate module
+                "bits": 8,
+            },
+            r".*\.21\..*gate.*":  { # match layer 21 (index start at 0) gate module
+                "bits": 8,
+            },
         }
         quantize_config = QuantizeConfig(
             bits=4,
-            dynamic_bits=dynamic_bits,
+            dynamic=dynamic,
             group_size=128,
         )
         model = GPTQModel.from_pretrained(

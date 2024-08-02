@@ -1,9 +1,10 @@
 import json
 import logging
+import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import isdir, join
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from packaging import version
 from transformers.utils.hub import cached_file
@@ -79,7 +80,7 @@ QUANT_CONFIG_ARG_SYNONYMS = {
 class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
-    dynamic_bits: Optional[Dict[str, int]] = field(default=None)
+    dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
     # 128 offer good balance between inference speed and quantization quality
     group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
@@ -119,11 +120,14 @@ class QuantizeConfig():
         if self.bits not in fields_info[0].metadata["choices"]:
             raise ValueError(f"only support quantize to {fields_info[0].metadata['choices']} bits.")
 
-        if self.dynamic_bits is not None:
-            for layer, bits in self.dynamic_bits.items():
-                if bits not in fields_info[0].metadata["choices"]:
-                    raise ValueError(
-                        f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
+        if self.dynamic is not None:
+            for layer, layer_dict in self.dynamic.items():
+                for key, value in layer_dict.items():
+                    if key == "bits" and value not in fields_info[0].metadata["choices"]:
+                        raise ValueError(
+                            f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
+                    elif key == "group_size" and value != -1 and value <= 0:
+                        raise ValueError("unless equal to -1, group_size must greater then 0.")
 
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("unless equal to -1, group_size must greater then 0.")
@@ -146,6 +150,18 @@ class QuantizeConfig():
 
     def meta_get(self, key: str) -> Any:
         return self.meta.get(key)
+
+    def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+        for pattern, pattern_dict in self.dynamic.items():
+            if re.match(pattern, layer_name):
+                print("pzs-----match")
+                if key is None:
+                    return pattern_dict
+                else:
+                    v = pattern_dict.get(key, default_value)
+                    print(f"pzs------{v}")
+                    return v
+        return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_set_versionable(self, key: str, value: str, version: str):
@@ -295,7 +311,7 @@ class QuantizeConfig():
     def to_dict(self):
         return {
             "bits": self.bits,
-            "dynamic_bits": self.dynamic_bits,
+            "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
             "static_groups": self.static_groups,
