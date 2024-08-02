@@ -44,50 +44,50 @@ class TestDynamic(unittest.TestCase):
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-    def test_dynamic_bits(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        # support dynamic set bits, group_size, desc_act, sym for each layer
         dynamic = {
             # `.*\.` matches the layers_node prefix
-            r".*\.18\..*gate.*": { # match layer 18 (index start at 0) gate module
-                "bits": 8,
-                "group_size": 256,
-            },
-            r".*\.19\..*gate.*": { # match layer 19 (index start at 0) gate module
-                "bits": 8,
-                "group_size": 256,
-            },
-            r".*\.20\..*gate.*": { # match layer 20 (index start at 0) gate module
-                "bits": 8,
-                "group_size": 256,
-            },
-            r".*\.21\..*gate.*":  { # match layer 21 (index start at 0) gate module
-                "bits": 8,
-                "group_size": 256,
-            },
+            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 18 (index start at 0) gate module
+            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 19 (index start at 0) gate module
+            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 20 (index start at 0) gate module
+            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 21 (index start at 0) gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
             dynamic=dynamic,
             group_size=128,
         )
-        model = GPTQModel.from_pretrained(
+        self.model = GPTQModel.from_pretrained(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=4)
+        self.model.quantize(self.calibration_dataset, batch_size=4)
+        self.model.save_quantized(self.tmp_dir.name)
+        del self.model
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
-                tmp_dir,
-            )
+    @classmethod
+    def tearDownClass(self):
+        self.tmp_dir.cleanup()
 
-            del model
+    def test_dynamic_bits(self):
+        model = GPTQModel.from_quantized(
+            self.tmp_dir.name,
+            backend=BACKEND.TRITON,
+        )
 
-            model = GPTQModel.from_quantized(
-                tmp_dir,
-                backend=BACKEND.TRITON,
-            )
+        dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
-            dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+        del model
+        assert dynamic_bits_ppl < 10
 
-            del model
-            assert dynamic_bits_ppl < 10
+    def test_marlin_dynamic_bits(self):
+        model = GPTQModel.from_quantized(
+            self.tmp_dir.name,
+            backend=BACKEND.MARLIN,
+        )
+
+        dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+
+        del model
+        assert dynamic_bits_ppl < 10
