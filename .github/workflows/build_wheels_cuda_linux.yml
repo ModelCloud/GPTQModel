@@ -95,10 +95,9 @@ jobs:
             python: "3.12"
           - torch: "2.1"
             python: "3.12"
-      max-parallel: 6
+      max-parallel: 4
     runs-on: [ self-hosted ]
     needs: check-vm
-    #    if: needs.check-vm.outputs.tag == 'intel'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
     steps:
