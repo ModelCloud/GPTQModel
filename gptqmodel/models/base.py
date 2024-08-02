@@ -496,6 +496,7 @@ class BaseGPTQModel(nn.Module):
 
                     scale, zero, g_idx, duration, avg_loss, bits, damp_percent = gptq[name].fasterquant(
                         percdamp=self.quantize_config.damp_percent,
+                        damp_auto_increment=self.quantize_config.damp_auto_increment,
                         group_size=self.quantize_config.group_size,
                         actorder=self.quantize_config.desc_act,
                         static_groups=self.quantize_config.static_groups,
