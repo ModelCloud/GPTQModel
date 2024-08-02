@@ -65,7 +65,6 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTED_GROUP_SIZE = [128, -1]
     SUPPORTED_DESC_ACT = [False]
     SUPPORTED_SYM = [True]
-    SUPPORTED_DYNAMIC_BITS = True
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):

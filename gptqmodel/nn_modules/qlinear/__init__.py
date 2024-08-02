@@ -10,7 +10,6 @@ class BaseQuantLinear(nn.Module):
     SUPPORTED_DESC_ACT = [True, False]
     SUPPORTED_SYM = [True, False]
     SUPPORTED_SHARDS: bool = True
-    SUPPORTED_DYNAMIC_BITS: bool = False
     SUPPORTED_DEVICES = [DEVICE.CUDA]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, *args, **kwargs):
@@ -44,9 +43,9 @@ class BaseQuantLinear(nn.Module):
             validate = False
             err = f"{cls} only supports `{cls.SUPPORTED_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
         elif cls.SUPPORTED_BITS and dynamic_bits is not None:
-            if not cls.SUPPORTED_DYNAMIC_BITS:
+            if len(cls.SUPPORTED_BITS) == 1:
                 validate = False
-                err = f"{cls} not supported dynamic_bits, use bits"
+                err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTED_BITS}` bits"
             else:
                 for layer, bits in dynamic_bits.items():
                     if bits not in cls.SUPPORTED_BITS:
