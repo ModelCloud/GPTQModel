@@ -97,6 +97,10 @@ jobs:
             python: "3.12"
           - torch: "2.1"
             python: "3.12"
+          - torch: "2.0"
+            cuda: "12.1"
+          - torch: "2.0"
+            cuda: "12.4"
       max-parallel: 4
     runs-on: [ self-hosted ]
     needs: check-vm
