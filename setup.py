@@ -61,7 +61,7 @@ if BUILD_CUDA_EXT:
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if not PYPI_RELEASE:
-        common_setup_kwargs["version"] += f"+torch{torch.version.__version__.replace("_", "-")}"
+        common_setup_kwargs["version"] += f"+torch{torch.version.__version__.replace('_', '-')}"
 
 
 with open('requirements.txt') as f:
