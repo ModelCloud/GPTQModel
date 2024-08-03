@@ -97,6 +97,10 @@ jobs:
       - name: Print Env
         shell: bash
         run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+          env_name="torch2.4_py3.11"
+          echo "env: $env_name"
+
           python --version
           nvcc --version
     
@@ -108,11 +112,19 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+          env_name="torch2.4_py3.11"
+          echo "env: $env_name"
+          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         shell: bash
-        run: python setup.py bdist_wheel
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+          env_name="torch2.4_py3.11"
+          echo "env: $env_name"
+          python setup.py bdist_wheel
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -130,6 +142,9 @@ jobs:
       - name: Print Env
         shell: bash
         run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+          env_name="torch2.4_py3.11"
+          echo "env: $env_name"
           python --version
           nvcc --version
     
@@ -141,11 +156,19 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+          env_name="torch2.4_py3.11"
+          echo "env: $env_name"
+          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         shell: bash
-        run: python setup.py bdist_wheel
+        run: |
+          export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
+          env_name="torch2.4_py3.11"
+          echo "env: $env_name"
+          python setup.py bdist_wheel
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
