@@ -100,6 +100,8 @@ jobs:
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
           env_name="torch2.4_py3.11"
           echo "env: $env_name"
+          pyenv activate $env_name
+          pyenv versions
 
           python --version
           nvcc --version
@@ -116,6 +118,8 @@ jobs:
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
           env_name="torch2.4_py3.11"
           echo "env: $env_name"
+          pyenv activate $env_name
+          pyenv versions
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
@@ -124,6 +128,8 @@ jobs:
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
           env_name="torch2.4_py3.11"
           echo "env: $env_name"
+          pyenv activate $env_name
+          pyenv versions
           python setup.py bdist_wheel
 
       - name: Upload to artifact
@@ -145,6 +151,8 @@ jobs:
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
           env_name="torch2.4_py3.11"
           echo "env: $env_name"
+          pyenv activate $env_name
+          pyenv versions
           python --version
           nvcc --version
     
@@ -160,6 +168,8 @@ jobs:
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
           env_name="torch2.4_py3.11"
           echo "env: $env_name"
+          pyenv activate $env_name
+          pyenv versions
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
@@ -168,6 +178,8 @@ jobs:
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
           env_name="torch2.4_py3.11"
           echo "env: $env_name"
+          pyenv activate $env_name
+          pyenv versions
           python setup.py bdist_wheel
 
       - name: Upload to artifact
