@@ -117,6 +117,7 @@ jobs:
 
           pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
 
+          echo "$HOME"
           echo "========="
           python --version
           echo "========="
