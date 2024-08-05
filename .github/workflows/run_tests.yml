@@ -97,6 +97,16 @@ jobs:
       - name: Print Env
         shell: bash
         run: |
+
+          whoami
+
+          echo $HOME
+
+          ls -ahl $HOME
+
+          ls -ahl /root
+          
+
           pyenv versions
 
           python --version
