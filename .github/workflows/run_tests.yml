@@ -102,6 +102,8 @@ jobs:
 
           echo $HOME
 
+          ls -ahl /
+
           ls -ahl $HOME
 
           ls -ahl /root
