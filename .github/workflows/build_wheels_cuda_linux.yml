@@ -111,13 +111,13 @@ jobs:
       - name: Print Env
         run: |
           export PYENV_ROOT=/opt/pyenv && export PATH=$PYENV_ROOT/bin:$PATH && eval "$(pyenv init -)" && eval "$(pyenv init --path)"
-
           env_name="torch${{ matrix.torch }}_py${{ matrix.python }}"
           echo "env: $env_name"
-
           pyenv local ${{ matrix.python }} && pyenv activate $env_name && pyenv versions
 
+          echo "========="
           echo "$HOME"
+          ls -ahl $HOME
           echo "========="
           python --version
           echo "========="
