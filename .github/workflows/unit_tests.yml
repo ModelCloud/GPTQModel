@@ -283,7 +283,7 @@ jobs:
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
-        if: always()
+        if: always() && ${{ env.CUDA_VISIBLE_DEVICES }} != ""
         run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   test_cpu:
