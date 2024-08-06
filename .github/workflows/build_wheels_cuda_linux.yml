@@ -136,7 +136,7 @@ jobs:
           whl=$(ls -t *.whl | head -n 1)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          twine check $whl
+          twine check dist/$whl
           pip install dist/$whl
 
       - name: Upload artifact
