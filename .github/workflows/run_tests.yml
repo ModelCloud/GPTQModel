@@ -95,7 +95,7 @@ jobs:
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'intel'
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     steps:
       - name: Print Env
         run: |
@@ -135,7 +135,7 @@ jobs:
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'amd'
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     steps:
       - name: Print Env
         run: |
@@ -220,7 +220,7 @@ jobs:
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -311,7 +311,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     strategy:
       fail-fast: false
       matrix:
