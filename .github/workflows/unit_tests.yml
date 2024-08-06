@@ -5,6 +5,7 @@ defaults:
     shell: bash -le {0}
 
 on:
+  push:
   schedule:
     - cron: '0 19 * * *'
   repository_dispatch:
