@@ -2,7 +2,7 @@ name: Unit Tests
 
 defaults:
   run:
-    shell: bash -le {0}
+    shell: bash --rcfile /root/.bashrc -le {0}
 
 on:
   schedule:
