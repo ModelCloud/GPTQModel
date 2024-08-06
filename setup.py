@@ -14,7 +14,6 @@ version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
 
-
 common_setup_kwargs = {
     "version": gptqmodel_version,
     "name": "gptqmodel",
@@ -42,13 +41,13 @@ common_setup_kwargs = {
     ],
 }
 
-
 PYPI_RELEASE = os.environ.get("PYPI_RELEASE", None)
 BUILD_CUDA_EXT = True
 COMPILE_MARLIN = True
 
 if BUILD_CUDA_EXT:
     import torch
+
     default_cuda_version = torch.version.cuda
     CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", default_cuda_version).split("."))
 
@@ -61,8 +60,7 @@ if BUILD_CUDA_EXT:
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if not PYPI_RELEASE:
-        common_setup_kwargs["version"] += f"+torch{torch.version.__version__}"
-
+        common_setup_kwargs["version"] += f"+cu{CUDA_VERSION}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 with open('requirements.txt') as f:
     requirements = f.read().splitlines()
@@ -78,7 +76,7 @@ else:
 
 if not at_least_one_cuda_v6:
     raise EnvironmentError(
-       "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
+        "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
     )
 
 extras_require = {

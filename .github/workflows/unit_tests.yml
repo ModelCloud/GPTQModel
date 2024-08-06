@@ -1,5 +1,9 @@
 name: Unit Tests
 
+defaults:
+  run:
+    shell: bash -le {0}
+
 on:
   schedule:
     - cron: '0 19 * * *'
@@ -26,7 +30,7 @@ env:
   CPU_TEST_FILES: "test_qbits.py"
 
 concurrency:
-  group: ${{ github.ref }}-workflow
+  group: ${{ github.ref }}-workflow-unit-tests
   cancel-in-progress: true
 
 jobs:
@@ -40,7 +44,6 @@ jobs:
     steps:
       - name: Select server
         id: get_ip
-        shell: bash
         run: |
           if [[ "${{ runner.name }}" == *"intel"* ]]; then
             echo "current ci is intel"
@@ -92,13 +95,18 @@ jobs:
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'intel'
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     steps:
       - name: Print Env
-        shell: bash
         run: |
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
           python --version
+          echo "== nvcc =="
           nvcc --version
+          echo "== torch =="
+          pip show torch
     
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -107,11 +115,10 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        shell: bash
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        shell: bash
+        timeout-minutes: 20
         run: python setup.py bdist_wheel
 
       - name: Upload to artifact
@@ -125,13 +132,18 @@ jobs:
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'amd'
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     steps:
       - name: Print Env
-        shell: bash
         run: |
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
           python --version
+          echo "== nvcc =="
           nvcc --version
+          echo "== torch =="
+          pip show torch
     
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -140,11 +152,10 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        shell: bash
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        shell: bash
+        timeout-minutes: 20
         run: python setup.py bdist_wheel
 
       - name: Upload to artifact
@@ -168,7 +179,6 @@ jobs:
 
       - name: List files
         id: files
-        shell: bash
         run: |
           script="
           import json
@@ -203,7 +213,7 @@ jobs:
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -212,10 +222,15 @@ jobs:
 
     steps:
       - name: Print Env
-        shell: bash
         run: |
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
           python --version
+          echo "== nvcc =="
           nvcc --version
+          echo "== torch =="
+          pip show torch
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -223,29 +238,18 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
-      - name: Show folder
-        run: |
-          ls -alh . || true
-          ls -alh dist || true
-          rm -rf dist/* || true
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
 
-      - name: Show dist folder
-        run: ls -alh dist || true
-
       - name: Install wheel
-        shell: bash
         run: |
           pip install bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
 
       - name: Check platform
-        shell: bash
         run: |
           if [[ "${{ runner.name }}" == *"intel"* ]]; then
             ip=${INTEL_SERVER}
@@ -255,7 +259,6 @@ jobs:
           echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Find suitable GPU
-        shell: bash
         run: |
           timestamp=$(date +%s%3N)
           gpu_id=-1
@@ -280,8 +283,7 @@ jobs:
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
-        if: always()
-        shell: bash
+        if: always() && ${{ env.CUDA_VISIBLE_DEVICES }} != ""
         run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   test_cpu:
@@ -292,18 +294,24 @@ jobs:
       - check-vm
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     strategy:
       fail-fast: false
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
     steps:
       - name: Print Env
-        shell: bash
         run: |
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
           python --version
+          echo "== nvcc =="
           nvcc --version
+          echo "== torch =="
+          pip show torch
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -318,9 +326,7 @@ jobs:
           path: dist
 
       - name: Install wheel
-        shell: bash
-        run: |
-          pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
