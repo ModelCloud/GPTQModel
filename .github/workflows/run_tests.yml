@@ -99,15 +99,13 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          ls /root
-          echo "===$PYENV_ROOT===="
-          echo "======="
+          echo "== pyenv =="
           pyenv versions
-          echo "======="
+          echo "== python =="
           python --version
-          echo "======="
+          echo "== nvcc =="
           nvcc --version
-          echo "======="
+          echo "== torch =="
           pip show torch
     
       - name: Checkout Codes
@@ -117,13 +115,11 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        run: |
-          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         timeout-minutes: 20
-        run: |
-          python setup.py bdist_wheel
+        run: python setup.py bdist_wheel
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -140,18 +136,13 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          cat /etc/profile
-          echo "---------"
-          cat /root/.bashrc || true
-          echo "===$PYENV_ROOT===="
-          ls -ahl /github/home/
-          echo "======="
+          echo "== pyenv =="
           pyenv versions
-          echo "======="
+          echo "== python =="
           python --version
-          echo "======="
+          echo "== nvcc =="
           nvcc --version
-          echo "======="
+          echo "== torch =="
           pip show torch
     
       - name: Checkout Codes
@@ -161,13 +152,11 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        run: |
-          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         timeout-minutes: 20
-        run: |
-          python setup.py bdist_wheel
+        run: python setup.py bdist_wheel
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -234,13 +223,13 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "======="
+          echo "== pyenv =="
           pyenv versions
-          echo "======="
+          echo "== python =="
           python --version
-          echo "======="
+          echo "== nvcc =="
           nvcc --version
-          echo "======="
+          echo "== torch =="
           pip show torch
 
       - name: Checkout Codes
@@ -249,20 +238,11 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
-      - name: Show folder
-        run: |
-          ls -alh . || true
-          ls -alh dist || true
-          rm -rf dist/* || true
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
-
-      - name: Show dist folder
-        run: ls -alh dist || true
 
       - name: Install wheel
         run: |
@@ -324,13 +304,13 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "======="
+          echo "== pyenv =="
           pyenv versions
-          echo "======="
+          echo "== python =="
           python --version
-          echo "======="
+          echo "== nvcc =="
           nvcc --version
-          echo "======="
+          echo "== torch =="
           pip show torch
 
       - name: Checkout Codes
@@ -346,8 +326,7 @@ jobs:
           path: dist
 
       - name: Install wheel
-        run: |
-          pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
