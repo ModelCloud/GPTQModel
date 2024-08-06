@@ -26,7 +26,7 @@ env:
   CPU_TEST_FILES: "test_qbits.py"
 
 concurrency:
-  group: ${{ github.ref }}-workflow
+  group: ${{ github.ref }}-workflow-unit-tests
   cancel-in-progress: true
 
 jobs:
