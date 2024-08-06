@@ -109,7 +109,6 @@ jobs:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
     steps:
       - name: Print Env
-        shell: bash
         run: |
           echo "======="
           pyenv versions
