@@ -139,6 +139,7 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          cat /root/.bashrc || true
           echo "===$PYENV_ROOT===="
           ls -ahl /github/home/
           echo "======="
