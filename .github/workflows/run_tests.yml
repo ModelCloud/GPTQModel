@@ -99,6 +99,8 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          echo $PYENV_ROOT
+          echo "======="
           ls -ahl /github/home/
           echo "======="
           pyenv versions
@@ -138,6 +140,8 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          echo $PYENV_ROOT
+          echo "======="
           ls -ahl /github/home/
           echo "======="
           pyenv versions
