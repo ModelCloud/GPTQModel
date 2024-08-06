@@ -45,7 +45,6 @@ jobs:
     steps:
       - name: Select server
         id: get_ip
-        shell: bash
         run: |
           if [[ "${{ runner.name }}" == *"intel"* ]]; then
             echo "current ci is intel"
@@ -100,7 +99,6 @@ jobs:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
     steps:
       - name: Print Env
-        shell: bash
         run: |
           echo "======="
           pyenv versions
@@ -118,12 +116,10 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        shell: bash
         run: |
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        shell: bash
         run: |
           python setup.py bdist_wheel
 
@@ -141,7 +137,6 @@ jobs:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
     steps:
       - name: Print Env
-        shell: bash
         run: |
           pyenv versions
           python --version
@@ -154,12 +149,10 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        shell: bash
         run: |
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        shell: bash
         run: |
           python setup.py bdist_wheel
 
@@ -184,7 +177,6 @@ jobs:
 
       - name: List files
         id: files
-        shell: bash
         run: |
           script="
           import json
@@ -228,11 +220,15 @@ jobs:
 
     steps:
       - name: Print Env
-        shell: bash
         run: |
+          echo "======="
           pyenv versions
+          echo "======="
           python --version
+          echo "======="
           nvcc --version
+          echo "======="
+          pip show torch
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -256,13 +252,11 @@ jobs:
         run: ls -alh dist || true
 
       - name: Install wheel
-        shell: bash
         run: |
           pip install bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
 
       - name: Check platform
-        shell: bash
         run: |
           if [[ "${{ runner.name }}" == *"intel"* ]]; then
             ip=${INTEL_SERVER}
@@ -272,7 +266,6 @@ jobs:
           echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Find suitable GPU
-        shell: bash
         run: |
           timestamp=$(date +%s%3N)
           gpu_id=-1
@@ -298,7 +291,6 @@ jobs:
 
       - name: Release GPU
         if: always()
-        shell: bash
         run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   test_cpu:
@@ -317,11 +309,15 @@ jobs:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
     steps:
       - name: Print Env
-        shell: bash
         run: |
+          echo "======="
           pyenv versions
+          echo "======="
           python --version
+          echo "======="
           nvcc --version
+          echo "======="
+          pip show torch
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -336,7 +332,6 @@ jobs:
           path: dist
 
       - name: Install wheel
-        shell: bash
         run: |
           pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
