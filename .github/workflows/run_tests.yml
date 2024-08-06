@@ -97,22 +97,14 @@ jobs:
       - name: Print Env
         shell: bash
         run: |
-
-          whoami
-
-          echo $HOME
-
-          ls -ahl /
-
-          ls -ahl $HOME
-
-          ls -ahl /root
-          
-
+          echo "======="
           pyenv versions
-
+          echo "======="
           python --version
+          echo "======="
           nvcc --version
+          echo "======="
+          pip show torch
     
       - name: Checkout Codes
         uses: actions/checkout@v4
