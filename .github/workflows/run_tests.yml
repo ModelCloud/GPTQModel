@@ -138,9 +138,15 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          ls -ahl /github/home/
+          echo "======="
           pyenv versions
+          echo "======="
           python --version
+          echo "======="
           nvcc --version
+          echo "======="
+          pip show torch
     
       - name: Checkout Codes
         uses: actions/checkout@v4
