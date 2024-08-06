@@ -101,12 +101,12 @@ jobs:
             cuda: "12.1"
           - torch: "2.0"
             cuda: "12.4"
-      max-parallel: 4
+      max-parallel: 3
     runs-on: [ self-hosted ]
     needs: check-vm
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Print Env
         run: |
