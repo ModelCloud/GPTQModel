@@ -13,7 +13,6 @@ env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   AMD_SERVER: 10.0.13.31
   INTEL_SERVER: 10.0.23.35
-  HOME: /root
 
 concurrency:
   group: ${{ github.ref }}-workflow-release
@@ -107,16 +106,17 @@ jobs:
     needs: check-vm
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
+    timeout-minutes: 20
     steps:
       - name: Print Env
         run: |
-          echo "======="
+          echo "== pyenv =="
           pyenv versions
-          echo "======="
+          echo "== python =="
           python --version
-          echo "======="
+          echo "== nvcc =="
           nvcc --version
-          echo "======="
+          echo "== torch =="
           pip show torch
 
       - name: Checkout Codes
@@ -126,19 +126,17 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Install requirements
-        run: |
-          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        run: |
-          python setup.py bdist_wheel
+        run: python setup.py bdist_wheel
 
       - name: Test install
         run: |
           whl=$(ls -t *.whl | head -n 1)
-          twine check $whl
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
+          twine check $whl
           pip install dist/$whl
 
       - name: Upload artifact
