@@ -15,7 +15,7 @@ env:
   INTEL_SERVER: 10.0.23.35
 
 concurrency:
-  group: ${{ github.ref }}-workflow
+  group: ${{ github.ref }}-workflow-release
   cancel-in-progress: true
 
 jobs:
