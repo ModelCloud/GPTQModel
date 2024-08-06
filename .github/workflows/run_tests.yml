@@ -121,6 +121,7 @@ jobs:
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
+        timeout-minutes: 20
         run: |
           python setup.py bdist_wheel
 
@@ -137,14 +138,6 @@ jobs:
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     steps:
-    
-      - name: Init
-        run: |
-          mkdir -p $HOME/.ssh
-
-      - name: SSH connection to Actions
-        uses: P3TERX/ssh2actions@v1.0.0
-
       - name: Print Env
         run: |
           cat /etc/profile
@@ -172,6 +165,7 @@ jobs:
           pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
+        timeout-minutes: 20
         run: |
           python setup.py bdist_wheel
 
@@ -320,6 +314,7 @@ jobs:
       - check-vm
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.1-torch2.1-python3.11
     strategy:
