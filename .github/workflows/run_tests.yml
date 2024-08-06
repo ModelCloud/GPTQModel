@@ -2,7 +2,7 @@ name: Unit Tests
 
 defaults:
   run:
-    shell: bash --rcfile /root/.bashrc -le {0}
+    shell: bash -le {0}
 
 on:
   schedule:
@@ -99,8 +99,8 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          ls /root
           echo "===$PYENV_ROOT===="
-          ls -ahl /github/home/
           echo "======="
           pyenv versions
           echo "======="
