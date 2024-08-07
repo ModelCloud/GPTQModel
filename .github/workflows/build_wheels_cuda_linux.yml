@@ -139,7 +139,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "== core $(nproc) =="
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -190,7 +189,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "== core $(nproc) =="
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
