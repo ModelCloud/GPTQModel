@@ -129,7 +129,7 @@ jobs:
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: python setup.py bdist_wheel
 
       - name: Upload to artifact
@@ -166,7 +166,7 @@ jobs:
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: python setup.py bdist_wheel
 
       - name: Upload to artifact
