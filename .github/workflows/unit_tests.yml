@@ -155,6 +155,7 @@ jobs:
       - name: Print Env
         run: |
           echo "--------------"
+          ls -ahl /root
           echo ""
           echo "--------------"
           echo ""
