@@ -80,7 +80,7 @@ jobs:
       - name: Assign tasks
         id: assign
         run: |
-          lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=2")
+          lists=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/runner/docker?json=1&divide=2")
           IFS=$'\n' read -r list_1 list_2 <<< "$lists"
 
           echo "list 1: $list_1"
