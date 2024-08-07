@@ -74,13 +74,14 @@ jobs:
 
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
+          
           echo "tag: $tag, ip: $ip"
 
       - name: Assign tasks
         id: assign
         run: |
-          lists=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/runner/docker?json=1&divide=2")
+          lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=2")
           IFS=$'\n' read -r list_1 list_2 <<< "$lists"
 
           echo "list 1: $list_1"
