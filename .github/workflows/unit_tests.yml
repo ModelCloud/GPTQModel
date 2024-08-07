@@ -117,13 +117,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "--------------"
-          echo ""
-          echo "--------------"
-          echo ""
-          cat /etc/profile
-          echo "--------------"
-          echo ""
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -161,6 +154,13 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          echo "--------------"
+          echo ""
+          echo "--------------"
+          echo ""
+          cat /etc/profile
+          echo "--------------"
+          echo ""
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
