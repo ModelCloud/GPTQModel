@@ -8,6 +8,15 @@ on:
     - cron: '0 20 * * *'
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      repo:
+        description: 'GitHub repo {owner}/{repo}'
+        required: false
+        default: ''
+      ref:
+        description: 'Branch, Tag or Commit SHA'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -26,6 +35,8 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
+      amd_list: ${{ steps.assign.outputs.amd_list }}
+      intel_list: ${{ steps.assign.outputs.intel_list }}
     steps:
       - name: Select server
         id: get_ip
@@ -55,58 +66,137 @@ jobs:
 
           echo "Runner tag: $tag"
 
-          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response=error
+          amd_online=0
+          intel_online=0
+          ip=""
+          
+          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "Intel server is online. set ip to $ip"
+            echo "Intel server is online. Set IP to $INTEL_SERVER"
             ip=${INTEL_SERVER}
+            intel_online=1
           else
-            response=$(curl -s --head --max-time 5 http://${AMD_SERVER}/gpu/status) || response=error
-            if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "Intel server is offline."
+          fi
+          
+          response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "AMD server is online. Set IP to $AMD_SERVER"
+            if [[ -z $ip ]]; then
               ip=${AMD_SERVER}
-              echo "AMD server is online. set ip to $ip"
-            else
-              echo "AMD server is offline."
-              exit 1
             fi
+            amd_online=1
+          else
+            echo "AMD server is offline."
+          fi
+
+          # 0 -> AMD & Intel | 1 -> AMD | 2 -> Intel
+          if [[ $amd_online -eq 0 ]] && [[ $intel_online -eq 0 ]]; then
+              exit 1
+          elif [[ $amd_online -eq 1 ]] && [[ $intel_online -eq 1 ]]; then # both intel & amd are online
+              tag=0
+          elif [[ $amd_online -eq 1 ]] && [[ $intel_online -eq 0 ]]; then # both amd is online
+              tag=1
+          elif [[ $amd_online -eq 0 ]] && [[ $intel_online -eq 1 ]]; then # both intel is online
+              tag=2
           fi
 
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
+          echo "TAG=$tag" >> $GITHUB_ENV
+
           echo "tag: $tag, ip: $ip"
 
-  build:
+      - name: Assign tasks
+        id: assign
+        run: |
+          tag=${{ env.TAG }}
+
+          # tag == 0, both intel & amd are online
+          if [[ $tag -eq 0 ]]; then
+              divide=2
+          elif [[ $tag -eq 1 ]] || [[ $tag -eq 2 ]]; then
+              divide=1
+          fi
+
+          lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
+          IFS=$'\n' read -r list_1 list_2 <<< "$lists"
+
+          echo "list 1: $list_1"
+          echo "list 2: $list_2"
+
+          if [[ $tag -eq 1 ]]; then
+              echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
+          elif [[ $tag -eq 2 ]]; then
+              echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+          fi
+
+  release-amd:
     strategy:
       fail-fast: false
       matrix:
-        cuda: [ "11.8", "12.1", "12.4" ]
-        torch: [ "2.0", "2.1", "2.2", "2.3", "2.4" ]
-        python: [ "3.9", "3.10", "3.11" ] # Python 3.12 is unsupported now. https://github.com/intel/intel-extension-for-pytorch/issues/525
-        exclude:
-          - cuda: "12.4"
-            torch: "2.1"
-          - cuda: "12.4"
-            torch: "2.2"
-          - cuda: "12.4"
-            torch: "2.3"
-          - torch: "2.4"
-            cuda: "11.8"
-          - torch: "2.4"
-            cuda: "12.1"
-          - torch: "2.0"
-            python: "3.12"
-          - torch: "2.1"
-            python: "3.12"
-          - torch: "2.0"
-            cuda: "12.1"
-          - torch: "2.0"
-            cuda: "12.4"
+        tag: ${{ fromJSON(needs.check-vm.outputs.amd_list) }}
       max-parallel: 3
-    runs-on: [ self-hosted ]
+    runs-on: [ self-hosted, amd ]
     needs: check-vm
+    if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
-    timeout-minutes: 25
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
+    timeout-minutes: 35
+    steps:
+      - name: Print Env
+        run: |
+          ls -ahl /root
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
+          python --version
+          echo "== nvcc =="
+          nvcc --version
+          echo "== torch =="
+          pip show torch
+
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Install requirements
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+
+      - name: Compile
+        run: python setup.py bdist_wheel
+
+      - name: Test install
+        run: |
+          cd dist
+          whl=$(ls -t *.whl | head -n 1)
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+
+          twine check $whl
+          pip install $whl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}
+
+  release-intel:
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.check-vm.outputs.intel_list) }}
+      max-parallel: 3
+    runs-on: [ self-hosted, intel ]
+    needs: check-vm
+    if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2'
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
+    timeout-minutes: 35
     steps:
       - name: Print Env
         run: |
@@ -133,11 +223,12 @@ jobs:
 
       - name: Test install
         run: |
+          cd dist
           whl=$(ls -t *.whl | head -n 1)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          twine check dist/$whl
-          pip install dist/$whl
+          twine check $whl
+          pip install $whl
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
