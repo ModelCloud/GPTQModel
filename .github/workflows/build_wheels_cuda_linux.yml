@@ -129,13 +129,13 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.amd_list) }}
-      max-parallel: 2
+      max-parallel: 3
     runs-on: [ self-hosted, amd ]
     needs: check-vm
     if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Print Env
         run: |
@@ -180,13 +180,13 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.intel_list) }}
-      max-parallel: 2
+      max-parallel: 3
     runs-on: [ self-hosted, intel ]
     needs: check-vm
     if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Print Env
         run: |
