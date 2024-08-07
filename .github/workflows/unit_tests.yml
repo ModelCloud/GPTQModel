@@ -96,7 +96,7 @@ jobs:
       - name: Select docker
         id: get_docker
         run: |
-          docker=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/random")
+          docker=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?random=1")
           echo "docker=$docker" >> "$GITHUB_OUTPUT"
           echo "select docker image: $docker"
 
