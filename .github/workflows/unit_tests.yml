@@ -22,6 +22,10 @@ on:
         description: 'Input Test(s) to Run (default all)'
         required: false
         default: ''
+      docker:
+        description: 'Build with selected docker image'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -96,7 +100,10 @@ jobs:
       - name: Select docker
         id: get_docker
         run: |
-          docker=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?random=1")
+          docker=${{ github.event.inputs.docker }}
+          if [ -z "$docker" ]; then
+              docker=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?random=1")
+          fi
           echo "docker=$docker" >> "$GITHUB_OUTPUT"
           echo "select docker image: $docker"
 
