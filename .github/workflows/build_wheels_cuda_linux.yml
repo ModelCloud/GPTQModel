@@ -162,11 +162,12 @@ jobs:
 
       - name: Test install
         run: |
+          cd dist
           whl=$(ls -t *.whl | head -n 1)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          twine check dist/$whl
-          pip install dist/$whl
+          twine check $whl
+          pip install $whl
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
