@@ -26,6 +26,8 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
+      amd_list: ${{ steps.assign.outputs.amd_list }}
+      intel_list: ${{ steps.assign.outputs.intel_list }}
     steps:
       - name: Select server
         id: get_ip
@@ -75,37 +77,78 @@ jobs:
 
           echo "tag: $tag, ip: $ip"
 
-  build:
+      - name: Assign tasks
+        id: assign
+        run: |
+          lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=2")
+          IFS=$'\n' read -r list_1 list_2 <<< "$lists"
+
+          echo "list 1: $list_1"
+          echo "list 2: $list_2"
+
+          echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
+          echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+
+
+  release-amd:
     strategy:
       fail-fast: false
       matrix:
-        cuda: [ "11.8", "12.1", "12.4" ]
-        torch: [ "2.0", "2.1", "2.2", "2.3", "2.4" ]
-        python: [ "3.9", "3.10", "3.11" ] # Python 3.12 is unsupported now. https://github.com/intel/intel-extension-for-pytorch/issues/525
-        exclude:
-          - cuda: "12.4"
-            torch: "2.1"
-          - cuda: "12.4"
-            torch: "2.2"
-          - cuda: "12.4"
-            torch: "2.3"
-          - torch: "2.4"
-            cuda: "11.8"
-          - torch: "2.4"
-            cuda: "12.1"
-          - torch: "2.0"
-            python: "3.12"
-          - torch: "2.1"
-            python: "3.12"
-          - torch: "2.0"
-            cuda: "12.1"
-          - torch: "2.0"
-            cuda: "12.4"
-      max-parallel: 3
-    runs-on: [ self-hosted ]
+        tag: ${{ fromJSON(needs.check-vm.outputs.amd_list) }}
+      max-parallel: 2
+    runs-on: [ self-hosted, amd ]
     needs: check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda${{ matrix.cuda }}-torch${{ matrix.torch }}-python${{ matrix.python }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
+    timeout-minutes: 25
+    steps:
+      - name: Print Env
+        run: |
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
+          python --version
+          echo "== nvcc =="
+          nvcc --version
+          echo "== torch =="
+          pip show torch
+
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Install requirements
+        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+
+      - name: Compile
+        run: python setup.py bdist_wheel
+
+      - name: Test install
+        run: |
+          whl=$(ls -t *.whl | head -n 1)
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+
+          twine check dist/$whl
+          pip install dist/$whl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}
+
+  release-intel:
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.check-vm.outputs.intel_list) }}
+      max-parallel: 2
+    runs-on: [ self-hosted, intel ]
+    needs: check-vm
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 25
     steps:
       - name: Print Env
