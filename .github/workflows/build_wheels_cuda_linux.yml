@@ -8,6 +8,15 @@ on:
     - cron: '0 20 * * *'
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      repo:
+        description: 'GitHub repo {owner}/{repo}'
+        required: false
+        default: ''
+      ref:
+        description: 'Branch, Tag or Commit SHA'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
