@@ -187,7 +187,8 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          cd distls -ahl .
+          cd dist
+          ls -ahl .
           whl=$(ls -t *.whl | head -n 1)
           curl -F "runid=${{ github.run_id }}" -F "file=@${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
