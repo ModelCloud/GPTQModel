@@ -7,19 +7,20 @@ from os.path import basename, isfile, join
 from typing import Dict, List, Optional, Union
 
 import accelerate
+import lm_eval
 import torch
 import torch.nn as nn
 import transformers
 from accelerate.hooks import remove_hook_from_module
+from lm_eval.loggers import EvaluationTracker, WandbLogger
+from lm_eval.tasks import TaskManager
+from lm_eval.utils import handle_non_serializable
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
-import lm_eval
-from lm_eval.loggers import EvaluationTracker, WandbLogger
-from lm_eval.utils import handle_non_serializable
-from lm_eval.tasks import TaskManager
+
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
