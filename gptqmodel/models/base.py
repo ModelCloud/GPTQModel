@@ -16,7 +16,10 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
-
+import lm_eval
+from lm_eval.loggers import EvaluationTracker, WandbLogger
+from lm_eval.utils import handle_non_serializable
+from lm_eval.tasks import TaskManager
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
@@ -872,6 +875,114 @@ class BaseGPTQModel(nn.Module):
     ):
         logger.warning("You are using save_pretrained, which will re-direct to save_quantized.")
         self.save_quantized(save_dir=save_dir, **kwargs)
+
+    @classmethod
+    def lm_eval(
+        cls,
+        model='hf',
+        model_args: Optional[Union[str, dict]] = None,
+        tasks: Optional[List[Union[str, dict, object]]] = None,
+        num_fewshot: Optional[int] = None,
+        batch_size: Optional[Union[int, str]] = None,
+        max_batch_size: Optional[int] = None,
+        device: Optional[str] = None,
+        use_cache: Optional[str] = None,
+        cache_requests: bool = False,
+        rewrite_requests_cache: bool = False,
+        delete_requests_cache: bool = False,
+        limit: Optional[Union[int, float]] = None,
+        bootstrap_iters: int = 100000,
+        check_integrity: bool = False,
+        write_out: bool = False,
+        log_samples: bool = True,
+        evaluation_tracker: Optional[EvaluationTracker] = None,
+        system_instruction: Optional[str] = None,
+        apply_chat_template: bool = False,
+        fewshot_as_multiturn: bool = False,
+        gen_kwargs: Optional[str] = None,
+        task_manager: Optional[TaskManager] = None,
+        verbosity: str = "INFO",
+        predict_only: bool = False,
+        random_seed: int = 0,
+        numpy_random_seed: int = 1234,
+        torch_random_seed: int = 1234,
+        fewshot_random_seed: int = 1234,
+        output_path: Optional[str] = None,
+        wandb_project: Optional[str] = None,
+        wandb_name: Optional[str] = None,
+        show_config: bool = False,
+    ):
+
+        if evaluation_tracker is None and output_path is not None:
+            evaluation_tracker = EvaluationTracker(output_path=output_path)
+
+        results = lm_eval.simple_evaluate(
+            model=model,
+            model_args=model_args,
+            tasks=tasks,
+            device=device,
+            num_fewshot=num_fewshot,
+            batch_size=batch_size,
+            max_batch_size=max_batch_size,
+            use_cache=use_cache,
+            cache_requests=cache_requests,
+            rewrite_requests_cache=rewrite_requests_cache,
+            delete_requests_cache=delete_requests_cache,
+            limit=limit,
+            bootstrap_iters=bootstrap_iters,
+            check_integrity=check_integrity,
+            write_out=write_out,
+            log_samples=log_samples,
+            evaluation_tracker=evaluation_tracker,
+            system_instruction=system_instruction,
+            apply_chat_template=apply_chat_template,
+            fewshot_as_multiturn=fewshot_as_multiturn,
+            gen_kwargs=gen_kwargs,
+            task_manager=task_manager,
+            verbosity=verbosity,
+            predict_only=predict_only,
+            random_seed=random_seed,
+            numpy_random_seed=numpy_random_seed,
+            torch_random_seed=torch_random_seed,
+            fewshot_random_seed=fewshot_random_seed,
+        )
+
+        if results is not None:
+            if log_samples:
+                samples = results.pop("samples")
+
+            dumped = json.dumps(
+                results, indent=2, default=handle_non_serializable, ensure_ascii=False
+            )
+            if show_config:
+                print(dumped)
+
+            # Add W&B logging
+            if wandb_project is not None:
+                wandb_logger = WandbLogger(
+                    project=wandb_project, job_type="eval", name=wandb_name
+                )
+                wandb_logger.post_init(results)
+                wandb_logger.log_eval_result()
+                if log_samples:
+                    wandb_logger.log_eval_samples(samples=samples)
+
+            evaluation_tracker.save_results_aggregated(
+                results=results, samples=samples if log_samples else None
+            )
+
+            if log_samples:
+                for task_name, config in results["configs"].items():
+                    evaluation_tracker.save_results_samples(
+                        task_name=task_name, samples=samples[task_name]
+                    )
+
+            if (evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub):
+                evaluation_tracker.recreate_metadata_card()
+
+            return results
+        else:
+            raise ValueError('lm_eval run fail, check your code!!!')
 
     @classmethod
     def from_pretrained(
