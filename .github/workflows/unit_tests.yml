@@ -273,6 +273,7 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Download wheel
+        continue-on-error: true
         run: |
           file_name=$(curl -s http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download/?runid=${{ github.run_id }}&docker=${{ needs.check-vm.outputs.docker }})
 
@@ -367,6 +368,7 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Download wheel
+        continue-on-error: true
         run: |
           file_name=$(curl -s http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download/?runid=${{ github.run_id }}&docker=${{ needs.check-vm.outputs.docker }})
 
