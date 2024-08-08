@@ -142,8 +142,9 @@ jobs:
       - name: Upload wheel
         run: |
           cd dist
+          ls -ahl .
           whl=$(ls -t *.whl | head -n 1)
-          curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -F "runid=${{ github.run_id }}" -F "file=@${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -160,14 +161,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "--------------"
-          ls -ahl /root
-          echo ""
-          echo "--------------"
-          echo ""
-          cat /etc/profile
-          echo "--------------"
-          echo ""
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -192,9 +185,9 @@ jobs:
 
       - name: Upload wheel
         run: |
-          cd dist
+          cd distls -ahl .
           whl=$(ls -t *.whl | head -n 1)
-          curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -F "runid=${{ github.run_id }}" -F "file=@${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
