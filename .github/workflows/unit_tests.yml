@@ -286,12 +286,10 @@ jobs:
               curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/$file_name
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
-          else
-              echo "DOWNLOADED=0" >> $GITHUB_ENV
           fi
           
       - name: Download artifact
-        if: ${{ env.DOWNLOADED }} == "0"
+        if: ${{ env.DOWNLOADED }} 1= "1"
         uses: actions/download-artifact@v4
         with:
           name: dist
@@ -382,12 +380,10 @@ jobs:
               curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/$file_name
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
-          else
-              echo "DOWNLOADED=0" >> $GITHUB_ENV
           fi
           
       - name: Download artifact
-        if: ${{ env.DOWNLOADED }} == "0"
+        if: ${{ env.DOWNLOADED }} != "1"
         uses: actions/download-artifact@v4
         with:
           name: dist
