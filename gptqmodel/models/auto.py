@@ -144,7 +144,6 @@ class GPTQModel:
             cls,
             model='hf',
             model_args: Optional[Union[str, dict]] = None,
-            model_path: Optional[str] = None,
             trust_remote_code: bool = False,
             tasks: Optional[List[Union[str, dict, object]]] = None,
             num_fewshot: Optional[int] = None,
@@ -177,6 +176,14 @@ class GPTQModel:
             wandb_name: Optional[str] = None,
             show_config: bool = False,
     ):
+        args_list = model_args.split(',')
+        model_path = None
+        for arg in args_list:
+            if arg.startswith("pretrained="):
+                model_path = arg.split('=')[1]
+                break
+        if model_path is None:
+            raise ValueError("Eval Model Path is none. Check your code!!!")
         model_type = check_and_get_model_type(model_path, trust_remote_code)
         return MODEL_MAP[model_type].lm_eval(
             model=model,

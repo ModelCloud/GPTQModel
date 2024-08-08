@@ -21,7 +21,6 @@ class TestLmEval(unittest.TestCase):
        with tempfile.TemporaryDirectory() as tmp_dir:
            model_args = f"pretrained={self.MODEL_ID},parallelize={False},device_map={'auto'},gptqmodel={True}"
            results = GPTQModel.lm_eval(
-                model_path=self.MODEL_ID,
                 model_args=model_args,
                 output_path=tmp_dir,
                 tasks='arc_challenge',
