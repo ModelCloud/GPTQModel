@@ -148,7 +148,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          ls -ahl /root
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -232,6 +231,9 @@ jobs:
 
           twine check $whl
           pip install $whl
+
+      - name: Upload wheel
+        run: curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
