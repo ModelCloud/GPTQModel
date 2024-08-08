@@ -276,7 +276,22 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
+      - name: Download wheel
+        run: |
+          file_name=$(curl -s http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download/?runid=${{ github.run_id }}&docker=${{ needs.check-vm.outputs.docker }})
+
+          if echo "$file_name" | grep -q "gptqmodel"; then
+              mkdir dist || true
+              cd dist
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/$file_name
+              ls
+              echo "DOWNLOADED=1" >> $GITHUB_ENV
+          else
+              echo "DOWNLOADED=0" >> $GITHUB_ENV
+          fi
+          
       - name: Download artifact
+        if: ${{ env.DOWNLOADED }} == "0"
         uses: actions/download-artifact@v4
         with:
           name: dist
@@ -357,7 +372,22 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
+      - name: Download wheel
+        run: |
+          file_name=$(curl -s http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download/?runid=${{ github.run_id }}&docker=${{ needs.check-vm.outputs.docker }})
+
+          if echo "$file_name" | grep -q "gptqmodel"; then
+              mkdir dist || true
+              cd dist
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/$file_name
+              ls
+              echo "DOWNLOADED=1" >> $GITHUB_ENV
+          else
+              echo "DOWNLOADED=0" >> $GITHUB_ENV
+          fi
+          
       - name: Download artifact
+        if: ${{ env.DOWNLOADED }} == "0"
         uses: actions/download-artifact@v4
         with:
           name: dist
