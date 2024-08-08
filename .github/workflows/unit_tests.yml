@@ -140,6 +140,7 @@ jobs:
         run: python setup.py bdist_wheel
 
       - name: Upload wheel
+        continue-on-error: true 
         run: |
           cd dist
           ls -ahl .
@@ -184,6 +185,7 @@ jobs:
         run: python setup.py bdist_wheel
 
       - name: Upload wheel
+        continue-on-error: true
         run: |
           cd distls -ahl .
           whl=$(ls -t *.whl | head -n 1)
