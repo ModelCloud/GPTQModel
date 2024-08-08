@@ -145,7 +145,7 @@ jobs:
           cd dist
           ls -ahl .
           whl=$(ls -t *.whl | head -n 1)
-          curl -F "runid=${{ github.run_id }}" -F "file=@${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -F "runid=${{ github.run_id }}" -F "file=@$whl" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -190,7 +190,7 @@ jobs:
           cd dist
           ls -ahl .
           whl=$(ls -t *.whl | head -n 1)
-          curl -F "runid=${{ github.run_id }}" -F "file=@${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -F "runid=${{ github.run_id }}" -F "file=@$whl" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
