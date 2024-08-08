@@ -139,6 +139,12 @@ jobs:
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
+      - name: Upload wheel
+        run: |
+          cd dist
+          whl=$(ls -t *.whl | head -n 1)
+          curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -183,6 +189,12 @@ jobs:
       - name: Compile
         timeout-minutes: 35
         run: python setup.py bdist_wheel
+
+      - name: Upload wheel
+        run: |
+          cd dist
+          whl=$(ls -t *.whl | head -n 1)
+          curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
