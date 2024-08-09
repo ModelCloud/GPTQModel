@@ -26,6 +26,10 @@ on:
         description: 'Build with selected docker image'
         required: false
         default: ''
+      artifact_id:
+        description: 'Run id for artifact to be downloaded'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -111,7 +115,7 @@ jobs:
   build-intel:
     runs-on: [self-hosted, intel]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'intel'
+    if: needs.check-vm.outputs.tag == 'intel' && ${{ !github.event.inputs.artifact_id }}
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
     steps:
@@ -156,7 +160,7 @@ jobs:
   build-amd:
     runs-on: [self-hosted, amd]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'amd'
+    if: needs.check-vm.outputs.tag == 'amd' && ${{ !github.event.inputs.artifact_id }}
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
     steps:
@@ -244,7 +248,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') || ${{ github.event.inputs.artifact_id }}
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
@@ -266,6 +270,14 @@ jobs:
           echo "== torch =="
           pip show torch
 
+          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
+            run_id="${{ github.event.inputs.artifact_id }}"
+          else
+            run_id="${{ github.run_id }}"
+          fi
+          echo "RUN_ID=$run_id" >> $GITHUB_ENV
+          echo "RUN_ID=${run_id}"
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -275,7 +287,7 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download?runid=${{ github.run_id }}&docker=${{ needs.check-vm.outputs.docker }}&fuzz=1)
+          file_name=$(curl -s http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download?runid=${{ env.RUN_ID }}&fuzz=1)
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
@@ -291,6 +303,7 @@ jobs:
         with:
           name: dist
           path: dist
+          run-id: ${{ env.RUN_ID }}
 
       - name: Install wheel
         run: |
@@ -341,7 +354,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') || ${{ github.event.inputs.artifact_id }}
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
@@ -360,6 +373,14 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+
+          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
+            run_id="${{ github.event.inputs.artifact_id }}"
+          else
+            run_id="${{ github.run_id }}"
+          fi
+          echo "RUN_ID=$run_id" >> $GITHUB_ENV
+          echo "RUN_ID=${run_id}"
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -386,6 +407,7 @@ jobs:
         with:
           name: dist
           path: dist
+          run-id: ${{ env.RUN_ID }}
 
       - name: Install wheel
         run: pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
