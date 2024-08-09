@@ -61,9 +61,7 @@ jobs:
               response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/intel) || response=error
             fi
           fi
-
           echo "response: $response"
-
           if [ "$response" == "0" ]; then
             tag="intel"
           elif [ "$response" == "-1" ]; then
@@ -72,9 +70,7 @@ jobs:
             echo "Error: Unexpected result - $response"
             exit 1
           fi
-
           echo "Runner tag: $tag"
-
           response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response=error
           if echo "$response" | grep "200 OK" > /dev/null; then
             echo "Intel server is online. set ip to $ip"
@@ -89,14 +85,10 @@ jobs:
               exit 1
             fi
           fi
-
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
           echo "GPU_IP=$ip" >> $GITHUB_ENV
-
           echo "tag: $tag, ip: $ip"
-
       - name: Select docker
         id: get_docker
         run: |
@@ -106,14 +98,12 @@ jobs:
           fi
           echo "docker=$docker" >> "$GITHUB_OUTPUT"
           echo "select docker image: $docker"
-
-
   build-intel:
     runs-on: [self-hosted, intel]
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'intel'
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Print Env
         run: |
@@ -150,7 +140,7 @@ jobs:
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'amd'
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Print Env
         run: |
@@ -209,26 +199,20 @@ jobs:
           script="
           import json
           import os
-
           cpu_file_list = [f.strip().removesuffix('.py') for f in '${CPU_TEST_FILES}'.split(',') if f.strip()]
           test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
-
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py')]
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
-
           print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
           "
-
           test_files=$(python3 -c "$script")
           IFS='|' read -r cpu_test_files gpu_test_files <<< "$test_files"
           echo "cpu-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
           echo "gpu-files=$gpu_test_files" >> "$GITHUB_OUTPUT"
-
           echo "Test files: $test_files"
           echo "CPU Test files: $cpu_test_files"
           echo "GPU Test files: $gpu_test_files"
-
   test_gpu:
     needs:
       - build-intel
@@ -239,7 +223,7 @@ jobs:
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -257,7 +241,6 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -274,7 +257,6 @@ jobs:
         run: |
           pip install bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
-
       - name: Check platform
         run: |
           if [[ "${{ runner.name }}" == *"intel"* ]]; then
@@ -283,15 +265,12 @@ jobs:
             ip=${AMD_SERVER}
           fi
           echo "GPU_IP=$ip" >> $GITHUB_ENV
-
       - name: Find suitable GPU
         run: |
           timestamp=$(date +%s%3N)
           gpu_id=-1
-
           while [ "$gpu_id" -lt 0 ]; do
             gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
-
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
@@ -303,7 +282,6 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
-
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
@@ -322,7 +300,7 @@ jobs:
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success')
     timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
@@ -338,7 +316,6 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
