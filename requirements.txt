@@ -16,5 +16,4 @@ protobuf>=4.25.3
 intel_extension_for_transformers>=1.4.2
 auto-round==0.2
 huggingface-hub>=0.24.2
-# Add the lm-evaluation-harness dependency from the support GPTQModel branch
-git+https://github.com/CL-ModelCloud/lm-evaluation-harness.git@MOD-Support-GPTQModel
+lm_eval==0.4.3
