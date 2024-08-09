@@ -22,10 +22,6 @@ on:
         description: 'Input Test(s) to Run (default all)'
         required: false
         default: ''
-      docker:
-        description: 'Build with selected docker image'
-        required: false
-        default: ''
       artifact_id:
         description: 'Run id for artifact to be downloaded'
         required: false
@@ -50,7 +46,6 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
-      docker: ${{ steps.get_docker.outputs.docker }}
     steps:
       - name: Select server
         id: get_ip
@@ -110,23 +105,12 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
 
-      - name: Select docker
-        id: get_docker
-        run: |
-          docker=${{ github.event.inputs.docker }}
-          if [ -z "$docker" ]; then
-              docker=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?random=1")
-          fi
-          echo "docker=$docker" >> "$GITHUB_OUTPUT"
-          echo "select docker image: $docker"
-
-
   build-intel:
     runs-on: [self-hosted, intel]
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'intel' && github.event.inputs.artifact_id == ''
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Print Env
         run: |
@@ -139,7 +123,7 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-    
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -154,7 +138,7 @@ jobs:
         run: python setup.py bdist_wheel
 
       - name: Upload wheel
-        continue-on-error: true 
+        continue-on-error: true
         run: |
           cd dist
           ls -ahl .
@@ -172,7 +156,7 @@ jobs:
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'amd' && github.event.inputs.artifact_id == ''
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
       - name: Print Env
         run: |
@@ -185,7 +169,7 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-    
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -262,7 +246,7 @@ jobs:
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success' || github.event.inputs.artifact_id != '')
     timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -307,7 +291,7 @@ jobs:
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
           fi
-          
+
       - name: Download artifact
         if: env.DOWNLOADED == ''
         uses: actions/download-artifact@v4
@@ -368,7 +352,7 @@ jobs:
     if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success' || github.event.inputs.artifact_id != '')
     timeout-minutes: 40
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
       fail-fast: false
       matrix:
@@ -403,7 +387,7 @@ jobs:
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
           fi
-          
+
       - name: Download artifact
         if: env.DOWNLOADED == ''
         uses: actions/download-artifact@v4
