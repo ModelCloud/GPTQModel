@@ -884,7 +884,6 @@ class BaseGPTQModel(nn.Module):
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
         max_batch_size: Optional[int] = 64,
-        device: Optional[str] = None,
         use_cache: Optional[str] = None,
         cache_requests: bool = False,
         rewrite_requests_cache: bool = False,
@@ -910,16 +909,11 @@ class BaseGPTQModel(nn.Module):
         wandb_project: Optional[str] = None,
         wandb_name: Optional[str] = None,
         show_config: bool = False,
-        trust_remote_code: bool = False,
-        torch_dtype: [str | torch.dtype] = "auto",
     ):
         LM = HFLM(
             pretrained=self,
-            device=device,
-            dtype=torch_dtype,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
-            trust_remote_code=trust_remote_code,
         )
         # evaluation_tracker need model_args cannot be None
         model_args = ""
@@ -930,7 +924,7 @@ class BaseGPTQModel(nn.Module):
             model=LM,
             model_args=model_args,
             tasks=tasks,
-            device=device,
+            device=self.device,
             num_fewshot=num_fewshot,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
