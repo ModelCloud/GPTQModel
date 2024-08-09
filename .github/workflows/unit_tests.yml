@@ -94,8 +94,9 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          pyenv versions
           echo "== python =="
-          python --version
+          python -V
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
@@ -129,16 +130,9 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "--------------"
-          ls -ahl /root
-          echo ""
-          echo "--------------"
-          echo ""
-          cat /etc/profile
-          echo "--------------"
-          echo ""
+          pyenv versions
           echo "== python =="
-          python --version
+          python -V
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
