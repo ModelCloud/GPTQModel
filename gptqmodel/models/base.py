@@ -13,9 +13,9 @@ import torch.nn as nn
 import transformers
 from accelerate.hooks import remove_hook_from_module
 from lm_eval.loggers import EvaluationTracker, WandbLogger
+from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable
-from lm_eval.models.huggingface import HFLM
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
