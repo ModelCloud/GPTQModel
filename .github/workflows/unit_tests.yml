@@ -115,11 +115,11 @@ jobs:
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
-      # - name: Upload to artifact
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: dist
-      #     path: dist
+      - name: Upload to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
 
   build-amd:
     runs-on: [self-hosted, amd]
@@ -151,11 +151,11 @@ jobs:
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
-      # - name: Upload to artifact
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: dist
-      #     path: dist
+      - name: Upload to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
 
   list-test-files:
     runs-on: ubuntu-latest
@@ -222,11 +222,11 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
-      # - name: Download artifact
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: dist
-      #     path: dist
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
 
       - name: Install wheel
         run: |
@@ -295,11 +295,11 @@ jobs:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
 
-      # - name: Download artifact
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: dist
-      #     path: dist
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
 
       - name: Install wheel
         run: pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
