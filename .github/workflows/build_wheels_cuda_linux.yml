@@ -179,10 +179,15 @@ jobs:
           pip install $whl
 
       - name: Upload wheel
-        run: curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+        run: |
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          if [ "$response" -eq 1 ]; then
+            echo "UPLOADED=1" >> $GITHUB_ENV
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: ${{ env.UPLOADED }} == "1"
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
@@ -233,10 +238,15 @@ jobs:
           pip install $whl
 
       - name: Upload wheel
-        run: curl -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+        run: |
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          if [ "$response" -eq 1 ]; then
+            echo "UPLOADED=1" >> $GITHUB_ENV
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: ${{ env.UPLOADED }} == "1"
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
