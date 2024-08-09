@@ -101,6 +101,10 @@ jobs:
 
           echo "tag: $tag, ip: $ip"
 
+          echo "------"
+
+          echo "artifact_id=${{ github.event.inputs.artifact_id }}, ${{ !github.event.inputs.artifact_id }}"
+
       - name: Select docker
         id: get_docker
         run: |
