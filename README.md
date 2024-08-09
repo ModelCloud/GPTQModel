@@ -44,6 +44,7 @@ GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, mor
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
+* 🚀 Added `EXAONE 3.0` Model Support
 * 🚀 Added `InternLM 2.5` Model Support
 * 🚀 Added `Gemma 2` Model Support
 * 🚀 Added `DeepSeek-V2` Model Support
@@ -91,16 +92,17 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Model Support ( 🚀 GPTQModel only )
 
-| Model          |    |                       |    |           |    |            |    |
-|----------------|----|-----------------------|----|-----------|----|------------|----|
-| Baichuan       | ✅  | DeepSeek-V2-Lite      | 🚀 | Llama     | ✅  | Phi/Phi-3  | 🚀 |
-| Bloom          | ✅  | Falon                 | ✅  | LongLLaMA | ✅  | Qwen       | ✅  |
-| ChatGLM        | 🚀 | Gemma 2               |  🚀  | MiniCPM   | 🚀 | Qwen2MoE   | 🚀 |
-| CodeGen        | ✅  | GPTBigCod             | ✅  | Mistral   | ✅  | RefinedWeb | ✅  |
-| Cohere         | ✅  | GPTNeoX               | ✅  | Mixtral   | ✅  | StableLM   | ✅  |
-| DBRX Converted | 🚀 | GPT-2                 | ✅  | MOSS      | ✅  | StarCoder2 | ✅  |
-| Deci           | ✅  | GPT-J                 | ✅  | MPT       | ✅  | XVERSE     | ✅  |
-| DeepSeek-V2    | 🚀 | InternLM/InternLM 2.5 | 🚀  | OPT       | ✅  | Yi         | ✅  |
+| Model            |    |                       |    |           |    |            |    |
+|------------------|----|-----------------------|----|-----------|----|------------|----|
+| Baichuan         | ✅  | EXAONE 3.0            | 🚀 | LongLLaMA | ✅  | Qwen2MoE   | 🚀 |
+| Bloom            | ✅  | Falon                 | ✅  | MiniCPM   | 🚀 | RefinedWeb | ✅  |
+| ChatGLM          | 🚀 | Gemma 2               | 🚀 | Mistral   | ✅  | StableLM   | ✅  |
+| CodeGen          | ✅  | GPTBigCod             | ✅  | Mixtral   | ✅  | StarCoder2 | ✅  |
+| Cohere           | ✅  | GPTNeoX               | ✅  | MOSS      | ✅  | XVERSE     | ✅  |
+| DBRX Converted   | 🚀 | GPT-2                 | ✅  | MPT       | ✅  | Yi         | ✅  |
+| Deci             | ✅  | GPT-J                 | ✅  | OPT       | ✅  |            |    |
+| DeepSeek-V2      | 🚀 | InternLM/InternLM 2.5 | 🚀 | Phi/Phi-3 | 🚀 |            |    |
+| DeepSeek-V2-Lite | 🚀 | Llama                 | ✅  | Qwen      | ✅  |            |    |
 
 ## Compatiblity 
 
