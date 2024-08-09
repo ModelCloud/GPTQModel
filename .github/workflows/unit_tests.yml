@@ -101,7 +101,13 @@ jobs:
 
           echo "tag: $tag, ip: $ip"
 
-          echo "artifact_id=${{ github.event.inputs.artifact_id }}"
+          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
+            run_id="${{ github.event.inputs.artifact_id }}"
+          else
+            run_id="${{ github.run_id }}"
+          fi
+
+          echo "artifact_id=$run_id"
 
       - name: Select docker
         id: get_docker
