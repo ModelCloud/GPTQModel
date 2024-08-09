@@ -258,7 +258,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') || ${{ github.event.inputs.artifact_id }}
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') || github.event.inputs.artifact_id != ''
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
@@ -364,7 +364,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') || ${{ github.event.inputs.artifact_id }}
+    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success') || github.event.inputs.artifact_id != ''
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
