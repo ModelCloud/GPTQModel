@@ -2,6 +2,9 @@ from .base import BaseGPTQModel
 
 
 class ExaoneGPTQ(BaseGPTQModel):
+    # exaone requires custom model code
+    require_trust_remote_code = True
+
     base_modules = ["transformer.ln_f", "transformer.wte"]
 
     layers_node = "transformer.h"
