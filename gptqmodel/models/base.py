@@ -15,6 +15,7 @@ from accelerate.hooks import remove_hook_from_module
 from lm_eval.loggers import EvaluationTracker, WandbLogger
 from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable
+from lm_eval.models.huggingface import HFLM
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
@@ -877,11 +878,8 @@ class BaseGPTQModel(nn.Module):
         logger.warning("You are using save_pretrained, which will re-direct to save_quantized.")
         self.save_quantized(save_dir=save_dir, **kwargs)
 
-    @classmethod
     def lm_eval(
-        cls,
-        model='hf',
-        model_args: Optional[Union[str, dict]] = None,
+        self,
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = None,
@@ -912,13 +910,24 @@ class BaseGPTQModel(nn.Module):
         wandb_project: Optional[str] = None,
         wandb_name: Optional[str] = None,
         show_config: bool = False,
+        trust_remote_code: bool = False,
+        torch_dtype: [str | torch.dtype] = "auto",
     ):
-
+        LM = HFLM(
+            pretrained=self,
+            device=device,
+            dtype=torch_dtype,
+            batch_size=batch_size,
+            max_batch_size=max_batch_size,
+            trust_remote_code=trust_remote_code,
+        )
+        # evaluation_tracker need model_args cannot be None
+        model_args = ""
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
 
         results = lm_eval.simple_evaluate(
-            model=model,
+            model=LM,
             model_args=model_args,
             tasks=tasks,
             device=device,
