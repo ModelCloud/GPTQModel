@@ -117,7 +117,7 @@ jobs:
   build-intel:
     runs-on: [self-hosted, intel]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'intel' && github.event.inputs.artifact_id == ""
+    if: needs.check-vm.outputs.tag == 'intel' && github.event.inputs.artifact_id == ''
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
     steps:
@@ -163,7 +163,7 @@ jobs:
   build-amd:
     runs-on: [self-hosted, amd]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'amd' && github.event.inputs.artifact_id == ""
+    if: needs.check-vm.outputs.tag == 'amd' && github.event.inputs.artifact_id == ''
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ needs.check-vm.outputs.docker }}
     steps:
