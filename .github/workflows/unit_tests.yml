@@ -102,9 +102,10 @@ jobs:
           echo "tag: $tag, ip: $ip"
 
           echo "------"
-          echo $('$tag' == 'amd' && ${{ !github.event.inputs.artifact_id }})
-          echo $('$tag' == 'intel' && ${{ !github.event.inputs.artifact_id }})
+
           echo "artifact_id=${{ github.event.inputs.artifact_id }}"
+          echo "$tag == 'amd' && ${{ !github.event.inputs.artifact_id }}
+          echo "$tag == 'intel' && ${{ !github.event.inputs.artifact_id }}
 
       - name: Select docker
         id: get_docker
