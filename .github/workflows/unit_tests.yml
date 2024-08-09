@@ -302,7 +302,7 @@ jobs:
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.RUN_ID }}/$file_name
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
           fi
@@ -406,7 +406,7 @@ jobs:
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.RUN_ID }}/$file_name
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
           fi
