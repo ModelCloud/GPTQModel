@@ -140,4 +140,3 @@ class GPTQModel:
             verify_hash=verify_hash,
             **kwargs,
         )
-
