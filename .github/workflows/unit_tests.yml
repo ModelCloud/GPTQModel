@@ -49,8 +49,8 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
+      run_id: ${{ steps.get_ip.outputs.run_id }}
       docker: ${{ steps.get_docker.outputs.docker }}
-      run_id: ${{ steps.get_docker.outputs.run_id }}
     steps:
       - name: Select server
         id: get_ip
