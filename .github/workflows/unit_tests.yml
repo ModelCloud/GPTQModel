@@ -49,7 +49,8 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
-      docker:  ${{ steps.get_docker.outputs.docker }}
+      docker: ${{ steps.get_docker.outputs.docker }}
+      run_id: ${{ steps.get_docker.outputs.run_id }}
     steps:
       - name: Select server
         id: get_ip
@@ -106,7 +107,7 @@ jobs:
           else
             run_id="${{ github.run_id }}"
           fi
-
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
 
       - name: Select docker
@@ -297,12 +298,12 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download?runid=${{ env.RUN_ID }}&fuzz=1")
+          file_name=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download?runid=${{ needs.check-vm.outputs.run_id }}&fuzz=1")
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.RUN_ID }}/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ needs.check-vm.outputs.run_id }}/$file_name
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
           fi
@@ -313,7 +314,7 @@ jobs:
         with:
           name: dist
           path: dist
-          run-id: ${{ env.RUN_ID }}
+          run-id: ${{ needs.check-vm.outputs.run_id }}
 
       - name: Install wheel
         run: |
@@ -384,14 +385,6 @@ jobs:
           echo "== torch =="
           pip show torch
 
-          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
-            run_id="${{ github.event.inputs.artifact_id }}"
-          else
-            run_id="${{ github.run_id }}"
-          fi
-          echo "RUN_ID=$run_id" >> $GITHUB_ENV
-          echo "RUN_ID=${run_id}"
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -401,12 +394,12 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download?runid=${{ github.run_id }}&fuzz=1")
+          file_name=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download?runid=${{ needs.check-vm.outputs.run_id }}&fuzz=1")
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.RUN_ID }}/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ needs.check-vm.outputs.run_id }}/$file_name
               ls
               echo "DOWNLOADED=1" >> $GITHUB_ENV
           fi
@@ -417,7 +410,7 @@ jobs:
         with:
           name: dist
           path: dist
-          run-id: ${{ env.RUN_ID }}
+          run-id: ${{ needs.check-vm.outputs.run_id }}
 
       - name: Install wheel
         run: pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
