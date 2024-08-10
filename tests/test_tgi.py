@@ -18,16 +18,16 @@ class TestModelInference(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp_dir = tempfile.TemporaryDirectory()
-        cls.MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        cls.MODEL_ID = "LnL-AI/opt-125M-autoround-lm_head-false-symTrue"
         cls.volume = f"{cls.tmp_dir.name}/data"
         cls.docker_image = "ghcr.io/huggingface/text-generation-inference:2.2.0"
-        cls.port = 8080
+        cls.port = 8081
 
         cls.docker_process = subprocess.Popen(
             [
                 "docker", "run", "--gpus", "all", "--shm-size", "1g",
                 "-p", f"{cls.port}:80", "-v", f"{cls.volume}:/data",
-                cls.docker_image, "--model-id", cls.MODEL_ID
+                cls.docker_image, "--model-id", cls.MODEL_ID, "--quantize", "gptq"
             ],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -79,4 +79,4 @@ class TestModelInference(unittest.TestCase):
             if generated_text is not None:
                 generated_text = generated_text.strip()
             print(f"Generated text:{generated_text}")
-            self.assertEqual(generated_text, "Deep Learning is a type of machine learning that involves the use of deep neural networks.")
+            self.assertEqual(generated_text, "Deep learning is a new technology that uses machine learning to learn. It is a new technology")
