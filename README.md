@@ -15,11 +15,15 @@
 * 07/25/2024 🚀 [v0.9.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.9): Added Llama-3.1 support, Gemma2 27B quant inference support via vLLM, auto pad_token normalization, fixed auto-round quant compat for vLLM/SGLang, and more.  
 * 07/13/2024 🚀🚀🚀 [v0.9.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.8):
 Run quantized models directly using GPTQModel using fast `vLLM` or `SGLang` backend! Both vLLM and SGLang are optimized for dyanamic batching inference for maximum `TPS` (check usage under examples). Marlin backend also
-got full end-to-end in/out features padding to enhance current/future model compatibility. 
-
+got full end-to-end in/out features padding to enhance current/future model compatibility.
 * 07/08/2024 🚀 [v0.9.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.7): InternLM 2.5 model support added.
-
 * 07/08/2024 🚀🚀 [v0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
+
+<details>
+    
+<summary>Archived News:</summary>
+
+
 
 * 07/05/2024 🚀🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU. Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
 
@@ -33,6 +37,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/29/2024 🚀🚀🚀 [v0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1): With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refractor/usability improvements, bugs fixes and much more.
 
 * 06/20/2924 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
+</details>
 
 ## Mission Statement
 
@@ -81,17 +86,8 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * ✨ Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
 * ✨ Everything that did not pass unit-tests have been removed from repo.
 
-## Roadmap (Target Date: July 2024):
-
-* <del>`lm_head` quantization support by integrating with Intel/AutoRound.</del> Completed
-* Customizable callback in Per-Layer quantization.
-* <del>Add Qbits (cpu inference) support from Intel/Qbits.</del> Completed
-* Add back ROCM/AMD support once everything is validated.
-* Store quant loss stat and apply diffs to new quant for quality control.
-* Add Tests for every single supported model.
-
-
-## Model Support ( 🚀 GPTQModel only )
+## Model Support ( 🚀 GPTQModel only ) 
+[Ready to deply quantized models](https://hf.co/ModelCloud)
 
 | Model            |    |                       |    |           |    |            |    |
 |------------------|----|-----------------------|----|-----------|----|------------|----|
