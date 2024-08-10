@@ -192,6 +192,14 @@ jobs:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
 
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.RUNNER_TOKEN }}
+          file: dist/${{ env.WHL_NAME }}
+          tag: ${{ github.ref }}
+          file_glob: true
+
   release-intel:
     strategy:
       fail-fast: false
@@ -250,3 +258,11 @@ jobs:
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.RUNNER_TOKEN }}
+          file: dist/${{ env.WHL_NAME }}
+          tag: ${{ github.ref }}
+          file_glob: true
