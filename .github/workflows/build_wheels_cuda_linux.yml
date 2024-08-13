@@ -175,7 +175,7 @@ jobs:
       - name: Test install
         run: |
           ls -ahl dist
-          whl=$(ls -t dist/*.gz | head -n 1)
+          whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check $whl
@@ -242,7 +242,7 @@ jobs:
       - name: Test install
         run: |
           ls -ahl dist
-          whl=$(ls -t dist/*.gz | head -n 1)
+          whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check $whl
@@ -300,7 +300,7 @@ jobs:
       - name: Check dist
         run: |
           ls -ahl dist
-          whl=$(ls -t dist/*.gz | head -n 1)
+          whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check $whl
