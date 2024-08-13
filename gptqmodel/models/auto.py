@@ -39,6 +39,7 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
+from .falcon_mamba import FalconMambaGPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -79,6 +80,7 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
     "exaone": ExaoneGPTQ,
+    "falcon_mamba": FalconMambaGPTQ,
 }
 
 
