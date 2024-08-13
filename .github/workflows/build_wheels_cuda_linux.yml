@@ -151,6 +151,7 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          echo ${{ github.event_name }}
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -197,6 +198,7 @@ jobs:
 
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
+        if: github.event_name == 'release'
         with:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ github.ref }}
@@ -263,6 +265,7 @@ jobs:
 
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
+        if: github.event_name == 'release'
         with:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ github.ref }}
