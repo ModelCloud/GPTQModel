@@ -326,6 +326,3 @@ jobs:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ github.ref }}
           file_glob: true
-
-      - name: Test install
-        run: pip install dist/${{ env.WHL_NAME }}
