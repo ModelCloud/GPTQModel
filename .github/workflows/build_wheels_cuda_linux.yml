@@ -24,7 +24,7 @@ env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   AMD_SERVER: 10.0.13.31
   INTEL_SERVER: 10.0.23.35
-  TORCH_CUDA_ARCH_LIST: "6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0"
+  TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
 
 concurrency:
   group: ${{ github.ref }}-workflow-release
@@ -151,7 +151,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo ${{ github.event_name }}
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -191,7 +190,7 @@ jobs:
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: ${{ env.UPLOADED }} == "1"
+        continue-on-error: ${{ env.UPLOADED }} == '1'
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
@@ -258,7 +257,7 @@ jobs:
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: ${{ env.UPLOADED }} == "1"
+        continue-on-error: ${{ env.UPLOADED }} == '1'
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
