@@ -3,3 +3,4 @@ global-include gptqmodel_ext/**/*.h
 global-include gptqmodel_ext/**/*.cpp
 global-include gptqmodel_ext/**/*.cu
 global-include gptqmodel_ext/**/*.py
+include requirements.txt
