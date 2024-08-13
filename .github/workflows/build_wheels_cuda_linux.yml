@@ -277,6 +277,8 @@ jobs:
     needs: check-vm
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
+    env:
+      PYPI_RELEASE: true
     steps:
       - name: Print Env
         run: |
