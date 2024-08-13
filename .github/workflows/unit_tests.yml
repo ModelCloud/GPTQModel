@@ -114,7 +114,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "${{ needs.check-vm.outputs.tag }} == 'intel' && ${{ !github.event.inputs.artifact_id }}
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -160,7 +159,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          echo "${{ needs.check-vm.outputs.tag }} == 'amd' && ${{ !github.event.inputs.artifact_id }}
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
