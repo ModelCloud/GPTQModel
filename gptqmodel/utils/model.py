@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from typing import List, Optional
 
@@ -17,7 +18,6 @@ from huggingface_hub import HfApi, hf_hub_download
 from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
-from concurrent.futures import ThreadPoolExecutor
 
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
