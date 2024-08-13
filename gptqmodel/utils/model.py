@@ -17,6 +17,7 @@ from huggingface_hub import HfApi, hf_hub_download
 from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
+from concurrent.futures import ThreadPoolExecutor
 
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -263,8 +264,10 @@ def select_quant_linear_with_pack(bits: int,
     )
     return QuantLinear
 
-def pack_layer(name, qlayers, quantizers, layers, QuantLinear):
+def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
+    # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
+        pbar.set_description(f"Packing {name}")
         quantizers[name], scale, zero, g_idx = quantizers[name]
         layer_device = qlayers[name].device
         qlayers[name].to(CPU)
@@ -279,6 +282,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear):
         else:
             qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
+        pbar.update()
 
 def pack_model(
     model,
@@ -292,9 +296,6 @@ def pack_model(
     force_layer_back_to_cpu: bool = False,
     dynamic=None,
 ):
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         dynamic=dynamic,
@@ -325,40 +326,16 @@ def pack_model(
         dynamic=dynamic,
     )
     qlayers = find_layers(model, [QuantLinear])
-    start = time.time()
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        executor.map(
-            pack_layer,
-            qlayers.keys(),
-            [qlayers] * len(qlayers),
-            [quantizers] * len(qlayers),
-            [layers] * len(qlayers),
-            [QuantLinear] * len(qlayers)
-        )
-    # Limit pack() thread usage to avoid auto-parallizataion regression
-    # with tctl.threadpool_limits(limits=1):
-    #     pbar = tqdm(qlayers.keys(), leave=True)
-    #     for name in pbar:
-    #         pbar.set_description(f"Packing {name}")
-    #
-    #         quantizers[name], scale, zero, g_idx = quantizers[name]
-    #         # so far can only pack layer on CPU
-    #         layer_device = qlayers[name].device
-    #         qlayers[name].to(CPU)
-    #         layers[name], scale, zero, g_idx = (
-    #             layers[name].to(CPU),
-    #             scale.to(CPU),
-    #             zero.to(CPU),
-    #             g_idx.to(CPU),
-    #         )
-    #         if QuantLinear is MarlinQuantLinear:
-    #             qlayers[name].pack(layers[name], scale)
-    #         else:
-    #             qlayers[name].pack(layers[name], scale, zero, g_idx)
-    #         qlayers[name].to(layer_device)
+    names = list(qlayers.keys())
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with tqdm(total=len(names), leave=True) as pbar:
+            def wrapper(name):
+                pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
+
+            for _ in executor.map(wrapper, names):
+                pass
 
     logger.info("Model packed.")
-    print(f"Time for pack: {time.time() - start}")
     return QuantLinear
 
 def verify_model_hash(file_path: str, verify_hash: str):
