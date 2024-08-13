@@ -178,8 +178,8 @@ jobs:
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          twine check $whl
-          pip install $whl
+          twine check dist/$whl
+          pip install dist/$whl
 
       - name: Upload wheel
         run: |
@@ -245,8 +245,8 @@ jobs:
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          twine check $whl
-          pip install $whl
+          twine check dist/$whl
+          pip install dist/$whl
 
       - name: Upload wheel
         run: |
@@ -303,7 +303,7 @@ jobs:
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          twine check $whl
+          twine check dist/$whl
 
       - name: Upload package
         run: |
