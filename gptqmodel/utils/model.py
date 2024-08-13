@@ -325,36 +325,36 @@ def pack_model(
     )
     qlayers = find_layers(model, [QuantLinear])
 
-    # with ThreadPoolExecutor(max_workers=4) as executor:
-    #     executor.map(
-    #         pack_layer,
-    #         qlayers.keys(),
-    #         [qlayers] * len(qlayers),
-    #         [quantizers] * len(qlayers),
-    #         [layers] * len(qlayers),
-    #         [QuantLinear] * len(qlayers)
-    #     )
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        executor.map(
+            pack_layer,
+            qlayers.keys(),
+            [qlayers] * len(qlayers),
+            [quantizers] * len(qlayers),
+            [layers] * len(qlayers),
+            [QuantLinear] * len(qlayers)
+        )
     # Limit pack() thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        pbar = tqdm(qlayers.keys(), leave=True)
-        for name in pbar:
-            pbar.set_description(f"Packing {name}")
-
-            quantizers[name], scale, zero, g_idx = quantizers[name]
-            # so far can only pack layer on CPU
-            layer_device = qlayers[name].device
-            qlayers[name].to(CPU)
-            layers[name], scale, zero, g_idx = (
-                layers[name].to(CPU),
-                scale.to(CPU),
-                zero.to(CPU),
-                g_idx.to(CPU),
-            )
-            if QuantLinear is MarlinQuantLinear:
-                qlayers[name].pack(layers[name], scale)
-            else:
-                qlayers[name].pack(layers[name], scale, zero, g_idx)
-            qlayers[name].to(layer_device)
+    # with tctl.threadpool_limits(limits=1):
+    #     pbar = tqdm(qlayers.keys(), leave=True)
+    #     for name in pbar:
+    #         pbar.set_description(f"Packing {name}")
+    #
+    #         quantizers[name], scale, zero, g_idx = quantizers[name]
+    #         # so far can only pack layer on CPU
+    #         layer_device = qlayers[name].device
+    #         qlayers[name].to(CPU)
+    #         layers[name], scale, zero, g_idx = (
+    #             layers[name].to(CPU),
+    #             scale.to(CPU),
+    #             zero.to(CPU),
+    #             g_idx.to(CPU),
+    #         )
+    #         if QuantLinear is MarlinQuantLinear:
+    #             qlayers[name].pack(layers[name], scale)
+    #         else:
+    #             qlayers[name].pack(layers[name], scale, zero, g_idx)
+    #         qlayers[name].to(layer_device)
 
     logger.info("Model packed.")
     print(f"Time for pack: {time.time() - start}")
