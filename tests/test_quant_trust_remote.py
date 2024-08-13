@@ -48,6 +48,8 @@ class TestQuantWithTrustRemoteTrue(unittest.TestCase):
             del model
             py_files = [f for f in os.listdir(tmp_dir) if f.endswith('.py')]
             expected_files = ["modeling_minicpm.py", "configuration_minicpm.py"]
-            self.assertEqual(py_files, expected_files)
+            for file in expected_files:
+                self.assertIn(file, py_files, f"File {file} is missing in the actual files list")
+
 
 

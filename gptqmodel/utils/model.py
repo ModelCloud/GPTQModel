@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from typing import List, Optional
 
@@ -263,6 +264,26 @@ def select_quant_linear_with_pack(bits: int,
     )
     return QuantLinear
 
+def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
+    # Limit pack() thread usage to avoid auto-parallizataion regression
+    with tctl.threadpool_limits(limits=1):
+        pbar.set_description(f"Packing {name}")
+        quantizers[name], scale, zero, g_idx = quantizers[name]
+        layer_device = qlayers[name].device
+        qlayers[name].to(CPU)
+        layers[name], scale, zero, g_idx = (
+            layers[name].to(CPU),
+            scale.to(CPU),
+            zero.to(CPU),
+            g_idx.to(CPU),
+        )
+        if QuantLinear is MarlinQuantLinear:
+            qlayers[name].pack(layers[name], scale)
+        else:
+            qlayers[name].pack(layers[name], scale, zero, g_idx)
+        qlayers[name].to(layer_device)
+        pbar.update()
+
 def pack_model(
     model,
     quantizers,
@@ -290,6 +311,7 @@ def pack_model(
         model.to(CPU)
 
     logger.info("Packing model...")
+
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
     make_quant(
@@ -304,31 +326,16 @@ def pack_model(
         dynamic=dynamic,
     )
     qlayers = find_layers(model, [QuantLinear])
+    names = list(qlayers.keys())
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with tqdm(total=len(names), leave=True) as pbar:
+            def wrapper(name):
+                pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
 
-    # Limit pack() thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        pbar = tqdm(qlayers.keys(), leave=True)
-        for name in pbar:
-            pbar.set_description(f"Packing {name}")
-
-            quantizers[name], scale, zero, g_idx = quantizers[name]
-            # so far can only pack layer on CPU
-            layer_device = qlayers[name].device
-            qlayers[name].to(CPU)
-            layers[name], scale, zero, g_idx = (
-                layers[name].to(CPU),
-                scale.to(CPU),
-                zero.to(CPU),
-                g_idx.to(CPU),
-            )
-            if QuantLinear is MarlinQuantLinear:
-                qlayers[name].pack(layers[name], scale)
-            else:
-                qlayers[name].pack(layers[name], scale, zero, g_idx)
-            qlayers[name].to(layer_device)
+            for _ in executor.map(wrapper, names):
+                pass
 
     logger.info("Model packed.")
-
     return QuantLinear
 
 def verify_model_hash(file_path: str, verify_hash: str):
