@@ -263,6 +263,22 @@ def select_quant_linear_with_pack(bits: int,
     )
     return QuantLinear
 
+def pack_layer(name, qlayers, quantizers, layers, QuantLinear):
+    quantizers[name], scale, zero, g_idx = quantizers[name]
+    layer_device = qlayers[name].device
+    qlayers[name].to(CPU)
+    layers[name], scale, zero, g_idx = (
+        layers[name].to(CPU),
+        scale.to(CPU),
+        zero.to(CPU),
+        g_idx.to(CPU),
+    )
+    if QuantLinear is MarlinQuantLinear:
+        qlayers[name].pack(layers[name], scale)
+    else:
+        qlayers[name].pack(layers[name], scale, zero, g_idx)
+    qlayers[name].to(layer_device)
+
 def pack_model(
     model,
     quantizers,
@@ -275,6 +291,9 @@ def pack_model(
     force_layer_back_to_cpu: bool = False,
     dynamic=None,
 ):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
         dynamic=dynamic,
@@ -290,6 +309,7 @@ def pack_model(
         model.to(CPU)
 
     logger.info("Packing model...")
+    start = time.time()
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
     make_quant(
@@ -305,6 +325,15 @@ def pack_model(
     )
     qlayers = find_layers(model, [QuantLinear])
 
+    # with ThreadPoolExecutor(max_workers=4) as executor:
+    #     executor.map(
+    #         pack_layer,
+    #         qlayers.keys(),
+    #         [qlayers] * len(qlayers),
+    #         [quantizers] * len(qlayers),
+    #         [layers] * len(qlayers),
+    #         [QuantLinear] * len(qlayers)
+    #     )
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         pbar = tqdm(qlayers.keys(), leave=True)
@@ -328,7 +357,7 @@ def pack_model(
             qlayers[name].to(layer_device)
 
     logger.info("Model packed.")
-
+    print(f"Time for pack: {time.time() - start}")
     return QuantLinear
 
 def verify_model_hash(file_path: str, verify_hash: str):
