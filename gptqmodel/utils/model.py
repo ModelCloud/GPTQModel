@@ -310,7 +310,7 @@ def pack_model(
         model.to(CPU)
 
     logger.info("Packing model...")
-    start = time.time()
+
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
     make_quant(
@@ -325,7 +325,7 @@ def pack_model(
         dynamic=dynamic,
     )
     qlayers = find_layers(model, [QuantLinear])
-
+    start = time.time()
     with ThreadPoolExecutor(max_workers=4) as executor:
         executor.map(
             pack_layer,
