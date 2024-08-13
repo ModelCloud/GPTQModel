@@ -264,20 +264,21 @@ def select_quant_linear_with_pack(bits: int,
     return QuantLinear
 
 def pack_layer(name, qlayers, quantizers, layers, QuantLinear):
-    quantizers[name], scale, zero, g_idx = quantizers[name]
-    layer_device = qlayers[name].device
-    qlayers[name].to(CPU)
-    layers[name], scale, zero, g_idx = (
-        layers[name].to(CPU),
-        scale.to(CPU),
-        zero.to(CPU),
-        g_idx.to(CPU),
-    )
-    if QuantLinear is MarlinQuantLinear:
-        qlayers[name].pack(layers[name], scale)
-    else:
-        qlayers[name].pack(layers[name], scale, zero, g_idx)
-    qlayers[name].to(layer_device)
+    with tctl.threadpool_limits(limits=1):
+        quantizers[name], scale, zero, g_idx = quantizers[name]
+        layer_device = qlayers[name].device
+        qlayers[name].to(CPU)
+        layers[name], scale, zero, g_idx = (
+            layers[name].to(CPU),
+            scale.to(CPU),
+            zero.to(CPU),
+            g_idx.to(CPU),
+        )
+        if QuantLinear is MarlinQuantLinear:
+            qlayers[name].pack(layers[name], scale)
+        else:
+            qlayers[name].pack(layers[name], scale, zero, g_idx)
+        qlayers[name].to(layer_device)
 
 def pack_model(
     model,
