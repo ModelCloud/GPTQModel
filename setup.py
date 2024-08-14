@@ -61,7 +61,7 @@ if BUILD_CUDA_EXT:
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if not PYPI_RELEASE:
-        common_setup_kwargs["version"] += f"+cu{CUDA_VERSION}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
+        common_setup_kwargs["version"] += f"+cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 with open('requirements.txt') as f:
     requirements = f.read().splitlines()
