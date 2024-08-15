@@ -61,6 +61,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     QUANT_METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.MARLIN,
+        FORMAT.BITBLAS,
     }
 }
 
