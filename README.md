@@ -107,6 +107,13 @@ ROCM/AMD support will be re-added in a future version after everything on ROCM h
 
 ## Install
 
+### PIP 
+
+```bash
+# Include any specific modules needed using brackets. Example: pip install gptqmodel[sglang,vllm,bitblas] --no-build-isolation
+pip install gptqmodel --no-build-isolation
+```
+
 ### Install from source
 
 ```bash
@@ -128,12 +135,7 @@ uv pip install -vvv --no-build-isolation .
 bash install.sh
 ```
 
-### PIP (PENDING RELEASE) 
 
-```bash
-# Include any specific modules needed using brackets. Example: pip install gptqmodel[sglang,vllm,bitblas] --no-build-isolation
-pip install gptqmodel --no-build-isolation
-```
 
 ### Quantization and Inference
 
