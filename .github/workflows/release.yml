@@ -143,7 +143,9 @@ jobs:
         tag: ${{ fromJSON(needs.check-vm.outputs.amd_list) }}
       max-parallel: 3
     runs-on: [ self-hosted, amd ]
-    needs: check-vm
+    needs: 
+      - check-vm
+      - release-source
     if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
@@ -210,7 +212,9 @@ jobs:
         tag: ${{ fromJSON(needs.check-vm.outputs.intel_list) }}
       max-parallel: 3
     runs-on: [ self-hosted, intel ]
-    needs: check-vm
+    needs: 
+      - check-vm
+      - release-source
     if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
