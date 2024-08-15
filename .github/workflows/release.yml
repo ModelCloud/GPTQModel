@@ -21,8 +21,11 @@ on:
         default: ''
       pypi:
         description: 'Release to PyPI only'
-        required: false
-        default: ''
+        required: true
+        default: 'no'
+        options:
+          - 'yes'
+          - 'no'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -150,7 +153,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == ''
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == 'no'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -219,7 +222,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == ''
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == 'no'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -336,7 +339,7 @@ jobs:
           file_glob: true
 
       - name: Upload sdist to pypi
-        if: github.event.inputs.pypi == '1' || github.event_name == 'release'
+        if: github.event.inputs.pypi == 'yes' || github.event_name == 'release'
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
