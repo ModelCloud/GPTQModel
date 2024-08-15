@@ -334,7 +334,7 @@ class QuantizeConfig():
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
-    layer_config: dict = {},
+    layer_config: dict = {}
     enable_full_range: bool = False  ##for symmetric, TODO support later
     batch_size: int = 1
     amp: bool = True
