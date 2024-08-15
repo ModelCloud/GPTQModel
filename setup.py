@@ -26,23 +26,20 @@ common_setup_kwargs = {
     "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
     "platforms": ["linux"],
     "classifiers": [
-        "Environment :: GPU :: NVIDIA CUDA :: 11.8",
-        "Environment :: GPU :: NVIDIA CUDA :: 12",
-        "Environment :: GPU :: NVIDIA CUDA :: 12.1",
-        "Environment :: GPU :: NVIDIA CUDA :: 12.2",
-        "Environment :: GPU :: NVIDIA CUDA :: 12.3",
-        "Environment :: GPU :: NVIDIA CUDA :: 12.4",
-        "License :: OSI Approved :: MIT License",
-        "Natural Language :: English",
+        "License :: OSI Approved :: Apache Software License",
+        "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
         "Programming Language :: C++",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Education",
+        "Intended Audience :: Science/Research",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 }
 
-PYPI_RELEASE = os.environ.get("PYPI_RELEASE", None)
+CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 BUILD_CUDA_EXT = True
 COMPILE_MARLIN = True
 
@@ -60,7 +57,7 @@ if BUILD_CUDA_EXT:
         sys.exit(1)
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    if not PYPI_RELEASE:
+    if CUDA_RELEASE == "1":
         common_setup_kwargs["version"] += f"+cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 with open('requirements.txt') as f:

@@ -20,15 +20,17 @@ on:
         required: false
         default: ''
       pypi:
+        type: boolean
         description: 'Release to PyPI only'
-        required: false
-        default: ''
+        required: true
+        default: 'false'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   AMD_SERVER: 10.0.13.31
   INTEL_SERVER: 10.0.23.35
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
+  CUDA_RELEASE: 1
 
 concurrency:
   group: ${{ github.ref }}-workflow-release
@@ -150,7 +152,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == ''
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == 'false'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -219,7 +221,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == ''
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == 'false'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -286,7 +288,7 @@ jobs:
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
     env:
-      PYPI_RELEASE: true
+      CUDA_RELEASE: 0
     steps:
       - name: Print Env
         run: |
@@ -298,6 +300,9 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+
+      - name: Checkout Codes
+        uses: actions/checkout@v4
 
       - name: Install requirements
         run: pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -334,3 +339,11 @@ jobs:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ github.ref }}
           file_glob: true
+
+      - name: Upload sdist to pypi
+        if: github.event.inputs.pypi == 'true' || github.event_name == 'release'
+        env:
+          TWINE_USERNAME: "__token__"
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          python -m twine upload dist/*gz
