@@ -5,7 +5,8 @@
         <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
     </a>
     <a href="https://pypi.org/project/model-gptq/">
-        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptqmodel">
+        <img alt="PyPI - Downloads" src="[https://img.shields.io/pypi/dd/gptqmodel](https://img.shields.io/pypi/dm/gptqmodel?link=https%3A%2F%2Fpypi.org%2Fproject%2Fgptqmodel%2F
+)">
     </a>
 </p>
 
