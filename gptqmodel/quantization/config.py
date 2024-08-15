@@ -61,6 +61,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     QUANT_METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.MARLIN,
+        FORMAT.BITBLAS,
     }
 }
 
@@ -331,6 +334,7 @@ class QuantizeConfig():
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
+    layer_config: dict = field(default_factory=dict)
     enable_full_range: bool = False  ##for symmetric, TODO support later
     batch_size: int = 1
     amp: bool = True
@@ -355,6 +359,7 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
         # inject auto-round specific meta data
         self.meta_set("auto_round", pkg_version(PKG_AUTO_ROUND))
         self.meta_set("enable_full_range", self.enable_full_range)
+        self.meta_set("layer_config", self.layer_config)
         self.meta_set("batch_size", self.batch_size)
         self.meta_set("amp", self.amp)
         self.meta_set("lr_scheduler", self.lr_scheduler)
