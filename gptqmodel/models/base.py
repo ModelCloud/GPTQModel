@@ -258,17 +258,8 @@ class BaseGPTQModel(nn.Module):
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
-            from transformers import modeling_utils
-            weight_config = {}
-            for n, m in self.model.named_modules():
-                if isinstance(m, torch.nn.Linear) or isinstance(m, modeling_utils.Conv1D):
-                    if m.weight.shape[0] % 32 != 0 or m.weight.shape[1] % 32 != 0:
-                        weight_config[n] = {"data_type": "fp"}
-                        print(
-                            f"{n} will not be quantized due to its shape not being divisible by 32, resulting in an exporting issue to gptqmodel")
-
             if self.quantize_config.lm_head:
-                weight_config['lm_head'] = {"data_type": "int"}
+                self.quantize_config.layer_config['lm_head'] = {"data_type": "int"}
 
             import torch.nn.functional as F
             from torch.utils.data import DataLoader
@@ -317,17 +308,17 @@ class BaseGPTQModel(nn.Module):
                                   low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
                                   seed=self.quantize_config.seed,
                                   gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
-                                  scale_dtype=self.quantize_config.scale_dtype, weight_config=weight_config,
+                                  scale_dtype=self.quantize_config.scale_dtype, layer_config=self.quantize_config.layer_config,
                                   enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
 
             model, _ = self.autoround.quantize()
 
             quantizers = {}
-            for key in self.autoround.weight_config:
-                info = self.autoround.weight_config[key]
+            for key in self.autoround.layer_config:
+                info = self.autoround.layer_config[key]
                 if not check_to_quantized(info):
                     continue
-                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32), info["g_idx"])
+                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32))
 
             self.qlinear_kernel = pack_model(
                 model=self.model,
@@ -335,7 +326,7 @@ class BaseGPTQModel(nn.Module):
                 bits=self.quantize_config.bits,
                 dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
-                backend=BACKEND.TRITON,
+                backend=BACKEND.AUTO,
                 desc_act=self.quantize_config.desc_act,
                 force_layer_back_to_cpu=True,
                 format=self.quantize_config.format,
