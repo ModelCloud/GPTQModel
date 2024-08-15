@@ -341,4 +341,4 @@ jobs:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: |
-          python -m twine upload dist/*gz
+          python -m twine upload dist/*gz --verbose
