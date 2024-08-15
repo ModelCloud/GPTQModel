@@ -20,6 +20,7 @@ on:
         required: false
         default: ''
       pypi:
+        type: choice
         description: 'Release to PyPI only'
         required: true
         default: 'no'
