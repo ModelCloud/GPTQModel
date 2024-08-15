@@ -334,3 +334,9 @@ jobs:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ github.ref }}
           file_glob: true
+
+      - name: Upload sdist to pypi
+        env:
+          TWINE_USERNAME: "__token__"
+        run: |
+          python -m twine upload dist/*
