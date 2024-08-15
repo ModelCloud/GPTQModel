@@ -276,7 +276,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
             layers[name].to(CPU),
             scale.to(CPU),
             zero.to(CPU),
-            g_idx.to(CPU),
+            g_idx.to(CPU) if g_idx is not None else None,
         )
         if QuantLinear is MarlinQuantLinear:
             qlayers[name].pack(layers[name], scale)

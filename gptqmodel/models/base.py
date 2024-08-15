@@ -318,7 +318,7 @@ class BaseGPTQModel(nn.Module):
                 info = self.autoround.layer_config[key]
                 if not check_to_quantized(info):
                     continue
-                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32))
+                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32), None)
 
             self.qlinear_kernel = pack_model(
                 model=self.model,
