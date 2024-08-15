@@ -30,6 +30,7 @@ env:
   AMD_SERVER: 10.0.13.31
   INTEL_SERVER: 10.0.23.35
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
+  CUDA_RELEASE: 1
 
 concurrency:
   group: ${{ github.ref }}-workflow-release
@@ -287,7 +288,7 @@ jobs:
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
     env:
-      PYPI_RELEASE: true
+      CUDA_RELEASE: 0
     steps:
       - name: Print Env
         run: |
