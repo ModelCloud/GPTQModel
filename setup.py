@@ -39,7 +39,7 @@ common_setup_kwargs = {
     ],
 }
 
-PYPI_RELEASE = os.environ.get("PYPI_RELEASE", None)
+CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 BUILD_CUDA_EXT = True
 COMPILE_MARLIN = True
 
@@ -57,7 +57,7 @@ if BUILD_CUDA_EXT:
         sys.exit(1)
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    if not PYPI_RELEASE:
+    if CUDA_RELEASE:
         common_setup_kwargs["version"] += f"+cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 with open('requirements.txt') as f:
