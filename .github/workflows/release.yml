@@ -19,6 +19,10 @@ on:
         description: 'Branch, Tag or Commit SHA'
         required: false
         default: ''
+      pypi:
+        description: 'Release to PyPI only'
+        required: false
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -146,7 +150,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1'
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == ''
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -215,7 +219,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2'
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == ''
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
