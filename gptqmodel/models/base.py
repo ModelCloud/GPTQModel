@@ -40,6 +40,7 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
+from packaging import version
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -258,6 +259,11 @@ class BaseGPTQModel(nn.Module):
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
+            from auto_round import __version__ as auto_round_version
+
+            if version.parse(auto_round_version) < version.parse("0.3.0"):
+                raise ValueError(f"AutoRound version must be >= 0.3.0. Current version: {auto_round_version}")
+
             if self.quantize_config.lm_head:
                 self.quantize_config.layer_config['lm_head'] = {"data_type": "int"}
 
