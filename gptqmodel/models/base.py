@@ -262,7 +262,7 @@ class BaseGPTQModel(nn.Module):
             from auto_round import __version__ as auto_round_version
 
             if version.parse(auto_round_version) < version.parse("0.3.0"):
-                raise ValueError(f"AutoRound version must be >= 0.3.0. Current version: {auto_round_version}")
+                raise ValueError(f"AutoRound version must be >= 0.3.0: actual = {auto_round_version}")
 
             if self.quantize_config.lm_head:
                 self.quantize_config.layer_config['lm_head'] = {"data_type": "int"}
