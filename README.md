@@ -4,8 +4,8 @@
     <a href="https://github.com/ModelCloud/GPTQModel/releases">
         <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
     </a>
-    <a href="https://pypi.org/project/model-gptq/">
-        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptq-model">
+    <a href="https://pypi.org/project/gptqmodel/">
+        <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dd/gptqmodel">
     </a>
 </p>
 
