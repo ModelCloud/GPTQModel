@@ -336,6 +336,7 @@ jobs:
           file_glob: true
 
       - name: Upload sdist to pypi
+        if: github.event.inputs.pypi == '1' || github.event_name == 'release'
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
