@@ -44,7 +44,7 @@ class TestModelInference(unittest.TestCase):
         ]
 
         cls.volume = f"{cls.tmp_dir.name}/data"
-        cls.docker_image = "ghcr.io/huggingface/text-generation-inference:2.2.0"
+        cls.docker_image = "10.0.13.31:5000/huggingface/text-generation-inference:2.2.0"
         cls.docker_process = subprocess.Popen(
             [
                 "docker", "run", "--gpus", "all", "--shm-size", "1g",
