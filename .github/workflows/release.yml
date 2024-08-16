@@ -47,6 +47,13 @@ jobs:
       amd_list: ${{ steps.assign.outputs.amd_list }}
       intel_list: ${{ steps.assign.outputs.intel_list }}
     steps:
+      - name: Print env
+        run: |
+          echo "event name: ${{ github.event_name }}"
+          echo "repo: ${{ github.event.inputs.repo }}"
+          echo "ref: ${{ github.event.inputs.ref }}"
+          echo "pypi: ${{ github.event.inputs.pypi }}"
+
       - name: Select server
         id: get_ip
         run: |
