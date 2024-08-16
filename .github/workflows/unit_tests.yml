@@ -276,7 +276,7 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }} -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
@@ -375,7 +375,7 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }} -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
