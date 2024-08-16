@@ -136,11 +136,20 @@ jobs:
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
+      - name: Test install
+        run: |
+          ls -ahl dist
+          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+
+          twine check dist/$whl
+          pip install dist/$whl
+
       - name: Upload wheel
         continue-on-error: true
         run: |
-          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "file=@dist/$whl" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
+          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
