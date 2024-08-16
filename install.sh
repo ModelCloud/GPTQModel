@@ -7,6 +7,7 @@ show_help() {
     echo "  --vllm     Install the vllm module"
     echo "  --sglang   Install the sglang module"
     echo "  --bitblas  Install the bitblas module"
+    echo "  --lm_eval  Install the lm_eval module"
     echo "  -h, --help Show this help message"
 }
 
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bitblas)
             MODULES="${MODULES}bitblas,"
+            shift
+            ;;
+        --lm_eval)
+            MODULES="${MODULES}lm_eval,"
             shift
             ;;
         -h|--help)
