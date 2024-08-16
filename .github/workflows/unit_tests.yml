@@ -307,7 +307,7 @@ jobs:
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ github.ref }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ github.repository }}/${{ needs.check-vm.outputs.run_id }}/$file_name
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
@@ -408,7 +408,7 @@ jobs:
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ github.ref }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ github.repository }}/${{ needs.check-vm.outputs.run_id }}/$file_name
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
