@@ -140,6 +140,10 @@ jobs:
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
+          sha256=$(sha256sum dist/whl)
+          echo "hash=$sha256"
+          
+          echo "WHL_HASH=$sha256" >> $GITHUB_ENV
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
@@ -148,8 +152,7 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -194,6 +197,10 @@ jobs:
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
+          sha256=$(sha256sum dist/whl)
+          echo "hash=$sha256"
+          
+          echo "WHL_HASH=$sha256" >> $GITHUB_ENV
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
@@ -202,8 +209,7 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
