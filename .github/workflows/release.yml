@@ -192,7 +192,8 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
@@ -262,7 +263,8 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
@@ -323,7 +325,8 @@ jobs:
       - name: Upload package
         continue-on-error: true
         run: |
-          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          sha256=$(sha256sum dist/${{ env.WHL_NAME }})
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
