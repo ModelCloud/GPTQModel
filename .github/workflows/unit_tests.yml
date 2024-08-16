@@ -140,7 +140,7 @@ jobs:
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
-          sha256=$(sha256sum dist/whl)
+          sha256=$(sha256sum dist/$whl)
           echo "hash=$sha256"
           
           echo "WHL_HASH=$sha256" >> $GITHUB_ENV
@@ -197,7 +197,7 @@ jobs:
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
-          sha256=$(sha256sum dist/whl)
+          sha256=$(sha256sum dist/$whl)
           echo "hash=$sha256"
           
           echo "WHL_HASH=$sha256" >> $GITHUB_ENV
