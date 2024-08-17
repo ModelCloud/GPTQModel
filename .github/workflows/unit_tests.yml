@@ -49,6 +49,11 @@ jobs:
       tag: ${{ steps.get_ip.outputs.tag }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
     steps:
+      - name: Print env
+        run: |
+          echo "repo: ${{ env.repo }}"
+          echo "ref: ${{ env.ref }}"
+
       - name: Select server
         id: get_ip
         run: |
