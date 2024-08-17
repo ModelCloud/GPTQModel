@@ -223,8 +223,9 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release' || github.event.inputs.release-to-ref == 'true'
         with:
-          file: dist/${{ env.WHL_NAME }}
+          repo_name: ${{ env.repo }}
           tag: ${{ env.ref }}
+          file: dist/${{ env.WHL_NAME }}
           file_glob: true
           overwrite: true
 
@@ -295,8 +296,9 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release' || github.event.inputs.release-to-ref == 'true'
         with:
-          file: dist/${{ env.WHL_NAME }}
+          repo_name: ${{ env.repo }}
           tag: ${{ env.ref }}
+          file: dist/${{ env.WHL_NAME }}
           file_glob: true
           overwrite: true
 
