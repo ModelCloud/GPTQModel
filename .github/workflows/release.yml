@@ -16,14 +16,9 @@ on:
         required: false
         default: ''
       ref:
-        description: 'Branch, Tag or Commit SHA'
+        description: 'GitHub ref: Branch, Tag or Commit SHA'
         required: false
         default: ''
-      pypi:
-        type: boolean
-        description: 'Release to PyPI only'
-        required: true
-        default: 'false'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -31,6 +26,8 @@ env:
   INTEL_SERVER: 10.0.23.35
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
+  repo: ${{ github.event.inputs.repo || github.repository }}
+  ref: ${{ github.event.inputs.ref || github.ref }}
 
 concurrency:
   group: ${{ github.ref }}-workflow-release
@@ -50,9 +47,8 @@ jobs:
       - name: Print env
         run: |
           echo "event name: ${{ github.event_name }}"
-          echo "repo: ${{ github.event.inputs.repo }}"
-          echo "ref: ${{ github.event.inputs.ref }}"
-          echo "pypi: ${{ github.event.inputs.pypi }}"
+          echo "repo: ${{ env.repo }}"
+          echo "ref: ${{ env.ref }}"
 
       - name: Select server
         id: get_ip
@@ -159,7 +155,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == 'false'
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') || github.event_name == 'release'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -178,8 +174,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -200,7 +196,7 @@ jobs:
         continue-on-error: true
         run: |
           sha256=$(sha256sum dist/${{ env.WHL_NAME }})
-          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
@@ -216,9 +212,11 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release'
         with:
+          repo_name: ${{ env.repo }}
+          tag: ${{ env.ref }}
           file: dist/${{ env.WHL_NAME }}
-          tag: ${{ github.ref }}
           file_glob: true
+          overwrite: true
 
   release-intel:
     strategy:
@@ -230,7 +228,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == 'false'
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -249,8 +247,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -271,7 +269,7 @@ jobs:
         continue-on-error: true
         run: |
           sha256=$(sha256sum dist/${{ env.WHL_NAME }})
-          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
@@ -287,9 +285,11 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release'
         with:
+          repo_name: ${{ env.repo }}
+          tag: ${{ env.ref }}
           file: dist/${{ env.WHL_NAME }}
-          tag: ${{ github.ref }}
           file_glob: true
+          overwrite: true
 
   release-source:
     strategy:
@@ -333,7 +333,7 @@ jobs:
         continue-on-error: true
         run: |
           sha256=$(sha256sum dist/${{ env.WHL_NAME }})
-          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
+          response=$(curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=$sha256" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload)
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
@@ -350,11 +350,11 @@ jobs:
         if: github.event_name == 'release'
         with:
           file: dist/${{ env.WHL_NAME }}
-          tag: ${{ github.ref }}
+          tag: ${{ env.ref }}
           file_glob: true
 
       - name: Upload sdist to pypi
-        if: github.event.inputs.pypi == 'true' || github.event_name == 'release'
+        if: github.event_name == 'release'
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
