@@ -31,6 +31,8 @@ env:
   INTEL_SERVER: 10.0.23.35
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
+  repo: ${{ github.event.inputs.repo || github.repository }}
+  ref: ${{ github.event.inputs.ref || github.ref }}
 
 concurrency:
   group: ${{ github.ref }}-workflow-release
@@ -50,8 +52,8 @@ jobs:
       - name: Print env
         run: |
           echo "event name: ${{ github.event_name }}"
-          echo "repo: ${{ github.event.inputs.repo }}"
-          echo "ref: ${{ github.event.inputs.ref }}"
+          echo "repo: ${{ env.repo }}"
+          echo "ref: ${{ env.ref }}"
           echo "pypi: ${{ github.event.inputs.pypi }}"
 
       - name: Select server
@@ -159,7 +161,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == 'false'
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') && github.event.inputs.pypi == 'false' || github.event_name == 'release'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -230,7 +232,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == 'false'
+    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') && github.event.inputs.pypi == 'false' || github.event_name == 'release'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
