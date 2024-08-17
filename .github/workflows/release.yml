@@ -350,7 +350,7 @@ jobs:
         if: github.event_name == 'release'
         with:
           file: dist/${{ env.WHL_NAME }}
-          tag: ${{ github.ref }}
+          tag: ${{ env.ref }}
           file_glob: true
 
       - name: Upload sdist to pypi
