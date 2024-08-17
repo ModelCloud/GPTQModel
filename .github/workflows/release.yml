@@ -226,6 +226,7 @@ jobs:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
+          overwrite: true
 
   release-intel:
     strategy:
@@ -297,6 +298,7 @@ jobs:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
+          overwrite: true
 
   release-source:
     strategy:
