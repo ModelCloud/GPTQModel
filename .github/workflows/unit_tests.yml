@@ -15,7 +15,7 @@ on:
         required: false
         default: ''
       ref:
-        description: 'Branch, Tag or Commit SHA'
+        description: 'GitHub ref: Branch, Tag or Commit SHA'
         required: false
         default: ''
       test_names:
@@ -32,6 +32,8 @@ env:
   AMD_SERVER: 10.0.13.31
   INTEL_SERVER: 10.0.23.35
   CPU_TEST_FILES: "test_qbits.py"
+  repo: ${{ github.event.inputs.repo || github.repository }}
+  ref: ${{ github.event.inputs.ref || github.ref }}
 
 concurrency:
   group: ${{ github.ref }}-workflow-unit-tests
@@ -126,8 +128,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -152,7 +154,7 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -181,8 +183,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: |
@@ -209,7 +211,7 @@ jobs:
       - name: Upload wheel
         continue-on-error: true
         run: |
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
@@ -227,8 +229,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: List files
         id: files
@@ -302,12 +304,12 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ github.repository }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
@@ -397,18 +399,18 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ github.repository }}" -F "ref=${{ github.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ github.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ github.repository }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
