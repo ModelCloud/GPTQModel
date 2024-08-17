@@ -185,8 +185,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -256,8 +256,8 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
