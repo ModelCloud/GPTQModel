@@ -51,6 +51,7 @@ SUPPORTED_MODELS = [
     "starcoder2",
     "cohere",
     "minicpm",
+    "minicpm3"
     "qwen2_moe",
     "dbrx_converted",
     "deepseek_v2",
