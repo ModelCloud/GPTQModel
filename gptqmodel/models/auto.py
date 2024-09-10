@@ -76,6 +76,7 @@ MODEL_MAP = {
     "phi3": Phi3GPTQ,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
+    "minicpm3":MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
