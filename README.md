@@ -179,7 +179,7 @@ model = GPTQModel.from_quantized(quant_output_dir)
 print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
 ```
 
-For more advanced features of model quantization, please reference to [this script](examples/quantization/quant_with_alpaca.py)
+For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
 
 ### How to Add Support for a New Model
 
