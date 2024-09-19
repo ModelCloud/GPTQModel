@@ -81,18 +81,18 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Model Support ( 🚀 GPTQModel only ) 
 [Ready to deply quantized models](https://hf.co/ModelCloud)
-
-| Model            |    |                       |    |           |    |            |    |
-|------------------|----|-----------------------|----|-----------|----|------------|----|
-| Baichuan         | ✅  | EXAONE 3.0            | 🚀 | LongLLaMA | ✅  | Qwen2MoE   | 🚀 |
-| Bloom            | ✅  | Falon                 | ✅  | MiniCPM   | 🚀 | RefinedWeb | ✅  |
-| ChatGLM          | 🚀 | Gemma 2               | 🚀 | Mistral   | ✅  | StableLM   | ✅  |
-| CodeGen          | ✅  | GPTBigCod             | ✅  | Mixtral   | ✅  | StarCoder2 | ✅  |
-| Cohere           | ✅  | GPTNeoX               | ✅  | MOSS      | ✅  | XVERSE     | ✅  |
-| DBRX Converted   | 🚀 | GPT-2                 | ✅  | MPT       | ✅  | Yi         | ✅  |
-| Deci             | ✅  | GPT-J                 | ✅  | OPT       | ✅  |            |    |
-| DeepSeek-V2      | 🚀 | InternLM/InternLM 2.5 | 🚀 | Phi/Phi-3 | 🚀 |            |    |
-| DeepSeek-V2-Lite | 🚀 | Llama                 | ✅  | Qwen      | ✅  |            |    |
+  
+| Model            |     |                       |     |           |     |            |     |     |
+| ---------------- | --- | --------------------- | --- | --------- | --- | ---------- | --- | --- |
+| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama     | ✅   | Phi/Phi-3  | 🚀  |     |
+| Bloom            | ✅   | Falon                 | ✅   | LongLLaMA | ✅   | Qwen       | ✅   |     |
+| ChatGLM          | 🚀  | Gemma 2               | 🚀  | MiniCPM   | 🚀  | Qwen2MoE   | 🚀  |     |
+| CodeGen          | ✅   | GPTBigCod             | ✅   | MiniCPM3  | 🚀  | RefinedWeb | ✅   |     |
+| Cohere           | ✅   | GPTNeoX               | ✅   | Mistral   | ✅   | StableLM   | ✅   |     |
+| DBRX Converted   | 🚀  | GPT-2                 | ✅   | Mixtral   | ✅   | StarCoder2 | ✅   |     |
+| Deci             | ✅   | GPT-J                 | ✅   | MOSS      | ✅   | XVERSE     | ✅   |     |
+| DeepSeek-V2      | 🚀  | GRIN-MoE              | 🚀  | MPT       | ✅   | Yi         | ✅   |     |
+| DeepSeek-V2-Lite | 🚀  | InternLM/InternLM 2.5 | 🚀  | OPT       | ✅   |            |     |     |
 
 ## Compatiblity 
 

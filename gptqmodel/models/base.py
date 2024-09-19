@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import copy
 import json
 import logging
@@ -17,6 +18,7 @@ from lm_eval.loggers import EvaluationTracker, WandbLogger
 from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable
+from packaging import version
 from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
@@ -40,7 +42,6 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
-from packaging import version
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -650,8 +651,6 @@ class BaseGPTQModel(nn.Module):
             # # internal is always gptq v2 but allow users to pass gptq (v1) via config
             if quantize_config.format == FORMAT.GPTQ:
                 # Model qzeros may be edited in place.
-                # TODO: avoid inplace modification of the weights
-                model = copy.deepcopy(self.model)
                 model = convert_gptq_v2_to_v1_format(
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
