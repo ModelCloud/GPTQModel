@@ -10,6 +10,7 @@
 </p>
 
 ## News
+* 09/18/2024 ✨ [v1.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.3) Added Microsoft GRIN-MoE and MiniCPM3 support.
 * 08/16/2024 ✨ [v1.0.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.2) Support Intel/AutoRound v0.3, pre-built whl packages, and PyPI release. 
 * 08/14/2024 ✨✨ [v1.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.0) 40% faster `packing`, Fixed Python 3.9 compat, added `lm_eval` api. 
 * 08/10/2024 🚀🚀🚀 [v0.9.11](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.11) Added LG EXAONE 3.0 model support. New `dynamic` per layer/module flexible quantization where each layer/module may have different bits/params. Added proper sharding support to `backend.BITBLAS`. Auto-heal quantization errors due to small damp values. 
@@ -92,7 +93,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 | DBRX Converted   | 🚀  | GPT-2                 | ✅   | Mixtral   | ✅   | StarCoder2 | ✅   |     |
 | Deci             | ✅   | GPT-J                 | ✅   | MOSS      | ✅   | XVERSE     | ✅   |     |
 | DeepSeek-V2      | 🚀  | GRIN-MoE              | 🚀  | MPT       | ✅   | Yi         | ✅   |     |
-| DeepSeek-V2-Lite | 🚀  | InternLM/InternLM 2.5 | 🚀  | OPT       | ✅   |            |     |     |
+| DeepSeek-V2-Lite | 🚀  | InternLM 1/2.5 | 🚀  | OPT       | ✅   |            |     |     |
 
 ## Compatiblity 
 
