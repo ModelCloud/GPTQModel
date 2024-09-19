@@ -55,7 +55,8 @@ SUPPORTED_MODELS = [
     "qwen2_moe",
     "dbrx_converted",
     "deepseek_v2",
-    "exaone"
+    "exaone",
+    "grinmoe",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048

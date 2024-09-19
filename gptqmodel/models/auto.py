@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from typing import Dict, List, Optional, Union
 
 from ..utils import BACKEND
@@ -20,6 +21,7 @@ from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
+from .grinmoe import GrinMOEGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
@@ -82,6 +84,7 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
     "exaone": ExaoneGPTQ,
+    "grinmoe": GrinMOEGPTQ,
 }
 
 

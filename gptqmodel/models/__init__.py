@@ -16,10 +16,12 @@ from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
+from .grinmoe import GrinMOEGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
+from .minicpm3 import MiniCPM3GPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
 from .moss import MOSSGPTQ
@@ -35,4 +37,3 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .minicpm3 import MiniCPM3GPTQ
