@@ -16,8 +16,6 @@ class GrinMOEGPTQ(BaseGPTQModel):
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
 
-        ["block_sparse_moe.gate"],
-
         # uses dynamic_expert_index
         [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w1", f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w3"],
         [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w2"],
