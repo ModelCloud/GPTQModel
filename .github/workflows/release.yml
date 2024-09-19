@@ -91,16 +91,16 @@ jobs:
             echo "Intel server is offline."
           fi
           
-          response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
-          if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "AMD server is online. Set IP to $AMD_SERVER"
-            if [[ -z $ip ]]; then
-              ip=${AMD_SERVER}
-            fi
-            amd_online=1
-          else
-            echo "AMD server is offline."
-          fi
+          # response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
+          # if echo "$response" | grep "200 OK" > /dev/null; then
+          #   echo "AMD server is online. Set IP to $AMD_SERVER"
+          #   if [[ -z $ip ]]; then
+          #     ip=${AMD_SERVER}
+          #   fi
+          #   amd_online=1
+          # else
+          #   echo "AMD server is offline."
+          # fi
 
           # 0 -> AMD & Intel | 1 -> AMD | 2 -> Intel
           if [[ $amd_online -eq 0 ]] && [[ $intel_online -eq 0 ]]; then
@@ -136,20 +136,12 @@ jobs:
           lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
           IFS=$'\n' read -r list_1 list_2 <<< "$lists"
 
-          list_1=${list_1:-"[]"}
-          list_2=${list_2:-"[]"}
-
           echo "list 1: $list_1"
           echo "list 2: $list_2"
 
-          if [[ $tag -eq 0 ]]; then
-              echo "all online set intel list: $list_1"
-              echo "intel_list=$list_1" >> "$GITHUB_OUTPUT"
           if [[ $tag -eq 1 ]]; then
-              echo "set amd list: $list_1"
               echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
           elif [[ $tag -eq 2 ]]; then
-              echo "set intel list: $list_2"
               echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
           fi
 
