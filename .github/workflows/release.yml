@@ -75,32 +75,33 @@ jobs:
             echo "Error: Unexpected result - $response"
             exit 1
           fi
-
+          
+          tag="amd"
           echo "Runner tag: $tag"
 
           amd_online=0
           intel_online=0
           ip=""
           
-          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
-          if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "Intel server is online. Set IP to $INTEL_SERVER"
-            ip=${INTEL_SERVER}
-            intel_online=1
-          else
-            echo "Intel server is offline."
-          fi
-          
-          # response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
+          # response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
           # if echo "$response" | grep "200 OK" > /dev/null; then
-          #   echo "AMD server is online. Set IP to $AMD_SERVER"
-          #   if [[ -z $ip ]]; then
-          #     ip=${AMD_SERVER}
-          #   fi
-          #   amd_online=1
+          #   echo "Intel server is online. Set IP to $INTEL_SERVER"
+          #   ip=${INTEL_SERVER}
+          #   intel_online=1
           # else
-          #   echo "AMD server is offline."
+          #   echo "Intel server is offline."
           # fi
+          
+          response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "AMD server is online. Set IP to $AMD_SERVER"
+            if [[ -z $ip ]]; then
+              ip=${AMD_SERVER}
+            fi
+            amd_online=1
+          else
+            echo "AMD server is offline."
+          fi
 
           # 0 -> AMD & Intel | 1 -> AMD | 2 -> Intel
           if [[ $amd_online -eq 0 ]] && [[ $intel_online -eq 0 ]]; then
