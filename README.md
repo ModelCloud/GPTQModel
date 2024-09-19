@@ -84,15 +84,15 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
   
 | Model            |     |                       |     |           |     |            |     |     |
 | ---------------- | --- | --------------------- | --- | --------- | --- | ---------- | --- | --- |
-| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama     | ✅   | Qwen       | ✅   |     |
-| Bloom            | ✅   | Falon                 | ✅   | LongLLaMA | ✅   | Qwen2MoE   | 🚀  |     |
-| ChatGLM          | 🚀  | Gemma 2               | 🚀  | MiniCPM   | 🚀  | RefinedWeb | ✅   |     |
-| CodeGen          | ✅   | GPTBigCod             | ✅   | Mistral   | ✅   | StableLM   | ✅   |     |
-| Cohere           | ✅   | GPTNeoX               | ✅   | Mixtral   | ✅   | StarCoder2 | ✅   |     |
-| DBRX Converted   | 🚀  | GPT-2                 | ✅   | MOSS      | ✅   | XVERSE     | ✅   |     |
-| Deci             | ✅   | GPT-J                 | ✅   | MPT       | ✅   | Yi         | ✅   |     |
-| DeepSeek-V2      | 🚀  | GRIN-MoE              | 🚀  | OPT       | ✅   |            |     |     |
-| DeepSeek-V2-Lite | 🚀  | InternLM/InternLM 2.5 | 🚀  | Phi/Phi-3 | 🚀  |            |     |     |
+| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama     | ✅   | Phi/Phi-3  | 🚀  |     |
+| Bloom            | ✅   | Falon                 | ✅   | LongLLaMA | ✅   | Qwen       | ✅   |     |
+| ChatGLM          | 🚀  | Gemma 2               | 🚀  | MiniCPM   | 🚀  | Qwen2MoE   | 🚀  |     |
+| CodeGen          | ✅   | GPTBigCod             | ✅   | MiniCPM3  | 🚀  | RefinedWeb | ✅   |     |
+| Cohere           | ✅   | GPTNeoX               | ✅   | Mistral   | ✅   | StableLM   | ✅   |     |
+| DBRX Converted   | 🚀  | GPT-2                 | ✅   | Mixtral   | ✅   | StarCoder2 | ✅   |     |
+| Deci             | ✅   | GPT-J                 | ✅   | MOSS      | ✅   | XVERSE     | ✅   |     |
+| DeepSeek-V2      | 🚀  | GRIN-MoE              | 🚀  | MPT       | ✅   | Yi         | ✅   |     |
+| DeepSeek-V2-Lite | 🚀  | InternLM/InternLM 2.5 | 🚀  | OPT       | ✅   |            |     |     |
 
 ## Compatiblity 
 
