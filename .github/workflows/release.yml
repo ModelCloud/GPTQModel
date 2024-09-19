@@ -142,6 +142,9 @@ jobs:
           echo "list 1: $list_1"
           echo "list 2: $list_2"
 
+          if [[ $tag -eq 0 ]]; then
+              echo "all online set intel list: $list_1"
+              echo "intel_list=$list_1" >> "$GITHUB_OUTPUT"
           if [[ $tag -eq 1 ]]; then
               echo "set amd list: $list_1"
               echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
