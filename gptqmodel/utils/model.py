@@ -297,6 +297,7 @@ def pack_model(
     sym: bool = True,
     force_layer_back_to_cpu: bool = False,
     dynamic=None,
+    parallel_packing: bool = True,
 ):
     QuantLinear = select_quant_linear_with_pack(
         bits=bits,
@@ -329,7 +330,13 @@ def pack_model(
     )
     qlayers = find_layers(model, [QuantLinear])
     names = list(qlayers.keys())
-    with ThreadPoolExecutor(max_workers=2) as executor:
+
+    if parallel_packing:
+        max_workers = 2
+    else:
+        max_workers = 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         with tqdm(total=len(names), leave=True) as pbar:
             def wrapper(name):
                 pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
