@@ -336,6 +336,7 @@ class BaseGPTQModel(nn.Module):
                 desc_act=self.quantize_config.desc_act,
                 force_layer_back_to_cpu=True,
                 format=self.quantize_config.format,
+                parallel_packing=self.quantize_config.parallel_packing,
             )
 
             self.model = model
@@ -570,6 +571,7 @@ class BaseGPTQModel(nn.Module):
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
             dynamic=self.quantize_config.dynamic,
+            parallel_packing=self.quantize_config.parallel_packing,
         )
 
         if device_map:

@@ -100,6 +100,10 @@ class QuantizeConfig():
     format: FORMAT = field(default=FORMAT.GPTQ)
     runtime_format: FORMAT = field(default=FORMAT.GPTQ)
 
+    # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
+    # if OOM, can set to False
+    parallel_packing: bool = field(default=True)
+
     # TODO: remove
     model_name_or_path: Optional[str] = field(default=None)
     model_file_base_name: Optional[str] = field(default=None)
