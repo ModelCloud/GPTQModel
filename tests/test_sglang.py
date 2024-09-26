@@ -16,7 +16,7 @@ class TestLoadSglang(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         # sglang set disable_flashinfer=True still import flashinfer
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer==0.1.5", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
         subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.2.7"])
 
         self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
