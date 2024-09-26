@@ -9,7 +9,7 @@ class MLlamaGPTQ(BaseGPTQModel):
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
     layers_node = "language_model.model.layers"
-    # Each repeating layer in `model.layers` is of type `LlamaDecoderLayer`
+    # MLllama has two types of repeating layers. Repeats in groups of 4 layers: 0-2 (first 3 layers) is text layers, 3 (4th) is cross-attention layer for vision 
     layer_type = ["MllamaSelfAttentionDecoderLayer", "MllamaCrossAttentionDecoderLayer"]
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
