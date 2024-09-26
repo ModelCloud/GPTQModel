@@ -102,6 +102,7 @@ class GPTQModel:
         pretrained_model_name_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
+        use_liger_kernel: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
         model_type = check_and_get_model_type(pretrained_model_name_or_path, trust_remote_code)
@@ -109,6 +110,7 @@ class GPTQModel:
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
+            use_liger_kernel=use_liger_kernel,
             **model_init_kwargs,
         )
 
