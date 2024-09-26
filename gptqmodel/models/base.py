@@ -348,7 +348,7 @@ class BaseGPTQModel(nn.Module):
             self._quantized = True
             return
 
-        forward_pass_use_cache = self.model.config.use_cache
+        forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
         self.model.config.use_cache = False
 
         layer_inputs = []
