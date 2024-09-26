@@ -64,7 +64,7 @@ class BaseGPTQModel(nn.Module):
     # node holding all the repeating layers
     layers_node: str = None
     # repeating layer type
-    layer_type: str = None
+    layer_type: Union[List[str], str] = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
 
@@ -1356,14 +1356,14 @@ class BaseGPTQModel(nn.Module):
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
                     max_memory=max_memory,
-                    no_split_module_classes=[cls.layer_type],
+                    no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
                     low_zero=(device_map == "balanced_low_0"),
                 )
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,
                 max_memory=max_memory,
-                no_split_module_classes=[cls.layer_type],
+                no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
             )
 
         load_checkpoint_in_model = False
