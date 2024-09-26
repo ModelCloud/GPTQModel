@@ -23,6 +23,7 @@ from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
+from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
@@ -440,6 +441,10 @@ class BaseGPTQModel(nn.Module):
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
+            if isinstance(layer, MllamaCrossAttentionDecoderLayer):
+                # currently we not support quantizing cross attention layer
+                continue
+
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU:
                 move_to(layer, CUDA_0)
