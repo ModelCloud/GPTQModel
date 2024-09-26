@@ -1,6 +1,6 @@
 from .base import BaseGPTQModel
 
-
+# TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
 class MLlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
