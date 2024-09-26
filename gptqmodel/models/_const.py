@@ -57,6 +57,7 @@ SUPPORTED_MODELS = [
     "deepseek_v2",
     "exaone",
     "grinmoe",
+    "mllama",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048

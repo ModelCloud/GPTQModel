@@ -23,6 +23,7 @@ from safetensors.torch import save_file as safe_save
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
+from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
@@ -64,7 +65,7 @@ class BaseGPTQModel(nn.Module):
     # node holding all the repeating layers
     layers_node: str = None
     # repeating layer type
-    layer_type: str = None
+    layer_type: Union[List[str], str] = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
 
@@ -440,6 +441,10 @@ class BaseGPTQModel(nn.Module):
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
+            if isinstance(layer, MllamaCrossAttentionDecoderLayer):
+                # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
+                continue
+
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU:
                 move_to(layer, CUDA_0)
@@ -1356,14 +1361,14 @@ class BaseGPTQModel(nn.Module):
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
                     max_memory=max_memory,
-                    no_split_module_classes=[cls.layer_type],
+                    no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
                     low_zero=(device_map == "balanced_low_0"),
                 )
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,
                 max_memory=max_memory,
-                no_split_module_classes=[cls.layer_type],
+                no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
             )
 
         load_checkpoint_in_model = False
