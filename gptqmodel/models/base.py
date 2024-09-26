@@ -442,7 +442,7 @@ class BaseGPTQModel(nn.Module):
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
             if isinstance(layer, MllamaCrossAttentionDecoderLayer):
-                # currently we not support quantizing cross attention layer
+                # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
 
             force_layer_back_to_cpu = False
