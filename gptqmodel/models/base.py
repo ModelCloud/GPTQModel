@@ -78,6 +78,9 @@ class BaseGPTQModel(nn.Module):
     # usage: set to property in model.config that holds this int value: total number of experts
     dynamic_expert_index: Optional[str] = None
 
+    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
+    model_loader = AutoModelForCausalLM
+
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}
@@ -345,7 +348,7 @@ class BaseGPTQModel(nn.Module):
             self._quantized = True
             return
 
-        forward_pass_use_cache = self.model.config.use_cache
+        forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
         self.model.config.use_cache = False
 
         layer_inputs = []
@@ -825,7 +828,7 @@ class BaseGPTQModel(nn.Module):
         transformers.modeling_utils._init_weights = False
         init_contexts = [no_init_weights()]
         with ContextManagers(init_contexts):
-            model = AutoModelForCausalLM.from_config(
+            model = self.model_loader.from_config(
                 config, torch_dtype=torch.float16
             )
 
@@ -1060,7 +1063,7 @@ class BaseGPTQModel(nn.Module):
         if model_init_kwargs.get("cpu") != "cpu":
             torch.cuda.empty_cache()
 
-        model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
+        model = cls.model_loader.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
@@ -1297,7 +1300,7 @@ class BaseGPTQModel(nn.Module):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            model = AutoModelForCausalLM.from_config(
+            model = cls.model_loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
             model.checkpoint_file_name = model_save_name
