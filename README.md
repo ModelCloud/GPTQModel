@@ -1,5 +1,5 @@
 <h1 align="center">GPTQModel</h1>
-<p align="center">An easy-to-use LLM quantization and inference toolkit based on GPTQ algorithm (weight-only quantization).</p>
+<p align="center">GPTQ based LLM model compression/quantization toolkit with accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases">
         <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
@@ -50,12 +50,12 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 ## How is GPTQModel different from AutoGPTQ?
 
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
 
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
-* 🚀🚀🚀🚀 Extensive model support for: `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
+* 🚀🚀🚀🚀 Extensive model support for: `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
 * 🚀🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
@@ -88,7 +88,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
   
 | Model            |     |                       |     |           |     |            |     |     |
 | ---------------- | --- | --------------------- | --- | --------- | --- | ---------- | --- | --- |
-| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama     | ✅   | Phi/Phi-3  | 🚀  |     |
+| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama 1/2/3     | ✅   | Phi/Phi-3  | 🚀  |     |
 | Bloom            | ✅   | Falon                 | ✅   | LongLLaMA | ✅   | Qwen       | ✅   |     |
 | ChatGLM          | 🚀  | Gemma 2               | 🚀  | MiniCPM   | 🚀  | Qwen2MoE   | 🚀  |     |
 | CodeGen          | ✅   | GPTBigCod             | ✅   | MiniCPM3  | 🚀  | RefinedWeb | ✅   |     |
