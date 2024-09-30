@@ -1,5 +1,5 @@
 <h1 align="center">GPTQModel</h1>
-<p align="center">GPTQ based LLM model compression/quantization library.</p>
+<p align="center">GPTQ based LLM model compression/quantization toolkit with accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases">
         <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
