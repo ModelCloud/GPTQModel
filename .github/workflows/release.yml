@@ -315,6 +315,9 @@ jobs:
 
       - name: Checkout Codes
         uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
