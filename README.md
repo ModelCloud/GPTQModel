@@ -55,7 +55,7 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
-* 🚀🚀🚀🚀 Extensive model support for: `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
+* 🚀🚀🚀🚀 Extensive model support for: `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
 * 🚀🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
@@ -88,7 +88,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
   
 | Model            |     |                       |     |           |     |            |     |     |
 | ---------------- | --- | --------------------- | --- | --------- | --- | ---------- | --- | --- |
-| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama     | ✅   | Phi/Phi-3  | 🚀  |     |
+| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama 1/2/3     | ✅   | Phi/Phi-3  | 🚀  |     |
 | Bloom            | ✅   | Falon                 | ✅   | LongLLaMA | ✅   | Qwen       | ✅   |     |
 | ChatGLM          | 🚀  | Gemma 2               | 🚀  | MiniCPM   | 🚀  | Qwen2MoE   | 🚀  |     |
 | CodeGen          | ✅   | GPTBigCod             | ✅   | MiniCPM3  | 🚀  | RefinedWeb | ✅   |     |
