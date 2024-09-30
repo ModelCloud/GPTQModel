@@ -1,5 +1,5 @@
 <h1 align="center">GPTQModel</h1>
-<p align="center">An easy-to-use LLM quantization and inference toolkit based on GPTQ algorithm (weight-only quantization).</p>
+<p align="center">GPTQ based LLM model compression/quantization library.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases">
         <img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg">
@@ -50,7 +50,7 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 ## How is GPTQModel different from AutoGPTQ?
 
-GPTQModel is an opinionated fork/refactor of AutoGPTQ with latest bug fixes, more model support, faster quant inference, faster quantization, better quants (as measured in PPL) and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes.
+GPTQModel started out as a refractored fork of AutoGTQP and but has now morphed into a full-stand-in replacement with clean api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
 
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
