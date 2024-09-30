@@ -50,7 +50,7 @@ We want GPTQModel to be highly focused on GPTQ based quantization and target inf
 
 ## How is GPTQModel different from AutoGPTQ?
 
-GPTQModel started out as a refractored fork of AutoGTQP and but has now morphed into a full-stand-in replacement with clean api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
+GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
 
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
