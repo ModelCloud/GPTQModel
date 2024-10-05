@@ -77,21 +77,20 @@ jobs:
             exit 1
           fi
           
-          tag="amd"
           echo "Runner tag: $tag"
 
           amd_online=0
           intel_online=0
           ip=""
           
-          # response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
-          # if echo "$response" | grep "200 OK" > /dev/null; then
-          #   echo "Intel server is online. Set IP to $INTEL_SERVER"
-          #   ip=${INTEL_SERVER}
-          #   intel_online=1
-          # else
-          #   echo "Intel server is offline."
-          # fi
+          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "Intel server is online. Set IP to $INTEL_SERVER"
+            ip=${INTEL_SERVER}
+            intel_online=1
+          else
+            echo "Intel server is offline."
+          fi
           
           response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
