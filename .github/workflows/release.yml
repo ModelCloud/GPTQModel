@@ -147,10 +147,13 @@ jobs:
           echo "list 1: $list_1"
           echo "list 2: $list_2"
 
-          if [[ $tag -eq 1 ]]; then
+          if [[ $tag -eq 0 ]]; then
+              echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
+              echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+          elif [[ $tag -eq 1 ]]; then
               echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
           elif [[ $tag -eq 2 ]]; then
-              echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+              echo "intel_list=$list_1" >> "$GITHUB_OUTPUT"
           fi
 
   release-amd:
