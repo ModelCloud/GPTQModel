@@ -231,7 +231,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.intel_list ！= ''
+    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.intel_list != ''
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
