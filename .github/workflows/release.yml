@@ -142,7 +142,7 @@ jobs:
 
           echo "lists=$lists"
           
-          IFS=$'\n' read -r list_1 list_2 <<< "$lists"
+          IFS=$'+' read -r list_1 list_2 <<< "$lists"
 
           echo "list 1: $list_1"
           echo "list 2: $list_2"
