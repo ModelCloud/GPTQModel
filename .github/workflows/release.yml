@@ -136,6 +136,8 @@ jobs:
               divide=1
           fi
 
+          echo "divide=$divide"
+
           lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
           IFS=$'\n' read -r list_1 list_2 <<< "$lists"
 
