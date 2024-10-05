@@ -132,6 +132,8 @@ jobs:
               divide=2
           elif [[ $tag -eq 1 ]] || [[ $tag -eq 2 ]]; then
               divide=1
+          else
+              divide=1
           fi
 
           lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
