@@ -77,21 +77,20 @@ jobs:
             exit 1
           fi
           
-          tag="amd"
           echo "Runner tag: $tag"
 
           amd_online=0
           intel_online=0
           ip=""
           
-          # response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
-          # if echo "$response" | grep "200 OK" > /dev/null; then
-          #   echo "Intel server is online. Set IP to $INTEL_SERVER"
-          #   ip=${INTEL_SERVER}
-          #   intel_online=1
-          # else
-          #   echo "Intel server is offline."
-          # fi
+          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
+          if echo "$response" | grep "200 OK" > /dev/null; then
+            echo "Intel server is online. Set IP to $INTEL_SERVER"
+            ip=${INTEL_SERVER}
+            intel_online=1
+          else
+            echo "Intel server is offline."
+          fi
           
           response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
@@ -133,18 +132,28 @@ jobs:
               divide=2
           elif [[ $tag -eq 1 ]] || [[ $tag -eq 2 ]]; then
               divide=1
+          else
+              divide=1
           fi
 
+          echo "divide=$divide"
+
           lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
-          IFS=$'\n' read -r list_1 list_2 <<< "$lists"
+
+          echo "lists=$lists"
+          
+          IFS=$'+' read -r list_1 list_2 <<< "$lists"
 
           echo "list 1: $list_1"
           echo "list 2: $list_2"
 
-          if [[ $tag -eq 1 ]]; then
+          if [[ $tag -eq 0 ]]; then
+              echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
+              echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+          elif [[ $tag -eq 1 ]]; then
               echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
           elif [[ $tag -eq 2 ]]; then
-              echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+              echo "intel_list=$list_1" >> "$GITHUB_OUTPUT"
           fi
 
   release-amd:
@@ -230,7 +239,7 @@ jobs:
     needs: 
       - check-vm
       - release-source
-    if: (needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release'
+    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.intel_list != ''
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
