@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gptqmodel_marlin_cuda_inference
 import torch
+import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
@@ -250,8 +251,8 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
         self.register_parameter("g_idx", g_idx)
         self.register_parameter("scales", scales)
         self.register_parameter("qzeros", qzeros)
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
+        self.infeatures = infeatures + (-infeatures % GPTQ_MARLIN_MIN_THREAD_K)
+        self.outfeatures = outfeatures + (-outfeatures % GPTQ_MARLIN_MIN_THREAD_N)
         self.is_k_full = marlin_is_k_full(desc_act, is_row_parallel=False)
 
         if bias:
@@ -279,18 +280,31 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
         # No zero-point
         self.zp = marlin_make_empty_g_idx(device)
 
+        qweight = self.qweight.data.clone()
+        if self.infeatures != self.original_infeatures or self.outfeatures != self.original_outfeatures:
+            padded_qweight = torch.zeros((self.infeatures, self.outfeatures), dtype=torch.int,
+                                         device=qweight.device)
+            padded_qweight[:qweight.size(0), :qweight.size(1)] = qweight
+            qweight = padded_qweight
+        print("qweight",qweight.shape, self.qweight.shape, self.infeatures, self.original_infeatures, self.outfeatures, self.original_outfeatures)
         # Repack weights from autogptq format to marlin format.
         marlin_qweight = gptqmodel_marlin_cuda_inference.gptq_marlin_repack(
-            self.qweight,
+            qweight,
             self.g_idx_sort_indices,
             self.infeatures,
             self.outfeatures,
             self.bits)
         replace_tensor(self, "qweight", marlin_qweight)
 
+        s = self.scales.data.clone()
+        if self.infeatures != self.original_infeatures or self.outfeatures != self.original_outfeatures:
+            padded_s = torch.zeros((s.size(0), self.outfeatures), dtype=torch.half, device=s.device)
+            padded_s[:s.size(0), :s.size(1)] = s
+            s = padded_s
+
         # Permute scales from autogptq format to marlin format.
         marlin_scales = marlin_permute_scales(
-            self.scales,
+            s,
             size_k=self.infeatures,
             size_n=self.outfeatures,
             group_size=self.group_size)
@@ -300,7 +314,11 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
         if A.dtype != torch.float16:
             A = A.half()
 
-        return apply_gptq_marlin_linear(
+        # padding
+        if A.size(-1) != self.infeatures:
+            A = F.pad(A, (0, self.infeatures - self.original_infeatures))
+
+        C = apply_gptq_marlin_linear(
             input=A,
             weight=self.qweight,
             weight_scale=self.scales,
@@ -313,3 +331,9 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
             input_size_per_partition=self.infeatures,
             is_k_full=self.is_k_full,
             bias=self.bias)
+
+        # revert padding
+        if self.outfeatures != self.original_outfeatures:
+            return C[:, :, :self.original_outfeatures]
+        else:
+            return C
