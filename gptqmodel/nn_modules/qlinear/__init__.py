@@ -1,3 +1,5 @@
+from typing import Tuple, Optional
+
 import torch.nn as nn
 
 from ...models._const import DEVICE, get_device_by_type
@@ -16,18 +18,18 @@ class BaseQuantLinear(nn.Module):
         super().__init__()
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym)
         if err:
-            raise NotImplementedError(err)
+            raise err
 
         if DEVICE.CUDA in self.SUPPORTED_DEVICES:
             check_cuda()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> bool:
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> Tuple[bool, Optional[Exception]]:
         validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic)
         return validate, err
 
     @classmethod
-    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None):
+    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> Tuple[bool, Optional[Exception]]:
         validate = True
         err = ""
         if cls.SUPPORTED_BITS and bits not in cls.SUPPORTED_BITS:
@@ -81,7 +83,7 @@ class BaseQuantLinear(nn.Module):
                     if desc_act not in cls.SUPPORTED_DESC_ACT:
                         validate = False
                         err = f"{cls} only supports `{cls.SUPPORTED_DESC_ACT}` bits: actual desc_act = `{desc_act}` for layer `{layer}`"
-        return validate, err
+        return validate, NotImplementedError(err) if err else None
 
     @classmethod
     def validate_device(cls, device_type: str):

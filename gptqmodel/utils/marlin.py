@@ -88,20 +88,10 @@ def _validate_marlin_device_support() -> bool:
 
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion
-def _validate_marlin_compatibility(cfg: QuantizeConfig, throwError: bool = False):
-    err = None
-    if cfg.bits != 4:
-        err = f"Marlin only supports 4bit quantization: actual = `{cfg.bits}`."
-    if cfg.group_size != 128 and cfg.group_size != -1:
-        err = f"Marlin only supports group size of 128 or -1: actual = `{cfg.group_size}`."
-    if not cfg.sym:
-        err = "Marlin does not support symmetric quantization: `sym=False`."
-    if cfg.desc_act:
-        err = "Marlin does not support act-order: `desc-act=True`."
-
-    if throwError and err is not None:
+def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = False):
+    validate, err = MarlinQuantLinear.validate(cfg.bits, cfg.group_size, cfg.desc_act, cfg.sym, cfg.dynamic)
+    if throw_error and err is not None:
         raise ValueError(err)
-
     return err
 
 

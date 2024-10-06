@@ -198,7 +198,7 @@ class BaseGPTQModel(nn.Module):
             )
 
         if self.quantize_config.format == FORMAT.MARLIN:
-            _validate_marlin_compatibility(self.quantize_config, throwError=True)
+            _validate_marlin_compatibility(self.quantize_config, throw_error=True)
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
@@ -1336,6 +1336,7 @@ class BaseGPTQModel(nn.Module):
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
             )
+            print("preload_qlinear_kernel",preload_qlinear_kernel)
             if preload_qlinear_kernel == QBitsQuantLinear:
                 quantize_config.runtime_format = FORMAT.QBITS
             model.tie_weights()
@@ -1402,7 +1403,7 @@ class BaseGPTQModel(nn.Module):
             load_checkpoint_in_model = True
             quantize_config.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN and quantize_config.format in [FORMAT.MARLIN, FORMAT.GPTQ, FORMAT.GPTQ_V2]:
+        if backend == BACKEND.MARLIN and quantize_config.format in [FORMAT.MARLIN]:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."
@@ -1416,7 +1417,7 @@ class BaseGPTQModel(nn.Module):
             if torch_dtype != torch.float16:
                 raise ValueError("Marlin kernel requires torch_dtype=torch.float16.")
 
-            _validate_marlin_compatibility(quantize_config, throwError=True)
+            _validate_marlin_compatibility(quantize_config, throw_error=True)
 
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise, convert to marlin.
