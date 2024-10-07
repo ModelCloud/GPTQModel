@@ -2,7 +2,6 @@ import copy
 import json
 import logging
 import re
-import traceback
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import isdir, join
