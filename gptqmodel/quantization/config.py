@@ -1,6 +1,8 @@
+import copy
 import json
 import logging
 import re
+import traceback
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import isdir, join
@@ -78,6 +80,18 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     FORMAT_FIELD_JSON: FORMAT_FIELD_CODE,
 }
 
+
+def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
+    """
+    Checks whether the passed dictionary and its nested dicts have a *scale_dtype* key and if it's not None,
+    converts torch.dtype to a string of just the type. For example, `torch.float32` get converted into *"float32"*
+    string, which can then be stored in the json format.
+    """
+    if d.get("scale_dtype", None) is not None and not isinstance(d["scale_dtype"], str):
+        d["scale_dtype"] = str(d["scale_dtype"]).split(".")[1]
+    for value in d.values():
+        if isinstance(value, dict):
+            dict_scale_dtype_to_str(value)
 
 @dataclass
 class QuantizeConfig():
@@ -317,7 +331,7 @@ class QuantizeConfig():
             return cls.from_quant_config(args_from_json, format)
 
     def to_dict(self):
-        return {
+        out = {
             "bits": self.bits,
             "dynamic": self.dynamic,
             "group_size": self.group_size,
@@ -335,6 +349,8 @@ class QuantizeConfig():
             FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,
         }
+        dict_scale_dtype_to_str(out)
+        return out
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
@@ -363,7 +379,14 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
         # inject auto-round specific meta data
         self.meta_set("auto_round", pkg_version(PKG_AUTO_ROUND))
         self.meta_set("enable_full_range", self.enable_full_range)
-        self.meta_set("layer_config", self.layer_config)
+        layer_config = copy.deepcopy(self.layer_config)
+        for key in layer_config:
+            info = layer_config[key]
+            # layer_config will store "scale" and "zp" Tensors, which cannot be serialized by json.
+            # see AutoRound.dump_qinfo_to_layer_config()
+            info.pop("scale", None)
+            info.pop("zp", None)
+        self.meta_set("layer_config", layer_config)
         self.meta_set("batch_size", self.batch_size)
         self.meta_set("amp", self.amp)
         self.meta_set("lr_scheduler", self.lr_scheduler)
