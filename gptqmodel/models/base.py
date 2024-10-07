@@ -1337,7 +1337,6 @@ class BaseGPTQModel(nn.Module):
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
             )
-            print("preload_qlinear_kernel",preload_qlinear_kernel)
             if preload_qlinear_kernel == QBitsQuantLinear:
                 quantize_config.runtime_format = FORMAT.QBITS
             model.tie_weights()
