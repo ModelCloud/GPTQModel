@@ -61,10 +61,10 @@ _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 
 class MarlinQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4]
-    SUPPORTED_GROUP_SIZE = [128, -1]
-    SUPPORTED_DESC_ACT = [False]
-    SUPPORTED_SYM = [True]
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [128, -1]
+    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_SYM = [True]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):

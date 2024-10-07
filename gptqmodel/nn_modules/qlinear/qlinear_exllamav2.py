@@ -96,9 +96,9 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
 
 
 class ExllamaV2QuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4]
-    SUPPORT_INFEATURES_DIVISIBLE_BY = [32]
-    SUPPORT_OUTFEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_BITS = [4]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 

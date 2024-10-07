@@ -14,9 +14,9 @@ logger = getLogger(__name__)
 
 
 class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
-    SUPPORTED_BITS = [2, 4, 8]
-    SUPPORT_INFEATURES_DIVISIBLE_BY = [32]
-    SUPPORT_OUTFEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_BITS = [2, 4, 8]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     """
     Triton v2 quantized linear layer.
