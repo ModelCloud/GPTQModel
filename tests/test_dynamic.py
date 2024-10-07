@@ -9,10 +9,10 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import QuantizeConfig  # noqa: E402
-from gptqmodel.utils import Perplexity  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
+from gptqmodel.quantization import QuantizeConfig  # noqa: E402
+from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized
 from transformers import AutoTokenizer  # noqa: E402
 
