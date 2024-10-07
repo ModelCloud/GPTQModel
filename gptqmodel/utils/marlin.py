@@ -42,7 +42,7 @@ def prepare_model_for_marlin_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # Marlin ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        if load_checkpoint_in_model:
+        if not load_checkpoint_in_model:
             accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
