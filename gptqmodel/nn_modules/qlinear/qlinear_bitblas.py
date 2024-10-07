@@ -76,6 +76,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTED_BITS = [1, 2, 4]
     SUPPORTED_DESC_ACT = [False]
     SUPPORTED_SHARDS = True
+    SUPPORT_INFEATURES_DIVISIBLE_BY = [16]
+    SUPPORT_OUTFEATURES_DIVISIBLE_BY = [16]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -105,7 +107,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,outfeatures=outfeatures,**kwargs)
 
         import_bitblas()
 
@@ -126,8 +128,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
     def _validate_parameters(
         self, group_size: int, infeatures: int, outfeatures: int
     ):
-        if infeatures % 16 != 0 or outfeatures % 16 != 0:
-            raise ValueError("`infeatures` and `outfeatures` must be divisible by 16.")
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
 
