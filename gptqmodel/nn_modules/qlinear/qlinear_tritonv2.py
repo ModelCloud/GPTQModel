@@ -14,7 +14,10 @@ logger = getLogger(__name__)
 
 
 class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
-    SUPPORTED_BITS = [2, 4, 8]
+    SUPPORTS_BITS = [2, 4, 8]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
+
     """
     Triton v2 quantized linear layer.
 
@@ -24,9 +27,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     """
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, bias, **kwargs,):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
-        if infeatures % 32 != 0 or outfeatures % 32 != 0:
-            raise NotImplementedError("in_feature and out_feature must be divisible by 32.")
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         self.infeatures = infeatures
         self.outfeatures = outfeatures
         self.bits = bits

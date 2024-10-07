@@ -96,31 +96,30 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
 
 
 class ExllamaV2QuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4]
+    SUPPORTS_BITS = [4]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool,  **kwargs,):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
+        self.group_size = group_size if group_size != -1 else infeatures
+        # auto pad
+        self.outfeatures = outfeatures + (-outfeatures % 32)
+        self.infeatures = infeatures + (-infeatures % self.group_size)
+
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures, **kwargs)
 
         self.q_handle = None
         self.q_tensors = None
 
         self.bits = bits
-        self.group_size = group_size if group_size != -1 else infeatures
-
-        # auto pad
-        self.outfeatures = outfeatures + (-outfeatures % 32)
-        self.infeatures = infeatures + (-infeatures % self.group_size)
 
         # backup original values
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
         self.maxq = 2**self.bits - 1
-
-        assert self.infeatures % 32 == 0
-        assert self.outfeatures % 32 == 0
 
         # I need to register the tensors, otherwise, we won't be able to load them easily using transformers ...
         self.register_buffer(

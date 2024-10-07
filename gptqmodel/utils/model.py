@@ -26,6 +26,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
@@ -134,10 +135,23 @@ def make_quant(
         dynamic=dynamic,
     )
 
+    try:
+        result = create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
+    except NotImplementedError as e:
+        if QuantLinear == MarlinInferenceQuantLinear:
+            # If create MarlinInferenceQuantLinear fails, we try to convert to MarlinQuantLinear.
+            # First use ExllamaV2QuantLinear to preload, then call convert_to_marlin().
+            result = create_quant_layer(ExllamaV2QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
+        else:
+            raise e
+
+    return result
+
+
+def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
     for name, submodule in module.named_modules():
-
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
 
@@ -178,8 +192,8 @@ def make_quant(
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
-
     return QuantLinear
+
 
 def convert_gptq_v1_to_v2_format(
     model,
@@ -247,13 +261,13 @@ def convert_gptq_v2_to_v1_format(
 
     return model
 
+
 def select_quant_linear_with_pack(bits: int,
                                   group_size: int,
                                   desc_act: bool,
                                   sym: bool,
                                   backend: BACKEND, format: str, pack: bool,
                                   dynamic=None):
-
     QuantLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -265,6 +279,7 @@ def select_quant_linear_with_pack(bits: int,
         dynamic=dynamic,
     )
     return QuantLinear
+
 
 def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
     # Limit pack() thread usage to avoid auto-parallizataion regression
@@ -285,6 +300,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
             qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
         pbar.update()
+
 
 def pack_model(
     model,
@@ -347,6 +363,7 @@ def pack_model(
     logger.info("Model packed.")
     return QuantLinear
 
+
 def verify_model_hash(file_path: str, verify_hash: str):
     if not isinstance(verify_hash, str):
         raise ValueError("model verify_hash must be a string")
@@ -377,6 +394,7 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
             logger.info(f"Hash verification failed for {shard_file}")
             return False
     return True
+
 
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
@@ -424,7 +442,9 @@ def simple_dispatch_model(model, device_map):
 
     return model
 
-def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None, max_input_length: Optional[int] = None):
+
+def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
+                        max_input_length: Optional[int] = None):
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
@@ -549,7 +569,6 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     if not model_uses_qbits:
         torch.cuda.empty_cache()
 
-
     return model
 
 
@@ -657,6 +676,7 @@ def get_moe_layer_modules(layer_modules: List, num_experts: int) -> List:
 
     return new_inside_layer_modules
 
+
 def check_to_quantized(config):
     if isinstance(config, dict):
         if config["bits"] > 8 or "fp" in config["data_type"] or "float" in config["data_type"]:
@@ -666,6 +686,7 @@ def check_to_quantized(config):
         if config.bits > 8 or "fp" in config.data_type or "float" in config.data_type:
             return False
         return True
+
 
 def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
     os.makedirs(save_dir, exist_ok=True)

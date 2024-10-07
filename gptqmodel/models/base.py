@@ -26,6 +26,7 @@ from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
 
+from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
@@ -198,7 +199,7 @@ class BaseGPTQModel(nn.Module):
             )
 
         if self.quantize_config.format == FORMAT.MARLIN:
-            _validate_marlin_compatibility(self.quantize_config, throwError=True)
+            _validate_marlin_compatibility(self.quantize_config, throw_error=True)
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
@@ -1402,7 +1403,7 @@ class BaseGPTQModel(nn.Module):
             load_checkpoint_in_model = True
             quantize_config.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN and quantize_config.format in [FORMAT.MARLIN, FORMAT.GPTQ, FORMAT.GPTQ_V2]:
+        if backend == BACKEND.MARLIN and preload_qlinear_kernel == ExllamaV2QuantLinear:
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."
@@ -1416,7 +1417,7 @@ class BaseGPTQModel(nn.Module):
             if torch_dtype != torch.float16:
                 raise ValueError("Marlin kernel requires torch_dtype=torch.float16.")
 
-            _validate_marlin_compatibility(quantize_config, throwError=True)
+            _validate_marlin_compatibility(quantize_config, throw_error=True)
 
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise, convert to marlin.

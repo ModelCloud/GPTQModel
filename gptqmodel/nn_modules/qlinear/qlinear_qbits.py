@@ -41,8 +41,8 @@ def convert_dtype_torch2str(dtype):
 
 
 class QBitsQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [2, 3, 4, 8]
-    SUPPORTED_DEVICES = [DEVICE.CPU]
+    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_DEVICES = [DEVICE.CPU]
 
     def __init__(
         self,
@@ -58,7 +58,7 @@ class QBitsQuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         self.sym = False
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,  **kwargs)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures

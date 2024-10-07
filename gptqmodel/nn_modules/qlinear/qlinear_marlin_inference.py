@@ -130,17 +130,15 @@ def apply_gptq_marlin_linear(
     return output.reshape(out_shape)
 
 class MarlinInferenceQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4, 8]
-    SUPPORTED_GROUP_SIZE = [-1, 32, 64, 128]
-    SUPPORTED_DESC_ACT = [True, False]
-    SUPPORTED_SYM = [True]
+    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
-
-        self.original_infeatures = infeatures
-        self.original_outfeatures = outfeatures
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
         self.pack_factor = 32 // bits  # packed into int32
 

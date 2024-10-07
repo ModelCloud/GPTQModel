@@ -35,29 +35,27 @@ def ext_q4_matmul(x, q4, q4_width):
 
 
 class ExllamaQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4]
-
+    SUPPORTS_BITS = [4]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
-
-        self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
-
         # auto pad
         self.outfeatures = outfeatures + (-outfeatures % 32)
         self.infeatures = infeatures + (-infeatures % self.group_size)
+
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures, **kwargs)
+
+        self.bits = bits
 
         # backup original values
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
 
         self.maxq = 2**self.bits - 1
-
-        assert self.infeatures % 32 == 0
-        assert self.outfeatures % 32 == 0
 
         self.register_buffer(
             "qweight",

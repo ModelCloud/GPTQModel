@@ -61,14 +61,14 @@ _perm, _scale_perm, _scale_perm_single = _get_perms()
 
 
 class MarlinQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [4]
-    SUPPORTED_GROUP_SIZE = [128, -1]
-    SUPPORTED_DESC_ACT = [False]
-    SUPPORTED_SYM = [True]
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [128, -1]
+    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_SYM = [True]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(
                 f'Can not use Marlin int4*fp16 kernel with a device of compute capability {torch.cuda.get_device_capability()}, the minimum compute capability is 8.0 for Marlin kernel. Please do not use `backend=Backend.MARLIN`, or please upgrade your GPU ("The more you buy, the more you save." - Taiwanese proverb).'
