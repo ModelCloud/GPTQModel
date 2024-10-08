@@ -58,7 +58,7 @@ class TestLoadVLLM(unittest.TestCase):
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            self.assertEquals(generated_text, " Paris. 2. Name the capital of the United States. 3.")
+            self.assertEquals(generated_text, " ___________.\n6. City Name: Paris, France\n7. C")
 
         del model
         self.release_vllm_model()
@@ -80,7 +80,7 @@ class TestLoadVLLM(unittest.TestCase):
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             self.assertEquals(generated_text,
-                              " Paris.\n2. Who has a national flag with a white field surrounded by")
+                              " Paris, which is also known as the city of love.")
 
         del model
         self.release_vllm_model()

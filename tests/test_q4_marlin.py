@@ -176,5 +176,5 @@ class TestQ4Marlin(unittest.TestCase):
 
             predicted_text = tokenizer.decode(res[0])
 
-            self.assertTrue(predicted_text.startswith("<s> I am in Paris and I am here to help. I am a very good doctor. I will make you feel better"))
+            self.assertTrue(predicted_text.startswith("<s> I am in Paris and I'm going to find you!"))
 

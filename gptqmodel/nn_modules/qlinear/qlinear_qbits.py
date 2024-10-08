@@ -58,7 +58,7 @@ class QBitsQuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         self.sym = False
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,  **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
