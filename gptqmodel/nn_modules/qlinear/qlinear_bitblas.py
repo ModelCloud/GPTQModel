@@ -75,7 +75,6 @@ def unpack_qzeros(qzeros, bits):
 class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [1, 2, 4]
     SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SHARDS = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [16]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
 
