@@ -367,7 +367,9 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Install requirements
-        run: pip install optimum
+        run: |
+          pip install optimum
+          pip install transformers -U
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
@@ -413,8 +415,7 @@ jobs:
       - name: Download wheel
         continue-on-error: true
         run: |
-          file_name=$(curl -s  -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ github.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
-
+          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
