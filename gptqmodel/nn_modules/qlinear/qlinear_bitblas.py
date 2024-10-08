@@ -107,7 +107,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,outfeatures=outfeatures,**kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
         import_bitblas()
 
