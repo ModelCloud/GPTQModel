@@ -367,7 +367,9 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Install requirements
-        run: pip install optimum
+        run: |
+          pip install optimum
+          pip install transformers -U
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
