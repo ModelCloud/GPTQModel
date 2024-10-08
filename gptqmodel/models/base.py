@@ -1403,7 +1403,7 @@ class BaseGPTQModel(nn.Module):
             load_checkpoint_in_model = True
             quantize_config.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN and preload_qlinear_kernel == ExllamaV2QuantLinear:
+        if backend == BACKEND.MARLIN and (preload_qlinear_kernel == ExllamaV2QuantLinear or quantize_config.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."

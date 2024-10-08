@@ -140,6 +140,9 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
                  bias: bool, **kwargs):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
+        self.original_infeatures = infeatures
+        self.original_outfeatures = outfeatures
+
         self.pack_factor = 32 // bits  # packed into int32
 
         if desc_act and group_size == -1:
