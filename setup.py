@@ -31,6 +31,7 @@ common_setup_kwargs = {
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Programming Language :: C++",
         "Intended Audience :: Developers",
         "Intended Audience :: Education",
@@ -185,6 +186,6 @@ setup(
     install_requires=requirements,
     extras_require=extras_require,
     include_dirs=include_dirs,
-    python_requires=">=3.8.0",
+    python_requires=">=3.9.0",
     **common_setup_kwargs,
 )
