@@ -262,7 +262,11 @@ jobs:
           ref: ${{ env.ref }}
 
       - name: Install requirements
-        run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: |
+          cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
+          torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
+          python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
+          /bin/bash /tmp/init/init_env.sh ￥cuda_version ￥torch_version ￥python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
