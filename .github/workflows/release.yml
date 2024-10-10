@@ -169,7 +169,7 @@ jobs:
     if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') || github.event_name == 'release') && needs.check-vm.outputs.zen3_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - name: Print Env
         run: |
@@ -242,7 +242,7 @@ jobs:
     if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.zen4_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - name: Print Env
         run: |
