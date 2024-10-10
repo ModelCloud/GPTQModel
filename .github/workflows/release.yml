@@ -266,7 +266,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          /bin/bash /tmp/init/init_env.sh ￥cuda_version ￥torch_version ￥python_version
+          /bin/bash /tmp/init/init_env.sh $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
