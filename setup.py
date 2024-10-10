@@ -7,6 +7,7 @@ from setuptools import find_packages, setup
 
 os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
+os.environ["BUILD_CUDA_EXT"] = "1"
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
@@ -89,7 +90,6 @@ extras_require = {
     'sglang': ["sglang>=0.2.7", "flashinfer==0.1.2"],
     'bitblas': ["bitblas>=0.0.1.dev13"],
     'hf': ["optimum>=1.21.2"],
-    'autoround': ["intel_extension_for_transformers>=1.4.2", "auto-round==0.3"]
 }
 
 include_dirs = ["gptqmodel_cuda"]
