@@ -7,6 +7,7 @@ from setuptools import find_packages, setup
 
 os.environ["CC"] = "g++"
 os.environ["CXX"] = "g++"
+os.environ["BUILD_CUDA_EXT"] = "1"
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
@@ -31,6 +32,7 @@ common_setup_kwargs = {
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Programming Language :: C++",
         "Intended Audience :: Developers",
         "Intended Audience :: Education",
@@ -87,7 +89,8 @@ extras_require = {
     'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
     'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
     'bitblas': ["bitblas>=0.0.1.dev13"],
-    'hf': ["optimum>=1.21.2"]
+    'hf': ["optimum>=1.21.2"],
+    'qbits': ["intel_extension_for_transformers>=1.4.2"],
 }
 
 include_dirs = ["gptqmodel_cuda"]
@@ -185,6 +188,6 @@ setup(
     install_requires=requirements,
     extras_require=extras_require,
     include_dirs=include_dirs,
-    python_requires=">=3.8.0",
+    python_requires=">=3.9.0",
     **common_setup_kwargs,
 )
