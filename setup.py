@@ -118,7 +118,7 @@ if BUILD_CUDA_EXT:
             "4",
             "-Xfatbin",
             "-compress-all",
-            "-diag-suppress=179,39",
+            "-diag-suppress=179,39,186",
              "--use_fast_math",
         ],
     }
