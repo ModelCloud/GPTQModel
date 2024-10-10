@@ -22,8 +22,8 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  AMD_SERVER: 10.0.13.31
-  INTEL_SERVER: 10.0.23.35
+  ZEN3_SERVER: 10.0.13.31
+  ZEN4_SERVER: 10.0.23.35
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
   CI: 1
@@ -42,8 +42,8 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
-      amd_list: ${{ steps.assign.outputs.amd_list }}
-      intel_list: ${{ steps.assign.outputs.intel_list }}
+      zen3_list: ${{ steps.assign.outputs.zen3_list }}
+      zen4_list: ${{ steps.assign.outputs.zen4_list }}
     steps:
       - name: Print env
         run: |
@@ -54,24 +54,24 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          if [[ "${{ runner.name }}" == *"intel"* ]]; then
-            echo "current ci is intel"
+          if [[ "${{ runner.name }}" == *"zen4"* ]]; then
+            echo "current ci is zen4"
             response=0
           else
-            echo "test intel vm status"
-            response=$(curl --silent --fail --max-time 5 http://$INTEL_SERVER/gpu/runner/status/intel) || response=error
+            echo "test zen4 vm status"
+            response=$(curl --silent --fail --max-time 5 http://$ZEN4_SERVER/gpu/runner/status/zen4) || response=error
             if [ "$response" == "error" ]; then
-              echo "test amd vm status"
-              response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/intel) || response=error
+              echo "test zen3 vm status"
+              response=$(curl --silent --fail --max-time 5 http://${ZEN3_SERVER}/gpu/runner/status/zen4) || response=error
             fi
           fi
 
           echo "response: $response"
 
           if [ "$response" == "0" ]; then
-            tag="intel"
+            tag="zen4"
           elif [ "$response" == "-1" ]; then
-            tag="amd"
+            tag="zen3"
           else
             echo "Error: Unexpected result - $response"
             exit 1
@@ -79,38 +79,38 @@ jobs:
           
           echo "Runner tag: $tag"
 
-          amd_online=0
-          intel_online=0
+          zen3_online=0
+          zen4_online=0
           ip=""
           
-          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response="error"
+          response=$(curl -s --head --fail --max-time 5 http://${ZEN4_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "Intel server is online. Set IP to $INTEL_SERVER"
-            ip=${INTEL_SERVER}
-            intel_online=1
+            echo "Zen4 server is online. Set IP to $ZEN4_SERVER"
+            ip=${ZEN4_SERVER}
+            zen4_online=1
           else
-            echo "Intel server is offline."
+            echo "Zen4 server is offline."
           fi
           
-          response=$(curl -s --head --fail --max-time 5 http://${AMD_SERVER}/gpu/status) || response="error"
+          response=$(curl -s --head --fail --max-time 5 http://${ZEN3_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "AMD server is online. Set IP to $AMD_SERVER"
+            echo "ZEN3 server is online. Set IP to $ZEN3_SERVER"
             if [[ -z $ip ]]; then
-              ip=${AMD_SERVER}
+              ip=${ZEN3_SERVER}
             fi
-            amd_online=1
+            zen3_online=1
           else
-            echo "AMD server is offline."
+            echo "ZEN3 server is offline."
           fi
 
-          # 0 -> AMD & Intel | 1 -> AMD | 2 -> Intel
-          if [[ $amd_online -eq 0 ]] && [[ $intel_online -eq 0 ]]; then
+          # 0 -> ZEN3 & Zen4 | 1 -> ZEN3 | 2 -> Zen4
+          if [[ $zen3_online -eq 0 ]] && [[ $zen4_online -eq 0 ]]; then
               exit 1
-          elif [[ $amd_online -eq 1 ]] && [[ $intel_online -eq 1 ]]; then # both intel & amd are online
+          elif [[ $zen3_online -eq 1 ]] && [[ $zen4_online -eq 1 ]]; then # both zen4 & zen3 are online
               tag=0
-          elif [[ $amd_online -eq 1 ]] && [[ $intel_online -eq 0 ]]; then # both amd is online
+          elif [[ $zen3_online -eq 1 ]] && [[ $zen4_online -eq 0 ]]; then # both zen3 is online
               tag=1
-          elif [[ $amd_online -eq 0 ]] && [[ $intel_online -eq 1 ]]; then # both intel is online
+          elif [[ $zen3_online -eq 0 ]] && [[ $zen4_online -eq 1 ]]; then # both zen4 is online
               tag=2
           fi
 
@@ -127,7 +127,7 @@ jobs:
         run: |
           tag=${{ env.TAG }}
 
-          # tag == 0, both intel & amd are online
+          # tag == 0, both zen4 & zen3 are online
           if [[ $tag -eq 0 ]]; then
               divide=2
           elif [[ $tag -eq 1 ]] || [[ $tag -eq 2 ]]; then
@@ -148,25 +148,25 @@ jobs:
           echo "list 2: $list_2"
 
           if [[ $tag -eq 0 ]]; then
-              echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
-              echo "intel_list=$list_2" >> "$GITHUB_OUTPUT"
+              echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
+              echo "zen4_list=$list_2" >> "$GITHUB_OUTPUT"
           elif [[ $tag -eq 1 ]]; then
-              echo "amd_list=$list_1" >> "$GITHUB_OUTPUT"
+              echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
           elif [[ $tag -eq 2 ]]; then
-              echo "intel_list=$list_1" >> "$GITHUB_OUTPUT"
+              echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
           fi
 
-  release-amd:
+  release-zen3:
     strategy:
       fail-fast: false
       matrix:
-        tag: ${{ fromJSON(needs.check-vm.outputs.amd_list) }}
+        tag: ${{ fromJSON(needs.check-vm.outputs.zen3_list) }}
       max-parallel: 3
-    runs-on: [ self-hosted, amd ]
+    runs-on: [ self-hosted, zen3 ]
     needs: 
       - check-vm
       - release-source
-    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') || github.event_name == 'release') && needs.check-vm.outputs.amd_list != '' && !cancelled()
+    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') || github.event_name == 'release') && needs.check-vm.outputs.zen3_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
@@ -229,17 +229,17 @@ jobs:
           file_glob: true
           overwrite: true
 
-  release-intel:
+  release-zen4:
     strategy:
       fail-fast: false
       matrix:
-        tag: ${{ fromJSON(needs.check-vm.outputs.intel_list) }}
+        tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
       max-parallel: 3
-    runs-on: [ self-hosted, intel ]
+    runs-on: [ self-hosted, zen4 ]
     needs: 
       - check-vm
       - release-source
-    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.intel_list != '' && !cancelled()
+    if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.zen4_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 50
