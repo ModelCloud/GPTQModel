@@ -114,10 +114,11 @@ if BUILD_CUDA_EXT:
             "-O3",
             "-std=c++17",
             "--threads",
-            "2",
+            "4",
             "-Xfatbin",
             "-compress-all",
             "-diag-suppress=179,39",
+             "--use_fast_math",
         ],
     }
 
