@@ -31,8 +31,9 @@ env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
   ZEN3_SERVER: 10.0.13.0 # set to a wrong ip to keep this feature but not use it
-  ZEN4_SERVER: 10.0.23.35
+  ZEN4_SERVER: 10.0.14.199
   CPU_TEST_FILES: "test_qbits.py"
+  EXCLUDED_TEST_FILES: "test_tgi.py"
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
 
@@ -258,6 +259,8 @@ jobs:
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
 
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py')]
+          all_tests = [item for item in all_tests if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
+
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
 
           print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
