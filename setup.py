@@ -66,8 +66,7 @@ with open('requirements.txt') as f:
         requirements = []
     else:
         requirements = requirement_list
-
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
 
