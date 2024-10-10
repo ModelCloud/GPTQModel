@@ -140,10 +140,10 @@ jobs:
 
       - name: Install requirements
         run: |
-          cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
-          torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
-          python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          /bin/bash /tmp/init/init_env.sh $cuda_version $torch_version $python_version
+          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
+          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
+          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
+          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
           pip install transformers -U
 
       - name: Compile
