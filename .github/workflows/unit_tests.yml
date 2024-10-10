@@ -30,7 +30,7 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  AMD_SERVER: 10.0.13.31
+  AMD_SERVER: 10.0.13.0 # set to a wrong ip to keep this feature but not use it
   INTEL_SERVER: 10.0.23.35
   CPU_TEST_FILES: "test_qbits.py"
   repo: ${{ github.event.inputs.repo || github.repository }}
