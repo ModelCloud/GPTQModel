@@ -22,7 +22,7 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  ZEN3_SERVER: 10.0.13.31
+  ZEN3_SERVER: 10.0.13.0 # disable it but keep this feature
   ZEN4_SERVER: 10.0.14.199
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
