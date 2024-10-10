@@ -90,6 +90,7 @@ extras_require = {
     'sglang': ["sglang>=0.2.7", "flashinfer==0.1.2"],
     'bitblas': ["bitblas>=0.0.1.dev13"],
     'hf': ["optimum>=1.21.2"],
+    'qbits': ["intel_extension_for_transformers>=1.4.2"],
 }
 
 include_dirs = ["gptqmodel_cuda"]
