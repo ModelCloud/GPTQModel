@@ -161,7 +161,7 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen3_list) }}
-      max-parallel: 3
+      max-parallel: 6
     runs-on: [ self-hosted, zen3 ]
     needs: 
       - check-vm
@@ -234,7 +234,7 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: 3
+      max-parallel: 6
     runs-on: [ self-hosted, zen4 ]
     needs: 
       - check-vm
