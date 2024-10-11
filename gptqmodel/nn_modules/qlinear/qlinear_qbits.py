@@ -21,7 +21,12 @@ BITS_DTYPE_MAPPING = {
 
 
 def qbits_dtype() -> torch.dtype:
-    from intel_extension_for_transformers import qbits
+    try:
+        from intel_extension_for_transformers import qbits
+    except Exception as e:
+        raise ImportError("intel_extension_for_transformers not installed. "
+                          "Please install via via 'pip install intel_extension_for_transformers")
+
     return torch.bfloat16 if qbits.check_isa_supported("AMX") else torch.float32
 
 
@@ -105,7 +110,11 @@ class QBitsQuantLinear(BaseQuantLinear):
     def post_init(self, quantize_config):
         self.validate_device(self.qweight.device.type)
 
-        from intel_extension_for_transformers import qbits
+        try:
+            from intel_extension_for_transformers import qbits
+        except Exception as e:
+            raise ImportError("intel_extension_for_transformers not installed. "
+                              "Please install via via 'pip install intel_extension_for_transformers")
 
         if self.bias is not None:
             self.bias = self.bias.to(dtype=torch.float32)
@@ -246,7 +255,11 @@ class QBitsQuantLinear(BaseQuantLinear):
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x: torch.Tensor):
-        from intel_extension_for_transformers import qbits
+        try:
+            from intel_extension_for_transformers import qbits
+        except Exception as e:
+            raise ImportError("intel_extension_for_transformers not installed. "
+                              "Please install via via 'pip install intel_extension_for_transformers")
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.outfeatures,)
