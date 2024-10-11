@@ -30,9 +30,10 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  AMD_SERVER: 10.0.13.31
-  INTEL_SERVER: 10.0.23.35
+  ZEN3_SERVER: 10.0.13.0 # set to a wrong ip to keep this feature but not use it
+  ZEN4_SERVER: 10.0.14.199
   CPU_TEST_FILES: "test_qbits.py"
+  EXCLUDED_TEST_FILES: "test_tgi.py"
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
 
@@ -58,24 +59,24 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          if [[ "${{ runner.name }}" == *"intel"* ]]; then
-            echo "current ci is intel"
+          if [[ "${{ runner.name }}" == *"zen4"* ]]; then
+            echo "current ci is zen4"
             response=0
           else
-            echo "test intel vm status"
-            response=$(curl --silent --fail --max-time 5 http://$INTEL_SERVER/gpu/runner/status/intel) || response=error
+            echo "test zen4 vm status"
+            response=$(curl --silent --fail --max-time 5 http://$ZEN4_SERVER/gpu/runner/status/zen4) || response=error
             if [ "$response" == "error" ]; then
-              echo "test amd vm status"
-              response=$(curl --silent --fail --max-time 5 http://${AMD_SERVER}/gpu/runner/status/intel) || response=error
+              echo "test zen3 vm status"
+              response=$(curl --silent --fail --max-time 5 http://${ZEN3_SERVER}/gpu/runner/status/zen4) || response=error
             fi
           fi
 
           echo "response: $response"
 
           if [ "$response" == "0" ]; then
-            tag="intel"
+            tag="zen4"
           elif [ "$response" == "-1" ]; then
-            tag="amd"
+            tag="zen3"
           else
             echo "Error: Unexpected result - $response"
             exit 1
@@ -83,17 +84,17 @@ jobs:
 
           echo "Runner tag: $tag"
 
-          response=$(curl -s --head --fail --max-time 5 http://${INTEL_SERVER}/gpu/status) || response=error
+          response=$(curl -s --head --fail --max-time 5 http://${ZEN4_SERVER}/gpu/status) || response=error
           if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "Intel server is online. set ip to $ip"
-            ip=${INTEL_SERVER}
+            echo "Zen4 server is online. set ip to $ip"
+            ip=${ZEN4_SERVER}
           else
-            response=$(curl -s --head --max-time 5 http://${AMD_SERVER}/gpu/status) || response=error
+            response=$(curl -s --head --max-time 5 http://${ZEN3_SERVER}/gpu/status) || response=error
             if echo "$response" | grep "200 OK" > /dev/null; then
-              ip=${AMD_SERVER}
-              echo "AMD server is online. set ip to $ip"
+              ip=${ZEN3_SERVER}
+              echo "ZEN3 server is online. set ip to $ip"
             else
-              echo "AMD server is offline."
+              echo "ZEN3 server is offline."
               exit 1
             fi
           fi
@@ -113,10 +114,10 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
 
-  build-intel:
-    runs-on: [self-hosted, intel]
+  build-zen4:
+    runs-on: [self-hosted, zen4]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'intel' && github.event.inputs.artifact_id == ''
+    if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == ''
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -127,7 +128,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          nvcc --version
+          #nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -139,8 +140,11 @@ jobs:
 
       - name: Install requirements
         run: |
-          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          pip install twine -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
+          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
+          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
+          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
+          pip install transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -170,10 +174,10 @@ jobs:
           name: dist
           path: dist
 
-  build-amd:
-    runs-on: [self-hosted, amd]
+  build-zen3:
+    runs-on: [self-hosted, zen3]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'amd' && github.event.inputs.artifact_id == ''
+    if: needs.check-vm.outputs.tag == 'zen3' && github.event.inputs.artifact_id == ''
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -184,7 +188,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          nvcc --version
+          #nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -196,8 +200,11 @@ jobs:
 
       - name: Install requirements
         run: |
-          pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          pip install twine -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
+          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
+          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
+          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
+          pip install transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -252,6 +259,8 @@ jobs:
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
 
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py')]
+          all_tests = [item for item in all_tests if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
+
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
 
           print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
@@ -268,12 +277,12 @@ jobs:
 
   test_gpu:
     needs:
-      - build-intel
-      - build-amd
+      - build-zen4
+      - build-zen3
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success' || github.event.inputs.artifact_id != '')
+    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || needs.build-zen3.result == 'success' || github.event.inputs.artifact_id != '')
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
@@ -291,7 +300,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          nvcc --version
+          #nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -339,10 +348,10 @@ jobs:
 
       - name: Check platform
         run: |
-          if [[ "${{ runner.name }}" == *"intel"* ]]; then
-            ip=${INTEL_SERVER}
+          if [[ "${{ runner.name }}" == *"zen4"* ]]; then
+            ip=${ZEN4_SERVER}
           else
-            ip=${AMD_SERVER}
+            ip=${ZEN3_SERVER}
           fi
           echo "GPU_IP=$ip" >> $GITHUB_ENV
 
@@ -368,7 +377,10 @@ jobs:
 
       - name: Install requirements
         run: |
-          pip install optimum
+          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
+          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
+          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
+          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
           pip install transformers -U
 
       - name: Run tests
@@ -381,12 +393,12 @@ jobs:
 
   test_cpu:
     needs:
-      - build-intel
-      - build-amd
+      - build-zen4
+      - build-zen3
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-intel.result == 'success' || needs.build-amd.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.cpu-files != '[]'
+    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || needs.build-zen3.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.cpu-files != '[]'
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
@@ -402,7 +414,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          nvcc --version
+          #nvcc --version
           echo "== torch =="
           pip show torch
 

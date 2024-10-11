@@ -65,11 +65,10 @@ if BUILD_CUDA_EXT:
 with open('requirements.txt') as f:
     requirement_list = f.read().splitlines()
     if os.getenv("CI"):
-        requirements = [item for item in requirement_list if not item.startswith("liger-kernel")]
+        requirements = []
     else:
         requirements = requirement_list
-
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
 
@@ -118,10 +117,11 @@ if BUILD_CUDA_EXT:
             "-O3",
             "-std=c++17",
             "--threads",
-            "2",
+            "4",
             "-Xfatbin",
             "-compress-all",
-            "-diag-suppress=179,39",
+            "-diag-suppress=179,39,186",
+             "--use_fast_math",
         ],
     }
 
