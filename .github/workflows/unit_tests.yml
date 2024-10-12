@@ -268,6 +268,7 @@ jobs:
           echo "Test files: $test_files"
           echo "CPU Test files: $cpu_test_files"
           echo "GPU Test files: $gpu_test_files"
+          echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   test_gpu:
     needs:
