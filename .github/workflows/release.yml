@@ -159,14 +159,14 @@ jobs:
 
             tag=${{ env.TAG }}
 
-            read -r cuda torch py <<< "$input"
-            task=compiler_cuda$cuda-torch$torch-python$py
-
             if [[ "$input" =~ "$server_lists" ]]; then
-               list_1="[\"$input\"]"
+              echo "use inputed image name"
+              list_1="[\"$input\"]"
             else
-               task=compiler_cuda$cuda-torch$torch-python$py
-               list_1="[\"$task\"]"
+              echo "extracting cuda torch and python"
+              read -r cuda torch py <<< "$input"
+              task=compiler_cuda$cuda-torch$torch-python$py
+              list_1="[\"$task\"]"
             fi
              list_2="[]"
 
