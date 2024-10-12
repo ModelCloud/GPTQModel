@@ -338,7 +338,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install bitblas parameterized uvicorn auto_gptq -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
 
       - name: Check platform
