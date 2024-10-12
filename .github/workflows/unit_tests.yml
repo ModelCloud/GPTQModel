@@ -306,6 +306,7 @@ jobs:
           fi
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
           echo "RUN_ID=${run_id}"
+          rm -rf ~/.cache/bitblas/nvidia/geforce-rtx-4090 || true
 
       - name: Checkout Codes
         uses: actions/checkout@v4
