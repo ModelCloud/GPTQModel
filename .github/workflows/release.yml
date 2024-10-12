@@ -80,13 +80,13 @@ jobs:
             echo "Error: Unexpected result - $response"
             exit 1
           fi
-          
+
           echo "Runner tag: $tag"
 
           zen3_online=0
           zen4_online=0
           ip=""
-          
+
           response=$(curl -s --head --fail --max-time 5 http://${ZEN4_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
             echo "Zen4 server is online. Set IP to $ZEN4_SERVER"
@@ -95,7 +95,7 @@ jobs:
           else
             echo "Zen4 server is offline."
           fi
-          
+
           response=$(curl -s --head --fail --max-time 5 http://${ZEN3_SERVER}/gpu/status) || response="error"
           if echo "$response" | grep "200 OK" > /dev/null; then
             echo "ZEN3 server is online. Set IP to $ZEN3_SERVER"
@@ -134,6 +134,8 @@ jobs:
 
           input="${{ github.event.inputs.target }}"
 
+          server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
+
           if [[ -z "$input" ]]; then
             # tag == 0, both zen4 & zen3 are online
             if [[ $tag -eq 0 ]]; then
@@ -146,11 +148,9 @@ jobs:
 
             echo "divide=$divide"
 
-            lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
+            echo "lists=$server_lists"
 
-            echo "lists=$lists"
-
-            IFS=$'+' read -r list_1 list_2 <<< "$lists"
+            IFS=$'+' read -r list_1 list_2 <<< "$server_lists"
 
             echo "list 1: $list_1"
             echo "list 2: $list_2"
@@ -160,8 +160,15 @@ jobs:
             tag=${{ env.TAG }}
 
             read -r cuda torch py <<< "$input"
-            list_1="[\"compiler_cuda$cuda-torch$torch-python$py\"]"
-            list_2="[]"
+            task=compiler_cuda$cuda-torch$torch-python$py
+
+            if [[ "$input" =~ "$server_lists" ]]; then
+               list_1="[\"$input\"]"
+            else
+               task=compiler_cuda$cuda-torch$torch-python$py
+               list_1="[\"$task\"]"
+            fi
+             list_2="[]"
 
             echo "task list: $list_1"
           fi
