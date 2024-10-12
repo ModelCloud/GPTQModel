@@ -5,8 +5,6 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
-os.environ["CC"] = "g++"
-os.environ["CXX"] = "g++"
 os.environ["BUILD_CUDA_EXT"] = "1"
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
@@ -112,17 +110,29 @@ if BUILD_CUDA_EXT:
     extra_compile_args = {
         "cxx": [
             "-O3",
+            "-std=c++17", 
+            "-fopenmp", 
+            "-lgomp", 
+            "-DENABLE_BF16"
             "-Wno-switch-bool",
         ],
         "nvcc": [
             "-O3",
             "-std=c++17",
+            "-DENABLE_BF16",
+            "-U__CUDA_NO_HALF_OPERATORS__",
+            "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_HALF2_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
             "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
             "-diag-suppress=179,39,186",
-             "--use_fast_math",
+            "--use_fast_math",
         ],
     }
 
