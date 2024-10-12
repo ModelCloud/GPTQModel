@@ -339,7 +339,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install auto_round auto_gptq optimum bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install auto_round optimum bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
           pip install torch -U
 
