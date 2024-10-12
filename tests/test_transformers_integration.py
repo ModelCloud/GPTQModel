@@ -97,7 +97,6 @@ class TestTransformersIntegration(unittest.TestCase):
             self.assertResult(model, tokenizer, True, exllama_version, reference_output)
 
     def assertResult(self, model, tokenizer, load_quant_model, exllama_version, reference_output):
-        print("qlinear type", type(model.model.decoder.layers[0].self_attn.k_proj))
         if exllama_version == 1:
             self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaQuantLinear)
         elif exllama_version == 2:
