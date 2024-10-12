@@ -115,7 +115,6 @@ if BUILD_CUDA_EXT:
             "-DENABLE_BF16"
             "-Wno-switch-bool",
         ],
-        "cxx": ["-O3", "-fopenmp", "-lgomp", "-std=c++17", "-DENABLE_BF16"],
         "nvcc": [
             "-O3",
             "-std=c++17",
