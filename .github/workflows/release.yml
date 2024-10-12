@@ -161,7 +161,7 @@ jobs:
 
             tag=${{ env.TAG }}
 
-            if [[ "$input" =~ \ ]]; then
+            if [[ "$input" =~ \  ]]; then
               echo "extracting cuda torch and python"
               read -r cuda torch py <<< "$input"
               task=compiler_cuda$cuda-torch$torch-python$py
