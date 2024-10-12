@@ -90,6 +90,7 @@ extras_require = {
     'bitblas': ["bitblas>=0.0.1.dev13"],
     'hf': ["optimum>=1.21.2"],
     'qbits': ["intel_extension_for_transformers>=1.4.2"],
+    'auto_round': ["auto_round>=0.3"],
 }
 
 include_dirs = ["gptqmodel_cuda"]
