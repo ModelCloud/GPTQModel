@@ -376,7 +376,7 @@ jobs:
 
           twine check dist/$whl
 
-      - name: Upload package
+      - name: Upload to local
         continue-on-error: true
         run: |
           sha256=$(sha256sum dist/${{ env.WHL_NAME }})
