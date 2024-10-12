@@ -132,25 +132,39 @@ jobs:
         run: |
           tag=${{ env.TAG }}
 
-          # tag == 0, both zen4 & zen3 are online
-          if [[ $tag -eq 0 ]]; then
-              divide=2
-          elif [[ $tag -eq 1 ]] || [[ $tag -eq 2 ]]; then
-              divide=1
+          input=${{ github.event.inputs.target }}
+
+          if [[ -z "$input" ]]; then
+            # tag == 0, both zen4 & zen3 are online
+            if [[ $tag -eq 0 ]]; then
+                divide=2
+            elif [[ $tag -eq 1 ]] || [[ $tag -eq 2 ]]; then
+                divide=1
+            else
+                divide=1
+            fi
+
+            echo "divide=$divide"
+
+            lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
+
+            echo "lists=$lists"
+
+            IFS=$'+' read -r list_1 list_2 <<< "$lists"
+
+            echo "list 1: $list_1"
+            echo "list 2: $list_2"
           else
-              divide=1
+            echo "inputed target is: ${{ github.event.inputs.target }}"
+
+            tag=${{ env.TAG }}
+
+            read -r cuda torch py <<< "${{ github.event.inputs.target }}"
+            list_1="[\"compiler_cuda$cuda-torch$torch-python$py\"]"
+            list_2 = []
+
+            echo "task list: $list_1"
           fi
-
-          echo "divide=$divide"
-
-          lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
-
-          echo "lists=$lists"
-          
-          IFS=$'+' read -r list_1 list_2 <<< "$lists"
-
-          echo "list 1: $list_1"
-          echo "list 2: $list_2"
 
           if [[ $tag -eq 0 ]]; then
               echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
@@ -161,28 +175,6 @@ jobs:
               echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Assign tasks
-        if: ${{ github.event.inputs.target }} != ''
-        id: assign
-        run: |
-          echo "inputed target is: ${{ github.event.inputs.target }}"
-
-          tag=${{ env.TAG }}
-
-          read -r cuda torch py <<< "${{ github.event.inputs.target }}"
-          list_1="[\"compiler_cuda$cuda-torch$torch-python$py\"]"
-          list_2 = []
-
-          echo "task list: $list_1"
-
-          if [[ $tag -eq 0 ]]; then
-              echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
-              echo "zen4_list=$list_2" >> "$GITHUB_OUTPUT"
-          elif [[ $tag -eq 1 ]]; then
-              echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
-          elif [[ $tag -eq 2 ]]; then
-              echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
-          fi
 
   release-zen3:
     strategy:
