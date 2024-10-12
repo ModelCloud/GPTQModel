@@ -161,7 +161,7 @@ jobs:
 
             read -r cuda torch py <<< "$input"
             list_1="[\"compiler_cuda$cuda-torch$torch-python$py\"]"
-            list_2 = []
+            list_2 = "[]"
 
             echo "task list: $list_1"
           fi
