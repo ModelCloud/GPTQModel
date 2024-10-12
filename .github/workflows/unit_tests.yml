@@ -33,7 +33,7 @@ env:
   ZEN3_SERVER: 10.0.13.0 # set to a wrong ip to keep this feature but not use it
   ZEN4_SERVER: 10.0.14.199
   CPU_TEST_FILES: "test_qbits.py"
-  EXCLUDED_TEST_FILES: "test_tgi.py"
+  IGNORED_TEST_FILES: "test_tgi.py"
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
 
@@ -128,7 +128,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          #nvcc --version
+          nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -140,9 +140,6 @@ jobs:
 
       - name: Install requirements
         run: |
-          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
-          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
-          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
           pip install transformers -U
 
@@ -188,7 +185,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          #nvcc --version
+          nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -200,9 +197,6 @@ jobs:
 
       - name: Install requirements
         run: |
-          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
-          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
-          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
           pip install transformers -U
 
@@ -258,7 +252,7 @@ jobs:
           test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
 
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py')]
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
           all_tests = [item for item in all_tests if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
 
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
@@ -274,6 +268,7 @@ jobs:
           echo "Test files: $test_files"
           echo "CPU Test files: $cpu_test_files"
           echo "GPU Test files: $gpu_test_files"
+          echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   test_gpu:
     needs:
@@ -300,7 +295,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          #nvcc --version
+          nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -377,9 +372,6 @@ jobs:
 
       - name: Install requirements
         run: |
-          # cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
-          # torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
-          # python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
           pip install transformers -U
 
@@ -414,7 +406,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          #nvcc --version
+          nvcc --version
           echo "== torch =="
           pip show torch
 
