@@ -5,8 +5,6 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
-#os.environ["CC"] = "g++"
-#os.environ["CXX"] = "g++"
 os.environ["BUILD_CUDA_EXT"] = "1"
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
