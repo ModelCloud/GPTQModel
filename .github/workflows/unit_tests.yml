@@ -306,7 +306,6 @@ jobs:
           fi
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
           echo "RUN_ID=${run_id}"
-          rm -rf ~/.cache/bitblas/nvidia/geforce-rtx-4090 || true
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -339,7 +338,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install auto_round optimum bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
           pip install torch -U
 
