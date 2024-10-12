@@ -38,7 +38,7 @@ env:
   ref: ${{ github.event.inputs.ref || github.ref }}
 
 concurrency:
-  group: ${{ github.ref }}-workflow-unit-tests
+  group: ${{ github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
   cancel-in-progress: true
 
 jobs:
