@@ -132,7 +132,7 @@ jobs:
         run: |
           tag=${{ env.TAG }}
 
-          input=${{ github.event.inputs.target }}
+          input="${{ github.event.inputs.target }}"
 
           if [[ -z "$input" ]]; then
             # tag == 0, both zen4 & zen3 are online
@@ -155,11 +155,11 @@ jobs:
             echo "list 1: $list_1"
             echo "list 2: $list_2"
           else
-            echo "inputed target is: ${{ github.event.inputs.target }}"
+            echo "inputed target is: $input"
 
             tag=${{ env.TAG }}
 
-            read -r cuda torch py <<< "${{ github.event.inputs.target }}"
+            read -r cuda torch py <<< "$input"
             list_1="[\"compiler_cuda$cuda-torch$torch-python$py\"]"
             list_2 = []
 
