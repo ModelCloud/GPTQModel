@@ -13,7 +13,6 @@ threadpoolctl>=3.5.0
 packaging>=24.1
 ninja>=1.11.1.1
 protobuf>=4.25.3
-auto_round @ git+https://github.com/intel/auto-round.git@v0.3#egg=auto-round
 huggingface-hub>=0.24.2
 lm_eval==0.4.4
 liger-kernel>=0.3.0
