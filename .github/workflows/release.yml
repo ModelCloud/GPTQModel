@@ -134,7 +134,8 @@ jobs:
 
           input="${{ github.event.inputs.target }}"
 
-          server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
+          server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1")
+          echo "lists=$server_lists"
 
           if [[ -z "$input" ]]; then
             # tag == 0, both zen4 & zen3 are online
@@ -148,6 +149,7 @@ jobs:
 
             echo "divide=$divide"
 
+            server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1&divide=$divide")
             echo "lists=$server_lists"
 
             IFS=$'+' read -r list_1 list_2 <<< "$server_lists"
