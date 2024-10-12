@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: '0 20 * * *'
   release:
-    types: [published]
+    types: [ published ]
   repository_dispatch:
   workflow_dispatch:
     inputs:
@@ -17,6 +17,10 @@ on:
         default: ''
       ref:
         description: 'GitHub ref: Branch, Tag or Commit SHA'
+        required: false
+        default: ''
+      target:
+        description: 'CUDA Torch Python version separated by space'
         required: false
         default: ''
 
@@ -123,6 +127,7 @@ jobs:
           echo "tag: $tag, ip: $ip"
 
       - name: Assign tasks
+        if: ${{ github.event.inputs.target }} = ''
         id: assign
         run: |
           tag=${{ env.TAG }}
@@ -156,6 +161,29 @@ jobs:
               echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Assign tasks
+        if: ${{ github.event.inputs.target }} != ''
+        id: assign
+        run: |
+          echo "inputed target is: ${{ github.event.inputs.target }}"
+
+          tag=${{ env.TAG }}
+
+          read -r cuda torch py <<< "${{ github.event.inputs.target }}"
+          list_1="[\"compiler_cuda$cuda-torch$torch-python$py\"]"
+          list_2 = []
+
+          echo "task list: $list_1"
+
+          if [[ $tag -eq 0 ]]; then
+              echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
+              echo "zen4_list=$list_2" >> "$GITHUB_OUTPUT"
+          elif [[ $tag -eq 1 ]]; then
+              echo "zen3_list=$list_1" >> "$GITHUB_OUTPUT"
+          elif [[ $tag -eq 2 ]]; then
+              echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
+          fi
+
   release-zen3:
     strategy:
       fail-fast: false
@@ -163,7 +191,7 @@ jobs:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen3_list) }}
       max-parallel: 6
     runs-on: [ self-hosted, zen3 ]
-    needs: 
+    needs:
       - check-vm
       - release-source
     if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '1') || github.event_name == 'release') && needs.check-vm.outputs.zen3_list != '' && !cancelled()
@@ -236,7 +264,7 @@ jobs:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
       max-parallel: 6
     runs-on: [ self-hosted, zen4 ]
-    needs: 
+    needs:
       - check-vm
       - release-source
     if: ((needs.check-vm.outputs.tag == '0' || needs.check-vm.outputs.tag == '2') || github.event_name == 'release') && needs.check-vm.outputs.zen4_list != '' && !cancelled()
