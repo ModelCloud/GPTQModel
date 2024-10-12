@@ -141,7 +141,7 @@ jobs:
       - name: Install requirements
         run: |
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
-          pip install transformers autoround -U
+          pip install transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -338,7 +338,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install autoround optimum bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install auto_round optimum bitblas parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
           pip install torch -U
 
