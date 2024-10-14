@@ -141,7 +141,7 @@ jobs:
       - name: Install requirements
         run: |
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
-          uv pip install --system transformers -U
+          uv pip install transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -198,7 +198,7 @@ jobs:
       - name: Install requirements
         run: |
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
-          uv pip install --system transformers -U
+          uv pip install transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -215,7 +215,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          uv pip install --system dist/$whl
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
