@@ -141,7 +141,7 @@ jobs:
       - name: Install requirements
         run: |
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
-          pip install transformers -U
+          uv pip install --system transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -158,7 +158,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          pip install dist/$whl
+          uv pip install --system dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -198,7 +198,7 @@ jobs:
       - name: Install requirements
         run: |
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
-          pip install transformers -U
+          uv pip install --system transformers -U
 
       - name: Compile
         timeout-minutes: 35
@@ -215,7 +215,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          pip install dist/$whl
+          uv pip install --system dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -338,9 +338,9 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          pip install dist/*.whl
-          pip install torch -U
+          uv pip install --system auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install --system dist/*.whl
+          uv pip install --system torch -U
 
       - name: Check platform
         run: |
@@ -378,7 +378,7 @@ jobs:
       - name: Install requirements
         run: |
           /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
-          pip install transformers -U
+          uv pip install --system transformers -U
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
@@ -444,7 +444,7 @@ jobs:
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
       - name: Install wheel
-        run: pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: uv pip install --system dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
