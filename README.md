@@ -133,7 +133,7 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 # You can install optional modules like autoround, qbits, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation .[autoround,vllm,sglang,bitblas,qbits]
 pip install -v . --no-build-isolation
 
-# up: compile and install 
+# uv: compile and install 
 uv pip install -v . --no-build-isolation
 ```
 
