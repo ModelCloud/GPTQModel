@@ -119,8 +119,8 @@ ROCM/AMD support will be re-added in a future version after everything on ROCM h
 ### PIP 
 
 ```bash
-# Include any specific modules needed using brackets. Example: pip install gptqmodel[sglang,vllm,bitblas] --no-build-isolation
-pip install gptqmodel
+# You can install optional modules like autoround, qbits, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation gptqmodel[auto_round,vllm,sglang,bitblas,qbits]
+pip install -v gptqmodel --no-build-isolation
 ```
 
 ### Install from source
@@ -129,13 +129,12 @@ pip install gptqmodel
 # clone repo
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
-# compile and install
-# You can optionally include specific modules like vllm, sglang, or bitblas by adding them in brackets. Example: pip install -vvv --no-build-isolation .[vllm,sglang,bitblas]
-pip install -vvv .
+# pip: compile and install
+# You can install optional modules like autoround, qbits, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation .[auto_round,vllm,sglang,bitblas,qbits]
+pip install -v . --no-build-isolation
 
-# If you have `uv` package version 0.1.16 or higher, you can use `uv pip` for potentially better dependency management
-# Include modules as needed: uv pip install -vvv --no-build-isolation .[vllm,sglang,bitblas]
-uv pip install -vvv .
+# uv: compile and install 
+uv pip install -v . --no-build-isolation
 ```
 
 ### Script installation  
