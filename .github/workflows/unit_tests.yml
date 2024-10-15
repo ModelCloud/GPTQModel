@@ -140,7 +140,7 @@ jobs:
 
       - name: Install requirements
         run: |
-          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
           uv pip install transformers -U
 
       - name: Compile
@@ -197,7 +197,7 @@ jobs:
 
       - name: Install requirements
         run: |
-          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
           uv pip install transformers -U
 
       - name: Compile
@@ -377,7 +377,7 @@ jobs:
 
       - name: Install requirements
         run: |
-          /bin/bash /tmp/init/init_env.sh 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
           uv pip install transformers -U
 
       - name: Run tests
