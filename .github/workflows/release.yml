@@ -184,7 +184,6 @@ jobs:
               echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
           fi
 
-
   release-zen3:
     strategy:
       fail-fast: false
@@ -200,6 +199,12 @@ jobs:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 70
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print Env
         run: |
           echo "== pyenv =="
@@ -210,12 +215,6 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
 
       # - name: Install requirements
       #   run: uv pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -273,6 +272,12 @@ jobs:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     timeout-minutes: 70
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print Env
         run: |
           echo "== pyenv =="
@@ -283,12 +288,6 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: |
@@ -345,6 +344,12 @@ jobs:
     env:
       CUDA_RELEASE: 0
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print Env
         run: |
           echo "== pyenv =="
@@ -355,12 +360,6 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: uv pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
