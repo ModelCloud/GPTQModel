@@ -218,7 +218,7 @@ jobs:
           ref: ${{ env.ref }}
 
       # - name: Install requirements
-      #   run: pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+      #   run: uv pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -230,7 +230,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          pip install dist/$whl
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -295,7 +295,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          /bin/bash /tmp/init/init_env.sh $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -307,7 +307,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          pip install dist/$whl
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -341,7 +341,7 @@ jobs:
     runs-on: self-hosted
     needs: check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4-python3.11
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4.1-python3.11
     env:
       CUDA_RELEASE: 0
     steps:
@@ -363,7 +363,7 @@ jobs:
           ref: ${{ env.ref }}
 
       - name: Install requirements
-        run: pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: uv pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         run: python -m build --no-isolation --sdist
