@@ -221,7 +221,7 @@ jobs:
       #   run: uv pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
-        run: python setup.py bdist_wheel --no-build-isolation
+        run: python setup.py bdist_wheel
 
       - name: Test install
         run: |
@@ -298,7 +298,7 @@ jobs:
           bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
-        run: python setup.py bdist_wheel --no-build-isolation
+        run: python setup.py bdist_wheel
 
       - name: Test install
         run: |
