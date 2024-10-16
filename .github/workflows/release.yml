@@ -218,7 +218,7 @@ jobs:
           ref: ${{ env.ref }}
 
       # - name: Install requirements
-      #   run: uv pip install --system -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+      #   run: uv pip install -r requirements.txt -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -230,7 +230,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          uv pip install --system dist/$whl
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -307,7 +307,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          uv pip install --system dist/$whl
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -363,7 +363,7 @@ jobs:
           ref: ${{ env.ref }}
 
       - name: Install requirements
-        run: uv pip install --system build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: uv pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         run: python -m build --no-isolation --sdist
