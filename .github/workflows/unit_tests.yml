@@ -354,7 +354,7 @@ jobs:
           pip show torch
           echo "-----------"
           nvcc --version
-          rm -rf /root/.cache/bitblas/nvidia/geforce-rtx-4090
+          rm -rf ~/.cache/bitblas/nvidia/geforce-rtx-4090
 
       - name: Find suitable GPU
         run: |
