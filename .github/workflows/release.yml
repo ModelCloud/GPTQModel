@@ -65,9 +65,6 @@ jobs:
         run: |
           input="${{ github.event.inputs.target }}"
 
-          server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1")
-          echo "lists=$server_lists"
-
           if [[ -z "$input" ]]; then
             server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1")
             echo "lists=$server_lists"
@@ -75,6 +72,7 @@ jobs:
             IFS=$'+' read -r list_1 list_2 <<< "$server_lists"
 
             echo "list 1: $list_1"
+            echo "list 2: $list_2"
           else
             echo "inputed target is: $input"
 
@@ -93,7 +91,6 @@ jobs:
           fi
 
           echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
-
 
   release-zen4:
     strategy:
