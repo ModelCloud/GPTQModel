@@ -30,7 +30,6 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  ZEN3_SERVER: 10.0.13.0 # set to a wrong ip to keep this feature but not use it
   ZEN4_SERVER: 10.0.14.199
   CPU_TEST_FILES: "test_qbits.py"
   IGNORED_TEST_FILES: "test_tgi.py"
@@ -59,50 +58,10 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          if [[ "${{ runner.name }}" == *"zen4"* ]]; then
-            echo "current ci is zen4"
-            response=0
-          else
-            echo "test zen4 vm status"
-            response=$(curl --silent --fail --max-time 5 http://$ZEN4_SERVER/gpu/runner/status/zen4) || response=error
-            if [ "$response" == "error" ]; then
-              echo "test zen3 vm status"
-              response=$(curl --silent --fail --max-time 5 http://${ZEN3_SERVER}/gpu/runner/status/zen4) || response=error
-            fi
-          fi
+          echo "ip=$ZEN4_SERVER" >> "$GITHUB_OUTPUT"
+          echo "tag=zen4" >> "$GITHUB_OUTPUT"
 
-          echo "response: $response"
-
-          if [ "$response" == "0" ]; then
-            tag="zen4"
-          elif [ "$response" == "-1" ]; then
-            tag="zen3"
-          else
-            echo "Error: Unexpected result - $response"
-            exit 1
-          fi
-
-          echo "Runner tag: $tag"
-
-          response=$(curl -s --head --fail --max-time 5 http://${ZEN4_SERVER}/gpu/status) || response=error
-          if echo "$response" | grep "200 OK" > /dev/null; then
-            echo "Zen4 server is online. set ip to $ip"
-            ip=${ZEN4_SERVER}
-          else
-            response=$(curl -s --head --max-time 5 http://${ZEN3_SERVER}/gpu/status) || response=error
-            if echo "$response" | grep "200 OK" > /dev/null; then
-              ip=${ZEN3_SERVER}
-              echo "ZEN3 server is online. set ip to $ip"
-            else
-              echo "ZEN3 server is offline."
-              exit 1
-            fi
-          fi
-
-          echo "ip=$ip" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-          echo "GPU_IP=$ip" >> $GITHUB_ENV
+          echo "GPU_IP=$ZEN4_SERVER" >> $GITHUB_ENV
 
           echo "tag: $tag, ip: $ip"
 
@@ -118,63 +77,6 @@ jobs:
     runs-on: [self-hosted, zen4]
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == ''
-    container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
-    steps:
-      - name: Print Env
-        run: |
-          echo "== pyenv =="
-          pyenv versions
-          echo "== python =="
-          python --version
-          echo "== nvcc =="
-          nvcc --version
-          echo "== torch =="
-          pip show torch
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: Install requirements
-        run: |
-          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          uv pip install transformers -U
-
-      - name: Compile
-        timeout-minutes: 35
-        run: python setup.py bdist_wheel
-
-      - name: Test install
-        run: |
-          ls -ahl dist
-          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
-          sha256=$(sha256sum dist/$whl)
-          echo "hash=$sha256"
-          
-          echo "WHL_HASH=$sha256" >> $GITHUB_ENV
-          echo "WHL_NAME=$whl" >> $GITHUB_ENV
-
-          twine check dist/$whl
-          uv pip install dist/$whl
-
-      - name: Upload wheel
-        continue-on-error: true
-        run: |
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
-
-      - name: Upload to artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist
-
-  build-zen3:
-    runs-on: [self-hosted, zen3]
-    needs: check-vm
-    if: needs.check-vm.outputs.tag == 'zen3' && github.event.inputs.artifact_id == ''
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -273,11 +175,10 @@ jobs:
   test_gpu:
     needs:
       - build-zen4
-      - build-zen3
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || needs.build-zen3.result == 'success' || github.event.inputs.artifact_id != '')
+    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '')
     timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
@@ -344,11 +245,7 @@ jobs:
 
       - name: Check platform
         run: |
-          if [[ "${{ runner.name }}" == *"zen4"* ]]; then
-            ip=${ZEN4_SERVER}
-          else
-            ip=${ZEN3_SERVER}
-          fi
+          ip=${ZEN4_SERVER}
           echo "GPU_IP=$ip" >> $GITHUB_ENV
           echo "-----------"
           pip show torch
@@ -392,12 +289,11 @@ jobs:
   test_cpu:
     needs:
       - build-zen4
-      - build-zen3
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || needs.build-zen3.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.cpu-files != '[]'
-    timeout-minutes: 40
+    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.cpu-files != '[]'
+    timeout-minutes: 60
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
