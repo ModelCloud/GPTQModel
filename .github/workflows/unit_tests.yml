@@ -207,7 +207,7 @@ jobs:
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
           echo "RUN_ID=${run_id}"
           
-          if grep -q "bitblas" your_file.txt; then
+          if grep -q "bitblas" tests/${{ matrix.test_script }}.py; then
               echo "BITBLAS=1" >> $GITHUB_ENV
           fi
 
