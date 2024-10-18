@@ -76,7 +76,7 @@ jobs:
   build-zen4:
     runs-on: [self-hosted, zen4]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == ''
+    if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -179,7 +179,6 @@ jobs:
       - check-vm
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '')
-    timeout-minutes: 40
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     strategy:
@@ -207,6 +206,10 @@ jobs:
           fi
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
           echo "RUN_ID=${run_id}"
+          
+          if grep -q "bitblas" tests/${{ matrix.test_script }}.py; then
+              echo "BITBLAS=1" >> $GITHUB_ENV
+          fi
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -230,7 +233,7 @@ jobs:
           fi
 
       - name: Download artifact
-        if: env.DOWNLOADED == ''
+        if: env.DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
           name: dist
@@ -239,9 +242,10 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install auto_round optimum bitblas==0.0.1.dev13 parameterized intel_extension_for_transformers uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           uv pip install dist/*.whl
-          uv pip install torch -U
+          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
+          uv pip install transformers -U
 
       - name: Check platform
         run: |
@@ -251,7 +255,6 @@ jobs:
           pip show torch
           echo "-----------"
           nvcc --version
-          rm -rf ~/.cache/bitblas/nvidia/geforce-rtx-4090
 
       - name: Find suitable GPU
         run: |
@@ -273,14 +276,16 @@ jobs:
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
-      - name: Install requirements
-        run: |
-          bash -c "$(curl -L http://10.0.14.199/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          uv pip install transformers -U
-
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+        timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 40 }}
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
+        run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+
+      - name: Clear cache
+        if: failure() && env.BITBLAS == '1' && env.ERROR == '1'
+        run: |
+          rm -rf ~/.cache/bitblas/nvidia/geforce-rtx-4090
+          echo "clear bitblas cache"
 
       - name: Release GPU
         if: always()
@@ -333,7 +338,7 @@ jobs:
           fi
 
       - name: Download artifact
-        if: env.DOWNLOADED == ''
+        if: env.DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
           name: dist
@@ -344,5 +349,5 @@ jobs:
         run: uv pip install intel_extension_for_transformers dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
