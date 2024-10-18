@@ -76,7 +76,7 @@ jobs:
   build-zen4:
     runs-on: [self-hosted, zen4]
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == ''
+    if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
@@ -233,7 +233,7 @@ jobs:
           fi
 
       - name: Download artifact
-        if: env.DOWNLOADED == ''
+        if: env.DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
           name: dist
@@ -278,7 +278,7 @@ jobs:
 
       - name: Run tests
         timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 40 }}
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 
       - name: Clear cache
@@ -338,7 +338,7 @@ jobs:
           fi
 
       - name: Download artifact
-        if: env.DOWNLOADED == ''
+        if: env.DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
           name: dist
@@ -349,5 +349,5 @@ jobs:
         run: uv pip install intel_extension_for_transformers dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }}
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
