@@ -3,7 +3,7 @@ import itertools
 import torch
 import triton
 import triton.language as tl
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 
 def make_dequant_configs(block_sizes, num_warps):
@@ -92,7 +92,7 @@ def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
 
     out = torch.empty((infeatures, outfeatures), device="cuda", dtype=torch.float16)
     numels = out.numel()
-    maxq = 2**bits - 1 if maxq is None else maxq
+    maxq = 2 ** bits - 1 if maxq is None else maxq
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
     dequant_kernel_248[grid](
@@ -119,7 +119,7 @@ def quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq=None, tra
 
 class QuantLinearFunction(torch.autograd.Function):
     @staticmethod
-    @custom_fwd
+    @custom_fwd(device_type="cuda")
     def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, maxq):
         output = quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq)
         ctx.save_for_backward(qweight, scales, qzeros, g_idx)
@@ -127,7 +127,7 @@ class QuantLinearFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         qweight, scales, qzeros, g_idx = ctx.saved_tensors
         bits, maxq = ctx.bits, ctx.maxq
