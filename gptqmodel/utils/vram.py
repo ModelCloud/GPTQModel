@@ -1,4 +1,4 @@
-from accelerate.utils import convert_bytes, dtype_byte_size
+from accelerate.utils import convert_bytes
 from typing import Dict, List, Tuple, Union, Optional
 from collections import defaultdict
 import torch
