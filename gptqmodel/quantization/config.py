@@ -33,7 +33,7 @@ META_FIELD_QUANTIZER = "quantizer"
 
 META_QUANTIZER_GPTQMODEL = "gptqmodel"
 
-META_FIELD_URI = "URI"
+META_FIELD_URI = "uri"
 META_VALUE_URI = "https://github.com/modelcloud/gptqmodel"
 
 # pkg names
