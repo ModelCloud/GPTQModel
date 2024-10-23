@@ -609,7 +609,7 @@ def get_checkpoints(
                     shard_index_name = fileName + ".index.json"
                     shard_index = cached_file(
                         model_name_or_path,
-                        shard_index_name,
+                        fileName,
                         **cached_file_kwargs,
                     )
                     searched_files.append(shard_index_name)
