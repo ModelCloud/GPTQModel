@@ -33,7 +33,8 @@ META_FIELD_QUANTIZER = "quantizer"
 
 META_QUANTIZER_GPTQMODEL = "gptqmodel"
 
-META_FIELD_URI = "https://modelcloud/gptqmodel"
+META_FIELD_URI = "URI"
+META_VALUE_URI = "https://github.com/modelcloud/gptqmodel"
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -187,21 +188,21 @@ class QuantizeConfig():
         return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_set_versionable(self, key: str, value: str, version: str, uri: str):
-        self.meta_set(key, f"{value}:{version}:{uri}")
+    def meta_set_versionable(self, key: str, value: str, version: str):
+        self.meta_set(key, f"{value}:{version}")
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_get_versionable(self, key: str) -> Tuple[str, str, str]:
+    def meta_get_versionable(self, key: str) -> Tuple[str, str]:
         val = self.meta_get(key)
         if val is None:
             return None, None
         parts = val.split(":")
-        return parts[0].lower(), parts[1].lower(), parts[2].lower() if len(parts) >= 3 else None
+        return parts[0].lower(), parts[1].lower() if len(parts) >= 2 else None
 
     # is quantized model quantized or packed by gptqmodel version with v2 format code
     def is_quantized_by_v2(self) -> bool:
         # check meta.quantizer
-        producer, _version, _ = self.meta_get_versionable(META_FIELD_QUANTIZER)
+        producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
         by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
 
         return by_v2
