@@ -665,14 +665,11 @@ class BaseGPTQModel(nn.Module):
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
         else:
-            model = self.get_model_with_quantize(quantize_config)
+            model = self.get_model_with_quantize(quantize_config, self.model_name_or_path)
         model.to(CPU)
         state_dict = model.state_dict()
 
-        if use_safetensors:
-            model_base_name = "model"
-        else:
-            model_base_name = "pytorch_model"
+        model_base_name = "model"
 
         if use_safetensors:
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
@@ -808,9 +805,9 @@ class BaseGPTQModel(nn.Module):
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_name_or_path)
 
-    def get_model_with_quantize(self, quantize_config):
+    def get_model_with_quantize(self, quantize_config, model_name_or_path):
         config = AutoConfig.from_pretrained(
-            quantize_config.model_name_or_path,
+            model_name_or_path,
             trust_remote_code=True,
         )
 
