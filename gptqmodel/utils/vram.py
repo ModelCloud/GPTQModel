@@ -26,11 +26,12 @@ def dtype_byte_size(dtype: torch.dtype):
         return 1
     elif dtype == torch.float8_e4m3fn:
         return 1
-    bit_search = re.search(r"[^\d](\d+)$", str(dtype))
-    if bit_search is None:
+    elif dtype == torch.float16 or dtype == torch.bfloat16:
+        return 2
+    elif dtype == torch.float32 or dtype == torch.int32:
+        return 4
+    else:
         raise ValueError(f"`dtype` is not a valid dtype: {dtype}.")
-    bit_size = int(bit_search.groups()[0])
-    return bit_size // 8
 
 def _get_proper_dtype(dtype: Union[str, torch.device]) -> torch.dtype:
     """
