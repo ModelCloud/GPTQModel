@@ -1230,14 +1230,6 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        if model_basename is None:
-            possible_model_basenames = [
-                f"gptq_model-{quantize_config.bits}bit-{quantize_config.group_size}g",
-                "model",
-            ]
-        else:
-            possible_model_basenames = [model_basename]
-
         extensions = []
         if use_safetensors:
             extensions.append(".safetensors")
@@ -1250,7 +1242,6 @@ class BaseGPTQModel(nn.Module):
         is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
             model_name_or_path=model_name_or_path,
             extensions=extensions,
-            possible_model_basenames=possible_model_basenames,
             **cached_file_kwargs,
         )
 

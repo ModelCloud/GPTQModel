@@ -573,7 +573,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
 
 def get_checkpoints(
-    model_name_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs
+    model_name_or_path: str, extensions: List[str], **cached_file_kwargs
 ):
     """
     Retrives (and if necessary downloads from Hugging Face Hub) the model checkpoint. Sharding is supported. All the `possible_model_basenames` (e.g. `["model", "model-4bit-gptq"]`) will be explored over all `extensions` (e.g. `[".bin", ".safetensors"]`).
@@ -584,56 +584,60 @@ def get_checkpoints(
 
     if os.path.isdir(model_name_or_path):
         for ext in extensions:
-            for possible_model_basename in possible_model_basenames:
-                shard_index_name = possible_model_basename + ext + ".index.json"
-                searched_files.append(shard_index_name)
-                possible_index_file = os.path.join(model_name_or_path, shard_index_name)
-                if os.path.isfile(possible_index_file):
-                    # The model is sharded over several checkpoints.
-                    possible_model_basename = possible_index_file.replace(ext + ".index.json", "")
-                    return True, possible_index_file, possible_model_basename
-                else:
-                    model_save_name = os.path.join(model_name_or_path, possible_model_basename)
-                    searched_files.append(possible_model_basename + ext)
-                    if os.path.isfile(model_save_name + ext):
-                        resolved_archive_file = model_save_name + ext
-                        return False, resolved_archive_file, possible_model_basename
+            for fileName in os.listdir(model_name_or_path):
+                if ext in fileName:
+                    shard_index_name = fileName + ".index.json"
+                    searched_files.append(shard_index_name)
+                    possible_index_file = os.path.join(model_name_or_path, shard_index_name)
+
+                    if os.path.isfile(possible_index_file):
+                        # The model is sharded over several checkpoints.
+                        possible_model_basename = possible_index_file.replace(ext + ".index.json", "")
+                        return True, possible_index_file, possible_model_basename
+                    else:
+                        model_save_name = os.path.join(model_name_or_path, fileName)
+                        searched_files.append(fileName)
+                        if os.path.isfile(model_save_name):
+                            resolved_archive_file = model_save_name
+                            return False, resolved_archive_file, fileName
+
     else:
         temp = None
         for ext in extensions:
-            for possible_model_basename in possible_model_basenames:
-                shard_index_name = possible_model_basename + ext + ".index.json"
-                shard_index = cached_file(
-                    model_name_or_path,
-                    shard_index_name,
-                    **cached_file_kwargs,
-                )
-                searched_files.append(shard_index_name)
-                if shard_index is not None:
-                    # The model is sharded over several checkpoints.
-                    with open(str(shard_index)) as f:
-                        index_json = json.load(f)
-                        # Download the shards from the index.json.
-                        shards = list(set(index_json["weight_map"].values()))
-                        for shard in shards:
-                            resolved_archive_file = cached_file(
-                                model_name_or_path,
-                                shard,
-                                **cached_file_kwargs,
-                            )
-                        return True, shard_index, possible_model_basename
-                else:
-                    resolved_archive_file = cached_file(
+            for fileName in os.listdir(model_name_or_path):
+                if ext in fileName:
+                    shard_index_name = fileName + ".index.json"
+                    shard_index = cached_file(
                         model_name_or_path,
-                        possible_model_basename + ext,
+                        shard_index_name,
                         **cached_file_kwargs,
                     )
-                    if resolved_archive_file is None:
-                        resolved_archive_file = temp
-                    searched_files.append(possible_model_basename + ext)
-                    if resolved_archive_file is not None:
-                        temp = resolved_archive_file
-                        return False, resolved_archive_file, possible_model_basename
+                    searched_files.append(shard_index_name)
+                    if shard_index is not None:
+                        # The model is sharded over several checkpoints.
+                        with open(str(shard_index)) as f:
+                            index_json = json.load(f)
+                            # Download the shards from the index.json.
+                            shards = list(set(index_json["weight_map"].values()))
+                            for shard in shards:
+                                resolved_archive_file = cached_file(
+                                    model_name_or_path,
+                                    shard,
+                                    **cached_file_kwargs,
+                                )
+                            return True, shard_index, fileName
+                    else:
+                        resolved_archive_file = cached_file(
+                            model_name_or_path,
+                            fileName,
+                            **cached_file_kwargs,
+                        )
+                        if resolved_archive_file is None:
+                            resolved_archive_file = temp
+                        searched_files.append(fileName)
+                        if resolved_archive_file is not None:
+                            temp = resolved_archive_file
+                            return False, resolved_archive_file, fileName
 
     if resolved_archive_file is None:
         raise FileNotFoundError(
