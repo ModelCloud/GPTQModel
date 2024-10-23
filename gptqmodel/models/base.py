@@ -30,7 +30,8 @@ from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
+                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, META_FIELD_URI,
+                                   META_VALUE_URI, META_FIELD_DAMP_PERCENT, META_FIELD_DAMP_AUTO_INCREMENT)
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import check_cuda
@@ -637,6 +638,21 @@ class BaseGPTQModel(nn.Module):
             key=META_FIELD_QUANTIZER,
             value=META_QUANTIZER_GPTQMODEL,
             version=__version__,
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_URI,
+            value=META_VALUE_URI,
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_DAMP_PERCENT,
+            value=self.quantize_config.damp_percent
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_DAMP_AUTO_INCREMENT,
+            value=self.quantize_config.damp_auto_increment
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
