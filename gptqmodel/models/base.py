@@ -1247,7 +1247,7 @@ class BaseGPTQModel(nn.Module):
         if use_safetensors:
             extensions.append(".safetensors")
         else:
-            extensions += [".pt"]
+            extensions += [".pt", ".pth"]
 
         model_name_or_path = str(model_name_or_path)
 
