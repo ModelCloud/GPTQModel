@@ -25,13 +25,14 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
+from .loader import ModelLoader
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
-                                   META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
+                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, META_FIELD_URI,
+                                   META_VALUE_URI, META_FIELD_DAMP_PERCENT, META_FIELD_DAMP_AUTO_INCREMENT)
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
@@ -44,7 +45,6 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
-from .base_loader import Base_Loader
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -1013,7 +1013,7 @@ class BaseGPTQModel(nn.Module):
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        model = Base_Loader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, use_liger_kernel, torch_dtype, cls.require_trust_remote_code, **model_init_kwargs)
+        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, use_liger_kernel, torch_dtype, cls.require_trust_remote_code, **model_init_kwargs)
         return cls(
             model,
             quantized=False,
