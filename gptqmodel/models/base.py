@@ -691,7 +691,8 @@ class BaseGPTQModel(nn.Module):
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
             model_save_name = model_base_name + ".safetensors"
         else:
-            model_save_name = model_base_name + ".bin"
+            model_save_name = model_base_name + ".pt"
+
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
@@ -1036,7 +1037,6 @@ class BaseGPTQModel(nn.Module):
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         format: Optional[FORMAT] = None,
-        allow_unsafe_loading: bool = False,
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
@@ -1177,7 +1177,7 @@ class BaseGPTQModel(nn.Module):
         if use_safetensors:
             extensions.append(".safetensors")
         else:
-            extensions += [".bin", ".pt"]
+            extensions += [".pt", ".pth"]
 
         model_name_or_path = str(model_name_or_path)
 
@@ -1190,14 +1190,9 @@ class BaseGPTQModel(nn.Module):
 
         # bin files have security issues: disable loading by default
         if ".bin" in resolved_archive_file:
-            if allow_unsafe_loading:
-                logger.warning(
-                    "There are security risks when loading tensors from .bin files. Make sure you are loading model only from a trusted source."
-                )
-            else:
-                raise ValueError(
-                    "Loading of unsafe .bin files are not allowed by default. Pass allow_unsafe_loading=True to bypass."
-                )
+            raise ValueError(
+                "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
+            )
 
         quantize_config.runtime_format = quantize_config.format
 

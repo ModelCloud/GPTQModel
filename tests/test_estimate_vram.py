@@ -8,14 +8,20 @@ import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils import get_vram
+from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 
 
 class TestEstimateVram(unittest.TestCase):
-    NATIVE_MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+    NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
     def test_estimate_vram(self):
-        model = GPTQModel.from_quantized(
+        quantize_config = QuantizeConfig(
+            bits=4,
+            group_size=128,
+        )
+        model = GPTQModel.from_pretrained(
             self.NATIVE_MODEL_ID,
+            quantize_config=quantize_config,
         )
 
         total_size, all_layers = get_vram(model)
@@ -24,4 +30,5 @@ class TestEstimateVram(unittest.TestCase):
             layer_name, layer_size = layer
             print(f"Layer {layer_name}: {layer_size}")
         del model
-        assert total_size == "731.73 MB"
+
+        assert total_size == "2.05 GB"

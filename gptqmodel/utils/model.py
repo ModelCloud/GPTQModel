@@ -543,7 +543,7 @@ def get_checkpoints(
     model_name_or_path: str, extensions: List[str], **cached_file_kwargs
 ):
     """
-    Retrives (and if necessary downloads from Hugging Face Hub) the model checkpoint. Sharding is supported. All the `possible_model_basenames` (e.g. `["model", "model-4bit-gptq"]`) will be explored over all `extensions` (e.g. `[".bin", ".safetensors"]`).
+    Retrives (and if necessary downloads from Hugging Face Hub) the model checkpoint. Sharding is supported. All the `possible_model_basenames` (e.g. `["model", "model-4bit-gptq"]`) will be explored over all `extensions` (e.g. `[".safetensors"]`).
     """
     searched_files = []
     resolved_archive_file = None
