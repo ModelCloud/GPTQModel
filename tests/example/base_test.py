@@ -45,13 +45,17 @@ class BaseTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save_quantized(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(tmpdirname)
+            q_model, q_tokenizer = self.loadQuantModel(tmpdirname, tokenizer_path=model_name_or_path)
 
         return q_model, q_tokenizer
 
 
-    def loadQuantModel(self, model_name_or_path, trust_remote_code=False):
-        tokenizer = self.load_tokenizer(model_name_or_path, trust_remote_code)
+    def loadQuantModel(self, model_name_or_path, trust_remote_code=False, tokenizer_path=None):
+        if tokenizer_path == None:
+            tokenizer_path = model_name_or_path
+        else:
+            trust_remote_code = True
+        tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
 
         model = GPTQModel.from_quantized(
             model_name_or_path,
