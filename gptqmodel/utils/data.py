@@ -5,8 +5,7 @@ from typing import Callable, Dict, List, Optional
 
 import torch
 from datasets import DatasetDict, IterableDatasetDict, load_dataset
-from tensorflow import Tensor
-from torch import LongTensor
+from torch import LongTensor, Tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
