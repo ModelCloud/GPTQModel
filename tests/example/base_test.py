@@ -13,7 +13,7 @@ class BaseTest(unittest.TestCase):
         prompt = "I am in Paris and"
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=60, max_new_tokens=60)
+        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE, max_new_tokens=self.GENERATE_EVAL_SIZE)
         output = tokenizer.decode(res[0])
 
         return output
