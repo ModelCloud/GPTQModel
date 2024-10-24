@@ -33,6 +33,12 @@ META_FIELD_QUANTIZER = "quantizer"
 
 META_QUANTIZER_GPTQMODEL = "gptqmodel"
 
+META_FIELD_URI = "uri"
+META_VALUE_URI = "https://github.com/modelcloud/gptqmodel"
+
+META_FIELD_DAMP_PERCENT = "damp_percent"
+META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
+
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
 
@@ -334,8 +340,6 @@ class QuantizeConfig():
             "static_groups": self.static_groups,
             "sym": self.sym,
             "lm_head": self.lm_head,
-            "damp_percent": self.damp_percent,
-            "damp_auto_increment": self.damp_auto_increment,
             "true_sequential": self.true_sequential,
             QUANT_METHOD_FIELD: self.quant_method,
             FORMAT_FIELD_JSON: self.format,
