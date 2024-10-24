@@ -98,6 +98,7 @@ class TestTransformersIntegration(unittest.TestCase):
             if load_quant_model:
                 self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaV2QuantLinear)
             else:
+                # only use ExllamaV2QuantLinear for inference, pack use TritonV2QuantLinear.
                 self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, TritonV2QuantLinear)
         inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
         res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)

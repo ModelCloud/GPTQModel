@@ -111,7 +111,7 @@ class GPTQConfig(GPTQConfig):
         super().post_init()
 
 class ExllamaVersion(int, Enum):
-    Triton = 1
+    TWO_PACK = 1
     TWO = 2
 
 
@@ -635,9 +635,9 @@ class GPTQModelQuantizer(object):
             elif self.exllama_version == ExllamaVersion.TWO:
                 logger.warning(
                     "Using Exllamav2 backend will reorder the weights offline, thus you will not be able to save the model with the right weights."
-                    "Setting `exllama_version=ExllamaVersion.ONE`. You should only use Exllamav2 backend for inference. "
+                    "Setting `exllama_version=ExllamaVersion.TWO_PACK`. You should only use Exllamav2 backend for inference. "
                 )
-                self.exllama_version = ExllamaVersion.Triton
+                self.exllama_version = ExllamaVersion.TWO_PACK
         # Step 4: Pack the model at the end (Replacing the layers)
         self.pack_model(model=model, quantizers=quantizers)
 
@@ -710,7 +710,7 @@ class GPTQModelQuantizer(object):
         logger.info("Model packed.")
 
     def select_quantlinear(self):
-        if self.exllama_version == ExllamaVersion.Triton:
+        if self.exllama_version == ExllamaVersion.TWO_PACK:
             backend = BACKEND.TRITON
         elif self.exllama_version == ExllamaVersion.TWO:
             backend = BACKEND.EXLLAMA_V2
