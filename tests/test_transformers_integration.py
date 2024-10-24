@@ -30,7 +30,6 @@ class TestTransformersIntegration(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # 1,
             2,
         ]
     )
@@ -50,7 +49,6 @@ class TestTransformersIntegration(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # 1,
             2,
         ]
     )

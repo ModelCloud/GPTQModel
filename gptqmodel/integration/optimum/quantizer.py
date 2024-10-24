@@ -111,7 +111,7 @@ class GPTQConfig(GPTQConfig):
         super().post_init()
 
 class ExllamaVersion(int, Enum):
-    ONE = 1
+    Triton = 1
     TWO = 2
 
 
@@ -256,10 +256,10 @@ class GPTQModelQuantizer(object):
         else:
             if "version" not in self.exllama_config:
                 raise ValueError("`exllama_config` needs to have a `version` key")
-            elif self.exllama_config["version"] not in [ExllamaVersion.ONE, ExllamaVersion.TWO]:
+            elif self.exllama_config["version"] not in [ExllamaVersion.TWO]:
                 version = self.exllama_config["version"]
                 raise ValueError(
-                    f"Only supported versions are in [ExllamaVersion.ONE, ExllamaVersion.TWO] - not recognized version {version}"
+                    f"Only supported versions are in [ExllamaVersion.TWO] - not recognized version {version}"
                 )
         self.exllama_version = self.exllama_config["version"]
 
@@ -637,7 +637,7 @@ class GPTQModelQuantizer(object):
                     "Using Exllamav2 backend will reorder the weights offline, thus you will not be able to save the model with the right weights."
                     "Setting `exllama_version=ExllamaVersion.ONE`. You should only use Exllamav2 backend for inference. "
                 )
-                self.exllama_version = ExllamaVersion.ONE
+                self.exllama_version = ExllamaVersion.Triton
         # Step 4: Pack the model at the end (Replacing the layers)
         self.pack_model(model=model, quantizers=quantizers)
 
@@ -710,7 +710,7 @@ class GPTQModelQuantizer(object):
         logger.info("Model packed.")
 
     def select_quantlinear(self):
-        if self.exllama_version == ExllamaVersion.ONE:
+        if self.exllama_version == ExllamaVersion.Triton:
             backend = BACKEND.TRITON
         elif self.exllama_version == ExllamaVersion.TWO:
             backend = BACKEND.EXLLAMA_V2
@@ -831,10 +831,10 @@ def load_quantized_model(
     else:
         if "version" not in exllama_config:
             raise ValueError("`exllama_config` needs to have a `version` key")
-        elif exllama_config["version"] not in [ExllamaVersion.ONE, ExllamaVersion.TWO]:
+        elif exllama_config["version"] not in [ExllamaVersion.TWO]:
             version = exllama_config["version"]
             raise ValueError(
-                f"Only supported versions are in [ExllamaVersion.ONE, ExllamaVersion.TWO] - not recognized version {version}"
+                f"Only supported versions are in [ExllamaVersion.TWO] - not recognized version {version}"
             )
 
     # this branch will check if model is from huggingface
