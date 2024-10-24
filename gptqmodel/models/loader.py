@@ -1,13 +1,15 @@
 from __future__ import annotations
+
 import logging
 from typing import Dict
-import torch
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
-from ..utils.device import check_cuda
-from ..utils.model import (auto_dtype_from_config)
-from ._const import SUPPORTED_MODELS
 
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM
+
+from ..nn_modules.qlinear.qlinear_qbits import qbits_dtype
+from ..utils.device import check_cuda
+from ..utils.model import auto_dtype_from_config
+from ._const import SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()

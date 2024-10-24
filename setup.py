@@ -110,9 +110,9 @@ if BUILD_CUDA_EXT:
     extra_compile_args = {
         "cxx": [
             "-O3",
-            "-std=c++17", 
-            "-fopenmp", 
-            "-lgomp", 
+            "-std=c++17",
+            "-fopenmp",
+            "-lgomp",
             "-DENABLE_BF16"
             "-Wno-switch-bool",
         ],

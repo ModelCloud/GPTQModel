@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from os.path import basename, isfile, join
+from os.path import isfile, join
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -25,17 +25,15 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
-from .base_loader import Base_Loader
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, META_FIELD_URI,
-                                   META_VALUE_URI, META_FIELD_DAMP_PERCENT, META_FIELD_DAMP_AUTO_INCREMENT)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
+                                   META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
+                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
-from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
@@ -46,6 +44,7 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
+from .base_loader import Base_Loader
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()

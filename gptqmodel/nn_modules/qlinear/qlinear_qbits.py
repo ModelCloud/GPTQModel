@@ -23,7 +23,7 @@ BITS_DTYPE_MAPPING = {
 def qbits_dtype() -> torch.dtype:
     try:
         from intel_extension_for_transformers import qbits
-    except Exception as e:
+    except Exception:
         raise ImportError("intel_extension_for_transformers not installed. "
                           "Please install via via 'pip install intel_extension_for_transformers")
 
@@ -112,7 +112,7 @@ class QBitsQuantLinear(BaseQuantLinear):
 
         try:
             from intel_extension_for_transformers import qbits
-        except Exception as e:
+        except Exception:
             raise ImportError("intel_extension_for_transformers not installed. "
                               "Please install via via 'pip install intel_extension_for_transformers")
 
@@ -257,7 +257,7 @@ class QBitsQuantLinear(BaseQuantLinear):
     def forward(self, x: torch.Tensor):
         try:
             from intel_extension_for_transformers import qbits
-        except Exception as e:
+        except Exception:
             raise ImportError("intel_extension_for_transformers not installed. "
                               "Please install via via 'pip install intel_extension_for_transformers")
 

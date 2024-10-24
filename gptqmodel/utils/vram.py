@@ -1,9 +1,10 @@
-from accelerate.utils import convert_bytes
-from typing import Dict, List, Tuple, Union, Optional
 from collections import defaultdict
+from typing import Dict, List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
-import re
+from accelerate.utils import convert_bytes
+
 
 def dtype_byte_size(dtype: torch.dtype):
     """
