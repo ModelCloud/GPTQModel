@@ -687,8 +687,11 @@ class BaseGPTQModel(nn.Module):
 
         model_base_name = "model"
 
-        state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
-        model_save_name = model_base_name + ".safetensors"
+        if use_safetensors:
+            state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
+            model_save_name = model_base_name + ".safetensors"
+        else:
+            model_save_name = model_base_name + ".pt"
 
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
