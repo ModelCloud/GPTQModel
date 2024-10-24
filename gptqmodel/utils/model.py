@@ -16,7 +16,7 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
@@ -603,13 +603,14 @@ def get_checkpoints(
 
     else:
         temp = None
-        for ext in extensions:
-            for fileName in os.listdir(model_name_or_path):
+        files = list_repo_files(model_name_or_path)
+        for fileName in files:
+            for ext in extensions:
                 if ext in fileName:
                     shard_index_name = fileName + ".index.json"
                     shard_index = cached_file(
                         model_name_or_path,
-                        fileName,
+                        shard_index_name,
                         **cached_file_kwargs,
                     )
                     searched_files.append(shard_index_name)
