@@ -1,15 +1,13 @@
 # -- do not touch
 import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-
 import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import get_vram
 
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestEstimateVram(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"

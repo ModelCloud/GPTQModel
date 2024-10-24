@@ -1,9 +1,6 @@
 # -- do not touch
 import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
@@ -16,6 +13,7 @@ from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized
 from transformers import AutoTokenizer  # noqa: E402
 
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestDynamic(unittest.TestCase):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
