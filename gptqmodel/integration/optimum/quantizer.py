@@ -76,7 +76,6 @@ class GPTQConfig(GPTQConfig):
             pad_token_id: Optional[int] = None,
             use_exllama: Optional[bool] = None,
             max_input_length: Optional[int] = None,
-            exllama_config: Optional[Dict[str, Any]] = None,
             cache_block_outputs: bool = True,
             modules_in_block_to_quantize: Optional[List[List[str]]] = None,
             **kwargs,
@@ -99,7 +98,6 @@ class GPTQConfig(GPTQConfig):
         self.pad_token_id = pad_token_id
         self.use_exllama = use_exllama
         self.max_input_length = max_input_length
-        self.exllama_config = exllama_config
         self.disable_exllama = kwargs.pop("disable_exllama", None)
         self.cache_block_outputs = cache_block_outputs
         self.modules_in_block_to_quantize = modules_in_block_to_quantize
@@ -109,11 +107,6 @@ class GPTQConfig(GPTQConfig):
         if not OPTIMUM_AVAILABLE:
             raise ValueError(OPTIMUM_INSTALL_HINT)
         super().post_init()
-
-class ExllamaVersion(int, Enum):
-    TWO_PACK = 1
-    TWO = 2
-
 
 class GPTQModelQuantizer(object):
     r"""
@@ -137,7 +130,7 @@ class GPTQModelQuantizer(object):
         batch_size: int = 1,
         pad_token_id: Optional[int] = None,
         disable_exllama: bool = False,
-        exllama_config: Dict[str, Any] = None,
+        use_triton = False,
         max_input_length: Optional[int] = None,
         cache_block_outputs: Optional[bool] = True,
         modules_in_block_to_quantize: Optional[List[List[str]]] = None,
@@ -178,8 +171,6 @@ class GPTQModelQuantizer(object):
                 The batch size of the dataset
             pad_token_id (`Optional[int]`, defaults to `None`):
                 The pad token id. Needed to prepare the dataset when `batch_size` > 1.
-            exllama_config (`Dict[str, Any]`, *optional*):
-                The exllama config. You can specify the version of the exllama kernel through the `version` key. Defaults to `{"version": 2}` if unset.
             max_input_length (`Optional[int]`, defaults to `None`):
                 The maximum input length. This is needed to initialize a buffer that depends on the maximum expected input length.
                 It is specific to the exllama backend with act-order.
@@ -212,7 +203,7 @@ class GPTQModelQuantizer(object):
         self.module_name_preceding_first_block = module_name_preceding_first_block
         self.batch_size = batch_size
         self.pad_token_id = pad_token_id
-        self.exllama_config = exllama_config
+        self.use_triton = use_triton
         self.max_input_length = max_input_length
         self.quant_method = QuantizationMethod.GPTQ
         self.cache_block_outputs = cache_block_outputs
@@ -250,18 +241,6 @@ class GPTQModelQuantizer(object):
 
         if self.damp_auto_increment < 0:
             raise ValueError("damp_auto_increment must greater than 0.")
-
-        if self.exllama_config is None:
-            self.exllama_config = {"version": ExllamaVersion.TWO}
-        else:
-            if "version" not in self.exllama_config:
-                raise ValueError("`exllama_config` needs to have a `version` key")
-            elif self.exllama_config["version"] not in [ExllamaVersion.TWO]:
-                version = self.exllama_config["version"]
-                raise ValueError(
-                    f"Only supported versions are in [ExllamaVersion.TWO] - not recognized version {version}"
-                )
-        self.exllama_version = self.exllama_config["version"]
 
     def to_dict(self):
         """
@@ -629,15 +608,7 @@ class GPTQModelQuantizer(object):
             torch.cuda.empty_cache()
 
         if self.bits == 4:
-            # device not on gpu
-            if device == torch.device("cpu") or (has_device_map and any(d in devices for d in ["cpu", "disk"])):
-                raise ValueError("Found modules on cpu/disk. Using Exllama/Exllamav2 backend requires all the modules to be on GPU.")
-            elif self.exllama_version == ExllamaVersion.TWO:
-                logger.warning(
-                    "Using Exllamav2 backend will reorder the weights offline, thus you will not be able to save the model with the right weights."
-                    "Setting `exllama_version=ExllamaVersion.TWO_PACK`. You should only use Exllamav2 backend for inference. "
-                )
-                self.exllama_version = ExllamaVersion.TWO_PACK
+            self.use_triton = True
         # Step 4: Pack the model at the end (Replacing the layers)
         self.pack_model(model=model, quantizers=quantizers)
 
@@ -710,13 +681,10 @@ class GPTQModelQuantizer(object):
         logger.info("Model packed.")
 
     def select_quantlinear(self):
-        if self.exllama_version == ExllamaVersion.TWO_PACK:
+        if self.use_triton:
             backend = BACKEND.TRITON
-        elif self.exllama_version == ExllamaVersion.TWO:
-            backend = BACKEND.EXLLAMA_V2
         else:
-            backend = BACKEND.AUTO
-
+            backend = BACKEND.EXLLAMA_V2
         QuantLinear = select_quant_linear(
             sym=self.sym,
             desc_act=self.desc_act,
@@ -768,7 +736,6 @@ def load_quantized_model(
     offload_folder: Optional[str] = None,
     offload_buffers: Optional[str] = None,
     offload_state_dict: bool = False,
-    exllama_config: Optional[Dict[str, Any]] = None,
     max_input_length: Optional[int] = None,
 ):
     """
@@ -802,8 +769,6 @@ def load_quantized_model(
             If `True`, will temporarily offload the CPU state dict on the hard drive to avoid getting out of CPU RAM if
             the weight of the CPU state dict + the biggest shard does not fit. Will default to `True` if the device map
             picked contains `"disk"` values.
-        exllama_config (`Optional[Dict[str, Any]]`, defaults to `None`):
-            The exllama config. You can specify the version of the exllama kernel through the `version` key. Defaults to `{"version": 2}` if unset.
         max_input_length (`Optional[int]`, defaults to `None`):
             The maximum input length. This is needed to initialize a buffer that depends on the maximum expected input length.
             It is specific to the exllama backend with act-order.
@@ -826,17 +791,6 @@ def load_quantized_model(
         device_map = {"": torch.cuda.current_device()}
         logger.info("The device_map was not initialized." "Setting device_map to `{'':torch.cuda.current_device()}`.")
 
-    if exllama_config is None:
-        exllama_config = {"version": ExllamaVersion.TWO}
-    else:
-        if "version" not in exllama_config:
-            raise ValueError("`exllama_config` needs to have a `version` key")
-        elif exllama_config["version"] not in [ExllamaVersion.TWO]:
-            version = exllama_config["version"]
-            raise ValueError(
-                f"Only supported versions are in [ExllamaVersion.TWO] - not recognized version {version}"
-            )
-
     # this branch will check if model is from huggingface
     try:
         if hasattr(model, "config") and hasattr(model.config, "quantization_config"):
@@ -849,8 +803,6 @@ def load_quantized_model(
             f"Failed to load quantization config from {save_folder} (lookup for traceback): {err}\nTip: If the save directory is saved from a transformers.PreTrainedModel, make sure that `config.json` contains a 'quantization_config' key."
         ) from err
     quantizer = GPTQModelQuantizer.from_dict(quantize_config_dict)
-    quantizer.exllama_config = exllama_config
-    quantizer.exllama_version = quantizer.exllama_config["version"]
     quantizer.max_input_length = max_input_length
 
     model = quantizer.convert_model(model)
