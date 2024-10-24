@@ -10,7 +10,7 @@ class TestLlama3(BaseTest):
     # QUANT_MODEL_ID = "ModelCloud/Meta-Llama-3.1-8B-gptq-4bit"
 
     def test_llama3(self):
-        model, tokenizer = self.loadModel(self.NATIVE_MODEL_ID, quant=True)
+        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)
         # model, tokenizer = self.loadQuantModel(self.QUANT_MODEL_ID)
         reference_output = "<|begin_of_text|>I am in Paris and I am looking for a job in the field of international relations. I am a French citizen, 24 years old, and I have a master degree in international relations. I am fluent in English and I am looking for a job in the field of international relations. I am available for a job in"
         result = self.generate(model, tokenizer)
