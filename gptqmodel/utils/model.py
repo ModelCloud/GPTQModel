@@ -23,7 +23,6 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
@@ -462,38 +461,6 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         if isinstance(submodule, QBitsQuantLinear):
             model_uses_qbits = True
             submodule.post_init(quantize_config)
-        elif isinstance(submodule, ExllamaQuantLinear):
-            model_uses_exllama = True
-            device = submodule.qweight.device
-            if device not in device_to_buffers_size:
-                device_to_buffers_size[device] = {
-                    "max_dq_buffer_size": 1,
-                    "max_inner_outer_dim": 1,
-                }
-            submodule._use_act_order = True if use_act_order else False
-
-            # Disable this heuristic for detecting act_order, but it could be used instead of the config.
-            """
-            if submodule.g_idx is None:
-                submodule.act_order = False
-            elif submodule.g_idx is not None and ((submodule.g_idx == 0).all() or torch.equal(submodule.g_idx.cpu(), torch.tensor([i // submodule.group_size for i in range(submodule.g_idx.shape[0])], dtype=torch.int32))):
-                submodule.g_idx = None
-                submodule.act_order = False
-            else:
-                submodule.act_order = True
-            """
-
-            device_to_buffers_size[device]["max_dq_buffer_size"] = max(
-                device_to_buffers_size[device]["max_dq_buffer_size"],
-                submodule.qweight.numel() * 8,
-            )
-
-            if use_act_order:
-                device_to_buffers_size[device]["max_inner_outer_dim"] = max(
-                    device_to_buffers_size[device]["max_inner_outer_dim"],
-                    submodule.infeatures,
-                    submodule.outfeatures,
-                )
         elif isinstance(submodule, ExllamaV2QuantLinear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
