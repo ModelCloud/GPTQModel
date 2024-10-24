@@ -34,7 +34,7 @@ env:
   ref: ${{ github.event.inputs.ref || github.ref }}
 
 concurrency:
-  group: ${{ github.ref }}-workflow-release
+  group: ${{ env.ref }}-workflow-release
   cancel-in-progress: true
 
 jobs:
