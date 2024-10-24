@@ -8,7 +8,7 @@ from gptqmodel import GPTQModel, QuantizeConfig
 pretrained_model_id = "facebook/opt-125m"
 quantized_model_id = "facebook-opt-125m"
 
-class TestsQ4ExllamaV2(unittest.TestCase):
+class Test_save_load_pt_weight(unittest.TestCase):
     def test_pt(self):
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
         calibration_dataset = [
@@ -16,6 +16,8 @@ class TestsQ4ExllamaV2(unittest.TestCase):
                 "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
             )
         ]
+
+        reference_output = "</s>gptqmodel is an easy-to-use model for creating a variety of a variety"
 
         quantize_config = QuantizeConfig(
             bits=4,
@@ -30,7 +32,6 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0", use_safetensors=False)
 
-        result = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
+        result = tokenizer.decode(model.generate(**tokenizer("gptqmodel is an easy-to-use model", return_tensors="pt").to(model.device))[0])
 
-        assert len(result) > 0
-
+        self.assertEqual(result, reference_output)
