@@ -22,7 +22,7 @@ class TestSerialization(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             model.save_pretrained(tmpdir)
 
-            self.assertTrue(os.path.isfile(os.path.join(tmpdir, "gptq_model-4bit-128g.safetensors")))
+            self.assertTrue(os.path.isfile(os.path.join(tmpdir, "model.safetensors")))
 
             model = GPTQModel.from_quantized(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
 

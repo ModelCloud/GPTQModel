@@ -39,7 +39,7 @@ class TestSharded(unittest.TestCase):
 
             del model
 
-            index_file_path = os.path.join(tmp_dir, "gptq_model-4bit-128g.safetensors.index.json")
+            index_file_path = os.path.join(tmp_dir, "model.safetensors.index.json")
             self.assertTrue(os.path.exists(index_file_path))
 
             model = GPTQModel.from_quantized(
@@ -69,7 +69,7 @@ class TestSharded(unittest.TestCase):
 
             del model
 
-            safetensors_file_path = os.path.join(tmp_dir, "gptq_model-4bit-128g.safetensors")
+            safetensors_file_path = os.path.join(tmp_dir, "model.safetensors")
             self.assertTrue(os.path.exists(safetensors_file_path))
 
             model = GPTQModel.from_quantized(
