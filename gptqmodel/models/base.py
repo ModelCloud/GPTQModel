@@ -1104,7 +1104,6 @@ class BaseGPTQModel(nn.Module):
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         format: Optional[FORMAT] = None,
-        allow_unsafe_loading: bool = False,
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
@@ -1259,7 +1258,7 @@ class BaseGPTQModel(nn.Module):
         # bin files have security issues: disable loading by default
         if ".bin" in resolved_archive_file:
             raise ValueError(
-                "Loading of unsafe .bin files are not allowed by default. Pass allow_unsafe_loading=True to bypass."
+                "Loading of unsafe .bin files are not allowed by default."
             )
 
         quantize_config.runtime_format = quantize_config.format
