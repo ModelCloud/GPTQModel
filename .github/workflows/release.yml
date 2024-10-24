@@ -129,7 +129,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          bash -c "$(curl -L http://${{ ZEN4_SERVER }}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://${ZEN4_SERVER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
