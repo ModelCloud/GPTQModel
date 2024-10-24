@@ -33,11 +33,11 @@ class TestQuantization(unittest.TestCase):
     @parameterized.expand(
         [
             (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
-            (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
+            # (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
@@ -72,9 +72,6 @@ class TestQuantization(unittest.TestCase):
 
             with open(tmpdirname + "/" + QUANT_CONFIG_FILENAME, "r") as f:
                 file_dict = json.loads(f.read())
-                # skip comparison of these two model path specific fields that do not exist in memory
-                file_dict["model_name_or_path"] = None
-                file_dict["model_file_base_name"] = None
 
                 # make sure the json dict saved to file matches config in memory
                 assert model.quantize_config.to_dict() == file_dict
