@@ -150,20 +150,9 @@ def monkey_patch_gptqmodel_into_transformers():
                     ['wikitext2','c4','c4-new'], but we found {self.dataset}"""
                 )
 
-        if self.disable_exllama is None and self.use_exllama is None:
+        if self.use_exllama is None:
             # New default behaviour
             self.use_exllama = True
-        elif self.disable_exllama is not None and self.use_exllama is None:
-            # Follow pattern of old config
-            logger.warning(
-                "Using `disable_exllama` is deprecated and will be removed in version 4.37. Use `use_exllama` instead and specify the version with `exllama_config`."
-                "The value of `use_exllama` will be overwritten by `disable_exllama` passed in `GPTQConfig` or stored in your config file."
-            )
-            self.use_exllama = not self.disable_exllama
-            self.disable_exllama = None
-        elif self.disable_exllama is not None and self.use_exllama is not None:
-            # Only happens if user explicitly passes in both arguments
-            raise ValueError("Cannot specify both `disable_exllama` and `use_exllama`. Please use just `use_exllama`")
 
         if self.bits == 4 and self.use_exllama:
             optimum_version = version.parse(importlib.metadata.version("optimum"))

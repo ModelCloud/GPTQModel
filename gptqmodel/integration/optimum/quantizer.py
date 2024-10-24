@@ -68,7 +68,6 @@ class GPTQConfig(GPTQConfig):
             desc_act: bool = False,
             sym: bool = True,
             true_sequential: bool = True,
-            use_cuda_fp16: bool = False,
             model_seqlen: Optional[int] = None,
             block_name_to_quantize: Optional[str] = None,
             module_name_preceding_first_block: Optional[List[str]] = None,
@@ -90,7 +89,6 @@ class GPTQConfig(GPTQConfig):
         self.desc_act = desc_act
         self.sym = sym
         self.true_sequential = true_sequential
-        self.use_cuda_fp16 = use_cuda_fp16
         self.model_seqlen = model_seqlen
         self.block_name_to_quantize = block_name_to_quantize
         self.module_name_preceding_first_block = module_name_preceding_first_block
@@ -98,7 +96,6 @@ class GPTQConfig(GPTQConfig):
         self.pad_token_id = pad_token_id
         self.use_exllama = use_exllama
         self.max_input_length = max_input_length
-        self.disable_exllama = kwargs.pop("disable_exllama", None)
         self.cache_block_outputs = cache_block_outputs
         self.modules_in_block_to_quantize = modules_in_block_to_quantize
         self.post_init()
@@ -123,13 +120,11 @@ class GPTQModelQuantizer(object):
         desc_act: bool = False,
         sym: bool = True,
         true_sequential: bool = True,
-        use_cuda_fp16: bool = False,
         model_seqlen: Optional[int] = None,
         block_name_to_quantize: Optional[str] = None,
         module_name_preceding_first_block: Optional[List[str]] = None,
         batch_size: int = 1,
         pad_token_id: Optional[int] = None,
-        disable_exllama: bool = False,
         use_triton = False,
         max_input_length: Optional[int] = None,
         cache_block_outputs: Optional[bool] = True,
@@ -159,8 +154,6 @@ class GPTQModelQuantizer(object):
                 Whether to perform sequential quantization even within a single Transformer block.
                 Instead of quantizing the entire block at once, we perform layer-wise quantization.
                 As a result, each layer undergoes quantization using inputs that have passed through the previously quantized layers.
-            use_cuda_fp16 (`bool`, defaults to `False`):
-                Whether or not to use optimized cuda kernel for fp16 model. Need to have model in fp16.
             model_seqlen (`Optional[int]`, defaults to `None`):
                 The maximum sequence length that the model can take.
             block_name_to_quantize (`Optional[str]`, defaults to `None`):
@@ -186,9 +179,6 @@ class GPTQModelQuantizer(object):
         if not OPTIMUM_AVAILABLE:
             raise ValueError(OPTIMUM_INSTALL_HINT)
 
-        if disable_exllama:
-            logger.warning("gptqmodel does not support parameter: disable_exllama=True. Setting `disable_exllama=False.")
-
         self.bits = bits
         self.dataset = dataset
         self.group_size = group_size
@@ -197,7 +187,6 @@ class GPTQModelQuantizer(object):
         self.desc_act = desc_act
         self.sym = sym
         self.true_sequential = true_sequential
-        self.use_cuda_fp16 = use_cuda_fp16
         self.model_seqlen = model_seqlen
         self.block_name_to_quantize = block_name_to_quantize
         self.module_name_preceding_first_block = module_name_preceding_first_block
@@ -416,9 +405,6 @@ class GPTQModelQuantizer(object):
                             module, hook = cpu_offload_with_hook(module, prev_module_hook=hook)
                 else:
                     has_device_map = False
-
-        if hasattr(model, "dtype"):
-            self.use_cuda_fp16 = model.dtype == torch.float16
 
         if self.model_seqlen is None:
             # We allow a max value of 4028 to avoid passing data with huge length to the model during the calibration step
