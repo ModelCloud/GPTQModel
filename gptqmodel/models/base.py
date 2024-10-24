@@ -25,7 +25,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
-from .base_loader import Base_Loader
+from .loader import ModelLoader
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
