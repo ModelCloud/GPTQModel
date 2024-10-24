@@ -72,9 +72,6 @@ class TestQuantization(unittest.TestCase):
 
             with open(tmpdirname + "/" + QUANT_CONFIG_FILENAME, "r") as f:
                 file_dict = json.loads(f.read())
-                # skip comparison of these two model path specific fields that do not exist in memory
-                file_dict["model_name_or_path"] = None
-                file_dict["model_file_base_name"] = None
 
                 # make sure the json dict saved to file matches config in memory
                 assert model.quantize_config.to_dict() == file_dict

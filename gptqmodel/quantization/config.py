@@ -123,10 +123,6 @@ class QuantizeConfig():
     # if OOM, can set to False
     parallel_packing: bool = field(default=True)
 
-    # TODO: remove
-    model_name_or_path: Optional[str] = field(default=None)
-    model_file_base_name: Optional[str] = field(default=None)
-
     # properties that do not directly contributes to quantization or quant inference should be placed in meta
     # i.e. quantizer tool (producer) + version, timestamp, entity who made the quant, etc
     meta: Optional[Dict] = field(default=None)
@@ -345,9 +341,6 @@ class QuantizeConfig():
             "sym": self.sym,
             "lm_head": self.lm_head,
             "true_sequential": self.true_sequential,
-            # TODO: deprecate?
-            "model_name_or_path": self.model_name_or_path,
-            "model_file_base_name": self.model_file_base_name,
             QUANT_METHOD_FIELD: self.quant_method,
             FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,

@@ -664,7 +664,6 @@ class BaseGPTQModel(nn.Module):
 
         if model_base_name is None:
             model_base_name = (
-                    self.quantize_config.model_file_base_name or
                     f"gptq_model-{self.quantize_config.bits}bit-{self.quantize_config.group_size}g"
             )
 
@@ -682,17 +681,11 @@ class BaseGPTQModel(nn.Module):
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
         else:
-            model = self.get_model_with_quantize(quantize_config)
+            model = self.get_model_with_quantize(quantize_config, self.model_name_or_path)
         model.to(CPU)
         state_dict = model.state_dict()
 
-        if quantize_config.model_file_base_name is None:
-            if use_safetensors:
-                model_base_name = "model"
-            else:
-                model_base_name = "pytorch_model"
-        else:
-            model_base_name = basename(quantize_config.model_file_base_name)
+        model_base_name = "model"
 
         if use_safetensors:
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
@@ -822,17 +815,15 @@ class BaseGPTQModel(nn.Module):
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
 
-        quantize_config.model_name_or_path = save_dir
-        quantize_config.model_file_base_name = model_base_name
         quantize_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_name_or_path)
 
-    def get_model_with_quantize(self, quantize_config):
+    def get_model_with_quantize(self, quantize_config, model_name_or_path):
         config = AutoConfig.from_pretrained(
-            quantize_config.model_name_or_path,
+            model_name_or_path,
             trust_remote_code=True,
         )
 
@@ -1252,19 +1243,6 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        if model_basename is None:
-            if quantize_config.model_file_base_name:
-                possible_model_basenames = [quantize_config.model_file_base_name]
-            else:
-                possible_model_basenames = [
-                    f"gptq_model-{quantize_config.bits}bit-{quantize_config.group_size}g",
-                    "model",
-                ]
-        else:
-            possible_model_basenames = [model_basename]
-
-        quantize_config.model_name_or_path = model_name_or_path
-
         extensions = []
         if use_safetensors:
             extensions.append(".safetensors")
@@ -1277,7 +1255,6 @@ class BaseGPTQModel(nn.Module):
         is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
             model_name_or_path=model_name_or_path,
             extensions=extensions,
-            possible_model_basenames=possible_model_basenames,
             **cached_file_kwargs,
         )
 
@@ -1292,7 +1269,6 @@ class BaseGPTQModel(nn.Module):
                     "Loading of unsafe .bin files are not allowed by default. Pass allow_unsafe_loading=True to bypass."
                 )
 
-        quantize_config.model_file_base_name = true_model_basename
         quantize_config.runtime_format = quantize_config.format
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
