@@ -46,7 +46,6 @@ if OPTIMUM_AVAILABLE and is_accelerate_available():
 
 from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
 from ...utils.backend import BACKEND
-from ...utils.exllama import exllama_set_max_input_length
 from ...utils.importer import select_quant_linear
 from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
 
@@ -676,12 +675,6 @@ class GPTQModelQuantizer(object):
         model.quantize_config = StoreAttr()
         model.quantize_config.desc_act = self.desc_act
         model = gptqmodel_post_init(model, use_act_order=self.desc_act)
-        if (
-            self.desc_act
-            and self.exllama_version == ExllamaVersion.ONE
-            and self.max_input_length is not None
-        ):
-            model = exllama_set_max_input_length(model, self.max_input_length)
         return model
 
     def pack_model(
@@ -718,7 +711,7 @@ class GPTQModelQuantizer(object):
 
     def select_quantlinear(self):
         if self.exllama_version == ExllamaVersion.ONE:
-            backend = BACKEND.EXLLAMA
+            backend = BACKEND.TRITON
         elif self.exllama_version == ExllamaVersion.TWO:
             backend = BACKEND.EXLLAMA_V2
         else:

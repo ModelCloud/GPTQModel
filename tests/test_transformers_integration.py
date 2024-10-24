@@ -15,9 +15,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 
-from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-
+from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 
 class TestTransformersIntegration(unittest.TestCase):
 
@@ -31,7 +30,7 @@ class TestTransformersIntegration(unittest.TestCase):
 
     @parameterized.expand(
         [
-            1,
+            # 1,
             2,
         ]
     )
@@ -51,7 +50,7 @@ class TestTransformersIntegration(unittest.TestCase):
 
     @parameterized.expand(
         [
-            1,
+            # 1,
             2,
         ]
     )
@@ -97,13 +96,11 @@ class TestTransformersIntegration(unittest.TestCase):
             self.assertResult(model, tokenizer, True, exllama_version, reference_output)
 
     def assertResult(self, model, tokenizer, load_quant_model, exllama_version, reference_output):
-        if exllama_version == 1:
-            self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaQuantLinear)
-        elif exllama_version == 2:
+        if exllama_version == 2:
             if load_quant_model:
                 self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaV2QuantLinear)
             else:
-                self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaQuantLinear)
+                self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, TritonV2QuantLinear)
         inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
         res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
         predicted_text = tokenizer.decode(res[0])

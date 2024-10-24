@@ -6,7 +6,7 @@ class BACKEND(Enum):
     # CUDA_OLD = 1
     # CUDA = 2
     TRITON = 3
-    EXLLAMA = 4
+    # EXLLAMA = 4
     EXLLAMA_V2 = 5
     MARLIN = 6
     BITBLAS = 7
