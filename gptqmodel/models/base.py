@@ -1261,7 +1261,7 @@ class BaseGPTQModel(nn.Module):
         # bin files have security issues: disable loading by default
         if ".bin" in resolved_archive_file:
             raise ValueError(
-                "Loading of unsafe .bin files are not allowed by default."
+                "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
             )
 
         quantize_config.runtime_format = quantize_config.format
