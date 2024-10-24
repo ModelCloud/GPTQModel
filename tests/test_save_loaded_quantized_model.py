@@ -1,7 +1,4 @@
 import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-
 import tempfile
 import unittest
 
@@ -9,6 +6,8 @@ import torch
 from gptqmodel import BACKEND, GPTQModel
 from parameterized import parameterized
 from transformers import AutoTokenizer
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 

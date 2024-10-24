@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from os.path import basename, isfile, join
+from os.path import isfile, join
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -29,12 +29,11 @@ from transformers.utils.generic import ContextManagers
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, META_FIELD_URI,
-                                   META_VALUE_URI, META_FIELD_DAMP_PERCENT, META_FIELD_DAMP_AUTO_INCREMENT)
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
+                                   META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
+                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
-from ..utils.device import check_cuda
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
@@ -45,6 +44,7 @@ from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_g
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ..version import __version__
 from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
+from .loader import ModelLoader
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -1014,77 +1014,7 @@ class BaseGPTQModel(nn.Module):
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        """load un-quantized pretrained model to cpu"""
-        got_cuda = check_cuda(raise_exception=False)
-
-        if not got_cuda:
-            try:
-                pass
-            except Exception as e:
-                raise ValueError(
-                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
-                )
-
-            model_init_kwargs["device"] = "cpu"
-            torch_dtype = qbits_dtype()
-
-        if cls.require_trust_remote_code and not trust_remote_code:
-            raise ValueError(
-                f"{pretrained_model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
-            )
-
-        # allow models to define optional notes that output messages to users that want to use this model
-        notes = cls.info.get("notes")
-        if notes:
-            logger.info(notes)
-
-        def skip(*args, **kwargs):
-            pass
-
-        torch.nn.init.kaiming_uniform_ = skip
-        torch.nn.init.uniform_ = skip
-        torch.nn.init.normal_ = skip
-
-        model_init_kwargs["trust_remote_code"] = trust_remote_code
-
-        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
-
-        if use_liger_kernel:
-            from liger_kernel.transformers.monkey_patch import MODEL_TYPE_TO_APPLY_LIGER_FN
-
-            apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(config.model_type, None)
-            if apply_fn is None:
-                raise ValueError(f"apply_fn is not defined for model type {config.model_type}")
-
-            apply_fn()
-
-        if torch_dtype == "auto":
-            torch_dtype = auto_dtype_from_config(config)
-        elif not isinstance(torch_dtype, torch.dtype):
-            raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
-
-        # enforce some values despite user specified
-        model_init_kwargs["torch_dtype"] = torch_dtype
-
-        if config.model_type not in SUPPORTED_MODELS:
-            raise TypeError(f"{config.model_type} isn't supported yet.")
-
-        if model_init_kwargs.get("cpu") != "cpu":
-            torch.cuda.empty_cache()
-
-        model = cls.model_loader.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
-
-        model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
-        if any(k in model_config for k in seq_len_keys):
-            for key in seq_len_keys:
-                if key in model_config:
-                    model.seqlen = model_config[key]
-                    break
-        else:
-            logger.warning("can't get model's sequence length from model config, will set to 4096.")
-            model.seqlen = 4096
-        model.eval()
+        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, use_liger_kernel, torch_dtype, cls.require_trust_remote_code, **model_init_kwargs)
         return cls(
             model,
             quantized=False,

@@ -123,8 +123,9 @@ def monkey_patch_gptqmodel_into_transformers():
         r"""
         Safety checker that arguments are correct
         """
-        from packaging import version
         import importlib
+
+        from packaging import version
         print("monkey patch postin")
         if self.bits not in [2, 3, 4, 8]:
             raise ValueError(f"Only support quantization to [2,3,4,8] bits but found {self.bits}")
