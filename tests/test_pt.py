@@ -1,9 +1,7 @@
-import torch
 import unittest
 
-from transformers import AutoTokenizer
-
 from gptqmodel import GPTQModel, QuantizeConfig
+from transformers import AutoTokenizer
 
 pretrained_model_id = "facebook/opt-125m"
 quantized_model_id = "facebook-opt-125m"
