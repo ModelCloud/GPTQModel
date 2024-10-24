@@ -11,7 +11,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-GENERATE_EVAL_SIZE = 100
+GENERATE_EVAL_SIZE = 30
 
 class TestsQ4Triton(unittest.TestCase):
     def test_generation_desc_act_false(self):

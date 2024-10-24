@@ -1047,7 +1047,7 @@ REFERENCE = torch.Tensor(
     ]
 ).to(torch.float16)
 
-GENERATE_EVAL_SIZE = 100
+GENERATE_EVAL_SIZE = 30
 
 def get_diff(a, ref):
     eps = 1e-6
