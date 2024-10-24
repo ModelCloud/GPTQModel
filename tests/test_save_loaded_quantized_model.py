@@ -17,7 +17,6 @@ class TestSave(unittest.TestCase):
         [
             (BACKEND.AUTO),
             (BACKEND.EXLLAMA_V2),
-            (BACKEND.EXLLAMA),
             (BACKEND.TRITON),
             (BACKEND.BITBLAS),
             (BACKEND.MARLIN),
