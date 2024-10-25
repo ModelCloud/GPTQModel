@@ -25,7 +25,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, Pre
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
-from .saver import ModelSaver
+from .writer import ModelWriter
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
@@ -628,7 +628,7 @@ class BaseGPTQModel(nn.Module):
         max_shard_size: Optional[str] = None,
         model_base_name: Optional[str] = None
     ):
-        ModelSaver.save_quantized(
+        ModelWriter.save_quantized(
             save_dir=save_dir,
             use_safetensors=use_safetensors,
             max_shard_size=max_shard_size,

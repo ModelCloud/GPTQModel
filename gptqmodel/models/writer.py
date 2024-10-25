@@ -54,7 +54,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-class ModelSaver():
+class ModelWriter():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
