@@ -1,8 +1,7 @@
 from model_test import ModelTest
 
 class TestGlm(ModelTest):
-    NATIVE_MODEL_ID = "THUDM/glm-4-9b-chat"
-    QUANT_MODEL_ID = "ModelCloud/glm-4-9b-chat-gptq-4bit"
+    NATIVE_MODEL_ID = "THUDM/chatglm3-6b"
 
     def test_glm(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)
