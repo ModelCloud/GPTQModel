@@ -40,8 +40,9 @@ class ModelWriter():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
+    @classmethod
     def save_quantized(
-            self,
+            cls,
             save_dir: str,
             quantized: bool,
             model_name_or_path: str,
@@ -107,7 +108,7 @@ class ModelWriter():
                     model, quantize_config=quantize_config, qlinear_kernel=qlinear_kernel
                 )
         else:
-            model = self.get_model_with_quantize(
+            model = cls.get_model_with_quantize(
                 quantize_config=quantize_config,
                 model_name_or_path=model_name_or_path,
                 dynamic_expert_index=dynamic_expert_index,
@@ -257,7 +258,8 @@ class ModelWriter():
         if trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=model_name_or_path)
 
-    def get_model_with_quantize(self,
+    @classmethod
+    def get_model_with_quantize(cls,
                                 quantize_config,
                                 model_name_or_path,
                                 dynamic_expert_index,
@@ -281,7 +283,7 @@ class ModelWriter():
         transformers.modeling_utils._init_weights = False
         init_contexts = [no_init_weights()]
         with ContextManagers(init_contexts):
-            model = self.model_loader.from_config(
+            model = cls.model_loader.from_config(
                 config, torch_dtype=torch.float16
             )
 
