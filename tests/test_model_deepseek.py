@@ -1,13 +1,7 @@
-# -- do not touch
-import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# -- end do not touch
 from base_test import BaseTest
 
 class TestDeepseek(BaseTest):
     NATIVE_MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
-    QUANT_MODEL_ID = "ModelCloud/DeepSeek-V2-Lite-gptq-4bit"
 
     def test_deepseek(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)

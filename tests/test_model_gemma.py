@@ -1,13 +1,7 @@
-# -- do not touch
-import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# -- end do not touch
 from base_test import BaseTest
 
 class TestGemma(BaseTest):
     NATIVE_MODEL_ID = "google/gemma-2-9b"
-    # QUANT_MODEL_ID = "ModelCloud/gemma-2-9b-gptq-4bit"
 
     def test_gemma(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)

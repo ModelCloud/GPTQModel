@@ -1,3 +1,8 @@
+# -- do not touch
+import os
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
 import unittest
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel
@@ -6,15 +11,31 @@ from gptqmodel.quantization.config import QuantizeConfig # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 import tempfile
 
-class BaseTest(unittest.TestCase):
+class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE = 100
 
-    def generate(self, model, tokenizer):
-        prompt = "I am in Paris and"
+    def generate(self, model, tokenizer, prompt=None):
+        if prompt == None:
+            prompt = "I am in Paris and"
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
         res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE, max_new_tokens=self.GENERATE_EVAL_SIZE)
         output = tokenizer.decode(res[0])
+
+        return output
+
+    def generateChat(self, model, tokenizer, prompt=None):
+        if prompt == None:
+            prompt = [
+                {"role": "system",
+                 "content": "You are a helpful assistant."},
+                {"role": "user",
+                 "content": "I am in Shanghai, preparing to visit the natural history museum. Can you tell me the best way to"}
+            ]
+
+        input_tensor = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_tensors="pt")
+        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE)
+        output = tokenizer.decode(outputs[0][input_tensor.shape[1]:], skip_special_tokens=True)
 
         return output
 
