@@ -823,6 +823,7 @@ class BaseGPTQModel(nn.Module):
             **kwargs
         )
 
+        cls.checkpoint_file_name = model.checkpoint_file_name
         return cls(
             model,
             quantized=True,
