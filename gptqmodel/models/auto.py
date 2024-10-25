@@ -21,6 +21,7 @@ from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
+from .granite import GraniteGPTQ
 from .grinmoe import GrinMOEGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
@@ -87,6 +88,7 @@ MODEL_MAP = {
     "exaone": ExaoneGPTQ,
     "grinmoe": GrinMOEGPTQ,
     "mllama": MLlamaGPTQ,
+    "granite": GraniteGPTQ,
 }
 
 

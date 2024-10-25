@@ -84,20 +84,18 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Model Support ( 🚀 GPTQModel only ) 
 [Ready to deply quantized models](https://hf.co/ModelCloud)
-  
-| Model            |     |                       |     |           |     |            |     |     |
-| ---------------- | --- | --------------------- | --- | --------- | --- | ---------- | --- | --- |
-| Baichuan         | ✅   | EXAONE 3.0            | 🚀  | Llama 1/2/3 | ✅   | Phi/Phi-3  | 🚀  |     |
-| Bloom            | ✅   | Falon                 | ✅   | Llama 3.2 Vision | 🚀   | Qwen       | ✅   |     |
-| ChatGLM          | 🚀  | Gemma 2               | 🚀  | LongLLaMA | ✅   | Qwen2MoE   | 🚀  |     |
-| CodeGen          | ✅   | GPTBigCod             | ✅   | MiniCPM3  | 🚀  | RefinedWeb | ✅   |     |
-| Cohere           | ✅   | GPTNeoX               | ✅   | Mistral   | ✅   | StableLM   | ✅   |     |
-| DBRX Converted   | 🚀  | GPT-2                 | ✅   | Mixtral   | ✅   | StarCoder2 | ✅   |     |
-| Deci             | ✅   | GPT-J                 | ✅   | MOSS      | ✅   | XVERSE     | ✅   |     |
-| DeepSeek-V2      | 🚀  | GRIN-MoE              | 🚀  | MPT       | ✅   | Yi         | ✅   |     |
-| DeepSeek-V2-Lite | 🚀  | InternLM 1/2.5        | 🚀  | OPT       | ✅   |            |     |     |
 
-
+| Model            |     |         |     |                  |     |            |     |     |     |
+| ---------------- | --- | ------- | --- | ---------------- | --- | ---------- | --- | --- | --- |
+| Baichuan         | ✅   | EXAONE 3.0 | 🚀  | InternLM 1/2.5   | 🚀  | OPT        | ✅   |     |     |
+| Bloom            | ✅   | Falon   | ✅   | Llama 1/2/3      | ✅   | Phi/Phi-3  | 🚀  |     |     |
+| ChatGLM          | 🚀  | Gemma 2 | 🚀  | Llama 3.2 Vision | 🚀  | Qwen       | ✅   |     |     |
+| CodeGen          | ✅   | GPTBigCod | ✅   | LongLLaMA        | ✅   | Qwen2MoE   | 🚀  |     |     |
+| Cohere           | ✅   | GPTNeoX | ✅   | MiniCPM3         | 🚀  | RefinedWeb | ✅   |     |     |
+| DBRX Converted   | 🚀  | GPT-2   | ✅   | Mistral          | ✅   | StableLM   | ✅   |     |     |
+| Deci             | ✅   | GPT-J   | ✅   | Mixtral          | ✅   | StarCoder2 | ✅   |     |     |
+| DeepSeek-V2      | 🚀  | Granite | 🚀  | MOSS             | ✅   | XVERSE     | ✅   |     |     |
+| DeepSeek-V2-Lite | 🚀  | GRIN-MoE | 🚀  | MPT              | ✅   | Yi         | ✅   |     |     |
 ## Compatiblity 
 
 We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case basis. 
