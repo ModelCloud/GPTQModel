@@ -251,7 +251,8 @@ class ModelLoader():
                 quantize_config,
                 None,  # qlinear_kernel
                 False,  # load_quantized_model
-                cls.generate
+                cls.generate,
+                None # return None if is SGLANG or VLLM
             )
 
         if quantize_config.format == FORMAT.MARLIN:
@@ -526,4 +527,5 @@ class ModelLoader():
             qlinear_kernel,
             True,  # load_quantized_model
             None, # return None if not SGLANG or VLLM
+            model.checkpoint_file_name
         )

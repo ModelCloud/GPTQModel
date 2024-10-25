@@ -802,7 +802,7 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
 
-        model, quantize_config, qlinear_kernel, load_quantized_model, generate = ModelLoader.from_quantized(
+        model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
             model_name_or_path=model_name_or_path,
             device_map=device_map,
             max_memory=max_memory,
@@ -823,9 +823,11 @@ class BaseGPTQModel(nn.Module):
             **kwargs
         )
 
-        cls.checkpoint_file_name = model.checkpoint_file_name
         if generate is not None:
             cls.generate = generate
+
+        if checkpoint_file_name is not None:
+            cls.checkpoint_file_name = checkpoint_file_name
 
         return cls(
             model,
