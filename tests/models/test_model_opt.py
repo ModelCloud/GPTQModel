@@ -5,9 +5,7 @@ class TestOpt(ModelTest):
 
     def test_opt(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = ""
+        reference_output = "</s>I am in Paris and I have a friend who is in the same city. I am in the same city as her and I have a friend who is in the same city. I am in the same city as her and I have a friend who is in the same city. I am in the same city as her and I have a friend who is in the same city. I am in the same city as her and I have a friend who is in the same city. I am in the same city as her and"
         result = self.generate(model, tokenizer)
-        print(f"Result is: \n{result}")
 
-        self.assertTrue(len(result) > 0)
-        # self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
