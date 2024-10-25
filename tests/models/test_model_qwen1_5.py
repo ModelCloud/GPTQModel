@@ -5,8 +5,7 @@ class TestQwen1_5(ModelTest):
 
     def test_qwen1_5(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = ""
+        reference_output = "I am in Paris and I am looking for a place to stay. I am looking for a place to stay in the city center. I am looking for a place to stay in the city center. I am looking for a place to stay in the city center. I am looking for a place to stay in the city center. I am looking for a place to stay in the city center. I am looking for a place to stay in the city center. I am looking for a place to stay in the city center."
         result = self.generate(model, tokenizer)
 
-        self.assertTrue(len(result) > 0)
-        # self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
