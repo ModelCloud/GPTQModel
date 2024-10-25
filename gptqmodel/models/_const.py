@@ -58,6 +58,7 @@ SUPPORTED_MODELS = [
     "exaone",
     "grinmoe",
     "mllama",
+    "granite",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
