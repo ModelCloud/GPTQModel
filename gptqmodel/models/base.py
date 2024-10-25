@@ -1040,7 +1040,7 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
 
-        model, quantize_config, qlinear_kernel, load_quantized_model = ModelLoader.from_quantized(
+        model, quantize_config, qlinear_kernel, load_quantized_model, generate = ModelLoader.from_quantized(
             model_name_or_path=model_name_or_path,
             device_map=device_map,
             max_memory=max_memory,
@@ -1060,6 +1060,9 @@ class BaseGPTQModel(nn.Module):
             layer_type=cls.layer_type,
             **kwargs
         )
+
+        if generate is not None:
+            cls.generate = generate
 
         return cls(
             model,

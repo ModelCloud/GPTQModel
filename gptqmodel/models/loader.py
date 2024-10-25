@@ -251,6 +251,7 @@ class ModelLoader():
                 quantize_config,
                 None,  # qlinear_kernel
                 False,  # load_quantized_model
+                cls.generate
             )
 
         if quantize_config.format == FORMAT.MARLIN:
@@ -523,5 +524,6 @@ class ModelLoader():
             model,
             quantize_config,
             qlinear_kernel,
-            True  # load_quantized_model
+            True,  # load_quantized_model
+            None, # return None if not SGLANG
         )
