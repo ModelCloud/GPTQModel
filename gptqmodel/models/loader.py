@@ -11,41 +11,25 @@ from gptqmodel.utils.device import check_cuda
 from typing import Dict, List, Optional, Union
 
 import accelerate
-import lm_eval
 import torch
-import torch.nn as nn
 import transformers
-from accelerate.hooks import remove_hook_from_module
-from lm_eval.loggers import EvaluationTracker, WandbLogger
-from lm_eval.models.huggingface import HFLM
-from lm_eval.tasks import TaskManager
-from lm_eval.utils import handle_non_serializable
-from packaging import version
-from safetensors.torch import save_file as safe_save
-from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
-from transformers.modeling_utils import no_init_weights, shard_checkpoint
-from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
-from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
-                                   META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
+from ..quantization import QuantizeConfig
+from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
-from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
-                           convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
-                           get_model_files_size, get_module_by_name_prefix, get_module_by_name_suffix,
-                           get_moe_layer_modules, gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
+                           find_layers, get_checkpoints,
+                           get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ..version import __version__
-from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
+from ._const import CPU, DEVICE, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
