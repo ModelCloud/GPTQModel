@@ -643,7 +643,8 @@ class BaseGPTQModel(nn.Module):
             dynamic_expert_index=self.dynamic_expert_index,
             base_modules=self.base_modules,
             lm_head=self.lm_head,
-            layer_modules=self.layer_modules
+            layer_modules=self.layer_modules,
+            checkpoint_file_name=self.checkpoint_file_name
         )
 
     #     """save quantized model and configs to local disk"""

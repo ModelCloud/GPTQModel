@@ -9,34 +9,19 @@ from os.path import isfile, join
 from typing import Dict, List, Optional, Union
 
 import accelerate
-import lm_eval
 import torch
 import torch.nn as nn
 import transformers
-from accelerate.hooks import remove_hook_from_module
-from lm_eval.loggers import EvaluationTracker, WandbLogger
-from lm_eval.models.huggingface import HFLM
-from lm_eval.tasks import TaskManager
-from lm_eval.utils import handle_non_serializable
-from packaging import version
 from safetensors.torch import save_file as safe_save
-from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
-from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
                                    META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
                                    MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
 from ..utils.backend import BACKEND
-from ..utils.data import collate_data
-from ..utils.importer import select_quant_linear
-from ..utils.marlin import (_validate_marlin_compatibility,
-                            _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
                            convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
                            get_model_files_size, get_module_by_name_prefix, get_module_by_name_suffix,
@@ -76,6 +61,7 @@ class ModelWriter():
             base_modules: List[str] = None,
             lm_head: str = None,
             layer_modules: List[List[str]] = None,
+            checkpoint_file_name=None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -132,6 +118,7 @@ class ModelWriter():
                 lm_head=lm_head,
                 base_modules=base_modules,
                 layer_modules=layer_modules,
+                checkpoint_file_name=checkpoint_file_name,
             )
 
         model.to(CPU)
@@ -282,6 +269,7 @@ class ModelWriter():
                                 lm_head,
                                 base_modules,
                                 layer_modules,
+                                checkpoint_file_name,
         ):
 
         config = AutoConfig.from_pretrained(
@@ -339,7 +327,7 @@ class ModelWriter():
             model,
             dtype=torch.float16,
             # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=self.checkpoint_file_name,
+            checkpoint=checkpoint_file_name,
             # device_map=device_map,
             # offload_state_dict=True,
             # offload_buffers=True,
