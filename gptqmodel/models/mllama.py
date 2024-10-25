@@ -1,5 +1,7 @@
-from .base import BaseGPTQModel
 from transformers import AutoModelForPreTraining
+
+from .base import BaseGPTQModel
+
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
 class MLlamaGPTQ(BaseGPTQModel):

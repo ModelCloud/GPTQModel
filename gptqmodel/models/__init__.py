@@ -16,6 +16,7 @@ from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
+from .granite import GraniteGPTQ
 from .grinmoe import GrinMOEGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
@@ -24,6 +25,7 @@ from .longllama import LongLlamaGPTQ
 from .minicpm3 import MiniCPM3GPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
+from .mllama import MLlamaGPTQ
 from .moss import MOSSGPTQ
 from .mpt import MPTGPTQ
 from .opt import OPTGPTQ
@@ -37,4 +39,3 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .mllama import MLlamaGPTQ
