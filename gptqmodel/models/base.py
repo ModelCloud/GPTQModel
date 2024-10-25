@@ -628,7 +628,13 @@ class BaseGPTQModel(nn.Module):
         max_shard_size: Optional[str] = None,
         model_base_name: Optional[str] = None
     ):
+
+        checkpoint_file_name = ""
+        if hasattr(self, "checkpoint_file_name") and self.checkpoint_file_name is not None:
+            checkpoint_file_name = self.checkpoint_file_name
+
         ModelWriter.save_quantized(
+            self,
             save_dir=save_dir,
             use_safetensors=use_safetensors,
             max_shard_size=max_shard_size,
@@ -644,7 +650,7 @@ class BaseGPTQModel(nn.Module):
             base_modules=self.base_modules,
             lm_head=self.lm_head,
             layer_modules=self.layer_modules,
-            checkpoint_file_name=self.checkpoint_file_name
+            checkpoint_file_name=checkpoint_file_name
         )
         
 

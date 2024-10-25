@@ -13,22 +13,19 @@ import torch
 import torch.nn as nn
 import transformers
 from safetensors.torch import save_file as safe_save
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
+from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
                                    META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
-                                   MIN_VERSION_WITH_V2, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
+                                   MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
-from ..utils.model import (auto_dtype_from_config, check_to_quantized, convert_gptq_v1_to_v2_format,
-                           convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_checkpoints, get_device,
-                           get_model_files_size, get_module_by_name_prefix, get_module_by_name_suffix,
-                           get_moe_layer_modules, gptqmodel_post_init, make_quant, move_to, nested_move_to, pack_model,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,get_model_files_size,
+                           get_moe_layer_modules, make_quant)
 from ..version import __version__
-from ._const import CPU, CUDA_0, DEVICE, SUPPORTED_MODELS
+from ._const import CPU
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -43,9 +40,8 @@ class ModelWriter():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
-    @classmethod
     def save_quantized(
-            cls,
+            self,
             save_dir: str,
             quantized: bool,
             model_name_or_path: str,
@@ -111,7 +107,7 @@ class ModelWriter():
                     model, quantize_config=quantize_config, qlinear_kernel=qlinear_kernel
                 )
         else:
-            model = cls.get_model_with_quantize(
+            model = self.get_model_with_quantize(
                 quantize_config=quantize_config,
                 model_name_or_path=model_name_or_path,
                 dynamic_expert_index=dynamic_expert_index,
@@ -261,7 +257,6 @@ class ModelWriter():
         if trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=model_name_or_path)
 
-    @classmethod
     def get_model_with_quantize(self,
                                 quantize_config,
                                 model_name_or_path,
