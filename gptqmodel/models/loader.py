@@ -525,5 +525,5 @@ class ModelLoader():
             quantize_config,
             qlinear_kernel,
             True,  # load_quantized_model
-            None, # return None if not SGLANG
+            None, # return None if not SGLANG or VLLM
         )
