@@ -5,9 +5,8 @@ class TestYi(ModelTest):
 
     def test_yi(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)
-        reference_output = "Certainly! Here's how you can get to the Shanghai Natural History Museum:\n\n1. **By Metro**: The museum is located near Line 10 of the Shanghai Metro. You can take the Line 10 train to the People's Park station. From there, it's a short walk to the museum.\n\n2. **By Bus**: Several bus lines pass near the museum. For example, bus routes 10, 11,"
+        reference_output = "Sure, I can guide you on how to get there, get there's a lot of public transport in Shanghai.\n\n1. From the Out of Towns area, you can take the Express Train 101. It's a 10-minute ride from the Out of Towns area to the National Museum.\n\n2. From the Out of Towns area, you can also take the Express Train 102. It's a 10"
 
-        result = self.generate(model, tokenizer)
-        print(f"Result is: \n{result}")
+        result = self.generateChat(model, tokenizer)
 
         self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
