@@ -5,8 +5,7 @@ class TestLlama(ModelTest):
 
     def test_llama(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = ""
+        reference_output = "<s> I am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I"
         result = self.generate(model, tokenizer)
 
-        self.assertTrue(len(result) > 0)
-        # self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
