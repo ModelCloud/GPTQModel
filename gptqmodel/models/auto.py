@@ -125,7 +125,6 @@ class GPTQModel:
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
         quantize_config: Optional[QuantizeConfig | Dict] = None,
-        model_basename: Optional[str] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         # verify weight files matches predefined hash during loading
@@ -144,7 +143,6 @@ class GPTQModel:
             device=device,
             backend=backend,
             quantize_config=quantize_config,
-            model_basename=model_basename,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,
