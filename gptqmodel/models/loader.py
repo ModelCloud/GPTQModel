@@ -52,7 +52,6 @@ class ModelLoader():
             use_liger_kernel: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
             require_trust_remote_code=None,
-            info: Dict[str, str] = {},
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
@@ -73,11 +72,6 @@ class ModelLoader():
             raise ValueError(
                 f"{pretrained_model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
-
-        # allow models to define optional notes that output messages to users that want to use this model
-        notes = info.get("notes")
-        if notes:
-            logger.info(notes)
 
         def skip(*args, **kwargs):
             pass
