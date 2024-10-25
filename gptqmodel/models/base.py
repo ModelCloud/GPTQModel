@@ -641,7 +641,6 @@ class BaseGPTQModel(nn.Module):
             safetensors_metadata=safetensors_metadata,
             quantize_config=self.quantize_config,
             dynamic_expert_index=self.dynamic_expert_index,
-            checkpoint_file_name=self.checkpoint_file_name,
             base_modules=self.base_modules,
             lm_head=self.lm_head,
             layer_modules=self.layer_modules

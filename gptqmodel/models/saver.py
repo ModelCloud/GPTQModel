@@ -73,7 +73,6 @@ class ModelSaver():
             max_shard_size: Optional[str] = None,
             quantize_config: QuantizeConfig = None,
             dynamic_expert_index: Optional[str] = None,
-            checkpoint_file_name=None,
             base_modules: List[str] = None,
             lm_head: str = None,
             layer_modules: List[List[str]] = None,
@@ -133,7 +132,6 @@ class ModelSaver():
                 lm_head=lm_head,
                 base_modules=base_modules,
                 layer_modules=layer_modules,
-                checkpoint_file_name=checkpoint_file_name,
             )
 
         model.to(CPU)
@@ -284,7 +282,7 @@ class ModelSaver():
                                 lm_head,
                                 base_modules,
                                 layer_modules,
-                                checkpoint_file_name=None):
+        ):
 
         config = AutoConfig.from_pretrained(
             model_name_or_path,
@@ -341,7 +339,7 @@ class ModelSaver():
             model,
             dtype=torch.float16,
             # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=checkpoint_file_name,
+            checkpoint=self.checkpoint_file_name,
             # device_map=device_map,
             # offload_state_dict=True,
             # offload_buffers=True,
