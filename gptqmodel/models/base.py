@@ -634,7 +634,6 @@ class BaseGPTQModel(nn.Module):
             checkpoint_file_name = self.checkpoint_file_name
 
         ModelWriter.save_quantized(
-            self,
             save_dir=save_dir,
             use_safetensors=use_safetensors,
             max_shard_size=max_shard_size,
