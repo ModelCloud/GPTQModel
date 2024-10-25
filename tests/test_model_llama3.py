@@ -1,6 +1,6 @@
-from base_test import BaseTest
+from model_test import ModelTest
 
-class TestLlama3(BaseTest):
+class TestLlama3(ModelTest):
     NATIVE_MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
 
     def test_llama3(self):

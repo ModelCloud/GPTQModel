@@ -1,6 +1,6 @@
-from base_test import BaseTest
+from model_test import ModelTest
 
-class TestGemma(BaseTest):
+class TestGemma(ModelTest):
     NATIVE_MODEL_ID = "google/gemma-2-9b"
 
     def test_gemma(self):

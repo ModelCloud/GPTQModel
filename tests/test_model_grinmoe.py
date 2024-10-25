@@ -1,6 +1,6 @@
-from base_test import BaseTest
+from model_test import ModelTest
 
-class TestGrinMoE(BaseTest):
+class TestGrinMoE(ModelTest):
 
     QUANT_MODEL_ID = "ModelCloud/GRIN-MoE-gptq-4bit"
     prompt = [

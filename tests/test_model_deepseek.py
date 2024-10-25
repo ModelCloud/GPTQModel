@@ -1,6 +1,6 @@
-from base_test import BaseTest
+from model_test import ModelTest
 
-class TestDeepseek(BaseTest):
+class TestDeepseek(ModelTest):
     NATIVE_MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
 
     def test_deepseek(self):

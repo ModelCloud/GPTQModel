@@ -1,6 +1,6 @@
-from base_test import BaseTest
+from model_test import ModelTest
 
-class TestExaone(BaseTest):
+class TestExaone(ModelTest):
     NATIVE_MODEL_ID = "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"
     prompt = [
         {"role": "system",
