@@ -40,6 +40,7 @@ class ModelTest(unittest.TestCase):
         return output
 
     def load_tokenizer(self, model_name_or_path, trust_remote_code=False):
+        # print(f"pzs----load_tokenizer {model_name_or_path}---{trust_remote_code}")
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 
@@ -49,7 +50,7 @@ class ModelTest(unittest.TestCase):
         return calibration_dataset
 
     def quantModel(self, model_name_or_path, trust_remote_code=False):
-        tokenizer = self.load_tokenizer(model_name_or_path)
+        tokenizer = self.load_tokenizer(model_name_or_path, trust_remote_code=trust_remote_code)
         calibration_dataset = self.load_dataset(tokenizer)
         quantize_config = QuantizeConfig(
             bits=4,
@@ -63,7 +64,7 @@ class ModelTest(unittest.TestCase):
         )
 
         model.quantize(calibration_dataset, batch_size=64)
-
+        # model.save_quantized("/monster/data/pzs/Qubitium/")
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save_quantized(tmpdirname)
             q_model, q_tokenizer = self.loadQuantModel(tmpdirname, tokenizer_path=model_name_or_path)
