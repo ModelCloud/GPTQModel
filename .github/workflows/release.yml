@@ -101,7 +101,7 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: ${{ Number(github.event.inputs.max-parallel) }}
+      max-parallel: ${{ echo ${github.event.inputs.max-parallel} | sed "s/'//g" }}
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
