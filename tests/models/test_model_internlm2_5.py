@@ -1,7 +1,7 @@
 from model_test import ModelTest
 
 class TestInternlm2_5(ModelTest):
-    NATIVE_MODEL_ID = "internlm/internlm2_5-1_8b-chat"
+    NATIVE_MODEL_ID = "internlm/internlm2_5-7b-chat"
 
     def test_internlm2_5(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)

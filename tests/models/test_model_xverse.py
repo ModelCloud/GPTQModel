@@ -1,7 +1,7 @@
 from model_test import ModelTest
 
 class TestXVerse(ModelTest):
-    NATIVE_MODEL_ID = "xverse/XVERSE-MoE-A4.2B-Chat"
+    NATIVE_MODEL_ID = "xverse/XVERSE-7B-Chat"
 
     def test_xverse(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
