@@ -25,7 +25,6 @@ on:
         default: ''
       max-parallel:
         description: 'max parallel jobs'
-        type: number
         required: false
         default: '6'
 
