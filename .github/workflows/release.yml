@@ -25,6 +25,7 @@ on:
         default: ''
       max-parallel:
         description: 'max parallel jobs'
+        type: number
         required: false
         default: '6'
 
@@ -101,7 +102,7 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: ${{ echo ${github.event.inputs.max-parallel} | sed "s/'//g" }}
+      max-parallel: ${{ echo github.event.inputs.max-parallel | sed "s/'//g" }}
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
