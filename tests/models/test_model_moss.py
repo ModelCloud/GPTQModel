@@ -1,7 +1,7 @@
 from model_test import ModelTest
 
 class TestMoss(ModelTest):
-    NATIVE_MODEL_ID = "fnlp/moss-base-7b"
+    NATIVE_MODEL_ID = "fnlp/moss2-2_5b-chat"
 
     def test_moss(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)
