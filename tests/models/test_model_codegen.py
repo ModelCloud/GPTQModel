@@ -1,7 +1,7 @@
 from model_test import ModelTest
 
 class TestCodeGen(ModelTest):
-    NATIVE_MODEL_ID = "Salesforce/codegen-350M-multi"
+    NATIVE_MODEL_ID = "Salesforce/codegen-2B-nl"
 
     def test_codegen(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
