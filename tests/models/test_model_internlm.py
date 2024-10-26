@@ -4,7 +4,7 @@ class TestInternlm(ModelTest):
     NATIVE_MODEL_ID = "internlm/internlm-7b"
 
     def test_internlm(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)
+        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=True)
 
         reference_output = ""
         result = self.generate(model, tokenizer)

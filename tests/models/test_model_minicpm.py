@@ -4,7 +4,7 @@ class TestMiniCpm(ModelTest):
     NATIVE_MODEL_ID = "openbmb/MiniCPM-2B-128k"
 
     def test_minicpm(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, True)
+        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=True)
         reference_output = "<s> I am in Paris and I am looking for a place to stay. I am looking for a place that is close to the Eiffel Tower. I am looking for a place that is close to the Eiffel Tower. I am looking for a place that is close to the Eiffel Tower. I am looking for a place that is close to the Eiffel Tower. I am looking for a place that is close to the Eiffel Tower. I am looking for a place that is close to the"
         result = self.generate(model, tokenizer)
 
