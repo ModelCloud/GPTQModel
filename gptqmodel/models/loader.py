@@ -49,7 +49,6 @@ class ModelLoader():
             cls,
             pretrained_model_name_or_path: str,
             trust_remote_code: bool = False,
-            use_liger_kernel: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
             require_trust_remote_code=None,
             **model_init_kwargs,
@@ -83,15 +82,6 @@ class ModelLoader():
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
         config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
-
-        if use_liger_kernel:
-            from liger_kernel.transformers.monkey_patch import MODEL_TYPE_TO_APPLY_LIGER_FN
-
-            apply_fn = MODEL_TYPE_TO_APPLY_LIGER_FN.get(config.model_type, None)
-            if apply_fn is None:
-                raise ValueError(f"apply_fn is not defined for model type {config.model_type}")
-
-            apply_fn()
 
         if torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config)

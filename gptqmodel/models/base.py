@@ -777,11 +777,10 @@ class BaseGPTQModel(nn.Module):
         pretrained_model_name_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
-        use_liger_kernel: bool = False,
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, use_liger_kernel, torch_dtype, cls.require_trust_remote_code, **model_init_kwargs)
+        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, **model_init_kwargs)
         return cls(
             model,
             quantized=False,
