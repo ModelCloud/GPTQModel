@@ -88,26 +88,10 @@ import torch  # noqa: E402
 
 if TORCH_CUDA_ARCH_LIST is None:
     at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-else:
-    at_least_one_cuda_v6 = True
-
-if not at_least_one_cuda_v6:
-    raise EnvironmentError(
-        "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
-    )
-
-extras_require = {
-    "test": ["pytest>=8.2.2", "parameterized"],
-    "quality": ["ruff==0.4.9", "isort==5.13.2"],
-    'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
-    'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
-    'bitblas': ["bitblas>=0.0.1.dev13"],
-    'hf': ["optimum>=1.21.2"],
-    'qbits': ["intel_extension_for_transformers>=1.4.2"],
-    'auto_round': ["auto_round>=0.3"],
-}
-
-include_dirs = ["gptqmodel_cuda"]
+    if not at_least_one_cuda_v6:
+        raise EnvironmentError(
+            "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
+        )
 
 additional_setup_kwargs = {}
 if BUILD_CUDA_EXT:
@@ -213,8 +197,17 @@ common_setup_kwargs.update(additional_setup_kwargs)
 setup(
     packages=find_packages(),
     install_requires=requirements,
-    extras_require=extras_require,
-    include_dirs=include_dirs,
+    extras_require={
+    "test": ["pytest>=8.2.2", "parameterized"],
+    "quality": ["ruff==0.4.9", "isort==5.13.2"],
+    'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
+    'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
+    'bitblas': ["bitblas>=0.0.1.dev13"],
+    'hf': ["optimum>=1.21.2"],
+    'qbits': ["intel_extension_for_transformers>=1.4.2"],
+    'auto_round': ["auto_round>=0.3"],
+},
+    include_dirs=["gptqmodel_cuda"],
     python_requires=">=3.9.0",
     **common_setup_kwargs,
 )
