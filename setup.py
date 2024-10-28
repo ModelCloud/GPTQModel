@@ -217,7 +217,7 @@ class CachedWheelsCommand(_bdist_wheel):
                 os.makedirs(self.dist_dir)
 
             impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = f"{common_setup_kwargs['name']}-{common_setup_kwargs['version']}-{impl_tag}-{abi_tag}-{plat_tag}"
+            archive_basename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_cuda_version_tag()}-{impl_tag}-{abi_tag}-{plat_tag}"
 
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
