@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from os.path import isfile, join
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 import accelerate
 import torch
@@ -17,7 +17,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
-from ..quantization import GPTQ, QuantizeConfig
+from ..quantization import QuantizeConfig
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
                                    META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
                                    MIN_VERSION_WITH_V2)
