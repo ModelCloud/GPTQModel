@@ -12,6 +12,7 @@ from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 os.environ["BUILD_CUDA_EXT"] = "1"
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
+
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
 version_vars = {}
@@ -24,7 +25,11 @@ BASE_WHEEL_URL = (
 
 BUILD_CUDA_EXT = True
 COMPILE_MARLIN = True
-FORCE_BUILD = False
+
+if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
+    FORCE_BUILD = True
+else:
+    FORCE_BUILD = False
 
 common_setup_kwargs = {
     "version": gptqmodel_version,
