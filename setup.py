@@ -103,6 +103,8 @@ additional_setup_kwargs = {}
 
 include_dirs = ["gptqmodel_cuda"]
 
+extensions = []
+
 if BUILD_CUDA_EXT:
     from distutils.sysconfig import get_python_lib
 
@@ -144,8 +146,6 @@ if BUILD_CUDA_EXT:
             "--use_fast_math",
         ],
     }
-
-    extensions = []
 
     # Marlin is not ROCm-compatible, CUDA only
     if COMPILE_MARLIN:
@@ -254,5 +254,6 @@ setup(
     else {
         "bdist_wheel": CachedWheelsCommand,
     },
+    ext_modules=extensions,
     **common_setup_kwargs
 )
