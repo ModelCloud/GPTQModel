@@ -224,6 +224,10 @@ class CachedWheelsCommand(_bdist_wheel):
 
             os.rename(wheel_filename, wheel_path)
 
+            import twine.commands.check as twine_check
+
+            twine_check.main([wheel_path])
+
             print(f"defined name & version: {common_setup_kwargs['name']} {common_setup_kwargs['version']}")
         except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
