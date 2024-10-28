@@ -6,18 +6,25 @@ from pathlib import Path
 from setuptools import find_packages, setup
 
 os.environ["BUILD_CUDA_EXT"] = "1"
-
+CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
 
+BASE_WHEEL_URL = (
+    "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
+)
+
+BUILD_CUDA_EXT = True
+COMPILE_MARLIN = True
+
 common_setup_kwargs = {
     "version": gptqmodel_version,
     "name": "gptqmodel",
     "author": "ModelCloud",
-    "author_email":"qubitium@modelcloud.ai",
+    "author_email": "qubitium@modelcloud.ai",
     "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
@@ -39,11 +46,13 @@ common_setup_kwargs = {
     ],
 }
 
-CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
-BUILD_CUDA_EXT = True
-COMPILE_MARLIN = True
+CUDA_VERSION_TAG = ""
 
-if BUILD_CUDA_EXT:
+
+def get_cuda_version_tag() -> str:
+    if CUDA_VERSION_TAG != "":
+        return CUDA_VERSION_TAG
+
     import torch
 
     default_cuda_version = torch.version.cuda
@@ -58,7 +67,14 @@ if BUILD_CUDA_EXT:
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
+        return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
+
+    return common_setup_kwargs["version"]
+
+
+if BUILD_CUDA_EXT:
+    if CUDA_RELEASE == "1":
+        common_setup_kwargs["version"] += f"+{get_cuda_version_tag()}"
 
 with open('requirements.txt') as f:
     requirement_list = f.read().splitlines()
