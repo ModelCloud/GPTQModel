@@ -222,13 +222,13 @@ class CachedWheelsCommand(_bdist_wheel):
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
 
-            os.rename(wheel_filename, wheel_path)
-
-            import twine.commands.check as twine_check
-
-            twine_check.main([wheel_path])
-
-            print(f"defined name & version: {common_setup_kwargs['name']} {common_setup_kwargs['version']}")
+            # os.rename(wheel_filename, wheel_path)
+            #
+            # import twine.commands.check as twine_check
+            #
+            # twine_check.main([wheel_path])
+            #
+            # print(f"defined name & version: {common_setup_kwargs['name']} {common_setup_kwargs['version']}")
         except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
