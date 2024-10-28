@@ -208,7 +208,7 @@ class CachedWheelsCommand(_bdist_wheel):
         wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_cuda_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
         wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{gptqmodel_version}", wheel_name=wheel_filename)
-        print("Guessing wheel URL: ", wheel_url)
+        print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
             urllib.request.urlretrieve(wheel_url, wheel_filename)
