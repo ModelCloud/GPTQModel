@@ -202,7 +202,7 @@ jobs:
           pip show torch
 
       - name: Install requirements
-        run: uv pip install build -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: uv pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         run: python -m build --no-isolation --sdist
