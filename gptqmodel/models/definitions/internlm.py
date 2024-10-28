@@ -2,6 +2,8 @@ from ..base import BaseGPTQModel
 
 
 class InternLMGPTQ(BaseGPTQModel):
+    require_transformers_version = "<=4.44.2"
+
     base_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"

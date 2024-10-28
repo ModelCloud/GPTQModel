@@ -68,6 +68,8 @@ class BaseGPTQModel(nn.Module):
 
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
+    # some models require transformer version(internalm require '<=4.42.2')
+    require_transformers_version: Optional[str] = None
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
@@ -774,7 +776,7 @@ class BaseGPTQModel(nn.Module):
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, **model_init_kwargs)
+        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
         return cls(
             model,
             quantized=False,
@@ -813,6 +815,7 @@ class BaseGPTQModel(nn.Module):
             format=format,
             verify_hash=verify_hash,
             require_trust_remote_code=cls.require_trust_remote_code,
+            require_transformers_version=cls.require_transformers_version,
             dynamic_expert_index=cls.dynamic_expert_index,
             base_modules=cls.base_modules,
             layer_modules=cls.layer_modules,

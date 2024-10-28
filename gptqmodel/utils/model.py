@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import operator
 from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from typing import List, Optional
@@ -20,6 +21,7 @@ from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
+from packaging import version
 
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -639,3 +641,20 @@ def get_model_files_size(pre_quantized_model_path, file_extension=['.bin', '.saf
                         pre_quantized_size_bytes += file_data.size
     pre_quantized_size_mb = pre_quantized_size_bytes / (1024 * 1024)
     return pre_quantized_size_mb
+
+def check_requires_version(requires_version, current_version):
+    OPERATOR_MAP = {
+        "<=": operator.le,
+        ">=": operator.ge,
+        "==": operator.eq,
+        "<": operator.lt,
+        ">": operator.gt,
+    }
+    match = re.match(r"(<=|>=|==|<|>)\s*([\d\.]+)", requires_version)
+    if match:
+        op_symbol, required_version = match.groups()
+        current_version = version.parse(current_version)
+        required_version = version.parse(required_version)
+        return OPERATOR_MAP[op_symbol](current_version, required_version)
+    else:
+        return None
