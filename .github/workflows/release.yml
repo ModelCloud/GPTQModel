@@ -64,7 +64,6 @@ jobs:
           echo "ip: $ip"
 
       - name: Assign tasks
-        if: ${{ github.event.inputs.target == '' }}
         id: assign
         run: |
           input="${{ github.event.inputs.target }}"
