@@ -1,5 +1,5 @@
-from ._const import EXPERT_INDEX_PLACEHOLDER
-from .base import BaseGPTQModel
+from .._const import EXPERT_INDEX_PLACEHOLDER
+from ..base import BaseGPTQModel
 
 
 class Qwen2MoeGPTQ(BaseGPTQModel):

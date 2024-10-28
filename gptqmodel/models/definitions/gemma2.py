@@ -1,8 +1,8 @@
 import logging
 from logging import getLogger
 
-from ..utils import BACKEND
-from .base import BaseGPTQModel
+from ...utils import BACKEND
+from ..base import BaseGPTQModel
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -38,13 +38,13 @@ class Gemma2GPTQ(BaseGPTQModel):
                     return
 
                 # quantized gemma-2 27b model only support vLLM/SGLang load.
-                from ..utils.vllm import VLLM_AVAILABLE
+                from ...utils.vllm import VLLM_AVAILABLE
                 if VLLM_AVAILABLE:
                     from vllm import LLM
                     if isinstance(self.model, LLM):
                         backend = BACKEND.VLLM
 
-                from ..utils.sglang import SGLANG_AVAILABLE
+                from ...utils.sglang import SGLANG_AVAILABLE
                 if SGLANG_AVAILABLE:
                     from sglang.srt.server import Runtime
                     if isinstance(self.model, Runtime):

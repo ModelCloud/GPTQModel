@@ -1,4 +1,4 @@
-from .base import BaseGPTQModel
+from ..base import BaseGPTQModel
 
 
 class InternLM2GPTQ(BaseGPTQModel):

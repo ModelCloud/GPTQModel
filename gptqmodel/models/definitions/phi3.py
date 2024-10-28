@@ -1,4 +1,4 @@
-from .base import BaseGPTQModel
+from ..base import BaseGPTQModel
 
 
 class Phi3GPTQ(BaseGPTQModel):

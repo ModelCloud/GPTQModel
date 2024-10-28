@@ -1,4 +1,4 @@
-from .base import BaseGPTQModel
+from ..base import BaseGPTQModel
 
 
 # placer=holder only as dbrx original models are not supported
