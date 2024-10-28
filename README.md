@@ -59,7 +59,8 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
-* 🚀 Extensive model support for: `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
+* 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
+* ✨ 100% CI coverage for all supported models including quality/ppl regression.
 * 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
@@ -73,19 +74,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Security: hash check of model weights on load
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
-* ✨ Alert users of sub-optimal calibration data. Most new users get this part horribly wrong.
-* ✨ Increased compatibility with newest models with auto-padding of in/out-features for [ Exllama, Exllama V2 ] backends.
-* 👾 Removed non-working, partially working, or fully deprecated features: Peft, ROCM, AWQ Gemm inference, Triton v1 (replaced by v2), Fused Attention (Replaced by Marlin/Exllama).
-* 👾 <del>Fixed packing Performance regression on high core-count systems.</del> Backported to AutoGPTQ
-* 👾 <del>Fixed crash on H100.</del> Backported to AutoGPTQ
-* ✨ 10s of thousands of lines of refactor/cleanup.
-* ✨ Over 8+ overly complex api args removed/merged into simple human-readable args. 
-* ✨ Added CI workflow for validation of future PRs and prevent code regressions.
-* ✨ Added perplexity unit-test to prevent against model quant quality regressions.
-* 👾 De-bloated 271K lines of which 250K was caused by a single dataset used only by an example. 
-* 👾 De-bloat the number of args presented in public `.from_quantized()`/`.from_pretrained()` api
-* ✨ Shorter and more concise public api/internal vars. No need to mimic HF style for verbose class names. 
-* ✨ Everything that did not pass unit-tests have been removed from repo.
+
 
 ## Model Support ( 🚀 GPTQModel only ) 
 [Ready to deply quantized models](https://hf.co/ModelCloud)
