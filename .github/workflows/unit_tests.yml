@@ -37,6 +37,7 @@ env:
   ZEN4_SERVER: 10.0.14.199
   CPU_TEST_FILES: "test_qbits.py"
   IGNORED_TEST_FILES: "test_tgi.py"
+  GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
 
