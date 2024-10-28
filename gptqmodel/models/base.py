@@ -16,7 +16,7 @@ from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable
 from packaging import version
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 from .writer import ModelWriter
 
@@ -30,6 +30,16 @@ from ..utils.model import (check_to_quantized, find_layers, get_device, get_modu
                            get_moe_layer_modules, move_to, nested_move_to, pack_model, simple_dispatch_model)
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
+
+
+def check_support_param_buffer_assignment(*args, **kwargs):
+    return False
+
+
+# Fix cpu memory leak.
+# See https://github.com/huggingface/transformers/issues/34366
+modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
+
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
