@@ -2,6 +2,9 @@ from ..base import BaseGPTQModel
 
 
 class InternLM2GPTQ(BaseGPTQModel):
+
+    require_transformers_version = "<=4.44.2"
+
     base_modules = ["model.tok_embeddings", "model.norm"]
 
     layers_node = "model.layers"

@@ -4,10 +4,10 @@ import logging
 
 from gptqmodel.utils.device import check_cuda
 from typing import Dict, List, Optional, Union
-
 import accelerate
 import torch
 import transformers
+from transformers import __version__ as transformers_version
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
@@ -23,7 +23,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, check_requires_version)
 from ._const import CPU, DEVICE, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ class ModelLoader():
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
             require_trust_remote_code=None,
+            require_transformers_version: Optional[str] = None,
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
@@ -66,6 +67,16 @@ class ModelLoader():
             raise ValueError(
                 f"{pretrained_model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
+
+        if require_transformers_version:
+            passed = check_requires_version(require_transformers_version, current_version=transformers_version)
+            if passed is not None:
+                if not passed:
+                    raise ValueError(
+                        f"{pretrained_model_name_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
+            else:
+                raise ValueError(
+                    f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
 
         def skip(*args, **kwargs):
             pass
@@ -123,6 +134,7 @@ class ModelLoader():
             format: Optional[FORMAT] = None,
             verify_hash: Optional[Union[str, List[str]]] = None,
             require_trust_remote_code: bool = False,
+            require_transformers_version: Optional[str] = None,
             dynamic_expert_index: Optional[str] = None,
             base_modules: List[str] = None,
             layer_modules: List[List[str]] = None,
@@ -157,6 +169,15 @@ class ModelLoader():
             raise ValueError(
                 f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
+
+        if require_transformers_version:
+            passed = check_requires_version(require_transformers_version, current_version=transformers_version)
+            if passed is not None:
+                if not passed:
+                    raise ValueError(
+                        f"{model_name_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
+            else:
+                raise ValueError(f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
