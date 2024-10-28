@@ -36,6 +36,7 @@ env:
   CI: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
+  MAX_JOBS: 4
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
