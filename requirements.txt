@@ -15,3 +15,4 @@ ninja>=1.11.1.1
 protobuf>=4.25.3
 huggingface-hub>=0.24.2
 lm_eval==0.4.4
+setuptools>=75.2.0
