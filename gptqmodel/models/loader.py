@@ -266,6 +266,11 @@ class ModelLoader():
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
+        possible_model_basenames = [
+            f"gptq_model-{quantize_config.bits}bit-{quantize_config.group_size}g",
+            "model",
+        ]
+
         extensions = []
         if use_safetensors:
             extensions.append(".safetensors")
@@ -278,6 +283,7 @@ class ModelLoader():
         is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
             model_name_or_path=model_name_or_path,
             extensions=extensions,
+            possible_model_basenames=possible_model_basenames,
             **cached_file_kwargs,
         )
 
