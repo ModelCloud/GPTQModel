@@ -21,7 +21,8 @@ if TYPE_CHECKING:
 
 from transformers.utils import is_optimum_available, is_torch_available, logging
 from transformers.utils.quantization_config import QuantizationConfigMixin
-
+from transformers import __version__ as transformers_version
+from packaging import version
 if is_torch_available():
     import torch
 
@@ -79,10 +80,19 @@ class GptqHfQuantizer(HfQuantizer):
             self.optimum_quantizer.quantize_model(model, self.quantization_config.tokenizer)
             model.config.quantization_config = GPTQConfig.from_dict(self.optimum_quantizer.to_dict())
 
+    def _is_transformers_new_version(self):
+        return version.parse(transformers_version) >= version.parse("4.46.0")
+
     @property
     def is_trainable(self, model: Optional["PreTrainedModel"] = None):
         return True
 
     @property
     def is_serializable(self):
-        return True
+        if self._is_transformers_new_version():
+            def is_serializable_fn(safe_serialization=True):
+                return True
+
+            return is_serializable_fn
+        else:
+            return True
