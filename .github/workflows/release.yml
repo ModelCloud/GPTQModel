@@ -180,7 +180,7 @@ jobs:
     runs-on: self-hosted
     needs: check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda12.4-torch2.4.1-python3.11
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
     env:
       CUDA_RELEASE: 0
     steps:
