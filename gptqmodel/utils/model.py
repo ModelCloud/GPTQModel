@@ -124,8 +124,8 @@ def make_quant(
     pack: bool = False,
     dynamic=None,
 ) -> BaseQuantLinear:
-    select_quant_linear_func = select_quant_linear_with_pack if pack else select_quant_linear
-    QuantLinear = select_quant_linear_func(
+
+    QuantLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -263,25 +263,6 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def select_quant_linear_with_pack(bits: int,
-                                  group_size: int,
-                                  desc_act: bool,
-                                  sym: bool,
-                                  backend: BACKEND, format: str, pack: bool,
-                                  dynamic=None):
-    QuantLinear = select_quant_linear(
-        bits=bits,
-        group_size=group_size,
-        desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=pack,
-        dynamic=dynamic,
-    )
-    return QuantLinear
-
-
 def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
@@ -309,14 +290,14 @@ def pack_model(
     bits,
     group_size,
     backend: BACKEND,
-    format: str,
+    format: str | FORMAT,
     desc_act=False,
     sym: bool = True,
     force_layer_back_to_cpu: bool = False,
     dynamic=None,
     parallel_packing: bool = True,
 ):
-    QuantLinear = select_quant_linear_with_pack(
+    QuantLinear = select_quant_linear(
         bits=bits,
         dynamic=dynamic,
         group_size=group_size,
