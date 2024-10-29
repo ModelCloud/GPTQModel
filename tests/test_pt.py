@@ -15,7 +15,7 @@ class Test_save_load_pt_weight(unittest.TestCase):
             )
         ]
 
-        reference_output = "</s>gptqmodel is an easy-to-use model for creating a variety of a variety"
+        reference_output = "</s>gptqmodel is an easy-to-use model quantization library that can be used"
 
         quantize_config = QuantizeConfig(
             bits=4,
@@ -30,6 +30,6 @@ class Test_save_load_pt_weight(unittest.TestCase):
 
         model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0", use_safetensors=False)
 
-        result = tokenizer.decode(model.generate(**tokenizer("gptqmodel is an easy-to-use model", return_tensors="pt").to(model.device))[0])
+        result = tokenizer.decode(model.generate(**tokenizer("gptqmodel is an easy-to-use model quantization library", return_tensors="pt").to(model.device))[0])
 
         self.assertEqual(result, reference_output)
