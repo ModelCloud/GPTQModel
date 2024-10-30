@@ -141,10 +141,6 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
-          echo "----------"
-          echo "event_name: ${{ github.event_name }}"
-          echo "upload_release: ${{ github.event.inputs.upload_release }}"
-          echo "upload_pypi: ${{ github.event.inputs.upload_pypi }}"
 
       - name: Install requirements
         run: |
@@ -207,21 +203,6 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Print Env
-        run: |
-          echo "== pyenv =="
-          pyenv versions
-          echo "== python =="
-          python --version
-          echo "== nvcc =="
-          #nvcc --version
-          echo "== torch =="
-          pip show torch
-          echo "----------"
-          echo "event_name: ${{ github.event_name }}"
-          echo "upload_release: ${{ github.event.inputs.upload_release }}"
-          echo "upload_pypi: ${{ github.event.inputs.upload_pypi }}"
-
       - name: Install requirements
         run: uv pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
@@ -254,7 +235,7 @@ jobs:
 
       - name: Upload package to release
         uses: svenstaro/upload-release-action@v2
-        if: (github.event_name == 'release' || github.event.inputs.upload_release) && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
         with:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ env.ref }}
@@ -262,7 +243,7 @@ jobs:
           overwrite: true
 
       - name: Upload sdist to pypi
-        if: (github.event_name == 'release' || github.event.inputs.upload_pypi) && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
