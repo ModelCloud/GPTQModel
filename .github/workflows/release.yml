@@ -27,6 +27,16 @@ on:
         description: 'max parallel jobs'
         required: false
         default: '{"size": 6}'
+      upload_release:
+        description: 'upload to release (it only works with a tag ref)'
+        type: boolean
+        required: false
+        default: 'false'
+      upload_pypi:
+        description: 'upload to PyPI'
+        type: boolean
+        required: false
+        default: 'false'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -57,6 +67,9 @@ jobs:
           echo "event name: ${{ github.event_name }}"
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+          echo "max-parallel: ${{ inputs.max-parallel }}"
+          echo "upload_release: ${{ inputs.upload_release }}"
+          echo "upload_pypi: ${{ inputs.upload_pypi }}"
 
       - name: Select server
         id: get_ip
@@ -102,7 +115,7 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: ${{ fromJson(inputs.max-parallel).size }}
+      max-parallel: ${{ fromJson(inputs.max-parallel).size || 6 }}
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
@@ -159,7 +172,7 @@ jobs:
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: ${{ env.UPLOADED }} == '1'
+        continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
@@ -226,21 +239,21 @@ jobs:
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: ${{ env.UPLOADED }} == '1'
+        continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
 
       - name: Upload package to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release' && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_release) && !cancelled()
         with:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
 
       - name: Upload sdist to pypi
-        if: github.event_name == 'release' && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi) && !cancelled()
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
