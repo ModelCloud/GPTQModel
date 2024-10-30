@@ -57,6 +57,7 @@ jobs:
           echo "event name: ${{ github.event_name }}"
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+          echo "max-parallel: ${{ inputs.max-parallel }}"
 
       - name: Select server
         id: get_ip
