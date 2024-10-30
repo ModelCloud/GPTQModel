@@ -29,10 +29,12 @@ on:
         default: '{"size": 6}'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
+        type: boolean
         required: false
         default: 'false'
       upload_pypi:
         description: 'upload to PyPI'
+        type: boolean
         required: false
         default: 'false'
 
