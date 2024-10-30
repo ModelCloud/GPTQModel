@@ -141,6 +141,10 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
+          echo "----------"
+          echo "event_name: ${{ github.event_name }}"
+          echo "upload_release: ${{ github.event.inputs.upload_release }}"
+          echo "upload_pypi: ${{ github.event.inputs.upload_pypi }}"
 
       - name: Install requirements
         run: |
@@ -213,6 +217,10 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
+          echo "----------"
+          echo "event_name: ${{ github.event_name }}"
+          echo "upload_release: ${{ github.event.inputs.upload_release }}"
+          echo "upload_pypi: ${{ github.event.inputs.upload_pypi }}"
 
       - name: Install requirements
         run: uv pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
