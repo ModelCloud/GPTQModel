@@ -251,6 +251,7 @@ jobs:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
+          overwrite: true
 
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi) && !cancelled()
