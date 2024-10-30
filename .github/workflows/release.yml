@@ -179,7 +179,7 @@ jobs:
 
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
         with:
           repo_name: ${{ env.repo }}
           tag: ${{ env.ref }}
