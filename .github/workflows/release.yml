@@ -102,7 +102,7 @@ jobs:
       fail-fast: false
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: ${{ fromJson(inputs.max-parallel).size }}
+      max-parallel: ${{ fromJson(inputs.max-parallel).size }} || 6
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
@@ -159,7 +159,7 @@ jobs:
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: ${{ env.UPLOADED }} == '1'
+        continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
@@ -226,7 +226,7 @@ jobs:
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: ${{ env.UPLOADED }} == '1'
+        continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
