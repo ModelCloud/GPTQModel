@@ -27,6 +27,14 @@ on:
         description: 'max parallel jobs'
         required: false
         default: '{"size": 6}'
+      upload_release:
+        description: 'upload to release (it only works with a tag ref)'
+        required: false
+        default: 'false'
+      upload_pypi:
+        description: 'upload to PyPI'
+        required: false
+        default: 'false'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -58,6 +66,8 @@ jobs:
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
           echo "max-parallel: ${{ inputs.max-parallel }}"
+          echo "upload_release: ${{ inputs.upload_release }}"
+          echo "upload_pypi: ${{ inputs.upload_pypi }}"
 
       - name: Select server
         id: get_ip
@@ -234,14 +244,14 @@ jobs:
 
       - name: Upload package to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release' && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_release) && !cancelled()
         with:
           file: dist/${{ env.WHL_NAME }}
           tag: ${{ env.ref }}
           file_glob: true
 
       - name: Upload sdist to pypi
-        if: github.event_name == 'release' && !cancelled()
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi) && !cancelled()
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
