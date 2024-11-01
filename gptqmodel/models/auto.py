@@ -45,6 +45,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+from .definitions.mobilellm import MobileLLMGPTQ
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -89,6 +90,7 @@ MODEL_MAP = {
     "grinmoe": GrinMOEGPTQ,
     "mllama": MLlamaGPTQ,
     "granite": GraniteGPTQ,
+    "mobilellm": MobileLLMGPTQ,
 }
 
 

@@ -59,6 +59,7 @@ SUPPORTED_MODELS = [
     "grinmoe",
     "mllama",
     "granite",
+    "mobilellm",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
