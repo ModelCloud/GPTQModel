@@ -2,7 +2,7 @@ import os
 import subprocess
 from argparse import ArgumentParser
 
-from future.moves import sys
+import sys
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from transformers import AutoTokenizer
 
@@ -14,7 +14,7 @@ def main():
     global quantized_model_id
 
     parser = ArgumentParser()
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'QBITS', 'SGLANG', 'VLLM'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'QBITS', 'SGLANG', 'VLLM'])
     args = parser.parse_args()
 
     backend = get_backend(args.backend)
@@ -22,9 +22,10 @@ def main():
     device = 'cpu' if backend == BACKEND.QBITS else 'cuda:0'
 
     if backend == BACKEND.SGLANG:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang>=0.1.19"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
     elif backend == BACKEND.VLLM:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.5.1"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
 
     prompt = "I am in Paris and"
 
@@ -32,7 +33,8 @@ def main():
         quantized_model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         if backend == BACKEND.SGLANG:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang>=0.1.19"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
             model = GPTQModel.from_quantized(
                 quantized_model_id,
                 device=device,
@@ -44,7 +46,7 @@ def main():
             model.shutdown()
             del model
         else:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.5.1"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
             model = GPTQModel.from_quantized(
                 quantized_model_id,
                 device=device,
