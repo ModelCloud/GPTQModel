@@ -93,6 +93,7 @@ class BaseGPTQModel(nn.Module):
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
         model_name_or_path: str = None,
+        cache_block_outputs: Optional[bool] = True,
     ):
         super().__init__()
 
@@ -106,6 +107,9 @@ class BaseGPTQModel(nn.Module):
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
         self.model_name_or_path = model_name_or_path
+        # Whether to cache block outputs to reuse as inputs for the succeeding block.
+        # It allows optimization of non-standard models (e.g. ChatGLM) but can require more time.
+        self.cache_block_outputs = cache_block_outputs
 
     @property
     def quantized(self):
@@ -360,6 +364,7 @@ class BaseGPTQModel(nn.Module):
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
         cur_layer_device = get_device(layers[0])
+
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         def store_input_hook(_, args, kwargs):
@@ -401,18 +406,18 @@ class BaseGPTQModel(nn.Module):
             if module is not None:
                 move_to(module, cur_layer_device)
 
-        # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
-        handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        for example in calibration_dataset:
-            for k, v in example.items():
-                if len(v.shape) == 1:
-                    v = v.unsqueeze(0)
-                example[k] = move_to(v, cur_layer_device)
-            try:
-                self.model(**example)
-            except ValueError:
-                pass
-        handle.remove()
+        if self.cache_block_outputs:
+            handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+            for example in calibration_dataset:
+                for k, v in example.items():
+                    if len(v.shape) == 1:
+                        v = v.unsqueeze(0)
+                    example[k] = move_to(v, cur_layer_device)
+                try:
+                    self.model(**example)
+                except ValueError:
+                    pass
+            handle.remove()
 
         move_to(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
         for module_name in self.base_modules:
@@ -443,6 +448,21 @@ class BaseGPTQModel(nn.Module):
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
+            if not self.cache_block_outputs:
+                handle = layer.register_forward_pre_hook(store_input_hook, with_kwargs=True)
+                for example in calibration_dataset:
+                    for k, v in example.items():
+                        if len(v.shape) == 1:
+                            v = v.unsqueeze(0)
+                        print("pzs------+++")
+                        example[k] = move_to(v, get_device(self.model))
+                    try:
+                        self.model(**example)
+                    except ValueError:
+                        pass
+                handle.remove()
+            print("pzs------")
+            print(f"Layer input device: {cur_layer_device}---layer:-{get_device(layer)}---{get_device(self.model)}")
             if isinstance(layer, MllamaCrossAttentionDecoderLayer):
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
@@ -453,6 +473,7 @@ class BaseGPTQModel(nn.Module):
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
             full = find_layers(layer)
+
             for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
                 gptq = {}
@@ -534,35 +555,46 @@ class BaseGPTQModel(nn.Module):
                     )
                     gptq[name].free()
 
-            for j in range(num_batches):
-                layer_input = []
-                for k, layer_inp in enumerate(layer_inputs[j]):
-                    layer_input.append(move_to(layer_inp, cur_layer_device))
+            if self.cache_block_outputs:
+                for j in range(num_batches):
+                    layer_input = []
+                    for k, layer_inp in enumerate(layer_inputs[j]):
+                        layer_input.append(move_to(layer_inp, cur_layer_device))
 
-                mask = attention_masks[j]
-                layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+                    mask = attention_masks[j]
+                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
 
-                additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
-                if layer_position_ids is not None:
-                    additional_layer_inputs["position_ids"] = layer_position_ids
-                for k, v in layer_input_kwargs[j].items():
-                    additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-                with torch.no_grad():
-                    layer_output = move_to(
-                        layer(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
-
-            layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
-            del layer
-            del gptq
-            del layer_inputs
-            layer_inputs, layer_outputs = (
-                layer_outputs,
-                [],
-            )  # TODO: is it really OK to cache only the first positional argument?
+                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                    layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
+                    if layer_position_ids is not None:
+                        additional_layer_inputs["position_ids"] = layer_position_ids
+                    for k, v in layer_input_kwargs[j].items():
+                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+                    with torch.no_grad():
+                        layer_output = move_to(
+                            layer(*layer_input, **additional_layer_inputs)[0],
+                            cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
+                layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+                del layer
+                del gptq
+                del layer_inputs
+                layer_inputs, layer_outputs = (
+                        layer_outputs,
+                        [],
+                    )  # TODO: is it really OK to cache only the first positional argument?
+            else:
+                layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+                del layer
+                del gptq
+                del layer_inputs
+                del attention_masks
+                del additional_layer_inputs
+                del layer_input_kwargs
+                layer_input_kwargs = []
+                attention_masks = []
+                layer_inputs = []
             torch.cuda.empty_cache()
 
         logger.info(f"Quantization summary:\n{quant_log}")
@@ -782,7 +814,8 @@ class BaseGPTQModel(nn.Module):
             quantized=False,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            model_name_or_path=pretrained_model_name_or_path
+            model_name_or_path=pretrained_model_name_or_path,
+            cache_block_outputs=False,
         )
 
     @classmethod
