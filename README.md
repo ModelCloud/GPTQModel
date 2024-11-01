@@ -6,6 +6,7 @@
 </p>
 
 ## News
+* 11/01/2024 🚀 [1.1.1-DEV] Meta MobileLLM model support added.
 * 10/29/2024 🚀 [v1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 * 10/12/2024 ✨ [v1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
 * 10/11/2024 ✨ [v1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Move QBits to optional and add wheel for python 3.12 and cuda 11.8.
