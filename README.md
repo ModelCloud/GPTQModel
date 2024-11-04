@@ -92,7 +92,10 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 | EXAONE 3.0       | 🚀  | Llama 1/2/3    | ✅   | Phi/Phi-3        | 🚀  |            |     |     |     |     |## Compatiblity 
 
 
-## Ultra High quality recovery of Llama 3.2 1B/3B Instruct models with avg 100% accuracy recovery post-quantization using GPTQModel:
+## Quality: GPTQModel quantized Llama-3.2-Instruct models with 100% avg recovery:
+
+![image](https://github.com/user-attachments/assets/c3685e22-98c2-4a10-b756-eeb510ab0140)![image](https://github.com/user-attachments/assets/801f9884-65a2-453a-95bb-e5eab8c75a65)
+
 
 ## Platform/GPU Requirements
 
