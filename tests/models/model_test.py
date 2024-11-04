@@ -97,6 +97,7 @@ class ModelTest(unittest.TestCase):
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
             results = model.lm_eval(
+                model="vllm",
                 output_path=tmp_dir,
                 tasks=self.TASK_NAME,
                 apply_chat_template=apply_chat_template,

@@ -659,6 +659,7 @@ class BaseGPTQModel(nn.Module):
 
     def lm_eval(
         self,
+        model: Optional[str] = None,
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
@@ -690,19 +691,20 @@ class BaseGPTQModel(nn.Module):
         show_config: bool = False,
         trust_remote_code: bool = False,
     ):
-        LM = HFLM(
-            pretrained=self,
-            batch_size=batch_size,
-            max_batch_size=max_batch_size,
-            trust_remote_code=trust_remote_code,
-        )
+        if model is None:
+            model = HFLM(
+                pretrained=self,
+                batch_size=batch_size,
+                max_batch_size=max_batch_size,
+                trust_remote_code=trust_remote_code,
+            )
         # evaluation_tracker need model_args cannot be None
         model_args = ""
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
 
         results = lm_eval.simple_evaluate(
-            model=LM,
+            model=model,
             model_args=model_args,
             tasks=tasks,
             device=self.device,
