@@ -660,6 +660,7 @@ class BaseGPTQModel(nn.Module):
     def lm_eval(
         self,
         model: Optional[str] = None,
+        model_args: str = "",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
@@ -699,7 +700,6 @@ class BaseGPTQModel(nn.Module):
                 trust_remote_code=trust_remote_code,
             )
         # evaluation_tracker need model_args cannot be None
-        model_args = f"pretrained={self.model_name_or_path}"
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
         results = lm_eval.simple_evaluate(
