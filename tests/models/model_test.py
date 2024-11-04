@@ -104,13 +104,12 @@ class ModelTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             results = model.lm_eval(
                 model="vllm",
-                model_args=f"pretrained={model.model_name_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,max_model_len=82000",
+                model_args=f"pretrained={model.model_name_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}",
                 output_path=tmp_dir,
                 tasks=self.TASK_NAME,
                 apply_chat_template=apply_chat_template,
                 trust_remote_code=trust_remote_code
             )
-
             print('--------Eval Result---------')
             print(make_table(results))
             if "groups" in results:

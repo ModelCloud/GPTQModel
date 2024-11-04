@@ -7,8 +7,7 @@ class TestStarCode2(ModelTest):
 
     def test_starcode2(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, torch_dtype=torch.float16)
-
-        task_results = self.lm_eval(model, trust_remote_code=True)
+        task_results = self.lm_eval(model)
         for filter, value in task_results.items():
             if "norm" in filter:
                 per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
