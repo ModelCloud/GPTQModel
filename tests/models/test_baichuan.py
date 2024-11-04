@@ -14,7 +14,8 @@ class TestBaiChuan(ModelTest):
         self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
 
         task_results = self.lm_eval(model, trust_remote_code=True)
-        for filter, value in task_results:
+        print(f"task_results---{task_results}")
+        for filter, value in task_results.items():
             if "flexible" in filter:
                 per = (value / self.NATIVE_GSM8k_FLEXIBLE_EXTRACT) * 100
                 print(f"{filter}: {value} improve {per:.2f}")
