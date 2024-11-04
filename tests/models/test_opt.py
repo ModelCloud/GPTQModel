@@ -8,7 +8,7 @@ class TestOpt(ModelTest):
     def test_opt(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
 
-        task_results = self.lm_eval(model, model_path=self.NATIVE_MODEL_ID, trust_remote_code=True)
+        task_results = self.lm_eval(model, trust_remote_code=True)
         for filter, value in task_results.items():
             if "norm" in filter:
                 # 0.2287

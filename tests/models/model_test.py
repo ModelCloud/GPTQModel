@@ -74,7 +74,7 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=64)
+        model.quantize(calibration_dataset, batch_size=16)
         model.save_quantized(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
         tokenizer.save_pretrained(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
         # with tempfile.TemporaryDirectory() as tmpdirname:
@@ -99,11 +99,11 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, model_path, apply_chat_template=False, trust_remote_code=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
             results = model.lm_eval(
                 model="vllm",
-                model_args=f"pretrained={model_path},dtype=auto,gpu_memory_utilization=0.8",
+                model_args=f"pretrained={model.model_name_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,max_model_len=82000",
                 output_path=tmp_dir,
                 tasks=self.TASK_NAME,
                 apply_chat_template=apply_chat_template,
