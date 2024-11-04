@@ -2,9 +2,17 @@ from model_test import ModelTest
 
 class TestMixtral(ModelTest):
     NATIVE_MODEL_ID = "mistralai/Mixtral-8x7B-Instruct-v0.1"
-
+    NATIVE_ARC_CHALLENGE_ACC = 0.5213
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5247
     def test_mixtral(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = "<s> I am in Paris and I am in love.\n\nI am in love with the city, the people, the food, the language, the architecture, the history, the culture, the fashion, the art, the music, the wine, the cheese, the bread, the pastries, the cafes, the parks, the gardens, the bridges, the streets, the metro, the Eiffel Tower, the Louvre, the Notre Dame, the Sacre Coeur, the Arc"
-        result = self.generate(model, tokenizer)
-
+        task_results = self.lm_eval(model)
+        for filter, value in task_results.items():
+            if "norm" in filter:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            else:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            self.assertTrue(90 <= per <= 110,
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")

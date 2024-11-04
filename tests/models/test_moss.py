@@ -9,4 +9,3 @@ class TestMoss(ModelTest):
         result = self.generate(model, tokenizer)
 
         self.assertTrue(len(result) > 0)
-        #

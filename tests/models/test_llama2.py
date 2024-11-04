@@ -1,11 +1,19 @@
 from model_test import ModelTest
-import torch
 
 class TestLlama2(ModelTest):
     NATIVE_MODEL_ID = "meta-llama/Llama-2-7b-chat-hf"
-
+    NATIVE_ARC_CHALLENGE_ACC = 0.3490
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3635
     def test_llama2(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = " Of course, I'd be happy to help! The Shanghai Natural History Museum is a fantastic place to visit, and I'm sure you'll have a great time there. Here are some tips to make the most of your visit:\n\n1. Plan Your Visit: The Shanghai Natural History Museum is open from 9:00 AM to 5:00 PM, Tuesday through Sunday. It's closed on Mondays. You can"
-        result = self.generateChat(model, tokenizer)
+        task_results = self.lm_eval(model)
+        for filter, value in task_results.items():
+            if "norm" in filter:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            else:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            self.assertTrue(90 <= per <= 110,
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
 

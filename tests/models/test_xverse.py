@@ -2,8 +2,8 @@ from model_test import ModelTest
 
 class TestXVerse(ModelTest):
     NATIVE_MODEL_ID = "xverse/XVERSE-7B-Chat"
-    NATIVE_ARC_CHALLENGE_ACC = 0.1894
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
+    NATIVE_ARC_CHALLENGE_ACC = 0.4198
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4044
 
     def test_xverse(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=True)

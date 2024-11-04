@@ -2,27 +2,19 @@ from model_test import ModelTest
 import torch
 class TestBloom(ModelTest):
     NATIVE_MODEL_ID = "bigscience/bloom-560m"
-    NATIVE_GSM8k_FLEXIBLE_EXTRACT = 0.0167
-    NATIVE_GSM8k_STRICT_MATCH = 0.0144
+    NATIVE_ARC_CHALLENGE_ACC = 0.2201
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2440
 
     def test_bloom(self):
-        # model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, torch_dtype=torch.float16)
-        model, tokenizer = self.loadQuantModel(f"/monster/data/pzs/quantization/{self.NATIVE_MODEL_ID}",
-                                               trust_remote_code=True)
-        reference_output = "I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and I am in Paris. I am in Paris and"
-        result = self.generate(model, tokenizer)
+        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, torch_dtype=torch.float16)
 
-
-
-        task_results = self.lm_eval(model, apply_chat_template=False)
+        task_results = self.lm_eval(model)
         for filter, value in task_results.items():
-            if "flexible" in filter:
-                per = (value / self.NATIVE_GSM8k_FLEXIBLE_EXTRACT) * 100
+            if "norm" in filter:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
                 print(f"{filter}: {value} diff {per:.2f}%")
-                #flexible-extract
-                self.assertGreater(value, self.NATIVE_GSM8k_FLEXIBLE_EXTRACT)
             else:
-                per = (value / self.NATIVE_GSM8k_STRICT_MATCH) * 100
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
                 print(f"{filter}: {value} diff {per:.2f}%")
-                #strict-match
-                self.assertGreater(value, self.NATIVE_GSM8k_STRICT_MATCH)
+            self.assertTrue(90 <= per <= 110,
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")

@@ -5,8 +5,6 @@ class TestChatGlm(ModelTest):
 
     def test_chatglm(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=True)
-        reference_output = ""
         result = self.generate(model, tokenizer)
 
         self.assertTrue(len(result) > 0)
-        #
