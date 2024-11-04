@@ -19,8 +19,10 @@ class TestBloom(ModelTest):
             if "flexible" in filter:
                 per = (value / self.NATIVE_GSM8k_FLEXIBLE_EXTRACT) * 100
                 print(f"{filter}: {value} diff {per:.2f}%")
+                #flexible-extract 0.0136
                 self.assertGreater(value, self.NATIVE_GSM8k_FLEXIBLE_EXTRACT)
             else:
                 per = (value / self.NATIVE_GSM8k_STRICT_MATCH) * 100
                 print(f"{filter}: {value} diff {per:.2f}%")
+                #strict-match 0.0076
                 self.assertGreater(value, self.NATIVE_GSM8k_STRICT_MATCH)
