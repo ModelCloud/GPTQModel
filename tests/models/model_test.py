@@ -94,7 +94,7 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template, trust_remote_code=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
             results = model.lm_eval(
                 output_path=tmp_dir,

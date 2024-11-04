@@ -13,7 +13,7 @@ class TestBaiChuan(ModelTest):
         result = self.generate(model, tokenizer)
         self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
 
-        task_results = self.lm_eval(model, apply_chat_template=False, trust_remote_code=True)
+        task_results = self.lm_eval(model, trust_remote_code=True)
         for filter, value in task_results:
             if "flexible" in filter:
                 per = (value / self.NATIVE_GSM8k_FLEXIBLE_EXTRACT) * 100
