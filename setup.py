@@ -175,20 +175,6 @@ if BUILD_CUDA_EXT:
 
     extensions.append(
         cpp_ext.CUDAExtension(
-            "gptqmodel_exllama_kernels",
-            [
-                "gptqmodel_ext/exllama/exllama_ext.cpp",
-                "gptqmodel_ext/exllama/cuda_buffers.cu",
-                "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        )
-    )
-    extensions.append(
-        cpp_ext.CUDAExtension(
             "gptqmodel_exllamav2_kernels",
             [
                 "gptqmodel_ext/exllamav2/ext.cpp",
