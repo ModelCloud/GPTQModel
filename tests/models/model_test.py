@@ -102,7 +102,6 @@ class ModelTest(unittest.TestCase):
                 apply_chat_template=apply_chat_template,
                 trust_remote_code=trust_remote_code
             )
-            print(results)
 
             print('--------Eval Result---------')
             print(make_table(results))
@@ -113,4 +112,5 @@ class ModelTest(unittest.TestCase):
                 metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
                 if metric != 'alias' and 'stderr' not in metric
             }
+            print(task_results)
             return task_results

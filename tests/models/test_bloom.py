@@ -18,9 +18,9 @@ class TestBloom(ModelTest):
         for filter, value in task_results.items():
             if "flexible" in filter:
                 per = (value / self.NATIVE_GSM8k_FLEXIBLE_EXTRACT) * 100
-                print(f"{filter}: {value} improve {per:.2f}")
+                print(f"{filter}: {value} diff {per:.2f}%")
                 self.assertGreater(value, self.NATIVE_GSM8k_FLEXIBLE_EXTRACT)
             else:
                 per = (value / self.NATIVE_GSM8k_STRICT_MATCH) * 100
-                print(f"{filter}: {value} improve {per:.2f}")
+                print(f"{filter}: {value} diff {per:.2f}%")
                 self.assertGreater(value, self.NATIVE_GSM8k_STRICT_MATCH)
