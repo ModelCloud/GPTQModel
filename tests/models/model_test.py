@@ -74,7 +74,8 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=16)
+        print(f"eeeee ===================================== 4")
+        model.quantize(calibration_dataset, batch_size=4)
         model.save_quantized(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
         tokenizer.save_pretrained(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
         # with tempfile.TemporaryDirectory() as tmpdirname:

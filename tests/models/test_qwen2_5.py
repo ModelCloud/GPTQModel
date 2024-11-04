@@ -2,12 +2,22 @@ from model_test import ModelTest
 
 class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+    NATIVE_ARC_CHALLENGE_ACC = 0.4343
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4676
 
 
     def test_qwen2_5(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
 
-        reference_output = "I am in Paris and I have a problem with my phone. I need to charge it but I don't have a charger. I have a laptop charger that has the same voltage and amperage as my phone charger. Can I use the laptop charger to charge my phone? Using a laptop charger to charge your phone is generally not recommended, even if the voltage and amperage seem to match. Here are a few reasons why:\n\n1. **Connector Type**: The charger's connector (the part that plugs into your"
-        result = self.generate(model, tokenizer)
+        task_results = self.lm_eval(model, trust_remote_code=True)
+        for filter, value in task_results.items():
+            if "norm" in filter:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            else:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            self.assertTrue(90 <= per <= 110,
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
 
 
