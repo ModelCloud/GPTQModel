@@ -350,7 +350,7 @@ jobs:
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
       - name: Install wheel
-        run: uv pip install intel_extension_for_transformers dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: uv pip install GPUtil intel_extension_for_transformers dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
