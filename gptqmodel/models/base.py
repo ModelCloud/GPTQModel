@@ -702,15 +702,11 @@ class BaseGPTQModel(nn.Module):
         model_args = f"pretrained={self.model_name_or_path}"
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
-        if self.device == CUDA_0:
-            device = CUDA
-        else:
-            device = self.device
         results = lm_eval.simple_evaluate(
             model=model,
             model_args=model_args,
             tasks=tasks,
-            device=device,
+            device=str(self.device),
             num_fewshot=num_fewshot,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
