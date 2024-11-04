@@ -2,11 +2,21 @@ from model_test import ModelTest
 
 class TestInternlm(ModelTest):
     NATIVE_MODEL_ID = "internlm/internlm-7b"
+    NATIVE_ARC_CHALLENGE_ACC = 0.4164
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4309
 
     def test_internlm(self):
         # transformers<=4.44.2 run normal
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=True)
 
-        reference_output = " <s>I am in Paris and I am in love with the city. I am in love with the people. I am in love with the food. I am in love with the art. I am in love with the architecture. I am in love with the fashion. I am in love with the language. I am in love with the history. I am in love with the culture. I am in love with the romance. I am in love with the city.\nI am in love with the city. I am in love"
-        result = self.generate(model, tokenizer)
+        task_results = self.lm_eval(model, trust_remote_code=True)
+        for filter, value in task_results.items():
+            if "norm" in filter:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            else:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            self.assertTrue(90 <= per <= 110,
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
 

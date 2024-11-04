@@ -2,9 +2,20 @@ from model_test import ModelTest
 
 class TestMpt(ModelTest):
     NATIVE_MODEL_ID = "mosaicml/mpt-7b-instruct"
+    NATIVE_ARC_CHALLENGE_ACC = 0.4275
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4454
 
     def test_mpt(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=True)
-        reference_output = "I am in Paris and I am going to the Louvre.\nI am in Paris and I am going to the Louvre. I am going to see the Mona Lisa.\nI am in Paris and I am going to the Louvre. I am going to see the Mona Lisa. I am going to see the Mona Lisa.\nI am in Paris and I am going to the Louvre. I am going to see the Mona Lisa. I am going to see the Mona Lisa."
-        result = self.generate(model, tokenizer)
+
+        task_results = self.lm_eval(model, trust_remote_code=True)
+        for filter, value in task_results.items():
+            if "norm" in filter:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            else:
+                per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+                print(f"{filter}: {value} diff {per:.2f}%")
+            self.assertTrue(90 <= per <= 110,
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
 
