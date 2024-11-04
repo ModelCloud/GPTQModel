@@ -80,7 +80,7 @@ class ModelTest(unittest.TestCase):
         # with tempfile.TemporaryDirectory() as tmpdirname:
         #     model.save_quantized(tmpdirname)
         #     tokenizer.save_pretrained(tmpdirname)
-        q_model, q_tokenizer = self.loadQuantModel(f"/monster/data/pzs/quantization/{model_name_or_path}")
+        q_model, q_tokenizer = self.loadQuantModel(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
 
         return q_model, q_tokenizer
 
