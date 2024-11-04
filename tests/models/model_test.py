@@ -45,11 +45,11 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        max_length = 2048
+        max_length = 4096
         traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
                                  split="train").filter(
             lambda x: len(x["text"]) >= max_length and len(x["text"]) <= (max_length * 1.5))
-        return [tokenizer(example["text"]) for example in traindata.select(range(max_length))]
+        return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
 
     def quantModel(self, model_name_or_path, trust_remote_code=False, torch_dtype="auto"):
