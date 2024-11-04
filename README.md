@@ -52,15 +52,9 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ GPTQModel [v0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 </details>
 
-## Mission Statement
-
-We want GPTQModel to be highly focused on GPTQ based quantization and target inference compatibility with HF Transformers, vLLM, and SGLang. 
-
-## How is GPTQModel different from AutoGPTQ?
+## Why should you use GPTQModel?
 
 GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
-
-We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 
 ## Major Changes (Advantages) vs AutoGPTQ
 * 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
@@ -80,8 +74,8 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
 
-## Model Support ( 🚀 GPTQModel only ) 
-[Ready to deply quantized models](https://hf.co/ModelCloud)
+## Latest Model Support ( 🚀 GPTQModel ) 
+[🤗 Pre-quantized models on HF](https://hf.co/ModelCloud)
 
 
 | Model            |     |                |     |                  |     |            |     |     |     |     |
@@ -97,15 +91,12 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 | DeepSeek-V2-Lite | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |     |     |     |
 | EXAONE 3.0       | 🚀  | Llama 1/2/3    | ✅   | Phi/Phi-3        | 🚀  |            |     |     |     |     |## Compatiblity 
 
-We aim for 100% compatibility with models quanted by AutoGPTQ <= 0.7.1 and will consider syncing future compatibilty on a case-by-case basis. 
+
+## Ultra High quality recovery of Llama 3.2 1B/3B Instruct models with avg 100% accuracy recovery post-quantization using GPTQModel:
 
 ## Platform/GPU Requirements
 
 GPTQModel is currently Linux only and requires CUDA capability >= 6.0 Nvidia GPU. 
-
-WSL on Windows should work as well. 
-
-ROCM/AMD support will be re-added in a future version after everything on ROCM has been validated. Only fully validated features will be re-added from the original AutoGPTQ repo. 
 
 ## Install
 
