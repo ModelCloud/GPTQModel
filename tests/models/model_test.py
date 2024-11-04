@@ -10,10 +10,11 @@ from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 import tempfile
+from lm_eval.utils import make_table
 
 class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE = 100
-
+    TASK_NAME = "gsm8k_cot"
     def generate(self, model, tokenizer, prompt=None):
         if prompt == None:
             prompt = "I am in Paris and"
@@ -92,3 +93,22 @@ class ModelTest(unittest.TestCase):
         )
 
         return model, tokenizer
+
+    def lm_eval(self, model, apply_chat_template, trust_remote_code=False):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            results = model.lm_eval(
+                output_path=tmp_dir,
+                tasks=self.TASK_NAME,
+                apply_chat_template=apply_chat_template,
+                trust_remote_code=trust_remote_code
+            )
+            task_results = {
+                metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
+                if metric != 'alias' and 'stderr' not in metric
+            }
+            print('--------Eval Result---------')
+            print(make_table(results))
+            if "groups" in results:
+                print(make_table(results, "groups"))
+            print('--------Eval Result End---------')
+            return task_results

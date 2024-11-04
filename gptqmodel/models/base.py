@@ -688,11 +688,13 @@ class BaseGPTQModel(nn.Module):
         wandb_project: Optional[str] = None,
         wandb_name: Optional[str] = None,
         show_config: bool = False,
+        trust_remote_code: bool = False,
     ):
         LM = HFLM(
             pretrained=self,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
+            trust_remote_code=trust_remote_code,
         )
         # evaluation_tracker need model_args cannot be None
         model_args = ""
