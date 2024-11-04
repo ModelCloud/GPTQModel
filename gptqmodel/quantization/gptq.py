@@ -187,6 +187,10 @@ class GPTQ:
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
+        if math.isnan(avg_loss):
+            print("Losses sum item:", torch.sum(Losses).item())
+            raise ValueError("Quantization failed due to NaN loss")
+
         group_size = group_size if group_size != -1 else self.columns
         if static_groups and actorder:
             g_idx = [perm[i] // group_size for i in range(self.columns)]
