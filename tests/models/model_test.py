@@ -45,9 +45,12 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        calibration_dataset = [tokenizer(example["text"]) for example in traindata.select(range(1024))]
-        return calibration_dataset
+        max_length = 2048
+        traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
+                                 split="train").filter(
+            lambda x: len(x["text"]) >= max_length and len(x["text"]) <= (max_length * 1.5))
+        return [tokenizer(example["text"]) for example in traindata.select(range(max_length))]
+
 
     def quantModel(self, model_name_or_path, trust_remote_code=False, torch_dtype="auto"):
         tokenizer = self.load_tokenizer(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -72,10 +75,12 @@ class ModelTest(unittest.TestCase):
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
         model.quantize(calibration_dataset, batch_size=64)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model.save_quantized(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(tmpdirname, tokenizer_path=model_name_or_path)
+        model.save_quantized(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
+        tokenizer.save_pretrained(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
+        # with tempfile.TemporaryDirectory() as tmpdirname:
+        #     model.save_quantized(tmpdirname)
+        #     tokenizer.save_pretrained(tmpdirname)
+        q_model, q_tokenizer = self.loadQuantModel(f"/monster/data/pzs/quantization/{model_name_or_path}")
 
         return q_model, q_tokenizer
 

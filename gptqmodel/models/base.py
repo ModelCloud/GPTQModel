@@ -28,7 +28,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix, get_module_by_name_suffix,
                            get_moe_layer_modules, move_to, nested_move_to, pack_model, simple_dispatch_model)
-from ._const import CPU, CUDA_0
+from ._const import CPU, CUDA, CUDA_0
 from .loader import ModelLoader
 
 
@@ -699,15 +699,18 @@ class BaseGPTQModel(nn.Module):
                 trust_remote_code=trust_remote_code,
             )
         # evaluation_tracker need model_args cannot be None
-        model_args = ""
+        model_args = f"pretrained={self.model_name_or_path}"
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
-
+        if self.device == CUDA_0:
+            device = CUDA
+        else:
+            device = self.device
         results = lm_eval.simple_evaluate(
             model=model,
             model_args=model_args,
             tasks=tasks,
-            device=self.device,
+            device=device,
             num_fewshot=num_fewshot,
             batch_size=batch_size,
             max_batch_size=max_batch_size,

@@ -9,4 +9,4 @@ class TestMoss(ModelTest):
         result = self.generate(model, tokenizer)
 
         self.assertTrue(len(result) > 0)
-        # self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+        #

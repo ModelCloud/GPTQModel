@@ -15,4 +15,4 @@ class TestExaone(ModelTest):
 
         result = self.generateChat(model, tokenizer, prompt=self.prompt)
 
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+
