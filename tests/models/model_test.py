@@ -14,7 +14,7 @@ from lm_eval.utils import make_table
 
 class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE = 100
-    TASK_NAME = "gsm8k_cot"
+    TASK_NAME = "arc_challenge"
     def generate(self, model, tokenizer, prompt=None):
         if prompt == None:
             prompt = "I am in Paris and"
