@@ -75,12 +75,10 @@ class ModelTest(unittest.TestCase):
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
         model.quantize(calibration_dataset, batch_size=4)
-        # model.save_quantized(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
-        # tokenizer.save_pretrained(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save_quantized(tmpdirname)
             tokenizer.save_pretrained(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(f"/monster/data/pzs/quantization/c4data/{model_name_or_path}")
+            q_model, q_tokenizer = self.loadQuantModel(tmpdirname)
 
         return q_model, q_tokenizer
 
