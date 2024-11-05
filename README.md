@@ -54,7 +54,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
 
-## Major Changes (Advantages) vs AutoGPTQ
+## Features
 * 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
 * ✨ 100% CI coverage for all supported models including quality/ppl regression.
 * 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
@@ -92,7 +92,7 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 
 ## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
 
-![image](https://github.com/user-attachments/assets/3d637bc7-97a4-4032-838d-114d40d8fbc7)
+![image](https://github.com/user-attachments/assets/5b57ff7d-d6e5-4a7e-be52-b41c03e71e54)
 
 ## Platform/GPU Requirements
 
