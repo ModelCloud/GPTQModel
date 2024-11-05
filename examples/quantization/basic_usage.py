@@ -1,5 +1,5 @@
 import os
-
+import torch
 from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer
 
@@ -49,7 +49,8 @@ def main():
     model.save_quantized(quantized_model_id, use_safetensors=True)
 
     # load quantized model to the first GPU
-    model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0")
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    model = GPTQModel.from_quantized(quantized_model_id, device=device)
 
     # load quantized model to CPU with IPEX kernel linear.
     # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")

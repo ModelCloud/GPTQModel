@@ -56,8 +56,11 @@ common_setup_kwargs = {
 }
 
 
-def get_cuda_version_tag(is_cuda_release: bool = True) -> str:
+def get_version_tag(is_cuda_release: bool = True) -> str:
     import torch
+
+    if not BUILD_CUDA_EXT:
+        return common_setup_kwargs["version"]
 
     default_cuda_version = torch.version.cuda
     CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", default_cuda_version).split("."))
@@ -93,7 +96,9 @@ if TORCH_CUDA_ARCH_LIST is None:
 
 if BUILD_CUDA_EXT:
     if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+{get_cuda_version_tag(True)}"
+        common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
+else:
+    common_setup_kwargs["version"] += "+cpu"
 
 additional_setup_kwargs = {}
 
@@ -192,7 +197,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
 
-        wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_cuda_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
+        wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
         wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{gptqmodel_version}", wheel_name=wheel_filename)
         print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
@@ -204,7 +209,7 @@ class CachedWheelsCommand(_bdist_wheel):
                 os.makedirs(self.dist_dir)
 
             impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_cuda_version_tag()}-{impl_tag}-{abi_tag}-{plat_tag}"
+            archive_basename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{impl_tag}-{abi_tag}-{plat_tag}"
 
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)

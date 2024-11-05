@@ -806,6 +806,12 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+        if not torch.cuda.is_available():
+            backend = BACKEND.IPEX
+        if backend == BACKEND.IPEX:
+            format = FORMAT.IPEX
+            if quantize_config:
+                quantize_config.format = FORMAT.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
             model_name_or_path=model_name_or_path,
