@@ -7,7 +7,7 @@
 </p>
 
 ## News
-* 11/01/2024 🚀 [1.1.1-DEV] Meta MobileLLM model support added.
+* 11/01/2024 🚀 [1.1.1-DEV] Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. 
 * 10/29/2024 🚀 [v1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 * 10/12/2024 ✨ [v1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
 * 10/11/2024 ✨ [v1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Move QBits to optional and add wheel for python 3.12 and cuda 11.8.
@@ -52,9 +52,9 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## Why should you use GPTQModel?
 
-GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
+GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge that ModelCloud, together with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements and model support.
 
-## Major Changes (Advantages) vs AutoGPTQ
+## Features
 * 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
 * ✨ 100% CI coverage for all supported models including quality/ppl regression.
 * 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
@@ -72,7 +72,7 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
 
-## Latest Model Support ( 🚀 GPTQModel ) 
+## Model Support:  🚀 (Added by GPTQModel) 
 [🤗 Pre-quantized models on HF](https://hf.co/ModelCloud)
 
 
@@ -90,10 +90,9 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 | EXAONE 3.0       | 🚀  | Llama 1/2/3    | ✅   | Phi/Phi-3        | 🚀  |            |     |     |     |     |## Compatiblity 
 
 
-## Quality: GPTQModel quantized Llama-3.2-Instruct models with 100% avg recovery:
+## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
 
-![image](https://github.com/user-attachments/assets/c3685e22-98c2-4a10-b756-eeb510ab0140)![image](https://github.com/user-attachments/assets/801f9884-65a2-453a-95bb-e5eab8c75a65)
-
+![image](https://github.com/user-attachments/assets/5b57ff7d-d6e5-4a7e-be52-b41c03e71e54)
 
 ## Platform/GPU Requirements
 
