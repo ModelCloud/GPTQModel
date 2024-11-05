@@ -140,18 +140,20 @@ class ModelTest(unittest.TestCase):
 
     def calculatorPer(self, filter, value):
         if "norm" in filter:
-            per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
-            print(f"{filter}: {value} diff {per:.2f}%")
+            diff_pct = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+            print(f"{filter}: {value} diff {diff_pct:.2f}%")
         else:
-            per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
-            print(f"{filter}: {value} diff {per:.2f}%")
-        return per
+            diff_pct = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+            print(f"{filter}: {value} diff {diff_pct:.2f}%")
+        return diff_pct
 
     def quant_lm_eval(self):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
         task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
         for filter, value in task_results.items():
-            per = self.calculatorPer(filter=filter, value=value)
-            self.assertTrue((100 - 100 * self.QUANT_ARC_MAX_NEGATIVE_DELTA) <= per <= (100 + 100 * self.QUANT_ARC_MAX_POSITIVE_DELTA),
-                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
+            diff_pct = self.calculatorPer(filter=filter, value=value)
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
+            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
+            self.assertTrue( negative_pct <= diff_pct <= positive_pct,
+                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range ({negative_pct}%-{positive_pct}%)")
