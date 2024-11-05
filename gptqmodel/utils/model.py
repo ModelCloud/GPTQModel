@@ -433,8 +433,6 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     # post init for bitblas backend.
     device_to_buffers_size = {}
 
-    model_uses_ipex = False
-
     # exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
