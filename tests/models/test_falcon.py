@@ -1,3 +1,4 @@
+import torch  # noqa: E402
 from model_test import ModelTest  # noqa: E402
 
 
@@ -7,6 +8,8 @@ class TestFalcon(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4292
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
+    TORCH_DTYPE = torch.float16
+    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.52
 
     def test_falcon(self):
         self.quant_lm_eval()
