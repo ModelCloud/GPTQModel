@@ -1,12 +1,10 @@
-from model_test import ModelTest
+from model_test import ModelTest  # noqa: E402
 
 
 class TestGptNeoX(ModelTest):
     NATIVE_MODEL_ID = "EleutherAI/gpt-neox-20b"
-
+    NATIVE_ARC_CHALLENGE_ACC = 0.3805
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4078
     def test_gptneox(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = "I am in Paris and I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to the Louvre. I am going to"
-        result = self.generate(model, tokenizer)
+        self.quant_lm_eval()
 
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])

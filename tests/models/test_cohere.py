@@ -1,12 +1,11 @@
-from model_test import ModelTest
+from model_test import ModelTest  # noqa: E402
 
 
 class TestCohere(ModelTest):
     NATIVE_MODEL_ID = "CohereForAI/aya-expanse-8b"
+    NATIVE_ARC_CHALLENGE_ACC = 0.5401
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5640
+    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.12
 
     def test_cohere(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = "<BOS_TOKEN>I am in Paris and I am in love. I am in love with the city, the people, the food, the art, the history, the architecture, the fashion, the music, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art, the art,"
-        result = self.generate(model, tokenizer)
-
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+        self.quant_lm_eval()

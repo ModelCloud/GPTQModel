@@ -1,13 +1,14 @@
-import torch
-from model_test import ModelTest
+import torch  # noqa: E402
+from model_test import ModelTest  # noqa: E402
 
 
 class TestGptBigCode(ModelTest):
     NATIVE_MODEL_ID = "bigcode/gpt_bigcode-santacoder"
+    NATIVE_ARC_CHALLENGE_ACC = 0.1689
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2056
+    TORCH_DTYPE = torch.float16
+    TRUST_REMOTE_CODE = True
 
     def test_gptbigcode(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, torch_dtype=torch.float16)
-        reference_output = "I am in Paris and I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Berlin. I am in Ber"
-        result = self.generate(model, tokenizer)
+        self.quant_lm_eval()
 
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])

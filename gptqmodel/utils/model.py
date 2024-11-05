@@ -431,7 +431,6 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
     # post init for bitblas backend.
-    device_to_buffers_size = {}
 
     model_uses_qbits = False
 

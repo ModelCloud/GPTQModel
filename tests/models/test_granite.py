@@ -1,12 +1,12 @@
-from model_test import ModelTest
+from model_test import ModelTest  # noqa: E402
 
 
 class TestGranite(ModelTest):
     NATIVE_MODEL_ID = "ibm-granite/granite-3.0-2b-instruct"
+    NATIVE_ARC_CHALLENGE_ACC = 0.4505
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4770
+    APPLY_CHAT_TEMPLATE = True
+    TRUST_REMOTE_CODE = True
 
     def test_granite(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = "I am in Paris and<fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix><fim_prefix>"
-        result = self.generate(model, tokenizer)
-
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+        self.quant_lm_eval()

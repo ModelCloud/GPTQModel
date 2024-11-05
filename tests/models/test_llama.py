@@ -1,12 +1,12 @@
-from model_test import ModelTest
+from model_test import ModelTest  # noqa: E402
 
 
 class TestLlama(ModelTest):
     NATIVE_MODEL_ID = "meta-llama/CodeLlama-7b-hf"
+    NATIVE_ARC_CHALLENGE_ACC = 0.3234
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3507
+    TRUST_REMOTE_CODE = True
 
     def test_llama(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = "<s> I am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I am in love.\nI am in Paris and I"
-        result = self.generate(model, tokenizer)
+        self.quant_lm_eval()
 
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])

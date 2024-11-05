@@ -1,12 +1,12 @@
-from model_test import ModelTest
+from model_test import ModelTest  # noqa: E402
 
 
 class TestGemma(ModelTest):
     NATIVE_MODEL_ID = "google/gemma-2-9b"
+    NATIVE_ARC_CHALLENGE_ACC = 0.6143
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.6553
 
     def test_gemma(self):
-        model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
-        reference_output = "<bos>I am in Paris and I am going to the Louvre. I am going to see the Mona Lisa. I am going to see the Venus de Milo. I am going to see the Winged Victory of Samothrace. I am going to see the Coronation of Napoleon. I am going to see the Raft of the Medusa. I am going to see the Code of Hammurabi. I am going to see the Rosetta Stone. I am going to see the Venus de Milo. I am going to see the Winged"
-        result = self.generate(model, tokenizer)
+        self.quant_lm_eval()
 
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+

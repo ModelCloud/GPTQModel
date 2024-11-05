@@ -259,7 +259,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer, )
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
@@ -659,6 +659,8 @@ class BaseGPTQModel(nn.Module):
 
     def lm_eval(
         self,
+        model: Optional[str] = None,
+        model_args: str = "",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
@@ -688,22 +690,23 @@ class BaseGPTQModel(nn.Module):
         wandb_project: Optional[str] = None,
         wandb_name: Optional[str] = None,
         show_config: bool = False,
+        trust_remote_code: bool = False,
     ):
-        LM = HFLM(
-            pretrained=self,
-            batch_size=batch_size,
-            max_batch_size=max_batch_size,
-        )
+        if model is None:
+            model = HFLM(
+                pretrained=self,
+                batch_size=batch_size,
+                max_batch_size=max_batch_size,
+                trust_remote_code=trust_remote_code,
+            )
         # evaluation_tracker need model_args cannot be None
-        model_args = ""
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
-
         results = lm_eval.simple_evaluate(
-            model=LM,
+            model=model,
             model_args=model_args,
             tasks=tasks,
-            device=self.device,
+            device=str(self.device),
             num_fewshot=num_fewshot,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
