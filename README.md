@@ -52,7 +52,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## Why should you use GPTQModel?
 
-GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge from the ModelCloud team and that we, along with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements, model support, and bug fixes. 
+GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge that ModelCloud, together with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements and model support.
 
 ## Features
 * 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
@@ -72,7 +72,7 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
 
-## Latest Model Support ( 🚀 GPTQModel ) 
+## Model Support:  🚀 (Added by GPTQModel) 
 [🤗 Pre-quantized models on HF](https://hf.co/ModelCloud)
 
 
