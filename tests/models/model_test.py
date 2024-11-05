@@ -10,6 +10,7 @@ from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 import tempfile
+import shutil
 from lm_eval.utils import make_table
 
 class ModelTest(unittest.TestCase):
@@ -52,7 +53,7 @@ class ModelTest(unittest.TestCase):
         return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
 
-    def quantModel(self, model_name_or_path, trust_remote_code=False, torch_dtype="auto"):
+    def quantModel(self, model_name_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         tokenizer = self.load_tokenizer(model_name_or_path, trust_remote_code=trust_remote_code)
         calibration_dataset = self.load_dataset(tokenizer)
         quantize_config = QuantizeConfig(
@@ -75,10 +76,18 @@ class ModelTest(unittest.TestCase):
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
         model.quantize(calibration_dataset, batch_size=4)
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            model.save_quantized(tmpdirname)
-            tokenizer.save_pretrained(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(tmpdirname)
+        if need_eval:
+            test_dir = os.path.dirname(os.path.abspath(__file__))
+            save_dir = os.path.join(test_dir, "test_quantized_model")
+            os.makedirs(save_dir, exist_ok=True)
+            model.save_quantized(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            q_model, q_tokenizer = self.loadQuantModel(save_dir)
+        else:
+            with tempfile.TemporaryDirectory() as tmpdirname:
+                model.save_quantized(tmpdirname)
+                tokenizer.save_pretrained(tmpdirname)
+                q_model, q_tokenizer = self.loadQuantModel(tmpdirname)
 
         return q_model, q_tokenizer
 
@@ -117,4 +126,6 @@ class ModelTest(unittest.TestCase):
                 if metric != 'alias' and 'stderr' not in metric
             }
             print(task_results)
+            if os.path.exists(model.model_name_or_path):
+                shutil.rmtree(model.model_name_or_path)
             return task_results
