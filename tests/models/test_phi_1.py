@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestPhi_1(ModelTest):
     NATIVE_MODEL_ID = "microsoft/phi-1"
 

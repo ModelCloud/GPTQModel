@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestMixtral(ModelTest):
     NATIVE_MODEL_ID = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 

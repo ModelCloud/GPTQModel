@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestMiniCpm(ModelTest):
     NATIVE_MODEL_ID = "openbmb/MiniCPM-2B-128k"
 

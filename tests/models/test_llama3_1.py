@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestLlama3_1(ModelTest):
     NATIVE_MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
 

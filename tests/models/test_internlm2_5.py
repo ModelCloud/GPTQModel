@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestInternlm2_5(ModelTest):
     NATIVE_MODEL_ID = "internlm/internlm2_5-1_8b-chat"
 

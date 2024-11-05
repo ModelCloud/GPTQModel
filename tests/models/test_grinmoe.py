@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestGrinMoE(ModelTest):
 
     QUANT_MODEL_ID = "ModelCloud/GRIN-MoE-gptq-4bit"

@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestMpt(ModelTest):
     NATIVE_MODEL_ID = "mosaicml/mpt-7b-instruct"
 

@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestXVerse(ModelTest):
     NATIVE_MODEL_ID = "xverse/XVERSE-7B-Chat"
 

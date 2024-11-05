@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestTinyllama(ModelTest):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 

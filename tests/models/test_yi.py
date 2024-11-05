@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestYi(ModelTest):
     NATIVE_MODEL_ID = "01-ai/Yi-Coder-1.5B-Chat"
 

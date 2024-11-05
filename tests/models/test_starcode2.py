@@ -1,5 +1,7 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest
+
+
 class TestStarCode2(ModelTest):
     NATIVE_MODEL_ID = "bigcode/starcoder2-3b"
 

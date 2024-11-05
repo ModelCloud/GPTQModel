@@ -2,9 +2,8 @@ import os
 import subprocess
 import sys
 import urllib
-import urllib.request
 import urllib.error
-
+import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup

@@ -18,18 +18,19 @@ from packaging import version
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
-from .writer import ModelWriter, QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
+from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import _validate_marlin_compatibility
-from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix, get_module_by_name_suffix,
-                           get_moe_layer_modules, move_to, nested_move_to, pack_model, simple_dispatch_model)
+from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
+                           get_module_by_name_suffix, get_moe_layer_modules, move_to,
+                           nested_move_to, pack_model, simple_dispatch_model)
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):

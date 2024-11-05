@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 

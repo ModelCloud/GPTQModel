@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestGranite(ModelTest):
     NATIVE_MODEL_ID = "ibm-granite/granite-3.0-2b-instruct"
 

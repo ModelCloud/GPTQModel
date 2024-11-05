@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestStablelm(ModelTest):
     NATIVE_MODEL_ID = "stabilityai/stablelm-base-alpha-3b"
 

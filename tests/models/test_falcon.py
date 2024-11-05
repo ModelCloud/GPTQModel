@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestFalcon(ModelTest):
     NATIVE_MODEL_ID = "tiiuae/falcon-7b-instruct"
 
