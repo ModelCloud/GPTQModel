@@ -25,7 +25,7 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
 
     def generate(self, model, tokenizer, prompt=None):
-        if prompt == None:
+        if prompt is None:
             prompt = "I am in Paris and"
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
@@ -35,7 +35,7 @@ class ModelTest(unittest.TestCase):
         return output
 
     def generateChat(self, model, tokenizer, prompt=None):
-        if prompt == None:
+        if prompt is None:
             prompt = [
                 {"role": "system",
                  "content": "You are a helpful assistant."},
@@ -59,7 +59,6 @@ class ModelTest(unittest.TestCase):
                                  split="train").filter(
             lambda x: len(x["text"]) >= max_length and len(x["text"]) <= (max_length * 1.5))
         return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
-
 
     def quantModel(self, model_name_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         tokenizer = self.load_tokenizer(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -101,7 +100,7 @@ class ModelTest(unittest.TestCase):
 
 
     def loadQuantModel(self, model_name_or_path, trust_remote_code=False, tokenizer_path=None):
-        if tokenizer_path == None:
+        if tokenizer_path is None:
             tokenizer_path = model_name_or_path
         else:
             trust_remote_code = True
