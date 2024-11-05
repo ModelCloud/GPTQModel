@@ -415,7 +415,7 @@ class ModelLoader():
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if quantize_config.format == FORMAT.GPTQ:
+        if quantize_config.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
             accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,
