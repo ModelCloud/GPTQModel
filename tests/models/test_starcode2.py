@@ -1,5 +1,9 @@
 import torch
+<<<<<<< HEAD
 from model_test import ModelTest # noqa: E402
+=======
+from model_test import ModelTest
+>>>>>>> main
 
 
 class TestStarCode2(ModelTest):
@@ -10,3 +14,7 @@ class TestStarCode2(ModelTest):
     def test_starcode2(self):
         self.quant_lm_eval()
 
+<<<<<<< HEAD
+=======
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+>>>>>>> main

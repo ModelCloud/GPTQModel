@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestDeci(ModelTest):
     NATIVE_MODEL_ID = "Deci/DeciLM-7B-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.5239

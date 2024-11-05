@@ -1,5 +1,6 @@
-# Acknowledgements
+# Credits
 
+* [Qubitium](https://x.com/qubitium) and [ModelCloud](https://x.com/ModelCloudAI) team for maintaining and improving GPTQModel
 * **Elias Frantar**, **Saleh Ashkboos**, **Torsten Hoefler** and **Dan Alistarh**: for creating [GPTQ](https://github.com/IST-DASLab/gptq) and [Marlin](https://github.com/IST-DASLab/marlin).
 * **PanQiWei**: for creation of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ) which this project code is based upon.
 * **FXMarty**: for maintaining and support of [AutoGPTQ](https://github.com/autogptq/AutoGPTQ).

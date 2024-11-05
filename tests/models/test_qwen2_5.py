@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4343

@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestGemma(ModelTest):
     NATIVE_MODEL_ID = "google/gemma-2-9b"
     NATIVE_ARC_CHALLENGE_ACC = 0.6143

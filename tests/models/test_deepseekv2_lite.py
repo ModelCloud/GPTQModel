@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestDeepseekV2Lite(ModelTest):
     NATIVE_MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4753

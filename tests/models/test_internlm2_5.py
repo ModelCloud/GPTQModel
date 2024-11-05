@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestInternlm2_5(ModelTest):
     NATIVE_MODEL_ID = "internlm/internlm2_5-1_8b-chat"
     NATIVE_ARC_CHALLENGE_ACC = 0.3217

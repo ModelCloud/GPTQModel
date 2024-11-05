@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestGranite(ModelTest):
     NATIVE_MODEL_ID = "ibm-granite/granite-3.0-2b-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4505
@@ -11,3 +12,7 @@ class TestGranite(ModelTest):
     def test_granite(self):
         self.quant_lm_eval()
 
+<<<<<<< HEAD
+=======
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+>>>>>>> main

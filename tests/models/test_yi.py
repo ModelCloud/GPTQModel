@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestYi(ModelTest):
     NATIVE_MODEL_ID = "01-ai/Yi-Coder-1.5B-Chat"
     NATIVE_ARC_CHALLENGE_ACC = 0.2679
@@ -11,3 +12,9 @@ class TestYi(ModelTest):
     def test_yi(self):
         self.quant_lm_eval()
 
+<<<<<<< HEAD
+=======
+        result = self.generateChat(model, tokenizer)
+
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+>>>>>>> main

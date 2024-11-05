@@ -1,6 +1,7 @@
 from model_test import ModelTest # noqa: E402
 
 
+
 class TestPhi_3(ModelTest):
     NATIVE_MODEL_ID = "microsoft/Phi-3-mini-4k-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.5401
@@ -11,3 +12,7 @@ class TestPhi_3(ModelTest):
     def test_phi_3(self):
         self.quant_lm_eval()
 
+<<<<<<< HEAD
+=======
+        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
+>>>>>>> main

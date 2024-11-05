@@ -30,7 +30,7 @@ from ..utils.model import (check_to_quantized, find_layers, get_device, get_modu
                            nested_move_to, pack_model, simple_dispatch_model)
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
-from .writer import ModelWriter
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -40,7 +40,6 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 # Fix cpu memory leak.
 # See https://github.com/huggingface/transformers/issues/34366
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
-
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -117,10 +116,10 @@ class BaseGPTQModel(nn.Module):
         return getattr(self.model, "hf_device_map", None)
 
     def _prepare_dataset_for_quantization(
-            self,
-            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-            batch_size: int = 1,
-            tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        self,
+        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -164,7 +163,7 @@ class BaseGPTQModel(nn.Module):
             else:
                 logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
 
-            if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
+            if not pad_token_id and isinstance(self.config.eos_token_id, list):  # Llama-3.1-8B-Instruct's eos_token_id is a list
                 pad_token_id = self.config.eos_token_id[0]
             elif not pad_token_id:
                 pad_token_id = self.config.eos_token_id
@@ -188,7 +187,7 @@ class BaseGPTQModel(nn.Module):
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-    ):
+    ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
@@ -222,7 +221,7 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) < min_calibration_dataset_size:
             logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
-                             f"Current size: {len(calibration_dataset)}.")
+                           f"Current size: {len(calibration_dataset)}.")
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
@@ -249,7 +248,7 @@ class BaseGPTQModel(nn.Module):
 
         if avg < min_calibration_dataset_input_ids_avg_length:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                             f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
@@ -306,21 +305,21 @@ class BaseGPTQModel(nn.Module):
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
-                                  tokenizer=None,
-                                  bits=self.quantize_config.bits,
-                                  group_size=self.quantize_config.group_size,
-                                  sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
-                                  dataset=dataloader, seqlen=seqlen, nblocks=self.quantize_config.nblocks,
-                                  iters=self.quantize_config.iters, lr=self.quantize_config.lr,
-                                  minmax_lr=self.quantize_config.minmax_lr,
-                                  enable_quanted_input=self.quantize_config.enable_quanted_input,
-                                  device=self.hf_device_map,
-                                  amp=self.quantize_config.amp,
-                                  low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
-                                  seed=self.quantize_config.seed,
-                                  gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
-                                  scale_dtype=self.quantize_config.scale_dtype, layer_config=self.quantize_config.layer_config,
-                                  enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
+                                       tokenizer=None,
+                                       bits=self.quantize_config.bits,
+                                       group_size=self.quantize_config.group_size,
+                                       sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
+                                       dataset=dataloader, seqlen=seqlen, nblocks=self.quantize_config.nblocks,
+                                       iters=self.quantize_config.iters, lr=self.quantize_config.lr,
+                                       minmax_lr=self.quantize_config.minmax_lr,
+                                       enable_quanted_input=self.quantize_config.enable_quanted_input,
+                                       device=self.hf_device_map,
+                                       amp=self.quantize_config.amp,
+                                       low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
+                                       seed=self.quantize_config.seed,
+                                       gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
+                                       scale_dtype=self.quantize_config.scale_dtype, layer_config=self.quantize_config.layer_config,
+                                       enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
 
             model, _ = self.autoround.quantize()
 
@@ -432,12 +431,12 @@ class BaseGPTQModel(nn.Module):
         if self.dynamic_expert_index is not None:
             num_experts = getattr(self.model.config, self.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
-                                                      num_experts=num_experts)
+                                                  num_experts=num_experts)
 
         quantizers = {}
 
         # stores all per-layer quant stats such as avg loss and processing time
-        quant_log = []
+        self.quant_log = []
 
         layer_count = len(layers)
         layer_pb = tqdm(range(layer_count))
@@ -519,12 +518,12 @@ class BaseGPTQModel(nn.Module):
                         actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
-                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                            "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
+                    stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
-                    quant_log.append(stat)
+                    self.quant_log.append(stat)
                     logger.info(stat)
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
@@ -566,8 +565,8 @@ class BaseGPTQModel(nn.Module):
             )  # TODO: is it really OK to cache only the first positional argument?
             torch.cuda.empty_cache()
 
-        logger.info(f"Quantization summary:\n{quant_log}")
-        for module_log in quant_log:
+        logger.info(f"Quantization summary:\n{self.quant_log}")
+        for module_log in self.quant_log:
             logger.info(module_log)
 
         self.qlinear_kernel = pack_model(
@@ -592,7 +591,7 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
-        return quant_log
+        return self.quant_log
 
     @property
     def device(self):
@@ -646,9 +645,9 @@ class BaseGPTQModel(nn.Module):
             base_modules=self.base_modules,
             lm_head=self.lm_head,
             layer_modules=self.layer_modules,
-            checkpoint_file_name=checkpoint_file_name
+            checkpoint_file_name=checkpoint_file_name,
+            quant_log=self.quant_log,
         )
-
 
     def save_pretrained(
         self,
@@ -843,7 +842,6 @@ class BaseGPTQModel(nn.Module):
             trust_remote_code=trust_remote_code,
             model_name_or_path=model_name_or_path,
         )
-
 
     def __getattr__(self, item):
         try:
