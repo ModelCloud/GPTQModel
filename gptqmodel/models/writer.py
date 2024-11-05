@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import logging
 import os
@@ -18,12 +19,12 @@ from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
 from ..quantization import QuantizeConfig
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
-                                   META_FIELD_QUANTIZER, META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI,
-                                   MIN_VERSION_WITH_V2)
+from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT,
+                                   META_FIELD_DAMP_PERCENT, META_FIELD_QUANTIZER, META_FIELD_URI,
+                                   META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,get_model_files_size,
-                           get_moe_layer_modules, make_quant)
+from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
+                           get_model_files_size, get_moe_layer_modules, make_quant)
 from ..version import __version__
 from ._const import CPU
 
@@ -34,6 +35,12 @@ handler.setFormatter(formatter)
 logger.propagate = False
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+QUANT_LOG_LAYER = "layer"
+QUANT_LOG_MODULE = "module"
+QUANT_LOG_LOSS = "loss"
+QUANT_LOG_DAMP = "damp"
+QUANT_LOG_TIME = "time"
 
 
 class ModelWriter():
@@ -59,9 +66,16 @@ class ModelWriter():
             lm_head: str = None,
             layer_modules: List[List[str]] = None,
             checkpoint_file_name=None,
+            quant_log:Optional[List[Dict[str, str]]]=None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
+
+        if quant_log:
+            with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
+                w = csv.writer(file)
+                w.writerow([QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME])
+                w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS), entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in quant_log])
 
         pre_quantized_size_mb = get_model_files_size(model_name_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024

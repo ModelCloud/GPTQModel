@@ -1,29 +1,28 @@
 from __future__ import annotations
 
 import logging
-
-from gptqmodel.utils.device import check_cuda
 from typing import Dict, List, Optional, Union
+
 import accelerate
 import torch
 import transformers
-from transformers import __version__ as transformers_version
+from gptqmodel.utils.device import check_cuda
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import __version__ as transformers_version
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear, ipex_dtype
 from ..quantization import QuantizeConfig
-from ..quantization.config import (FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2)
+from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format,
-                           find_layers, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init, make_quant,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, check_requires_version)
+from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
+                           find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import CPU, DEVICE, SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)

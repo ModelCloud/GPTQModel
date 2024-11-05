@@ -24,6 +24,7 @@ from .minicpm3 import MiniCPM3GPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
 from .mllama import MLlamaGPTQ
+from .mobilellm import MobileLLMGPTQ
 from .moss import MOSSGPTQ
 from .mpt import MPTGPTQ
 from .opt import OPTGPTQ

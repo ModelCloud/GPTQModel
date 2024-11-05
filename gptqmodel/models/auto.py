@@ -4,8 +4,8 @@ from typing import Dict, List, Optional, Union
 
 from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
-from .definitions.baichuan import BaiChuanGPTQ
 from .base import BaseGPTQModel, QuantizeConfig
+from .definitions.baichuan import BaiChuanGPTQ
 from .definitions.bloom import BloomGPTQ
 from .definitions.chatglm import ChatGLM
 from .definitions.codegen import CodeGenGPTQ
@@ -32,6 +32,7 @@ from .definitions.minicpm3 import MiniCPM3GPTQ
 from .definitions.mistral import MistralGPTQ
 from .definitions.mixtral import MixtralGPTQ
 from .definitions.mllama import MLlamaGPTQ
+from .definitions.mobilellm import MobileLLMGPTQ
 from .definitions.moss import MOSSGPTQ
 from .definitions.mpt import MPTGPTQ
 from .definitions.opt import OPTGPTQ
@@ -89,6 +90,7 @@ MODEL_MAP = {
     "grinmoe": GrinMOEGPTQ,
     "mllama": MLlamaGPTQ,
     "granite": GraniteGPTQ,
+    "mobilellm": MobileLLMGPTQ,
 }
 
 
