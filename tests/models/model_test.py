@@ -16,6 +16,11 @@ from lm_eval.utils import make_table
 class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE = 100
     TASK_NAME = "arc_challenge"
+    QUANT_ARC_MAX_NEGATIVE_DELTA = 10  # -10%
+    QUANT_ARC_MAX_POSITIVE_DELTA = 20  # 20%
+    TRUST_REMOTE_CODE = False
+    APPLY_CHAT_TEMPLATE = False
+    TORCH_DTYPE = "auto"
     def generate(self, model, tokenizer, prompt=None):
         if prompt == None:
             prompt = "I am in Paris and"
@@ -128,12 +133,11 @@ class ModelTest(unittest.TestCase):
                 if metric != 'alias' and 'stderr' not in metric
             }
             print(task_results)
-            if os.path.exists(model.model_name_or_path):
-                shutil.rmtree(model.model_name_or_path)
+            # if os.path.exists(model.model_name_or_path):
+            #     shutil.rmtree(model.model_name_or_path)
             return task_results
 
     def calculatorPer(self, filter, value):
-        print(self.NATIVE_ARC_CHALLENGE_ACC_NORM)
         if "norm" in filter:
             per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
             print(f"{filter}: {value} diff {per:.2f}%")
@@ -141,3 +145,12 @@ class ModelTest(unittest.TestCase):
             per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
             print(f"{filter}: {value} diff {per:.2f}%")
         return per
+
+    def quant_lm_eval(self):
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+
+        task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
+        for filter, value in task_results.items():
+            per = self.calculatorPer(filter=filter, value=value)
+            self.assertTrue((100 - self.QUANT_ARC_MAX_NEGATIVE_DELTA) <= per <= (100 + self.QUANT_ARC_MAX_POSITIVE_DELTA),
+                            f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
