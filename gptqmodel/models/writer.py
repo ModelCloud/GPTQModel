@@ -36,6 +36,12 @@ logger.propagate = False
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+QUANT_LOG_LAYER = "layer"
+QUANT_LOG_MODULE = "module"
+QUANT_LOG_LOSS = "loss"
+QUANT_LOG_DAMP = "damp"
+QUANT_LOG_TIME = "time"
+
 
 class ModelWriter():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
@@ -68,8 +74,8 @@ class ModelWriter():
         if quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
-                w.writerow(["layer", "module", "avg_loss", "damp_percent", "time"])
-                w.writerows([[entry.get("layer"), entry.get("module"), entry.get("avg_loss"), entry.get("damp_percent"), entry.get("time")] for entry in quant_log])
+                w.writerow([QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME])
+                w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS), entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in quant_log])
 
         pre_quantized_size_mb = get_model_files_size(model_name_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024

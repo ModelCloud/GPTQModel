@@ -18,7 +18,7 @@ from packaging import version
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
-from .writer import ModelWriter
+from .writer import ModelWriter, QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME
 
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import (FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
@@ -517,8 +517,8 @@ class BaseGPTQModel(nn.Module):
                         actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
-                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                            "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
+                    stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
