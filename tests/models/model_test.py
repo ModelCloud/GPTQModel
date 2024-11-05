@@ -156,4 +156,4 @@ class ModelTest(unittest.TestCase):
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range ({negative_pct}%-{positive_pct}%)")
+                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
