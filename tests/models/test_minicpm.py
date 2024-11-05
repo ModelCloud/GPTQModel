@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestMiniCpm(ModelTest):
     NATIVE_MODEL_ID = "openbmb/MiniCPM-2B-128k"

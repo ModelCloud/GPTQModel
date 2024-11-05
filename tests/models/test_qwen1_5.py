@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestQwen1_5(ModelTest):
     NATIVE_MODEL_ID = "Qwen/Qwen1.5-0.5B"

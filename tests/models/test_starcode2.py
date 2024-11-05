@@ -1,5 +1,7 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest # noqa: E402
+
+
 class TestStarCode2(ModelTest):
     NATIVE_MODEL_ID = "bigcode/starcoder2-3b"
     NATIVE_ARC_CHALLENGE_ACC = 0.2901

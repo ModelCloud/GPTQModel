@@ -4,6 +4,7 @@ import os
 import torch
 from gptqmodel.utils import Perplexity, get_backend
 from transformers import AutoTokenizer
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 if __name__ == "__main__":

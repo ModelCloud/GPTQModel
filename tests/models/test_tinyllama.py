@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestTinyllama(ModelTest):
     NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"

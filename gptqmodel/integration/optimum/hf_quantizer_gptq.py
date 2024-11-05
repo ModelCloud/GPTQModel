@@ -19,10 +19,11 @@ from transformers.quantizers.base import HfQuantizer
 if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel
 
+from packaging import version
+from transformers import __version__ as transformers_version
 from transformers.utils import is_optimum_available, is_torch_available, logging
 from transformers.utils.quantization_config import QuantizationConfigMixin
-from transformers import __version__ as transformers_version
-from packaging import version
+
 if is_torch_available():
     import torch
 

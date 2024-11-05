@@ -4,10 +4,10 @@ import functools
 import hashlib
 import json
 import logging
+import operator
 import os
 import re
 import shutil
-import operator
 from concurrent.futures import ThreadPoolExecutor
 from logging import getLogger
 from typing import List, Optional
@@ -17,13 +17,13 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from huggingface_hub import HfApi, hf_hub_download, list_repo_files
+from huggingface_hub import HfApi, hf_hub_download
+from packaging import version
 from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
-from packaging import version
 
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear

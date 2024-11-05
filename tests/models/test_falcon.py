@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestFalcon(ModelTest):
     NATIVE_MODEL_ID = "tiiuae/falcon-7b-instruct"

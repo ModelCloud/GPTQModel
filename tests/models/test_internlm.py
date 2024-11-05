@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestInternlm(ModelTest):
     NATIVE_MODEL_ID = "internlm/internlm-7b"

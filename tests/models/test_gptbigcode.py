@@ -1,5 +1,7 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest # noqa: E402
+
+
 class TestGptBigCode(ModelTest):
     NATIVE_MODEL_ID = "bigcode/gpt_bigcode-santacoder"
     NATIVE_ARC_CHALLENGE_ACC = 0.1689

@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestMistral(ModelTest):
     NATIVE_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"

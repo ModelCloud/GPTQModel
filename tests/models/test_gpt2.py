@@ -1,5 +1,6 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest # noqa: E402
+
 
 class TestGpt2(ModelTest):
     NATIVE_MODEL_ID = "openai-community/gpt2"

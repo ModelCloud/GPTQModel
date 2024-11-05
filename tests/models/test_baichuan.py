@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestBaiChuan(ModelTest):
     NATIVE_MODEL_ID = "baichuan-inc/Baichuan2-7B-Chat"

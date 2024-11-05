@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestPhi_3(ModelTest):
     NATIVE_MODEL_ID = "microsoft/Phi-3-mini-4k-instruct"

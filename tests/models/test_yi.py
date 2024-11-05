@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestYi(ModelTest):
     NATIVE_MODEL_ID = "01-ai/Yi-Coder-1.5B-Chat"

@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestCodeGen(ModelTest):
     NATIVE_MODEL_ID = "Salesforce/codegen2-1B_P"

@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestDeci(ModelTest):
     NATIVE_MODEL_ID = "Deci/DeciLM-7B-instruct"

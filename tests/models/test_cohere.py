@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestCohere(ModelTest):
     NATIVE_MODEL_ID = "CohereForAI/aya-expanse-8b"

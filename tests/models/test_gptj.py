@@ -1,5 +1,7 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest # noqa: E402
+
+
 class TestGptJ(ModelTest):
     NATIVE_MODEL_ID = "EleutherAI/gpt-j-6b"
     NATIVE_ARC_CHALLENGE_ACC = 0.3396

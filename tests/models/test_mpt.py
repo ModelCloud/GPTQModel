@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestMpt(ModelTest):
     NATIVE_MODEL_ID = "mosaicml/mpt-7b-instruct"

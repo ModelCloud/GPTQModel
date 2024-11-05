@@ -3,15 +3,16 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-import unittest
+import tempfile # noqa: E402
+import unittest # noqa: E402
+
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import GPTQModel # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
-from gptqmodel.quantization.config import QuantizeConfig # noqa: E402
+from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from lm_eval.utils import make_table # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
-import tempfile
-import shutil
-from lm_eval.utils import make_table
+
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"

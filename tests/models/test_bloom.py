@@ -1,5 +1,7 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest # noqa: E402
+
+
 class TestBloom(ModelTest):
     NATIVE_MODEL_ID = "bigscience/bloom-560m"
     NATIVE_ARC_CHALLENGE_ACC = 0.2201

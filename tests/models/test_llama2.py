@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestLlama2(ModelTest):
     NATIVE_MODEL_ID = "meta-llama/Llama-2-7b-chat-hf"

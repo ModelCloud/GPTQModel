@@ -1,4 +1,5 @@
-from model_test import ModelTest
+from model_test import ModelTest # noqa: E402
+
 
 class TestGlm(ModelTest):
     NATIVE_MODEL_ID = "THUDM/chatglm3-6b"
