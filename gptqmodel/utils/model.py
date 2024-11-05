@@ -440,10 +440,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, IPEXQuantLinear):
-            model_uses_ipex = True
-            submodule.post_init(quantize_config)
-        elif isinstance(submodule, ExllamaV2QuantLinear):
+        if isinstance(submodule, ExllamaV2QuantLinear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -464,11 +461,10 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear) and not model_uses_ipex:
+        elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
-    if not model_uses_ipex:
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
     return model
 

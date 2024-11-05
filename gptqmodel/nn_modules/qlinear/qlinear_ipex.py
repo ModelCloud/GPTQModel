@@ -116,7 +116,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         # for training forward
         self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
 
-    def post_init(self, quantize_config):
+    def post_init(self):
         self.validate_device(self.qweight.device.type)
         assert self.qweight.device.type == "cpu"
         if not self.training and IPEX_AVAILABLE:
