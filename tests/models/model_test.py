@@ -75,19 +75,26 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=4)
+        test_dir = os.path.dirname(os.path.abspath(__file__))
+        save_dir = os.path.join(test_dir, "test_quantized_model")
+        os.makedirs(save_dir, exist_ok=True)
+        if os.path.exists(save_dir):
+            q_model, q_tokenizer = self.loadQuantModel(save_dir, trust_remote_code=trust_remote_code)
+            return q_model, q_tokenizer
+
+        batch_size = 16
+        print(f"eee=========================================================== {batch_size}")
+        model.quantize(calibration_dataset, batch_size=batch_size)
+        
         if need_eval:
-            test_dir = os.path.dirname(os.path.abspath(__file__))
-            save_dir = os.path.join(test_dir, "test_quantized_model")
-            os.makedirs(save_dir, exist_ok=True)
             model.save_quantized(save_dir)
             tokenizer.save_pretrained(save_dir)
-            q_model, q_tokenizer = self.loadQuantModel(save_dir)
+            q_model, q_tokenizer = self.loadQuantModel(save_dir, trust_remote_code=trust_remote_code)
         else:
             with tempfile.TemporaryDirectory() as tmpdirname:
                 model.save_quantized(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
-                q_model, q_tokenizer = self.loadQuantModel(tmpdirname)
+                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
 
         return q_model, q_tokenizer
 
