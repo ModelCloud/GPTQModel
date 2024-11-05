@@ -1,5 +1,4 @@
-from model_test import ModelTest # noqa: E402
-
+from model_test import ModelTest  # noqa: E402
 
 
 class TestQwen2_5(ModelTest):

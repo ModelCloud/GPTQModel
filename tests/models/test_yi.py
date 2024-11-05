@@ -1,5 +1,4 @@
-from model_test import ModelTest # noqa: E402
-
+from model_test import ModelTest  # noqa: E402
 
 
 class TestYi(ModelTest):
@@ -11,10 +10,3 @@ class TestYi(ModelTest):
 
     def test_yi(self):
         self.quant_lm_eval()
-
-<<<<<<< HEAD
-=======
-        result = self.generateChat(model, tokenizer)
-
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
->>>>>>> main

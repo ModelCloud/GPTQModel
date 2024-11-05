@@ -1,9 +1,5 @@
 import torch
-<<<<<<< HEAD
-from model_test import ModelTest # noqa: E402
-=======
-from model_test import ModelTest
->>>>>>> main
+from model_test import ModelTest  # noqa: E402
 
 
 class TestGpt2(ModelTest):
@@ -16,7 +12,3 @@ class TestGpt2(ModelTest):
     def test_gpt2(self):
         self.quant_lm_eval()
 
-<<<<<<< HEAD
-=======
-        self.assertEqual(result[:self.GENERATE_EVAL_SIZE], reference_output[:self.GENERATE_EVAL_SIZE])
->>>>>>> main
