@@ -1,5 +1,6 @@
+import torch  # noqa: E402
 from model_test import ModelTest  # noqa: E402
-import torch
+
 
 class TestFalcon(ModelTest):
     NATIVE_MODEL_ID = "tiiuae/falcon-7b-instruct"
