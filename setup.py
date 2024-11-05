@@ -10,7 +10,6 @@ from pathlib import Path
 from setuptools import find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
-os.environ["BUILD_CUDA_EXT"] = "1"
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
@@ -78,10 +77,6 @@ def get_cuda_version_tag(is_cuda_release: bool = True) -> str:
     return common_setup_kwargs["version"]
 
 
-if BUILD_CUDA_EXT:
-    if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+{get_cuda_version_tag(True)}"
-
 with open('requirements.txt') as f:
     requirement_list = f.read().splitlines()
     if os.getenv("CI"):
@@ -95,9 +90,11 @@ import torch  # noqa: E402
 if TORCH_CUDA_ARCH_LIST is None:
     at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
     if not at_least_one_cuda_v6:
-        raise EnvironmentError(
-            "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
-        )
+        BUILD_CUDA_EXT = False
+
+if BUILD_CUDA_EXT:
+    if CUDA_RELEASE == "1":
+        common_setup_kwargs["version"] += f"+{get_cuda_version_tag(True)}"
 
 additional_setup_kwargs = {}
 
@@ -244,7 +241,7 @@ setup(
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
         'bitblas': ["bitblas>=0.0.1.dev13"],
         'hf': ["optimum>=1.21.2"],
-        'qbits': ["intel_extension_for_transformers>=1.4.2"],
+        'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
     },
     include_dirs=include_dirs,

@@ -8,7 +8,7 @@
 ## News
 * 10/29/2024 🚀 [v1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 * 10/12/2024 ✨ [v1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
-* 10/11/2024 ✨ [v1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Move QBits to optional and add wheel for python 3.12 and cuda 11.8.
+* 10/11/2024 ✨ [v1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Move  to optional and add wheel for python 3.12 and cuda 11.8.
 * 10/08/2024 ✨ [v1.0.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.7) Fixed marlin (faster) kernel was not auto-selected for some models.
 * 09/26/2024 ✨ [v1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed quantized Llama 3.2 vision quantized loader.
 * 09/26/2024 ✨ [v1.0.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.5) Partial Llama 3.2 Vision model support (mllama): only text-layer quantization layers are supported for now.
@@ -34,7 +34,7 @@ got full end-to-end in/out features padding to enhance current/future model comp
 
 * 07/08/2024 🚀 [v0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
 
-* 07/05/2024 🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU. Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
+* 07/05/2024 🚀 [v0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): Cuda kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
 
 * 07/03/2024 🚀 [v0.9.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.4): HF Transformers integration added and bug fixed Gemma 2 support.
 
@@ -64,7 +64,7 @@ We will backport bug fixes to AutoGPTQ on a case-by-case basis.
 * 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
-* 🚀 [Intel/QBits](https://github.com/intel/intel-extension-for-transformers) support added for [2,3,4,8] bit quantization/inference on CPU.
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) support added for 4 bit quantization/inference on CPU.
 * 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
 * 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * 🚀`lm_head` module quant inference support for further VRAM reduction. 
@@ -107,7 +107,7 @@ ROCM/AMD support will be re-added in a future version after everything on ROCM h
 ### PIP 
 
 ```bash
-# You can install optional modules like autoround, qbits, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation gptqmodel[auto_round,vllm,sglang,bitblas,qbits]
+# You can install optional modules like autoround, ipex, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation gptqmodel[auto_round,vllm,sglang,bitblas,ipex]
 pip install -v gptqmodel --no-build-isolation
 ```
 
@@ -118,7 +118,7 @@ pip install -v gptqmodel --no-build-isolation
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # pip: compile and install
-# You can install optional modules like autoround, qbits, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation .[auto_round,vllm,sglang,bitblas,qbits]
+# You can install optional modules like autoround, ipex, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation .[auto_round,vllm,sglang,bitblas,ipex]
 pip install -v . --no-build-isolation
 
 # uv: compile and install 

@@ -15,9 +15,9 @@ from transformers import AutoTokenizer  # noqa: E402
 GENERATE_EVAL_SIZE = 100
 
 
-class TestsQBits(unittest.TestCase):
+class TestsIPEX(unittest.TestCase):
 
-    def test_qbits_format(self):
+    def test_ipex_format(self):
         prompt = "I am in Paris and"
         device = torch.device("cpu")
 
@@ -25,7 +25,7 @@ class TestsQBits(unittest.TestCase):
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            backend=BACKEND.QBITS,
+            backend=BACKEND.IPEX,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 

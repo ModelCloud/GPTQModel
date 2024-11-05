@@ -3,11 +3,16 @@
 
 from logging import getLogger
 
-import gptqmodel_marlin_cuda
 import numpy as np
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+marlin_import_exception = None
+try:
+    import gptqmodel_marlin_cuda
+except ImportError as e:
+    marlin_import_exception = e
 
 logger = getLogger(__name__)
 
@@ -68,6 +73,11 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
+        if marlin_import_exception is not None:
+            raise ValueError(
+                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
+            )
+
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         if not torch.cuda.get_device_capability()[0] >= 8:
             raise ValueError(

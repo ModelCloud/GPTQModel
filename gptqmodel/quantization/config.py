@@ -49,7 +49,7 @@ class FORMAT:
     GPTQ_V2 = "gptq_v2"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
-    QBITS = "qbits"
+    IPEX = "ipex"
 
 
 # quant methods
@@ -64,7 +64,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
-        FORMAT.QBITS,
+        FORMAT.IPEX,
     },
     QUANT_METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
