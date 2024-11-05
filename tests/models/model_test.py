@@ -3,6 +3,7 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
@@ -82,9 +83,7 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        batch_size = 16
-        print(f"eee=========================================================== {batch_size}")
-        model.quantize(calibration_dataset, batch_size=batch_size)
+        model.quantize(calibration_dataset, batch_size=64)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
@@ -135,8 +134,8 @@ class ModelTest(unittest.TestCase):
                 if metric != 'alias' and 'stderr' not in metric
             }
             print(task_results)
-            # if os.path.exists(model.model_name_or_path):
-            #     shutil.rmtree(model.model_name_or_path)
+            if os.path.exists(model.model_name_or_path):
+                shutil.rmtree(model.model_name_or_path)
             return task_results
 
     def calculatorPer(self, filter, value):
