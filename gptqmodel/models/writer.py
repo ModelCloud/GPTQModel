@@ -67,9 +67,9 @@ class ModelWriter():
 
         if quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(["module", "loss", "damp", "layer_forward_time", "w_clone_time", "quant_time"])
-                writer.writerows([[f"{entry['layer']}.{entry['module']}", entry['loss'], entry['damp'], entry['layer_forward_time'], entry['w_clone_time'], entry['quant_time']] for entry in quant_log])
+                w = csv.writer(file)
+                w.writerow(["layer", "module", "avg_loss", "damp_percent", "time"])
+                w.writerows([[entry.get("layer"), entry.get("module"), entry.get("avg_loss"), entry.get("damp_percent"), entry.get("time")] for entry in quant_log])
 
         pre_quantized_size_mb = get_model_files_size(model_name_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
