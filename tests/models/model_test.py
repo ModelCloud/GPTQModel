@@ -16,8 +16,8 @@ from lm_eval.utils import make_table
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 10  # -10%
-    QUANT_ARC_MAX_POSITIVE_DELTA = 20  # 20%
+    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.1  # -10%
+    QUANT_ARC_MAX_POSITIVE_DELTA = 0.2  # 20%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
@@ -153,5 +153,5 @@ class ModelTest(unittest.TestCase):
         task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
         for filter, value in task_results.items():
             per = self.calculatorPer(filter=filter, value=value)
-            self.assertTrue((100 - self.QUANT_ARC_MAX_NEGATIVE_DELTA) <= per <= (100 + self.QUANT_ARC_MAX_POSITIVE_DELTA),
+            self.assertTrue((100 - 100 * self.QUANT_ARC_MAX_NEGATIVE_DELTA) <= per <= (100 + 100 * self.QUANT_ARC_MAX_POSITIVE_DELTA),
                             f"{filter}: {value} diff {per:.2f}% is out of the expected range (90%-110%)")
