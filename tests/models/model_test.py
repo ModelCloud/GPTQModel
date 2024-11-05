@@ -14,13 +14,14 @@ import shutil
 from lm_eval.utils import make_table
 
 class ModelTest(unittest.TestCase):
-    GENERATE_EVAL_SIZE = 100
     TASK_NAME = "arc_challenge"
+    # sub test can modify
     QUANT_ARC_MAX_NEGATIVE_DELTA = 10  # -10%
     QUANT_ARC_MAX_POSITIVE_DELTA = 20  # 20%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
+
     def generate(self, model, tokenizer, prompt=None):
         if prompt == None:
             prompt = "I am in Paris and"
