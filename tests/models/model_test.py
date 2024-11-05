@@ -131,3 +131,13 @@ class ModelTest(unittest.TestCase):
             if os.path.exists(model.model_name_or_path):
                 shutil.rmtree(model.model_name_or_path)
             return task_results
+
+    def calculatorPer(self, filter, value):
+        print(self.NATIVE_ARC_CHALLENGE_ACC_NORM)
+        if "norm" in filter:
+            per = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
+            print(f"{filter}: {value} diff {per:.2f}%")
+        else:
+            per = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
+            print(f"{filter}: {value} diff {per:.2f}%")
+        return per
