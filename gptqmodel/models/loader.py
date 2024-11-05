@@ -13,7 +13,7 @@ from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear, qbits_dtype
+from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear, ipex_dtype
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
@@ -56,11 +56,11 @@ class ModelLoader():
                 pass
             except Exception as e:
                 raise ValueError(
-                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
                 )
 
-            model_init_kwargs["device"] = "cpu"
-            torch_dtype = qbits_dtype()
+            model_init_kwargs["device_map"] = "cpu"
+            torch_dtype = ipex_dtype()
 
         if require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -147,21 +147,21 @@ class ModelLoader():
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
-        if backend == BACKEND.QBITS:
+        if backend == BACKEND.IPEX:
             device = CPU
             try:
                 pass
             except Exception as e:
                 raise ValueError(
-                    f"QBits is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
                 )
 
             if torch_dtype is None or torch_dtype == "auto":
-                torch_dtype = qbits_dtype()
+                torch_dtype = ipex_dtype()
 
-        if backend != BACKEND.QBITS and not torch.cuda.is_available():
+        if backend != BACKEND.IPEX and not torch.cuda.is_available():
             raise EnvironmentError(
-                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.QBITS for cpu only quantization and inference.")
+                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu only quantization and inference.")
 
         """load quantized model from local disk"""
         if require_trust_remote_code and not trust_remote_code:
@@ -266,7 +266,7 @@ class ModelLoader():
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
             backend = BACKEND.MARLIN
 
-        marlin_compatible = False if backend == BACKEND.QBITS else _validate_marlin_device_support()
+        marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
 
         if backend != BACKEND.MARLIN:
             unsupported = _validate_marlin_compatibility(quantize_config)
@@ -375,8 +375,8 @@ class ModelLoader():
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
             )
-            if preload_qlinear_kernel == QBitsQuantLinear:
-                quantize_config.runtime_format = FORMAT.QBITS
+            if preload_qlinear_kernel == IPEXQuantLinear:
+                quantize_config.runtime_format = FORMAT.IPEX
             model.tie_weights()
 
         # == step3: load checkpoint and dispatch == #
@@ -415,7 +415,7 @@ class ModelLoader():
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if quantize_config.format == FORMAT.GPTQ:
+        if quantize_config.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
             accelerate.load_checkpoint_in_model(
                 model,
                 dtype=torch_dtype,

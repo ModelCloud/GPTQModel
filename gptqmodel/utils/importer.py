@@ -5,7 +5,7 @@ from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
+from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT
 from .backend import BACKEND
@@ -15,7 +15,7 @@ backend_dict = OrderedDict({
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
     BACKEND.BITBLAS: [BitBLASQuantLinear],
-    BACKEND.QBITS: [QBitsQuantLinear],
+    BACKEND.IPEX: [IPEXQuantLinear],
 })
 
 format_dict = {
@@ -23,7 +23,7 @@ format_dict = {
     FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.TRITON],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
-    FORMAT.QBITS: [BACKEND.QBITS],
+    FORMAT.IPEX: [BACKEND.IPEX],
 }
 
 logger = getLogger(__name__)
@@ -65,7 +65,7 @@ def select_quant_linear(
         return MarlinQuantLinear if pack else MarlinInferenceQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         return ExllamaV2QuantLinear
-    elif backend == BACKEND.QBITS:
-        return QBitsQuantLinear
+    elif backend == BACKEND.IPEX:
+        return IPEXQuantLinear
     else:
         return ExllamaV2QuantLinear

@@ -40,9 +40,9 @@ To Execute `basic_usage_marlin.py`, using command like this:
 python basic_usage_marlin.py
 ```
 
-To Execute `basic_usage_qbits.py`, using command like this:
+To Execute `basic_usage_ipex.py`, using command like this:
 ```shell
-python basic_usage_qbits.py
+python basic_usage_ipex.py
 ```
 
 To Execute `basic_usage_sglang.py`, using command like this:

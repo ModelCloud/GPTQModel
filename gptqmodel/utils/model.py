@@ -28,7 +28,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
+from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
@@ -432,17 +432,12 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     """
     # post init for bitblas backend.
 
-    model_uses_qbits = False
-
     # exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, QBitsQuantLinear):
-            model_uses_qbits = True
-            submodule.post_init(quantize_config)
-        elif isinstance(submodule, ExllamaV2QuantLinear):
+        if isinstance(submodule, ExllamaV2QuantLinear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -463,11 +458,10 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear) and not model_uses_qbits:
+        elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
-    if not model_uses_qbits:
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
     return model
 

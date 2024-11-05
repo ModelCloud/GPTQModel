@@ -195,6 +195,11 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
+        
+        backend = BACKEND.AUTO
+        if not torch.cuda.is_available():
+            self.quantize_config.format = FORMAT.IPEX
+            backend = BACKEND.IPEX
 
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throw_error=True)
@@ -212,7 +217,7 @@ class BaseGPTQModel(nn.Module):
             group_size=self.quantize_config.group_size,
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
-            backend=BACKEND.AUTO,
+            backend=backend,
             format=self.quantize_config.format,
         )
 
@@ -253,7 +258,7 @@ class BaseGPTQModel(nn.Module):
         device_map = self.hf_device_map
         if device_map:
             for name, device in device_map.items():
-                if device == "cpu":
+                if device == "cpu" and torch.cuda.is_available():
                     logger.info(f"truly offloading {name} to cpu with hook.")
                     module = get_module_by_name_suffix(self.model, name)
                     remove_hook_from_module(module, recurse=True)
@@ -336,7 +341,7 @@ class BaseGPTQModel(nn.Module):
                 bits=self.quantize_config.bits,
                 dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
-                backend=BACKEND.AUTO,
+                backend=backend,
                 desc_act=self.quantize_config.desc_act,
                 force_layer_back_to_cpu=True,
                 format=self.quantize_config.format,
@@ -386,7 +391,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU:
+        if get_device(layers[0]) == CPU and torch.cuda.is_available():
             layers[0] = layers[0].to(CUDA_0)
             force_layer_back_to_cpu = True
 
@@ -448,7 +453,7 @@ class BaseGPTQModel(nn.Module):
                 continue
 
             force_layer_back_to_cpu = False
-            if get_device(layer) == CPU:
+            if get_device(layer) == CPU and torch.cuda.is_available():
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
@@ -574,7 +579,7 @@ class BaseGPTQModel(nn.Module):
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=BACKEND.AUTO,
+            backend=backend,
             desc_act=self.quantize_config.desc_act,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
@@ -804,6 +809,8 @@ class BaseGPTQModel(nn.Module):
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+        if not torch.cuda.is_available():
+            backend = BACKEND.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
             model_name_or_path=model_name_or_path,

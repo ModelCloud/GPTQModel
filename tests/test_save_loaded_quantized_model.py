@@ -19,12 +19,12 @@ class TestSave(unittest.TestCase):
             (BACKEND.TRITON),
             (BACKEND.BITBLAS),
             (BACKEND.MARLIN),
-            (BACKEND.QBITS),
+            (BACKEND.IPEX),
         ]
     )
     def test_save(self, backend):
         prompt = "I am in Paris and"
-        device = torch.device("cuda:0") if backend != BACKEND.QBITS else torch.device("cpu")
+        device = torch.device("cuda:0") if backend != BACKEND.IPEX else torch.device("cpu")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 

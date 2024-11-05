@@ -33,7 +33,7 @@ class TestQuantization(unittest.TestCase):
     @parameterized.expand(
         [
             (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.IPEX, False, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
@@ -79,7 +79,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
+                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 backend=backend,
             )
 
@@ -92,7 +92,7 @@ class TestQuantization(unittest.TestCase):
             torch.cuda.empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
-            if not sym and format == FORMAT.GPTQ or format == FORMAT.QBITS:
+            if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
                 return
 
             # test compat: 1) with simple dict type 2) is_marlin_format
@@ -106,7 +106,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
+                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
@@ -125,7 +125,7 @@ class TestQuantization(unittest.TestCase):
             }
             model = GPTQModel.from_quantized(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
+                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 quantize_config=compat_quantize_config,
                 format=format,
             )

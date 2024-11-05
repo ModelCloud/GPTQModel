@@ -15,17 +15,18 @@ from transformers import AutoTokenizer  # noqa: E402
 GENERATE_EVAL_SIZE = 100
 
 
-class TestsQBits(unittest.TestCase):
+class TestsIPEX(unittest.TestCase):
 
-    def test_qbits_format(self):
+    def test_ipex_format(self):
         prompt = "I am in Paris and"
+        expected_output = "<s> I am in Paris and I am in love with"
         device = torch.device("cpu")
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         model_q = GPTQModel.from_quantized(
             model_id,
-            backend=BACKEND.QBITS,
+            backend=BACKEND.IPEX,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -33,5 +34,4 @@ class TestsQBits(unittest.TestCase):
 
         result = model_q.generate(**input, num_beams=1, max_new_tokens=5)
         output = tokenizer.decode(result[0])
-        print(f"output={output}")
-        self.assertGreater(len(output), 0)
+        self.assertTrue(output == expected_output)

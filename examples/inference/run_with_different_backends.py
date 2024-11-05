@@ -14,12 +14,12 @@ def main():
     global quantized_model_id
 
     parser = ArgumentParser()
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'QBITS', 'SGLANG', 'VLLM'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
     args = parser.parse_args()
 
     backend = get_backend(args.backend)
 
-    device = 'cpu' if backend == BACKEND.QBITS else 'cuda:0'
+    device = 'cpu' if backend == BACKEND.IPEX else 'cuda:0'
 
     if backend == BACKEND.SGLANG:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
