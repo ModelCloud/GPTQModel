@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestBaiChuan(ModelTest):
     NATIVE_MODEL_ID = "baichuan-inc/Baichuan2-7B-Chat"
 

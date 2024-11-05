@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestChatGlm(ModelTest):
     NATIVE_MODEL_ID = "THUDM/chatglm3-6b"
 

@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestOpt(ModelTest):
     NATIVE_MODEL_ID = "facebook/opt-125m"
 

@@ -1,5 +1,7 @@
-from model_test import ModelTest
 import torch
+from model_test import ModelTest
+
+
 class TestGptBigCode(ModelTest):
     NATIVE_MODEL_ID = "bigcode/gpt_bigcode-santacoder"
 

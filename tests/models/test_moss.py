@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestMoss(ModelTest):
     NATIVE_MODEL_ID = "fnlp/moss2-2_5b-chat"
 

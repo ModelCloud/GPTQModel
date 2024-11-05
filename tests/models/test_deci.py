@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestDeci(ModelTest):
     NATIVE_MODEL_ID = "Deci/DeciLM-7B-instruct"
 

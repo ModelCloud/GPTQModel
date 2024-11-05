@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestGptNeoX(ModelTest):
     NATIVE_MODEL_ID = "EleutherAI/gpt-neox-20b"
 

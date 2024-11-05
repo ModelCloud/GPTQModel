@@ -1,8 +1,8 @@
 import os
 import subprocess
+import sys
 from argparse import ArgumentParser
 
-import sys
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from transformers import AutoTokenizer
 

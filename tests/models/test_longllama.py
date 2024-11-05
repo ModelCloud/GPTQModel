@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestLongLlama(ModelTest):
     NATIVE_MODEL_ID = "syzymon/long_llama_3b_instruct"
 

@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestCodeGen(ModelTest):
     NATIVE_MODEL_ID = "Salesforce/codegen2-1B_P"
 
