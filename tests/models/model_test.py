@@ -69,7 +69,7 @@ class ModelTest(unittest.TestCase):
             format=FORMAT.GPTQ,
         )
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             model_name_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
@@ -87,12 +87,12 @@ class ModelTest(unittest.TestCase):
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
             os.makedirs(save_dir, exist_ok=True)
-            model.save_quantized(save_dir)
+            model.save(save_dir)
             tokenizer.save_pretrained(save_dir)
             q_model, q_tokenizer = self.loadQuantModel(save_dir, trust_remote_code=trust_remote_code)
         else:
             with tempfile.TemporaryDirectory() as tmpdirname:
-                model.save_quantized(tmpdirname)
+                model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
 
@@ -106,7 +106,7 @@ class ModelTest(unittest.TestCase):
             trust_remote_code = True
         tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
 
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             model_name_or_path,
             trust_remote_code=trust_remote_code,
         )
