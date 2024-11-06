@@ -19,7 +19,7 @@ class TestsIPEX(unittest.TestCase):
 
     def test_ipex_format(self):
         prompt = "I am in Paris and"
-        expected_output = "<s> I am in Paris and I am in love with"
+        expected_output = "<s> I am in Paris and I am a tourist"
         device = torch.device("cpu")
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"

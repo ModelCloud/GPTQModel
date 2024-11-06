@@ -106,6 +106,8 @@ class BaseGPTQModel(nn.Module):
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
         self.model_name_or_path = model_name_or_path
+        # stores all per-layer quant stats such as avg loss and processing time
+        self.quant_log = []
 
     @property
     def quantized(self):
@@ -439,9 +441,6 @@ class BaseGPTQModel(nn.Module):
                                                   num_experts=num_experts)
 
         quantizers = {}
-
-        # stores all per-layer quant stats such as avg loss and processing time
-        self.quant_log = []
 
         layer_count = len(layers)
         layer_pb = tqdm(range(layer_count))
