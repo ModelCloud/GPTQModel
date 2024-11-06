@@ -47,6 +47,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from transformers import AutoConfig
+from ..quantization.config import FORMAT
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -115,6 +116,7 @@ class GPTQModel:
             use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            format: Optional[FORMAT] = None,
             **kwargs,
     ):
         config = AutoConfig.from_pretrained(model_name_or_path)
@@ -126,6 +128,7 @@ class GPTQModel:
                 max_memory=max_memory,
                 device=device,
                 backend=backend,
+                format=format,
                 quantize_config=quantize_config,
                 use_safetensors=use_safetensors,
                 trust_remote_code=trust_remote_code,
@@ -167,6 +170,7 @@ class GPTQModel:
         quantize_config: Optional[QuantizeConfig | Dict] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
+        format: Optional[FORMAT] = None,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
         # supports all hashlib hash methods
@@ -182,6 +186,7 @@ class GPTQModel:
             max_memory=max_memory,
             device=device,
             backend=backend,
+            format=format,
             quantize_config=quantize_config,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
