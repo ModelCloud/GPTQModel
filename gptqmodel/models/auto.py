@@ -46,10 +46,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-import torch
 from transformers import AutoConfig
-import os
-from ..quantization.config import FORMAT
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -132,7 +129,6 @@ class GPTQModel:
                 quantize_config=quantize_config,
                 use_safetensors=use_safetensors,
                 trust_remote_code=trust_remote_code,
-                format=format,
                 verify_hash=verify_hash,
                 **kwargs,
             )
