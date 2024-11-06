@@ -104,14 +104,14 @@ class GPTQModel:
         )
 
     @classmethod
-    def auto_config_from(
+    def _from(
             cls,
             model_name_or_path: Optional[str],
+            quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             max_memory: Optional[dict] = None,
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
-            quantize_config: Optional[QuantizeConfig | Dict] = None,
             use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
