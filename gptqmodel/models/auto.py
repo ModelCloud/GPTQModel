@@ -105,7 +105,7 @@ class GPTQModel:
         )
 
     @classmethod
-    def _from(
+    def load(
             cls,
             model_name_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,

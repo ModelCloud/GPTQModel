@@ -23,7 +23,7 @@ def main():
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
-    model = GPTQModel._from(pretrained_model_id, quantize_config)
+    model = GPTQModel.load(pretrained_model_id, quantize_config)
 
     # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     model.quantize(calibration_dataset)
@@ -50,7 +50,7 @@ def main():
 
     # load quantized model to the first GPU
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    model = GPTQModel._from(quantized_model_id, device=device)
+    model = GPTQModel.load(quantized_model_id, device=device)
 
     # load quantized model to CPU with IPEX kernel linear.
     # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
