@@ -46,6 +46,10 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+import torch
+from transformers import AutoConfig
+import os
+from ..quantization.config import FORMAT
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -101,6 +105,44 @@ class GPTQModel:
             "use `GPTQModel.from_pretrained` to load pretrained model and prepare for quantization via `.quantize()`.\n"
             "use `GPTQModel.from_quantized` to inference with post-quantized model."
         )
+
+    @classmethod
+    def auto_config_from(
+            cls,
+            model_name_or_path: Optional[str],
+            device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
+            max_memory: Optional[dict] = None,
+            device: Optional[Union[str, int]] = None,
+            backend: BACKEND = BACKEND.AUTO,
+            quantize_config: Optional[QuantizeConfig | Dict] = None,
+            use_safetensors: bool = True,
+            trust_remote_code: bool = False,
+            verify_hash: Optional[Union[str, List[str]]] = None,
+            **kwargs,
+    ):
+        config = AutoConfig.from_pretrained(model_name_or_path)
+
+        if hasattr(config, "quantization_config"):
+            return cls.from_quantized(
+                model_name_or_path=model_name_or_path,
+                device_map=device_map,
+                max_memory=max_memory,
+                device=device,
+                backend=backend,
+                quantize_config=quantize_config,
+                use_safetensors=use_safetensors,
+                trust_remote_code=trust_remote_code,
+                format=format,
+                verify_hash=verify_hash,
+                **kwargs,
+            )
+        else:
+            return cls.from_pretrained(
+                pretrained_model_name_or_path=model_name_or_path,
+                quantize_config=quantize_config,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
 
     @classmethod
     def from_pretrained(
