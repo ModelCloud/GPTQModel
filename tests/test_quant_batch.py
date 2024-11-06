@@ -58,32 +58,32 @@ class TestQuantBatch(unittest.TestCase):
         model.quantize(self.calibration_dataset, batch_size=1)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 
             del model
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
             )
 
             batch_size_1_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
 
         model.quantize(self.calibration_dataset, batch_size=4)
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 
             del model
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
             )
 

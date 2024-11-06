@@ -23,7 +23,7 @@ class TestLoadSglang(unittest.TestCase):
         self.prompt = "The capital of France is"
 
     def test_load_sglang(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.SGLANG,

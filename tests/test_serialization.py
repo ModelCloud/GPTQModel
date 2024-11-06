@@ -17,25 +17,25 @@ class TestSerialization(unittest.TestCase):
     MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     def test_marlin_local_serialization(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
+        model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            model.save_pretrained(tmpdir)
+            model.save(tmpdir)
 
             self.assertTrue(os.path.isfile(os.path.join(tmpdir, "model.safetensors")))
 
-            model = GPTQModel.from_quantized(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
+            model = GPTQModel.load(tmpdir, device="cuda:0", backend=BACKEND.MARLIN)
 
     def test_gptq_v1_to_v2_runtime_convert(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
+        model = GPTQModel.load(self.MODEL_ID, device="cuda:0")
         self.assertEqual(model.quantize_config.runtime_format, FORMAT.GPTQ_V2)
 
     def test_gptq_v1_serialization(self):
-        model = GPTQModel.from_quantized(self.MODEL_ID, device="cuda:0")
+        model = GPTQModel.load(self.MODEL_ID, device="cuda:0")
         model.quantize_config.format = FORMAT.GPTQ
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            model.save_quantized(tmpdir)
+            model.save(tmpdir)
 
             with open(os.path.join(tmpdir, "quantize_config.json"), "r") as f:
                 quantize_config = json.load(f)

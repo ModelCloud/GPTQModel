@@ -23,7 +23,7 @@ class TestSharded(unittest.TestCase):
         cls.reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can only see the characters' silhouettes.)\n\n("
 
     def test_save_and_load(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.MODEL_ID,
             device_map="auto",
         )
@@ -31,7 +31,7 @@ class TestSharded(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
                 max_shard_size="100MB"
             )
@@ -41,7 +41,7 @@ class TestSharded(unittest.TestCase):
             index_file_path = os.path.join(tmp_dir, "model.safetensors.index.json")
             self.assertTrue(os.path.exists(index_file_path))
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
             )
@@ -54,7 +54,7 @@ class TestSharded(unittest.TestCase):
             self.assertEqual(result[:100], self.reference_output[:100])
 
     def test_save_and_load_no_shard(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.MODEL_ID,
             device_map="auto",
         )
@@ -62,7 +62,7 @@ class TestSharded(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
                 max_shard_size=None,
             )
@@ -72,7 +72,7 @@ class TestSharded(unittest.TestCase):
             safetensors_file_path = os.path.join(tmp_dir, "model.safetensors")
             self.assertTrue(os.path.exists(safetensors_file_path))
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
             )

@@ -128,7 +128,7 @@ class TestPerplexity(unittest.TestCase):
 
         dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(format)
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             model_id,
             quantize_config=quantize_config,
         )
@@ -137,13 +137,13 @@ class TestPerplexity(unittest.TestCase):
         model.quantize(dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 
             del model
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
             )

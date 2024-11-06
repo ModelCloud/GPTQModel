@@ -61,13 +61,13 @@ class TestDynamic(unittest.TestCase):
             dynamic=dynamic,
             group_size=128,
         )
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             cls.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
         model.quantize(cls.calibration_dataset, batch_size=4)
 
-        model.save_quantized(
+        model.save(
             cls.tmp_dir.name,
         )
 
@@ -84,7 +84,7 @@ class TestDynamic(unittest.TestCase):
     )
 
     def test_dynamic_bits(self, backend):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.tmp_dir.name,
             backend=backend,
         )

@@ -35,7 +35,7 @@ class TestLoadVLLM(unittest.TestCase):
         torch.cuda.empty_cache()
 
     def test_load_vllm(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
@@ -65,7 +65,7 @@ class TestLoadVLLM(unittest.TestCase):
         self.release_vllm_model()
 
     def test_load_shared_vllm(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.SHARDED_MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,

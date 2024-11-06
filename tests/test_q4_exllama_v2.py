@@ -1110,7 +1110,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
-        model_q = GPTQModel.from_quantized(model_id, device="cuda:0")
+        model_q = GPTQModel.load(model_id, device="cuda:0")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
@@ -1130,7 +1130,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
-        model_q = GPTQModel.from_quantized(
+        model_q = GPTQModel.load(
             model_id,
             rivision=revision,
             device="cuda:0",

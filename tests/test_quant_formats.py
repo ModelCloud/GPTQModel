@@ -59,14 +59,14 @@ class TestQuantization(unittest.TestCase):
         else:
             raise ValueError(f"Invalid quantization method: {method}")
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
         model.quantize(self.calibration_dataset, batch_size=128)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
-            model.save_quantized(tmpdirname)
+            model.save(tmpdirname)
 
             logging.info(f"Saved config mem: {model.quantize_config}")
 
@@ -77,7 +77,7 @@ class TestQuantization(unittest.TestCase):
                 assert model.quantize_config.to_dict() == file_dict
                 logging.info(f"Saved config file: {file_dict}")
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmpdirname,
                 device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 backend=backend,
@@ -104,7 +104,7 @@ class TestQuantization(unittest.TestCase):
                 "is_marlin_format": backend == BACKEND.MARLIN,
             }
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmpdirname,
                 device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 quantize_config=compat_quantize_config,
@@ -123,7 +123,7 @@ class TestQuantization(unittest.TestCase):
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,
             }
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmpdirname,
                 device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 quantize_config=compat_quantize_config,

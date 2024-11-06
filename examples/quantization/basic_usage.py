@@ -46,7 +46,7 @@ def main():
     # model.push_to_hub(repo_id, save_dir=quantized_model_dir, use_safetensors=True, commit_message=commit_message, use_auth_token=True)
 
     # save quantized model using safetensors
-    model.save_quantized(quantized_model_id, use_safetensors=True)
+    model.save(quantized_model_id, use_safetensors=True)
 
     # load quantized model to the first GPU
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
