@@ -32,12 +32,13 @@ def main():
 
     del model
 
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     model = GPTQModel.from_quantized(
         quantized_model_id,
-        device="cuda:0",
+        device=device,
     )
 
-    input_ids = torch.ones((1, 1), dtype=torch.long, device="cuda:0")
+    input_ids = torch.ones((1, 1), dtype=torch.long, device=device)
     outputs = model(input_ids=input_ids)
     print(f"output logits {outputs.logits.shape}: \n", outputs.logits)
     # inference with model.generate
