@@ -38,13 +38,6 @@ if __name__ == "__main__":
         default="text",
         help="Column in the dataset containing the text.",
     )
-    parser.add_argument(
-        "--per_gpu_max_memory",
-        type=int,
-        default=None,
-        help="Max memory used in each GPU.",
-    )
-    parser.add_argument("--cpu_max_memory", type=int, default=None, help="Max memory used in CPU.")
     parser.add_argument("--is_quantized", action="store_true", help="Is the model GPTQ quantized?")
     parser.add_argument(
         "--use_safetensors",
@@ -62,15 +55,6 @@ if __name__ == "__main__":
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    max_memory = {}
-    if args.per_gpu_max_memory is not None and args.per_gpu_max_memory > 0:
-        if torch.cuda.is_available():
-            max_memory.update({i: f"{args.per_gpu_max_memory}GIB" for i in range(torch.cuda.device_count())})
-    if args.cpu_max_memory is not None and args.cpu_max_memory > 0 and max_memory:
-        max_memory["cpu"] = f"{args.cpu_max_memory}GIB"
-    if not max_memory:
-        max_memory = None
-
     if args.use_safetensors:
         print(
             "The argument --use_safetensors is deprecrated and will be removed in the next release. It is now the default behavior."
@@ -82,7 +66,6 @@ if __name__ == "__main__":
         model = GPTQModel.from_quantized(
             args.model_name,
             device_map="auto",
-            max_memory=max_memory,
             model_basename=args.model_basename,
             use_safetensors=True,
             trust_remote_code=args.trust_remote_code,
@@ -94,7 +77,6 @@ if __name__ == "__main__":
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name,
             device_map="auto",
-            max_memory=max_memory,
             torch_dtype=torch.float16,
             trust_remote_code=args.trust_remote_code,
         )

@@ -43,7 +43,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
 
-    model = GPTQModel.from_pretrained(args.base_model_dir, QuantizeConfig())
+    model = GPTQModel.load(args.base_model_dir, QuantizeConfig())
     model.to("cuda:0")
 
     task = SequenceClassificationTask(

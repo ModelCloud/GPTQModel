@@ -35,7 +35,7 @@ def main():
         if backend == BACKEND.SGLANG:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
             subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 quantized_model_id,
                 device=device,
                 backend=backend,
@@ -47,7 +47,7 @@ def main():
             del model
         else:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 quantized_model_id,
                 device=device,
                 backend=backend,
@@ -69,16 +69,16 @@ def main():
         )
 
         # load un-quantized model, by default, the model will always be loaded into CPU memory
-        model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
+        model = GPTQModel.load(pretrained_model_id, quantize_config)
 
         # quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
         model.quantize(examples)
 
         # save quantized model
-        model.save_quantized(quantized_model_id)
+        model.save(quantized_model_id)
         tokenizer.save_pretrained(quantized_model_id)
 
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             quantized_model_id,
             device=device,
             backend=backend,

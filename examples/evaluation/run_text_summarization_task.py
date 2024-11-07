@@ -42,7 +42,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
 
-    model = GPTQModel.from_pretrained(args.base_model_dir, QuantizeConfig())
+    model = GPTQModel.load(args.base_model_dir, QuantizeConfig())
     model.to("cuda:0")
 
     task = TextSummarizationTask(
@@ -67,7 +67,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    model = GPTQModel.from_quantized(args.quantized_model_dir, device="cuda:0", backend=get_backend(args.backend))
+    model = GPTQModel.load(args.quantized_model_dir, device="cuda:0", backend=get_backend(args.backend))
     task.model = model
     task.device = model.device
     print(f"eval result for quantized model: {task.run(generation_config=GenerationConfig(max_new_tokens=32))}")

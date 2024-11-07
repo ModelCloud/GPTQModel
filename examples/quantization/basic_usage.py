@@ -29,7 +29,7 @@ def main():
     model.quantize(calibration_dataset)
 
     # save quantized model
-    model.save_quantized(quantized_model_id)
+    model.save(quantized_model_id)
 
     # push quantized model to Hugging Face Hub.
     # to use use_auth_token=True, Login first via huggingface-cli login.

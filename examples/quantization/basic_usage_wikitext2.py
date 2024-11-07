@@ -46,20 +46,20 @@ def main():
     )
 
     # load un-quantized model, the model will always be force loaded into cpu
-    model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
+    model = GPTQModel.load(pretrained_model_id, quantize_config)
 
     # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     # with value under torch.LongTensor type.
     model.quantize(traindataset)
 
     # save quantized model
-    model.save_quantized(quantized_model_id)
+    model.save(quantized_model_id)
 
     # save quantized model using safetensors
-    model.save_quantized(quantized_model_id, use_safetensors=True)
+    model.save(quantized_model_id, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0")
+    model = GPTQModel.load(quantized_model_id, device="cuda:0")
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))

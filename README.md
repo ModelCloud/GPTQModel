@@ -155,16 +155,16 @@ quant_config = QuantizeConfig(
 )
 
 # load un-quantized model, by default, the model will always be loaded into CPU memory
-model = GPTQModel.from_pretrained(pretrained_model_dir, quant_config)
+model = GPTQModel.load(pretrained_model_dir, quant_config)
 
 # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
 model.quantize(calibration_dataset)
 
 # save quantized model
-model.save_quantized(quant_output_dir)
+model.save(quant_output_dir)
 
 # load quantized model to the first GPU
-model = GPTQModel.from_quantized(quant_output_dir)
+model = GPTQModel.load(quant_output_dir)
 
 # inference with model.generate
 print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
@@ -219,7 +219,7 @@ def ds_refactor_fn(samples):
 
 
 #  model = AutoModelForCausalLM.from_pretrained(MODEL).eval().half().to("cuda:0")
-model = GPTQModel.from_pretrained(MODEL, QuantizeConfig())
+model = GPTQModel.load(MODEL, QuantizeConfig())
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 task = SequenceClassificationTask(

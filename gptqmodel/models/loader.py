@@ -123,7 +123,6 @@ class ModelLoader():
             cls,
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-            max_memory: Optional[dict] = None,
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
@@ -382,28 +381,16 @@ class ModelLoader():
                 "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
                 "'sequential'."
             )
-        if isinstance(device_map, dict):
-            max_memory = None
-        else:
-            if device is None and not device_map and not max_memory:
-                device_map = "auto"
+
+        if not isinstance(device_map, dict):
             if device is not None:
                 device = torch.device(device)
-                if not max_memory and not device_map:
-                    device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
-            if not isinstance(device_map, dict) and device_map != "sequential":
-                max_memory = accelerate.utils.get_balanced_memory(
-                    model=model,
-                    max_memory=max_memory,
+                device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
+            else:
+                device_map = accelerate.infer_auto_device_map(
+                    model,
                     no_split_module_classes=[layer_type] if isinstance(layer_type, str) else layer_type,
-                    low_zero=(device_map == "balanced_low_0"),
                 )
-        if not isinstance(device_map, dict):
-            device_map = accelerate.infer_auto_device_map(
-                model,
-                max_memory=max_memory,
-                no_split_module_classes=[layer_type] if isinstance(layer_type, str) else layer_type,
-            )
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format

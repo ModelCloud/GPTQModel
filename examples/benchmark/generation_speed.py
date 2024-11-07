@@ -147,7 +147,6 @@ def load_model_tokenizer(
     backend: BACKEND,
     tokenizer_name_or_path: Optional[str] = None,
     from_pretrained: bool = False,
-    max_memory: Optional[dict] = None,
     model_basename: Optional[str] = None,
     quantize_config: Optional[str] = None,
     trust_remote_code: bool = False,
@@ -166,13 +165,11 @@ def load_model_tokenizer(
         model = GPTQModel.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=QuantizeConfig(),
-            max_memory=max_memory,
             trust_remote_code=trust_remote_code,
         )
     else:
         model = GPTQModel.from_quantized(
             model_id_or_path,
-            max_memory=max_memory,
             quantize_config=quantize_config,
             model_basename=model_basename,
             use_safetensors=use_safetensors,
@@ -233,23 +230,10 @@ def main():
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
-    parser.add_argument("--per_gpu_max_memory", type=int, default=None)
-    parser.add_argument("--cpu_max_memory", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
-
-    max_memory = {}
-    if args.per_gpu_max_memory is not None and args.per_gpu_max_memory > 0:
-        if torch.cuda.is_available():
-            max_memory.update({i: f"{args.per_gpu_max_memory}GIB" for i in range(torch.cuda.device_count())})
-    if args.cpu_max_memory is not None and args.cpu_max_memory > 0 and max_memory:
-        max_memory["cpu"] = f"{args.cpu_max_memory}GIB"
-    if not max_memory:
-        max_memory = None
-
-    logger.info(f"max_memory: {max_memory}")
 
     quantize_config = None
     if args.quantize_config_save_dir:
@@ -266,7 +250,6 @@ def main():
         model_id_or_path=args.model_id_or_path,
         tokenizer_name_or_path=args.tokenizer_name_or_path,
         from_pretrained=args.from_pretrained,
-        max_memory=max_memory,
         model_basename=args.model_basename,
         quantize_config=quantize_config,
         trust_remote_code=args.trust_remote_code,

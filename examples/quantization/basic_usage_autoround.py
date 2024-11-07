@@ -19,14 +19,14 @@ def main():
         group_size=128
     )
 
-    model = GPTQModel.from_pretrained(
+    model = GPTQModel.load(
         pretrained_model_id,
         quantize_config=quantize_config,
     )
 
     model.quantize(examples)
 
-    model.save_quantized(quantized_model_id)
+    model.save(quantized_model_id)
 
     tokenizer.save_pretrained(quantized_model_id)
 
