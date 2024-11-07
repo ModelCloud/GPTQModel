@@ -16,6 +16,10 @@ on:
         description: 'GitHub ref: Branch, Tag or Commit SHA'
         required: false
         default: ''
+      pr:
+        description: 'pr number'
+        required: false
+        default: ''
       test_names:
         description: 'Input Test(s) to Run (default all)'
         required: false
@@ -58,6 +62,10 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+
+      - name: Set checkout ref
+        if: ${{ github.event.inputs.pr != '' }}
+        run: echo "ref=refs/pull/${{ github.event.inputs.pr }}/merge" >> $GITHUB_ENV
 
       - name: Select server
         id: get_ip
