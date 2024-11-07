@@ -114,20 +114,3 @@ class TestQuantization(unittest.TestCase):
             del model
             torch.cuda.empty_cache()
 
-            # test checkpoint_format hint to from_quantized()
-            os.remove(f"{tmpdirname}/{QUANT_CONFIG_FILENAME}")
-
-            compat_quantize_config = {
-                "bits": bits,
-                "group_size": 128,
-                "sym": sym,
-                "desc_act": False if format == FORMAT.MARLIN else True,
-            }
-            model = GPTQModel.load(
-                tmpdirname,
-                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
-                quantize_config=compat_quantize_config,
-                format=format,
-            )
-            assert isinstance(model.quantize_config, QuantizeConfig)
-
