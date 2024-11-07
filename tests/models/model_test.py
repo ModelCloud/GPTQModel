@@ -54,7 +54,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        max_length = 4096
+        max_length = 2048
         traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
                                  split="train").filter(
             lambda x: len(x["text"]) >= max_length and len(x["text"]) <= (max_length * 1.5))
@@ -82,7 +82,7 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=64)
+        model.quantize(calibration_dataset, batch_size=4)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
