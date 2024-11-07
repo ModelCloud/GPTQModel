@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Union
 
+from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -115,19 +117,18 @@ class GPTQModel:
             use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
-            format: Optional[FORMAT] = None,
             **kwargs,
     ):
         config = AutoConfig.from_pretrained(model_id_or_path)
 
-        if hasattr(config, "quantization_config"):
+        if hasattr(config, "quantization_config") or any(os.path.exists(os.path.join(model_id_or_path, name)) for name in
+                     [QUANT_CONFIG_FILENAME, "quant_config.json"]):
             return cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
                 max_memory=max_memory,
                 device=device,
                 backend=backend,
-                format=format,
                 quantize_config=quantize_config,
                 use_safetensors=use_safetensors,
                 trust_remote_code=trust_remote_code,
