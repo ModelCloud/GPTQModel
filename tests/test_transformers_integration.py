@@ -62,7 +62,7 @@ class TestTransformersIntegration(unittest.TestCase):
         self.assertResult(model, tokenizer, False, reference_output)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save(
+            model.save_pretrained(
                 tmp_dir,
             )
 
