@@ -109,7 +109,6 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-            max_memory: Optional[dict] = None,
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
             use_safetensors: bool = True,
@@ -124,7 +123,6 @@ class GPTQModel:
             return cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
-                max_memory=max_memory,
                 device=device,
                 backend=backend,
                 format=format,
@@ -163,7 +161,6 @@ class GPTQModel:
         cls,
         model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-        max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
         use_safetensors: bool = True,
@@ -180,7 +177,6 @@ class GPTQModel:
         return quant_func(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
-            max_memory=max_memory,
             device=device,
             backend=backend,
             use_safetensors=use_safetensors,

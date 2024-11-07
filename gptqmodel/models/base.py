@@ -810,7 +810,6 @@ class BaseGPTQModel(nn.Module):
         cls,
         model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-        max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
         torch_dtype: [str | torch.dtype] = "auto",
@@ -825,7 +824,6 @@ class BaseGPTQModel(nn.Module):
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
-            max_memory=max_memory,
             backend=backend,
             device=device,
             torch_dtype=torch_dtype,
