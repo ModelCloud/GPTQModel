@@ -159,6 +159,7 @@ jobs:
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
 
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
+
           all_tests_models = [f"tests/{f.removesuffix('.py')}" for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
           all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
 
@@ -211,7 +212,7 @@ jobs:
           fi
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
           echo "RUN_ID=${run_id}"
-          
+
           if grep -q "bitblas" tests/${{ matrix.test_script }}.py; then
               echo "BITBLAS=1" >> $GITHUB_ENV
           fi
