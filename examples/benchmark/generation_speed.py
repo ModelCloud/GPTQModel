@@ -162,13 +162,13 @@ def load_model_tokenizer(
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if from_pretrained:
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=QuantizeConfig(),
             trust_remote_code=trust_remote_code,
         )
     else:
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
             model_basename=model_basename,

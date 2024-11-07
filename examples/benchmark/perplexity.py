@@ -63,7 +63,7 @@ if __name__ == "__main__":
     if args.is_quantized:
         from gptqmodel import GPTQModel
 
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             args.model_name,
             device_map="auto",
             model_basename=args.model_basename,

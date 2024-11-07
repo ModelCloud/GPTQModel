@@ -49,6 +49,8 @@ from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from transformers import AutoConfig
+from transformers.utils.hub import cached_file
+from os.path import join, isdir
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -118,10 +120,24 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
-        config = AutoConfig.from_pretrained(model_id_or_path)
+        is_quantized = False
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path), "quantization_config"):
+            is_quantized = True
+        else:
+            for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
+                if isdir(model_id_or_path):  # Local
+                    resolved_config_file = join(model_id_or_path, name)
+                else:  # Remote
+                    resolved_config_file = cached_file(
+                        model_id_or_path,
+                        name,
+                    )
 
-        if hasattr(config, "quantization_config") or any(os.path.exists(os.path.join(model_id_or_path, name)) for name in
-                     [QUANT_CONFIG_FILENAME, "quant_config.json"]):
+                if resolved_config_file is not None:
+                    is_quantized = True
+                    break
+
+        if is_quantized:
             return cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
