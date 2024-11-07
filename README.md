@@ -139,8 +139,8 @@ Below is an example for the simplest use of `gptqmodel` to quantize a model and 
 from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
-pretrained_model_dir = "facebook/opt-125m"
-quant_output_dir = "opt-125m-4bit"
+model_id = "facebook/opt-125m"
+quant_path = "opt-125m-gptqmodel-4bit"
 
 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
 calibration_dataset = [
@@ -154,17 +154,17 @@ quant_config = QuantizeConfig(
     group_size=128,  # 128 is good balance between quality and performance
 )
 
-# load un-quantized model, by default, the model will always be loaded into CPU memory
-model = GPTQModel.from_pretrained(pretrained_model_dir, quant_config)
+# load un-quantized model into into cpu memory
+model = GPTQModel.load(model_id, quant_config)
 
-# quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
+# quantize model
 model.quantize(calibration_dataset)
 
 # save quantized model
-model.save_quantized(quant_output_dir)
+model.save_quantized(quant_path)
 
 # load quantized model to the first GPU
-model = GPTQModel.from_quantized(quant_output_dir)
+model = GPTQModel.load(quant_path)
 
 # inference with model.generate
 print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
