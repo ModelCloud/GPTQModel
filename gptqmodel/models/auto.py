@@ -144,7 +144,6 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 backend=backend,
-                quantize_config=quantize_config,
                 use_safetensors=use_safetensors,
                 trust_remote_code=trust_remote_code,
                 verify_hash=verify_hash,
