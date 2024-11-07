@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 random.seed(0)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 class CustomizedMinNewTokensLogitsProcessor(LogitsProcessor):
     def __init__(
         self,
@@ -229,7 +227,7 @@ def main():
     parser.add_argument("--model_basename", type=str, default=None)
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX'])
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
@@ -239,6 +237,8 @@ def main():
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
+
+    device = torch.device('cpu' if not torch.cuda.is_available() or args.backend == "IPEX" else 'cpu')
 
     max_memory = {}
     if args.per_gpu_max_memory is not None and args.per_gpu_max_memory > 0:

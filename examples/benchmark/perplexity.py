@@ -53,7 +53,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use_fast_tokenizer", action="store_true", help="Whether to use fast tokenizer")
     parser.add_argument("--trust_remote_code", action="store_true", help="Whether to use remote code")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'], help="Whether to use BACKEND format")
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX'], help="Whether to use BACKEND format")
     args = parser.parse_args()
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
