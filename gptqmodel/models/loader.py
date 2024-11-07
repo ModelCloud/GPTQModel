@@ -214,7 +214,7 @@ class ModelLoader():
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        quantize_config = QuantizeConfig.from_pretrained(model_id_or_path)
+        quantize_config = QuantizeConfig.from_pretrained(model_id_or_path, **cached_file_kwargs, **kwargs)
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
