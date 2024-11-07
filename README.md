@@ -92,11 +92,11 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 
 ## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
 
-![image](https://github.com/user-attachments/assets/5b57ff7d-d6e5-4a7e-be52-b41c03e71e54)
+![image](https://github.com/user-attachments/assets/9df7e05d-ca8d-4ac7-a74d-552e100dd8a5)
 
-## Platform/GPU Requirements
+## Platform Requirements
 
-GPTQModel is currently Linux only and requires CUDA capability >= 6.0 Nvidia GPU. 
+GPTQModel is validated for Linux x86_64 with Nvidia GPUs. Windows WSL2 may work but un-tested. 
 
 ## Install
 
