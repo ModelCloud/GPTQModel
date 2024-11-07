@@ -47,7 +47,6 @@ from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from transformers import AutoConfig
-from ..quantization.config import FORMAT
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
