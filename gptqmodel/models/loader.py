@@ -127,10 +127,8 @@ class ModelLoader():
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
-            quantize_config: Optional[QuantizeConfig] = None,
             use_safetensors: bool = True,
             trust_remote_code: bool = False,
-            format: Optional[FORMAT] = None,
             verify_hash: Optional[Union[str, List[str]]] = None,
             require_trust_remote_code: bool = False,
             require_transformers_version: Optional[str] = None,
@@ -217,13 +215,7 @@ class ModelLoader():
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        if quantize_config is None:
-            quantize_config = QuantizeConfig.from_pretrained(
-                model_name_or_path, format=format, **cached_file_kwargs, **kwargs
-            )
-        else:
-            if not isinstance(quantize_config, QuantizeConfig):
-                quantize_config = QuantizeConfig.from_quant_config(quantize_config, format)
+        quantize_config = QuantizeConfig.from_pretrained(model_name_or_path)
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
