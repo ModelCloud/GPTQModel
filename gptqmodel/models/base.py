@@ -816,7 +816,6 @@ class BaseGPTQModel(nn.Module):
         torch_dtype: [str | torch.dtype] = "auto",
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
-        format: Optional[FORMAT] = None,
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
@@ -832,7 +831,6 @@ class BaseGPTQModel(nn.Module):
             torch_dtype=torch_dtype,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
-            format=format,
             verify_hash=verify_hash,
             require_trust_remote_code=cls.require_trust_remote_code,
             require_transformers_version=cls.require_transformers_version,
