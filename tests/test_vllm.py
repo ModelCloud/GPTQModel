@@ -1,16 +1,17 @@
 import gc
 import os
-import sys
 import subprocess
+import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import importlib.util  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-import importlib.util  # noqa: E402
+
 
 class TestLoadVLLM(unittest.TestCase):
 

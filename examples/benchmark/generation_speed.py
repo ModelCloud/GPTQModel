@@ -267,6 +267,7 @@ def main():
         args.max_new_tokens,
     )
 
+    device = "cpu" if not torch.cuda.is_available() or args.backend == "IPEX" else "cuda:0"
     model.to(device)
 
     generation_config = GenerationConfig(

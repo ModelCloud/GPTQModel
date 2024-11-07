@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import os
+from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from transformers import AutoConfig
+from transformers.utils.hub import cached_file
+
 from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -48,9 +51,6 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-from transformers import AutoConfig
-from transformers.utils.hub import cached_file
-from os.path import join, isdir
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,

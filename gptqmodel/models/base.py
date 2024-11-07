@@ -197,7 +197,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
-        
+
         backend = BACKEND.AUTO
         if not torch.cuda.is_available():
             self.quantize_config.format = FORMAT.IPEX
@@ -632,7 +632,7 @@ class BaseGPTQModel(nn.Module):
             self.save_quantized(save_dir, safetensors_metadata, use_safetensors, max_shard_size)
         else:
             self.save_pretrained(save_dir, **kwargs)
-            
+
     def save_quantized(
         self,
         save_dir: str,
