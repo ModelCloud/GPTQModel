@@ -143,7 +143,7 @@ def load_data(tokenizer, n_samples, max_new_tokens):
 
 
 def load_model_tokenizer(
-    model_name_or_path: str,
+    model_id_or_path: str,
     backend: BACKEND,
     tokenizer_name_or_path: Optional[str] = None,
     from_pretrained: bool = False,
@@ -155,7 +155,7 @@ def load_model_tokenizer(
     use_fast_tokenizer: bool = False,
 ):
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=tokenizer_name_or_path or model_name_or_path,
+        pretrained_model_name_or_path=tokenizer_name_or_path or model_id_or_path,
         use_fast=use_fast_tokenizer,
         trust_remote_code=trust_remote_code,
     )
@@ -164,14 +164,14 @@ def load_model_tokenizer(
 
     if from_pretrained:
         model = GPTQModel.from_pretrained(
-            pretrained_model_name_or_path=model_name_or_path,
+            pretrained_model_id_or_path=model_id_or_path,
             quantize_config=QuantizeConfig(),
             max_memory=max_memory,
             trust_remote_code=trust_remote_code,
         )
     else:
         model = GPTQModel.from_quantized(
-            model_name_or_path,
+            model_id_or_path,
             max_memory=max_memory,
             quantize_config=quantize_config,
             model_basename=model_basename,
@@ -223,7 +223,7 @@ def benchmark_generation_speed(model, tokenizer, examples, generation_config):
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--model_name_or_path", type=str)
+    parser.add_argument("--model_id_or_path", type=str)
     parser.add_argument("--tokenizer_name_or_path", type=str, default=None)
     parser.add_argument("--from_pretrained", action="store_true")
     parser.add_argument("--model_basename", type=str, default=None)
@@ -263,7 +263,7 @@ def main():
     logger.info("loading model and tokenizer")
     start = time.time()
     model, tokenizer = load_model_tokenizer(
-        model_name_or_path=args.model_name_or_path,
+        model_id_or_path=args.model_id_or_path,
         tokenizer_name_or_path=args.tokenizer_name_or_path,
         from_pretrained=args.from_pretrained,
         max_memory=max_memory,

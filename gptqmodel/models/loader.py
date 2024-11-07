@@ -41,7 +41,7 @@ class ModelLoader():
     @classmethod
     def from_pretrained(
             cls,
-            pretrained_model_name_or_path: str,
+            pretrained_model_id_or_path: str,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
             require_trust_remote_code=None,
@@ -64,7 +64,7 @@ class ModelLoader():
 
         if require_trust_remote_code and not trust_remote_code:
             raise ValueError(
-                f"{pretrained_model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+                f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
         if require_transformers_version:
@@ -72,7 +72,7 @@ class ModelLoader():
             if passed is not None:
                 if not passed:
                     raise ValueError(
-                        f"{pretrained_model_name_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
+                        f"{pretrained_model_id_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
             else:
                 raise ValueError(
                     f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
@@ -86,7 +86,7 @@ class ModelLoader():
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
-        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
+        config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         if torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config)
@@ -102,7 +102,7 @@ class ModelLoader():
         if model_init_kwargs.get("cpu") != "cpu":
             torch.cuda.empty_cache()
 
-        model = cls.model_loader.from_pretrained(pretrained_model_name_or_path, **model_init_kwargs)
+        model = cls.model_loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
@@ -121,7 +121,7 @@ class ModelLoader():
     @classmethod
     def from_quantized(
             cls,
-            model_name_or_path: Optional[str],
+            model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             max_memory: Optional[dict] = None,
             device: Optional[Union[str, int]] = None,
@@ -164,7 +164,7 @@ class ModelLoader():
         """load quantized model from local disk"""
         if require_trust_remote_code and not trust_remote_code:
             raise ValueError(
-                f"{model_name_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
+                f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
         if require_transformers_version:
@@ -172,7 +172,7 @@ class ModelLoader():
             if passed is not None:
                 if not passed:
                     raise ValueError(
-                        f"{model_name_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
+                        f"{model_id_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
             else:
                 raise ValueError(f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
 
@@ -202,7 +202,7 @@ class ModelLoader():
 
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
-            model_name_or_path,
+            model_id_or_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
@@ -215,7 +215,7 @@ class ModelLoader():
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        quantize_config = QuantizeConfig.from_pretrained(model_name_or_path)
+        quantize_config = QuantizeConfig.from_pretrained(model_id_or_path)
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
@@ -224,7 +224,7 @@ class ModelLoader():
                 from ..utils.vllm import load_model_by_vllm, vllm_generate
 
                 model = load_model_by_vllm(
-                    model=model_name_or_path,
+                    model=model_id_or_path,
                     trust_remote_code=trust_remote_code,
                     **kwargs,
                 )
@@ -237,7 +237,7 @@ class ModelLoader():
                 from ..utils.sglang import load_model_by_sglang, sglang_generate
 
                 model, hf_config = load_model_by_sglang(
-                    model=model_name_or_path,
+                    model=model_id_or_path,
                     trust_remote_code=trust_remote_code,
                     **kwargs,
                 )
@@ -289,11 +289,11 @@ class ModelLoader():
         else:
             extensions += [".pt", ".pth"]
 
-        model_name_or_path = str(model_name_or_path)
+        model_id_or_path = str(model_id_or_path)
 
         # Retrieve (and if necessary download) the quantized checkpoint(s).
         is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
             extensions=extensions,
             possible_model_basenames=possible_model_basenames,
             **cached_file_kwargs,

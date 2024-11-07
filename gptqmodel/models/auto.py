@@ -106,7 +106,7 @@ class GPTQModel:
     @classmethod
     def load(
             cls,
-            model_name_or_path: Optional[str],
+            model_id_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             max_memory: Optional[dict] = None,
@@ -118,11 +118,11 @@ class GPTQModel:
             format: Optional[FORMAT] = None,
             **kwargs,
     ):
-        config = AutoConfig.from_pretrained(model_name_or_path)
+        config = AutoConfig.from_pretrained(model_id_or_path)
 
         if hasattr(config, "quantization_config"):
             return cls.from_quantized(
-                model_name_or_path=model_name_or_path,
+                model_id_or_path=model_id_or_path,
                 device_map=device_map,
                 max_memory=max_memory,
                 device=device,
@@ -136,7 +136,7 @@ class GPTQModel:
             )
         else:
             return cls.from_pretrained(
-                pretrained_model_name_or_path=model_name_or_path,
+                pretrained_model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
                 trust_remote_code=trust_remote_code,
                 **kwargs,
@@ -145,14 +145,14 @@ class GPTQModel:
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: str,
+        pretrained_model_id_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
-        model_type = check_and_get_model_type(pretrained_model_name_or_path, trust_remote_code)
+        model_type = check_and_get_model_type(pretrained_model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            pretrained_model_id_or_path=pretrained_model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             **model_init_kwargs,
@@ -161,7 +161,7 @@ class GPTQModel:
     @classmethod
     def from_quantized(
         cls,
-        model_name_or_path: Optional[str],
+        model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
         max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
@@ -174,11 +174,11 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
-        model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
+        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
         return quant_func(
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
             device_map=device_map,
             max_memory=max_memory,
             device=device,
