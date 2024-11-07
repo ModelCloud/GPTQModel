@@ -51,6 +51,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+from huggingface_hub import list_repo_files
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -126,16 +127,16 @@ class GPTQModel:
         else:
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
                 if isdir(model_id_or_path):  # Local
-                    resolved_config_file = join(model_id_or_path, name)
-                else:  # Remote
-                    resolved_config_file = cached_file(
-                        model_id_or_path,
-                        name,
-                    )
+                    if join(model_id_or_path, name) is not None:
+                        is_quantized = True
+                        break
 
-                if resolved_config_file is not None:
-                    is_quantized = True
-                    break
+                else:  # Remote
+                    files = list_repo_files(repo_id=model_id_or_path)
+                    for f in files:
+                        if f == name:
+                            is_quantized = True
+                            break
 
         if is_quantized:
             return cls.from_quantized(
