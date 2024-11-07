@@ -142,7 +142,7 @@ from gptqmodel import GPTQModel, QuantizeConfig
 model_id = "facebook/opt-125m"
 quant_path = "opt-125m-gptqmodel-4bit"
 
-tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
+tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
 calibration_dataset = [
     tokenizer(
         "The world is a wonderful place full of beauty and love."
@@ -161,7 +161,7 @@ model = GPTQModel.load(model_id, quant_config)
 model.quantize(calibration_dataset)
 
 # save quantized model
-model.save_quantized(quant_path)
+model.save(quant_path)
 
 # load quantized model to the first GPU
 model = GPTQModel.load(quant_path)
