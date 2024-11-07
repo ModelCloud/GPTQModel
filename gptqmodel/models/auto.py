@@ -122,7 +122,7 @@ class GPTQModel:
             **kwargs,
     ):
         is_quantized = False
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             is_quantized = True
         else:
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
