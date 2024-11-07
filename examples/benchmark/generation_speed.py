@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 random.seed(0)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 class CustomizedMinNewTokensLogitsProcessor(LogitsProcessor):
     def __init__(
         self,
@@ -226,7 +224,7 @@ def main():
     parser.add_argument("--model_basename", type=str, default=None)
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX'])
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)

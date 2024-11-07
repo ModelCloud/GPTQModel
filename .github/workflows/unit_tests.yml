@@ -103,7 +103,7 @@ jobs:
 
       - name: Install requirements
         run: |
-          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.5.1 3.11
           uv pip install transformers -U
 
       - name: Compile
@@ -159,7 +159,9 @@ jobs:
           cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
 
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
-          all_tests = [item for item in all_tests if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
+
+          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
+          all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
 
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
 
@@ -210,7 +212,7 @@ jobs:
           fi
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
           echo "RUN_ID=${run_id}"
-          
+
           if grep -q "bitblas" tests/${{ matrix.test_script }}.py; then
               echo "BITBLAS=1" >> $GITHUB_ENV
           fi
@@ -248,7 +250,7 @@ jobs:
         run: |
           uv pip install auto_round optimum bitblas==0.0.1.dev13 parameterized intel_extension_for_pytorch uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           uv pip install dist/*.whl
-          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.5.1 3.11
           uv pip install transformers GPUtil -U
 
       - name: Check platform

@@ -59,10 +59,11 @@ def main():
     model.save(quantized_model_id, use_safetensors=True)
 
     # load quantized model, currently only support cpu or single gpu
-    model = GPTQModel.load(quantized_model_id, device="cuda:0")
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    model = GPTQModel.load(quantized_model_id, device=device)
 
     # inference with model.generate
-    print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to("cuda:0"))[0]))
+    print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to(device))[0]))
 
     print(f"Quantized Model {quantized_model_id} avg PPL is {calculate_avg_ppl(model, tokenizer)}")
 

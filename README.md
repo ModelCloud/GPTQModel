@@ -92,11 +92,11 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 
 ## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
 
-![image](https://github.com/user-attachments/assets/5b57ff7d-d6e5-4a7e-be52-b41c03e71e54)
+![image](https://github.com/user-attachments/assets/9df7e05d-ca8d-4ac7-a74d-552e100dd8a5)
 
-## Platform/GPU Requirements
+## Platform Requirements
 
-GPTQModel is currently Linux only and requires CUDA capability >= 6.0 Nvidia GPU. 
+GPTQModel is validated for Linux x86_64 with Nvidia GPUs. Windows WSL2 may work but un-tested. 
 
 ## Install
 
@@ -139,10 +139,10 @@ Below is an example for the simplest use of `gptqmodel` to quantize a model and 
 from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
-pretrained_model_dir = "facebook/opt-125m"
-quant_output_dir = "opt-125m-4bit"
+model_id = "facebook/opt-125m"
+quant_path = "opt-125m-gptqmodel-4bit"
 
-tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
+tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
 calibration_dataset = [
     tokenizer(
         "The world is a wonderful place full of beauty and love."
@@ -154,17 +154,17 @@ quant_config = QuantizeConfig(
     group_size=128,  # 128 is good balance between quality and performance
 )
 
-# load un-quantized model, by default, the model will always be loaded into CPU memory
-model = GPTQModel.load(pretrained_model_dir, quant_config)
+# load un-quantized model into into cpu memory
+model = GPTQModel.load(model_id, quant_config)
 
-# quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
+# quantize model
 model.quantize(calibration_dataset)
 
 # save quantized model
-model.save(quant_output_dir)
+model.save(quant_path)
 
 # load quantized model to the first GPU
-model = GPTQModel.load(quant_output_dir)
+model = GPTQModel.load(quant_path)
 
 # inference with model.generate
 print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
