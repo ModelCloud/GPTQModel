@@ -110,7 +110,7 @@ Use `--help` flag to see detailed descriptions for more command arguments.
 
 To execute this script, using command like this:
 ```shell
-CUDA_VISIBLE_DEVICES=0 python generation_speed.py --model_name_or_path PATH/TO/MODEL/DIR
+CUDA_VISIBLE_DEVICES=0 python generation_speed.py --model_id_or_path PATH/TO/MODEL/DIR
 ```
 
 Use `--help` flag to see detailed descriptions for more command arguments.

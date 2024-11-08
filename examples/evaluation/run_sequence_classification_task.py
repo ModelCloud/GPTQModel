@@ -43,8 +43,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
 
-    model = GPTQModel.from_pretrained(args.base_model_dir, QuantizeConfig())
-
+    model = GPTQModel.load(args.base_model_dir, QuantizeConfig())
     device = "cpu" if not torch.cuda.is_available() or args.backend == "IPEX" else "cuda:0"
     model.to(device)
 

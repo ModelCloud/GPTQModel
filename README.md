@@ -219,7 +219,7 @@ def ds_refactor_fn(samples):
 
 
 #  model = AutoModelForCausalLM.from_pretrained(MODEL).eval().half().to("cuda:0")
-model = GPTQModel.from_pretrained(MODEL, QuantizeConfig())
+model = GPTQModel.load(MODEL, QuantizeConfig())
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 task = SequenceClassificationTask(

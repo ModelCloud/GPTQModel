@@ -1,16 +1,17 @@
 import gc
 import os
-import sys
 import subprocess
+import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import importlib.util  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-import importlib.util  # noqa: E402
+
 
 class TestLoadVLLM(unittest.TestCase):
 
@@ -38,7 +39,7 @@ class TestLoadVLLM(unittest.TestCase):
         torch.cuda.empty_cache()
 
     def test_load_vllm(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
@@ -68,7 +69,7 @@ class TestLoadVLLM(unittest.TestCase):
         self.release_vllm_model()
 
     def test_load_shared_vllm(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.SHARDED_MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,

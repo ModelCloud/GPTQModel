@@ -109,7 +109,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool,  **kwargs,):
-        
+
         if exllama_v2_import_exception is not None:
             raise ValueError(
                 f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_v2_import_exception}"

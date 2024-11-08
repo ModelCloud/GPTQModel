@@ -64,7 +64,7 @@ def get_model_and_tokenizer(
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    model = GPTQModel.from_quantized(
+    model = GPTQModel.load(
         model_id,
         **model_kwargs,
     )

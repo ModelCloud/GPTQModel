@@ -42,8 +42,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
 
-    model = GPTQModel.from_pretrained(args.base_model_dir, QuantizeConfig())
-
+    model = GPTQModel.load(args.base_model_dir, QuantizeConfig())
     device = "cpu" if not torch.cuda.is_available() or args.backend == "IPEX" else "cuda:0"
     model.to(device)
 
@@ -69,7 +68,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    model = GPTQModel.from_quantized(args.quantized_model_dir, device=device, backend=get_backend(args.backend))
+    model = GPTQModel.load(args.quantized_model_dir, device=device, backend=get_backend(args.backend))
     task.model = model
     task.device = model.device
     print(f"eval result for quantized model: {task.run(generation_config=GenerationConfig(max_new_tokens=32))}")

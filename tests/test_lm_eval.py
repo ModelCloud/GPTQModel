@@ -17,7 +17,7 @@ class TestLmEval(unittest.TestCase):
 
     def test_lm_eval(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
-           model = GPTQModel.from_quantized(
+           model = GPTQModel.load(
                self.MODEL_ID
            )
            results = model.lm_eval(

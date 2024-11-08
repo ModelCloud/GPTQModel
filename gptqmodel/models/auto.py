@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from os.path import isdir, join
 from typing import Dict, List, Optional, Union
+
+from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from transformers import AutoConfig
+from transformers.utils.hub import cached_file
 
 from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
@@ -46,6 +51,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+from huggingface_hub import list_repo_files
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -103,16 +109,65 @@ class GPTQModel:
         )
 
     @classmethod
+    def load(
+            cls,
+            model_id_or_path: Optional[str],
+            quantize_config: Optional[QuantizeConfig | Dict] = None,
+            device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
+            device: Optional[Union[str, int]] = None,
+            backend: BACKEND = BACKEND.AUTO,
+            use_safetensors: bool = True,
+            trust_remote_code: bool = False,
+            verify_hash: Optional[Union[str, List[str]]] = None,
+            **kwargs,
+    ):
+        is_quantized = False
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+            is_quantized = True
+        else:
+            for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
+                if isdir(model_id_or_path):  # Local
+                    if join(model_id_or_path, name) is not None:
+                        is_quantized = True
+                        break
+
+                else:  # Remote
+                    files = list_repo_files(repo_id=model_id_or_path)
+                    for f in files:
+                        if f == name:
+                            is_quantized = True
+                            break
+
+        if is_quantized:
+            return cls.from_quantized(
+                model_id_or_path=model_id_or_path,
+                device_map=device_map,
+                device=device,
+                backend=backend,
+                use_safetensors=use_safetensors,
+                trust_remote_code=trust_remote_code,
+                verify_hash=verify_hash,
+                **kwargs,
+            )
+        else:
+            return cls.from_pretrained(
+                pretrained_model_id_or_path=model_id_or_path,
+                quantize_config=quantize_config,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+
+    @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: str,
+        pretrained_model_id_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
-        model_type = check_and_get_model_type(pretrained_model_name_or_path, trust_remote_code)
+        model_type = check_and_get_model_type(pretrained_model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            pretrained_model_id_or_path=pretrained_model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             **model_init_kwargs,
@@ -121,12 +176,10 @@ class GPTQModel:
     @classmethod
     def from_quantized(
         cls,
-        model_name_or_path: Optional[str],
+        model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-        max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
-        quantize_config: Optional[QuantizeConfig | Dict] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
         # verify weight files matches predefined hash during loading
@@ -135,16 +188,14 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
-        model_type = check_and_get_model_type(model_name_or_path, trust_remote_code)
+        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
         return quant_func(
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
             device_map=device_map,
-            max_memory=max_memory,
             device=device,
             backend=backend,
-            quantize_config=quantize_config,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,

@@ -92,7 +92,7 @@ class BaseGPTQModel(nn.Module):
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
-        model_name_or_path: str = None,
+        model_id_or_path: str = None,
     ):
         super().__init__()
 
@@ -105,7 +105,7 @@ class BaseGPTQModel(nn.Module):
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
-        self.model_name_or_path = model_name_or_path
+        self.model_id_or_path = model_id_or_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
@@ -197,7 +197,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
-        
+
         backend = BACKEND.AUTO
         if not torch.cuda.is_available():
             self.quantize_config.format = FORMAT.IPEX
@@ -620,6 +620,19 @@ class BaseGPTQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
+    def save(
+            self,
+            save_dir: str,
+            safetensors_metadata: Optional[Dict[str, str]] = None,
+            use_safetensors: bool = True,
+            max_shard_size: Optional[str] = None,
+            **kwargs,
+    ):
+        if self.quantized:
+            self.save_quantized(save_dir, safetensors_metadata, use_safetensors, max_shard_size)
+        else:
+            self.save_pretrained(save_dir, **kwargs)
+
     def save_quantized(
         self,
         save_dir: str,
@@ -638,7 +651,7 @@ class BaseGPTQModel(nn.Module):
             use_safetensors=use_safetensors,
             max_shard_size=max_shard_size,
             quantized=self.quantized,
-            model_name_or_path=self.model_name_or_path,
+            model_id_or_path=self.model_id_or_path,
             model=self.model,
             load_quantized_model=self.load_quantized_model,
             qlinear_kernel=self.qlinear_kernel,
@@ -777,34 +790,31 @@ class BaseGPTQModel(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: str,
+        pretrained_model_id_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
+        model = ModelLoader.from_pretrained(pretrained_model_id_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
         return cls(
             model,
             quantized=False,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            model_name_or_path=pretrained_model_name_or_path
+            model_id_or_path=pretrained_model_id_or_path
         )
 
     @classmethod
     def from_quantized(
         cls,
-        model_name_or_path: Optional[str],
+        model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-        max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
         torch_dtype: [str | torch.dtype] = "auto",
-        quantize_config: Optional[QuantizeConfig] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
-        format: Optional[FORMAT] = None,
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
@@ -812,16 +822,13 @@ class BaseGPTQModel(nn.Module):
             backend = BACKEND.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
             device_map=device_map,
-            max_memory=max_memory,
             backend=backend,
             device=device,
             torch_dtype=torch_dtype,
-            quantize_config=quantize_config,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
-            format=format,
             verify_hash=verify_hash,
             require_trust_remote_code=cls.require_trust_remote_code,
             require_transformers_version=cls.require_transformers_version,
@@ -846,7 +853,7 @@ class BaseGPTQModel(nn.Module):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=load_quantized_model,
             trust_remote_code=trust_remote_code,
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
         )
 
     def __getattr__(self, item):

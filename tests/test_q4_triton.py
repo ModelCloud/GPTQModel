@@ -22,7 +22,7 @@ class TestsQ4Triton(unittest.TestCase):
 
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
-        model_q = GPTQModel.from_quantized(
+        model_q = GPTQModel.load(
             model_id,
             device="cuda:0",
             backend=BACKEND.TRITON,
@@ -59,7 +59,7 @@ class TestsQ4Triton(unittest.TestCase):
         model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
-        model_q = GPTQModel.from_quantized(
+        model_q = GPTQModel.load(
             model_id,
             device="cuda:0",
             backend=BACKEND.TRITON,

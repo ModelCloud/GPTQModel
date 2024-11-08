@@ -49,19 +49,19 @@ class ModelTest(unittest.TestCase):
         print(f"Result is: \n{output}")
         return output
 
-    def load_tokenizer(self, model_name_or_path, trust_remote_code=False):
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
+    def load_tokenizer(self, model_id_or_path, trust_remote_code=False):
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        max_length = 4096
+        max_length = 2048
         traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
                                  split="train").filter(
             lambda x: len(x["text"]) >= max_length and len(x["text"]) <= (max_length * 1.5))
         return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-    def quantModel(self, model_name_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
-        tokenizer = self.load_tokenizer(model_name_or_path, trust_remote_code=trust_remote_code)
+    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
+        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
         calibration_dataset = self.load_dataset(tokenizer)
         quantize_config = QuantizeConfig(
             bits=4,
@@ -69,8 +69,8 @@ class ModelTest(unittest.TestCase):
             format=FORMAT.GPTQ,
         )
 
-        model = GPTQModel.from_pretrained(
-            model_name_or_path,
+        model = GPTQModel.load(
+            model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype
@@ -82,32 +82,32 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=64)
+        model.quantize(calibration_dataset, batch_size=4)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
             os.makedirs(save_dir, exist_ok=True)
-            model.save_quantized(save_dir)
+            model.save(save_dir)
             tokenizer.save_pretrained(save_dir)
             q_model, q_tokenizer = self.loadQuantModel(save_dir, trust_remote_code=trust_remote_code)
         else:
             with tempfile.TemporaryDirectory() as tmpdirname:
-                model.save_quantized(tmpdirname)
+                model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
 
         return q_model, q_tokenizer
 
 
-    def loadQuantModel(self, model_name_or_path, trust_remote_code=False, tokenizer_path=None):
+    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
         if tokenizer_path is None:
-            tokenizer_path = model_name_or_path
+            tokenizer_path = model_id_or_path
         else:
             trust_remote_code = True
         tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
 
-        model = GPTQModel.from_quantized(
-            model_name_or_path,
+        model = GPTQModel.load(
+            model_id_or_path,
             trust_remote_code=trust_remote_code,
         )
 
@@ -117,7 +117,7 @@ class ModelTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             results = model.lm_eval(
                 model="vllm",
-                model_args=f"pretrained={model.model_name_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}",
+                model_args=f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}",
                 output_path=tmp_dir,
                 tasks=self.TASK_NAME,
                 apply_chat_template=apply_chat_template,
@@ -133,8 +133,8 @@ class ModelTest(unittest.TestCase):
                 if metric != 'alias' and 'stderr' not in metric
             }
             print(task_results)
-            if os.path.exists(model.model_name_or_path):
-                shutil.rmtree(model.model_name_or_path)
+            if os.path.exists(model.model_id_or_path):
+                shutil.rmtree(model.model_id_or_path)
             return task_results
 
     def calculatorPer(self, filter, value):

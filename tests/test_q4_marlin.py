@@ -69,7 +69,7 @@ class TestQ4Marlin(unittest.TestCase):
         device = torch.device("cuda:0")
 
         try:
-            model_q = GPTQModel.from_quantized(model_id, revision=revision, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, revision=revision, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
@@ -95,7 +95,7 @@ class TestQ4Marlin(unittest.TestCase):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "s3nh/starcoderbase-1b-GPTQ"
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
@@ -138,20 +138,20 @@ class TestQ4Marlin(unittest.TestCase):
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         calibration_dataset = [tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             model_id,
             quantize_config=quantize_config,
         )
         model.quantize(calibration_dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 
             del model
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
                 backend=BACKEND.MARLIN,

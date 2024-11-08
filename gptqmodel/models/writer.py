@@ -52,7 +52,7 @@ class ModelWriter():
             cls,
             save_dir: str,
             quantized: bool,
-            model_name_or_path: str,
+            model_id_or_path: str,
             model: PreTrainedModel,
             load_quantized_model: bool,
             qlinear_kernel: nn.Module,
@@ -77,7 +77,7 @@ class ModelWriter():
                 w.writerow([QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME])
                 w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS), entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in quant_log])
 
-        pre_quantized_size_mb = get_model_files_size(model_name_or_path)
+        pre_quantized_size_mb = get_model_files_size(model_id_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
         # write gptqmodel tooling fingerprint to config
@@ -124,7 +124,7 @@ class ModelWriter():
         else:
             model = cls.get_model_with_quantize(
                 quantize_config=quantize_config,
-                model_name_or_path=model_name_or_path,
+                model_id_or_path=model_id_or_path,
                 dynamic_expert_index=dynamic_expert_index,
                 lm_head=lm_head,
                 base_modules=base_modules,
@@ -270,12 +270,12 @@ class ModelWriter():
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if trust_remote_code:
-            copy_py_files(save_dir, model_id_or_path=model_name_or_path)
+            copy_py_files(save_dir, model_id_or_path=model_id_or_path)
 
     @classmethod
     def get_model_with_quantize(cls,
                                 quantize_config,
-                                model_name_or_path,
+                                model_id_or_path,
                                 dynamic_expert_index,
                                 lm_head,
                                 base_modules,
@@ -284,7 +284,7 @@ class ModelWriter():
         ):
 
         config = AutoConfig.from_pretrained(
-            model_name_or_path,
+            model_id_or_path,
             trust_remote_code=True,
         )
 

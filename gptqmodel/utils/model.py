@@ -28,7 +28,6 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
@@ -466,7 +465,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     return model
 
 
-def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs):
+def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs):
     """
     Retrives (and if necessary downloads from Hugging Face Hub) the model checkpoint. Sharding is supported. All the `possible_model_basenames` (e.g. `["model", "model-4bit-gptq"]`) will be explored over all `extensions` (e.g. `[".bin", ".safetensors"]`).
     """
@@ -474,18 +473,18 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
     resolved_archive_file = None
     true_model_basename = None
 
-    if os.path.isdir(model_name_or_path):
+    if os.path.isdir(model_id_or_path):
         for ext in extensions:
             for possible_model_basename in possible_model_basenames:
                 shard_index_name = possible_model_basename + ext + ".index.json"
                 searched_files.append(shard_index_name)
-                possible_index_file = os.path.join(model_name_or_path, shard_index_name)
+                possible_index_file = os.path.join(model_id_or_path, shard_index_name)
                 if os.path.isfile(possible_index_file):
                     # The model is sharded over several checkpoints.
                     possible_model_basename = possible_index_file.replace(ext + ".index.json", "")
                     return True, possible_index_file, possible_model_basename
                 else:
-                    model_save_name = os.path.join(model_name_or_path, possible_model_basename)
+                    model_save_name = os.path.join(model_id_or_path, possible_model_basename)
                     searched_files.append(possible_model_basename + ext)
                     if os.path.isfile(model_save_name + ext):
                         resolved_archive_file = model_save_name + ext
@@ -496,7 +495,7 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
             for possible_model_basename in possible_model_basenames:
                 shard_index_name = possible_model_basename + ext + ".index.json"
                 shard_index = cached_file(
-                    model_name_or_path,
+                    model_id_or_path,
                     shard_index_name,
                     **cached_file_kwargs,
                 )
@@ -509,14 +508,14 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
                         shards = list(set(index_json["weight_map"].values()))
                         for shard in shards:
                             resolved_archive_file = cached_file(
-                                model_name_or_path,
+                                model_id_or_path,
                                 shard,
                                 **cached_file_kwargs,
                             )
                         return True, shard_index, possible_model_basename
                 else:
                     resolved_archive_file = cached_file(
-                        model_name_or_path,
+                        model_id_or_path,
                         possible_model_basename + ext,
                         **cached_file_kwargs,
                     )
@@ -529,7 +528,7 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
 
     if resolved_archive_file is None:
         raise FileNotFoundError(
-            f"Could not find a model in {model_name_or_path} with a name in {', '.join(searched_files)}. Please specify the argument model_basename to use a custom file name."
+            f"Could not find a model in {model_id_or_path} with a name in {', '.join(searched_files)}. Please specify the argument model_basename to use a custom file name."
         )
 
     return False, resolved_archive_file, true_model_basename

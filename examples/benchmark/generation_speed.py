@@ -141,11 +141,10 @@ def load_data(tokenizer, n_samples, max_new_tokens):
 
 
 def load_model_tokenizer(
-    model_name_or_path: str,
+    model_id_or_path: str,
     backend: BACKEND,
     tokenizer_name_or_path: Optional[str] = None,
     from_pretrained: bool = False,
-    max_memory: Optional[dict] = None,
     model_basename: Optional[str] = None,
     quantize_config: Optional[str] = None,
     trust_remote_code: bool = False,
@@ -153,7 +152,7 @@ def load_model_tokenizer(
     use_fast_tokenizer: bool = False,
 ):
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=tokenizer_name_or_path or model_name_or_path,
+        pretrained_model_name_or_path=tokenizer_name_or_path or model_id_or_path,
         use_fast=use_fast_tokenizer,
         trust_remote_code=trust_remote_code,
     )
@@ -161,16 +160,14 @@ def load_model_tokenizer(
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if from_pretrained:
-        model = GPTQModel.from_pretrained(
-            pretrained_model_name_or_path=model_name_or_path,
+        model = GPTQModel.load(
+            pretrained_model_id_or_path=model_id_or_path,
             quantize_config=QuantizeConfig(),
-            max_memory=max_memory,
             trust_remote_code=trust_remote_code,
         )
     else:
-        model = GPTQModel.from_quantized(
-            model_name_or_path,
-            max_memory=max_memory,
+        model = GPTQModel.load(
+            model_id_or_path,
             quantize_config=quantize_config,
             model_basename=model_basename,
             use_safetensors=use_safetensors,
@@ -221,7 +218,7 @@ def benchmark_generation_speed(model, tokenizer, examples, generation_config):
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--model_name_or_path", type=str)
+    parser.add_argument("--model_id_or_path", type=str)
     parser.add_argument("--tokenizer_name_or_path", type=str, default=None)
     parser.add_argument("--from_pretrained", action="store_true")
     parser.add_argument("--model_basename", type=str, default=None)
@@ -231,25 +228,10 @@ def main():
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
-    parser.add_argument("--per_gpu_max_memory", type=int, default=None)
-    parser.add_argument("--cpu_max_memory", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
-
-    device = torch.device('cpu' if not torch.cuda.is_available() or args.backend == "IPEX" else 'cpu')
-
-    max_memory = {}
-    if args.per_gpu_max_memory is not None and args.per_gpu_max_memory > 0:
-        if torch.cuda.is_available():
-            max_memory.update({i: f"{args.per_gpu_max_memory}GIB" for i in range(torch.cuda.device_count())})
-    if args.cpu_max_memory is not None and args.cpu_max_memory > 0 and max_memory:
-        max_memory["cpu"] = f"{args.cpu_max_memory}GIB"
-    if not max_memory:
-        max_memory = None
-
-    logger.info(f"max_memory: {max_memory}")
 
     quantize_config = None
     if args.quantize_config_save_dir:
@@ -263,10 +245,9 @@ def main():
     logger.info("loading model and tokenizer")
     start = time.time()
     model, tokenizer = load_model_tokenizer(
-        model_name_or_path=args.model_name_or_path,
+        model_id_or_path=args.model_id_or_path,
         tokenizer_name_or_path=args.tokenizer_name_or_path,
         from_pretrained=args.from_pretrained,
-        max_memory=max_memory,
         model_basename=args.model_basename,
         quantize_config=quantize_config,
         trust_remote_code=args.trust_remote_code,
@@ -286,6 +267,7 @@ def main():
         args.max_new_tokens,
     )
 
+    device = "cpu" if not torch.cuda.is_available() or args.backend == "IPEX" else "cuda:0"
     model.to(device)
 
     generation_config = GenerationConfig(
