@@ -84,6 +84,13 @@ jobs:
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
     steps:
+
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print Env
         run: |
           echo "== pyenv =="
@@ -94,12 +101,6 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
 
       - name: Install requirements
         run: |
@@ -196,6 +197,12 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
       - name: Print Env
         run: |
           echo "== pyenv =="
@@ -218,12 +225,6 @@ jobs:
           if grep -q "bitblas" tests/${{ matrix.test_script }}.py; then
               echo "BITBLAS=1" >> $GITHUB_ENV
           fi
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
 
       - name: Download wheel
         continue-on-error: true
@@ -316,6 +317,12 @@ jobs:
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print Env
         run: |
           echo "== pyenv =="
@@ -326,12 +333,6 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
 
       - name: Download wheel
         continue-on-error: true
