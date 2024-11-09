@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os.path
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
@@ -127,7 +128,7 @@ class GPTQModel:
         else:
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
                 if isdir(model_id_or_path):  # Local
-                    if join(model_id_or_path, name) is not None:
+                    if os.path.exists(join(model_id_or_path, name)):
                         is_quantized = True
                         break
 
