@@ -143,7 +143,7 @@ from gptqmodel import GPTQModel, QuantizeConfig
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
 
-tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 calibration_dataset = [
   tokenizer(example["text"])
