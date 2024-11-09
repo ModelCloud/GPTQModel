@@ -15,7 +15,7 @@ class ChatGLM(BaseGPTQModel):
         ["mlp.dense_4h_to_h"],
     ]
 
-    # chatglm requires custom transformer forward method
+    # fix: chatglm-3 and glm-4 have broken transformer (latest) compat due to missing/wrong type-hints
     def monkey_patch(self):
         from typing import Optional
         import torch
