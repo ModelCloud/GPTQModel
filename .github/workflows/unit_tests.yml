@@ -311,6 +311,8 @@ jobs:
     timeout-minutes: 60
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      volumes:
+        - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
       matrix:
