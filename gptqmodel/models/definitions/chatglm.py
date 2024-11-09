@@ -2,7 +2,7 @@ from ..base import BaseGPTQModel
 
 
 class ChatGLM(BaseGPTQModel):
-    monkey_patch_forward = True
+    require_monkeypatch = True
 
     base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
 
@@ -16,7 +16,7 @@ class ChatGLM(BaseGPTQModel):
     ]
 
     # chatglm requires custom transformer forward method
-    def monkey_patch_forward(self):
+    def monkey_patch(self):
         from typing import Optional
         import torch
 

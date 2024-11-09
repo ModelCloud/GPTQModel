@@ -81,7 +81,7 @@ class BaseGPTQModel(nn.Module):
     model_loader = AutoModelForCausalLM
 
     # some models require monkey patching the forward method
-    monkey_patch_forward = False
+    require_monkeypatch = False
 
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
@@ -111,6 +111,9 @@ class BaseGPTQModel(nn.Module):
         self.model_id_or_path = model_id_or_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
+
+        if self.require_monkeypatch:
+            self.monkey_patch()
 
     @property
     def quantized(self):
@@ -214,9 +217,6 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
-
-        if self.monkey_patch_forward:
-            self.monkey_patch_forward()
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
