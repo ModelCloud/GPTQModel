@@ -198,6 +198,8 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          ls -ahl /
+          ls-ahl /monster/data/model
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
