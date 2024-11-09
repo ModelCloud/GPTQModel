@@ -12,7 +12,7 @@ import torch.utils.benchmark as benchmark  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-MODEL_ID = "TheBloke/Llama-7B-GPTQ"
+MODEL_ID = "/monster/data/model/Llama-7B-GPTQ"
 DATASET_ID = "timdettmers/openassistant-guanaco"
 LEARNING_RATE = 3e-5
 MAX_SEQ_LEN = 10

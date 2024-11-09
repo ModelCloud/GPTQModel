@@ -14,7 +14,7 @@ from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
-    MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+    MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     def test_marlin_local_serialization(self):
         model = GPTQModel.load(self.MODEL_ID, device="cuda:0", backend=BACKEND.MARLIN)

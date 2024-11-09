@@ -27,7 +27,7 @@ class TestTransformersIntegration(unittest.TestCase):
 
 
     def test_load_gptq_model_with_exllama(self):
-        model_id = "LnL-AI/opt-125M-autoround-lm_head-false-symTrue"
+        model_id = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         gptq_config = GPTQConfig(bits=4)
         model = AutoModelForCausalLM.from_pretrained(
@@ -39,7 +39,7 @@ class TestTransformersIntegration(unittest.TestCase):
         self.assertResult(model, tokenizer, True, reference_output)
 
     def test_quant_and_load(self):
-        model_id = "facebook/opt-125m"
+        model_id = "/monster/data/model/opt-125m"
         tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         calibration_dataset = [example["text"] for example in traindata.select(range(1024))]

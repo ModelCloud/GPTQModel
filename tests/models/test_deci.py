@@ -2,7 +2,7 @@ from model_test import ModelTest  # noqa: E402
 
 
 class TestDeci(ModelTest):
-    NATIVE_MODEL_ID = "Deci/DeciLM-7B-instruct"
+    NATIVE_MODEL_ID = "/monster/data/model/DeciLM-7B-instruct" # "Deci/DeciLM-7B-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.5239
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5222
     QUANT_ARC_MAX_NEGATIVE_DELTA = 0.55

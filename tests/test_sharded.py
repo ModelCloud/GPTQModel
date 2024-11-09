@@ -14,7 +14,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestSharded(unittest.TestCase):
-    MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+    MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     @classmethod
     def setUpClass(cls):

@@ -22,7 +22,7 @@ class TestLoadSglang(unittest.TestCase):
         if importlib.util.find_spec("sglang") is None:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
 
-        self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         self.prompt = "The capital of France is"
 
     def test_load_sglang(self):

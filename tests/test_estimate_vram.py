@@ -10,7 +10,7 @@ from gptqmodel.utils import get_vram
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestEstimateVram(unittest.TestCase):
-    NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
     def test_estimate_vram(self):
         quantize_config = QuantizeConfig(
