@@ -80,6 +80,9 @@ class BaseGPTQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
+    # some models require monkey patching the forward method
+    monkey_patch_forward = False
+
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}
@@ -211,6 +214,10 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
+
+        if self.monkey_patch_forward:
+            self.monkey_patch_forward()
+
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
