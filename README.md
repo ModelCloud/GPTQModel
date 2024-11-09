@@ -140,7 +140,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
-model_id = "/monster/data/model/Llama-3.2-1B-Instruct" #"meta-llama/Llama-3.2-1B-Instruct"
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
