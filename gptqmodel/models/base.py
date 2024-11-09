@@ -80,7 +80,7 @@ class BaseGPTQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
-    # some models require monkey patching the forward method
+    # monkey patch api for trust_remote_code=True models that have broken transformer compat 
     require_monkeypatch = False
 
     # allow models to define optional notes that output messages to users that want to use this model
@@ -112,6 +112,7 @@ class BaseGPTQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
+        # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
             self.monkey_patch()
 
