@@ -136,13 +136,12 @@ bash install.sh
 Below is an example for the simplest use of `gptqmodel` to quantize a model and inference after quantization:
 
 ```py
-import tempfile
-
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
+model_id = "/monster/data/model/Llama-3.2-1B-Instruct" #"meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
 
@@ -154,12 +153,11 @@ model = GPTQModel.load(model_id, quant_config)
 
 model.quantize(calibration_dataset)
 
-with tempfile.TemporaryDirectory() as tmp_dir:
-    model.save(tmp_dir)
+model.save(quant_path)
 
-    model = GPTQModel.load(tmp_dir)
+model = GPTQModel.load(quant_path)
 
-    print(tokenizer.decode(model.generate(**tokenizer("Uncovering deep insights begins with", return_tensors="pt").to(model.device))[0]))
+print(tokenizer.decode(model.generate(**tokenizer("Uncovering deep insights begins with", return_tensors="pt").to(model.device))[0]))
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
