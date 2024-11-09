@@ -16,7 +16,7 @@ from transformers import AutoTokenizer  # noqa: E402
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestDynamic(unittest.TestCase):
-    NATIVE_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     tmp_dir = None
 
     def calculate_avg_ppl(self, model, tokenizer):
