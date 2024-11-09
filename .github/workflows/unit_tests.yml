@@ -178,7 +178,7 @@ jobs:
           echo "GPU Test files: $gpu_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  test_gpu:
+  gpu:
     needs:
       - build-zen4
       - list-test-files
@@ -299,7 +299,7 @@ jobs:
         if: always()
         run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
-  test_cpu:
+  cpu:
     needs:
       - build-zen4
       - list-test-files
