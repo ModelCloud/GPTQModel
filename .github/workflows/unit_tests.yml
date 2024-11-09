@@ -188,7 +188,7 @@ jobs:
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
       volumes:
-        - /home/ci/models:/hf
+        - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.max-parallel).size }}
