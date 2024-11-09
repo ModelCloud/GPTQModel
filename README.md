@@ -275,13 +275,15 @@ Currently, `gptqmodel` supports: `LanguageModelingTask`, `SequenceClassification
 
 GPTQModel will use Marlin, Exllama v2, Triton kernels in that order for maximum inference performance.
 
-## Cite
+## Citation
 ```
-@article{frantar2024marlin,
-  title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
-  author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
-  journal={arXiv preprint arXiv:2408.11743},
-  year={2024}
+@misc{gptqmodel,
+    author = {ModelCloud.ai},
+    title = {GPTQModel},
+    year = {2024},
+    publisher = {GitHub},
+    journal = {GitHub repository},
+    howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
 }
 
 @article{frantar-gptq,
@@ -289,5 +291,12 @@ GPTQModel will use Marlin, Exllama v2, Triton kernels in that order for maximum 
   author={Elias Frantar and Saleh Ashkboos and Torsten Hoefler and Dan Alistarh},
   year={2022},
   journal={arXiv preprint arXiv:2210.17323}
+}
+
+@article{frantar2024marlin,
+  title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
+  author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2408.11743},
+  year={2024}
 }
 ```
