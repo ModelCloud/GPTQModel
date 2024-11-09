@@ -136,38 +136,30 @@ bash install.sh
 Below is an example for the simplest use of `gptqmodel` to quantize a model and inference after quantization:
 
 ```py
+import tempfile
+
+from datasets import load_dataset
 from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
-model_id = "facebook/opt-125m"
-quant_path = "opt-125m-gptqmodel-4bit"
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-calibration_dataset = [
-    tokenizer(
-        "The world is a wonderful place full of beauty and love."
-    )
-]
 
-quant_config = QuantizeConfig(
-    bits=4,  # 4-bit
-    group_size=128,  # 128 is good balance between quality and performance
-)
+calibration_dataset = [tokenizer(example["text"]) for example in load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz", split="train").select(range(1024))]
 
-# load un-quantized model into into cpu memory
+quant_config = QuantizeConfig(bits=4, group_size=128)
+
 model = GPTQModel.load(model_id, quant_config)
 
-# quantize model
 model.quantize(calibration_dataset)
 
-# save quantized model
-model.save(quant_path)
+with tempfile.TemporaryDirectory() as tmp_dir:
+    model.save(tmp_dir)
 
-# load quantized model to the first GPU
-model = GPTQModel.load(quant_path)
+    model = GPTQModel.load(tmp_dir)
 
-# inference with model.generate
-print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
+    print(tokenizer.decode(model.generate(**tokenizer("Uncovering deep insights begins with", return_tensors="pt").to(model.device))[0]))
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
