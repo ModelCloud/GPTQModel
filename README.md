@@ -145,7 +145,14 @@ quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
 
-calibration_dataset = [tokenizer(example["text"]) for example in load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz", split="train").select(range(1024))]
+calibration_dataset = [
+    tokenizer(example["text"])
+    for example in load_dataset(
+        "allenai/c4",
+        data_files="en/c4-train.00001-of-01024.json.gz",
+        split="train"
+    ).select(range(1024))
+]
 
 quant_config = QuantizeConfig(bits=4, group_size=128)
 
@@ -157,7 +164,9 @@ model.save(quant_path)
 
 model = GPTQModel.load(quant_path)
 
-print(tokenizer.decode(model.generate(**tokenizer("Uncovering deep insights begins with", return_tensors="pt").to(model.device))[0]))
+result = model.generate(**tokenizer("Uncovering deep insights begins with", return_tensors="pt").to(model.device))[0]
+
+print(tokenizer.decode(result))
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
