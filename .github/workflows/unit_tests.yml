@@ -187,6 +187,8 @@ jobs:
     if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      volumes:
+        - /home/ci/models:/hf
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.max-parallel).size }}
@@ -196,6 +198,7 @@ jobs:
     steps:
       - name: Print Env
         run: |
+          ls -ahl /hf
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
