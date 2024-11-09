@@ -198,7 +198,6 @@ jobs:
     steps:
       - name: Print Env
         run: |
-          ls -ahl /hf
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
