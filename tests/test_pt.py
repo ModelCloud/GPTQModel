@@ -3,7 +3,7 @@ import unittest
 from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer
 
-pretrained_model_id = "facebook/opt-125m"
+pretrained_model_id = "/monster/data/model/opt-125m" # "facebook/opt-125m"
 quantized_model_id = "facebook-opt-125m"
 
 class Test_save_load_pt_weight(unittest.TestCase):

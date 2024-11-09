@@ -2,7 +2,7 @@ from model_test import ModelTest  # noqa: E402
 
 
 class TestLlama2(ModelTest):
-    NATIVE_MODEL_ID = "meta-llama/Llama-2-7b-chat-hf"
+    NATIVE_MODEL_ID = "/monster/data/model/Llama-2-7b-chat-hf" # "meta-llama/Llama-2-7b-chat-hf"
     NATIVE_ARC_CHALLENGE_ACC = 0.3490
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3635
     APPLY_CHAT_TEMPLATE = True

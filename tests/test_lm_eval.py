@@ -13,7 +13,7 @@ class TestLmEval(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit" # "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     def test_lm_eval(self):
        with tempfile.TemporaryDirectory() as tmp_dir:

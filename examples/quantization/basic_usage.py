@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 

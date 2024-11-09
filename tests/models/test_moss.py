@@ -2,7 +2,7 @@ from model_test import ModelTest  # noqa: E402
 
 
 class TestMoss(ModelTest):
-    NATIVE_MODEL_ID = "fnlp/moss2-2_5b-chat"
+    NATIVE_MODEL_ID = "/monster/data/model/moss2-2_5b-chat" # "fnlp/moss2-2_5b-chat"
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
 

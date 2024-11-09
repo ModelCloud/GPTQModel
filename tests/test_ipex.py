@@ -22,7 +22,7 @@ class TestsIPEX(unittest.TestCase):
         expected_output = "<s> I am in Paris and I am a tourist"
         device = torch.device("cpu")
 
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit" # "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         model_q = GPTQModel.load(
             model_id,

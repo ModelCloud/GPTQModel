@@ -15,7 +15,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantBatch(unittest.TestCase):
-    NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(

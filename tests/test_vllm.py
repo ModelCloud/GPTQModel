@@ -24,8 +24,8 @@ class TestLoadVLLM(unittest.TestCase):
             subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
 
         from vllm import SamplingParams  # noqa: E402
-        self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-        self.SHARDED_MODEL_ID = "ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
+        self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        self.SHARDED_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
         self.prompts = [
             "The capital of France is",
         ]

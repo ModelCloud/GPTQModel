@@ -14,7 +14,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestLmHead(unittest.TestCase):
-    MODEL_ID = "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
+    MODEL_ID = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse" # "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
     DEVICE = "cuda:0"
 
     @classmethod

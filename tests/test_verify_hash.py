@@ -4,7 +4,7 @@ from gptqmodel import BACKEND, GPTQModel
 
 
 class TestVerifyHashFunction(unittest.TestCase):
-    MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+    MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
     EXPECTED_MD5_HASH = "md5:7725c72bc217bcb57b3f1f31d452d871"
     EXPECTED_SHA256_HASH = "sha256:2680bb4d5c977ee54f25dae584665641ea887e7bd8e8d7197ce8ffd310e93f2f"
 

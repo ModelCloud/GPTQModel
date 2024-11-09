@@ -16,8 +16,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
-    TINYLLAMA_MODEL_ID = "ModelCloud/tinyllama-15M-stories"
-    OPT_MODEL_ID = "facebook/opt-125m"
+    TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories" # "ModelCloud/tinyllama-15M-stories"
+    OPT_MODEL_ID = "/monster/data/model/opt-125m" # "facebook/opt-125m"
 
     OPT_DATASET_PATH = "wikitext"
     OPT_DATASET_NAME = "wikitext-2-raw-v1"

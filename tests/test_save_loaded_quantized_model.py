@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
 class TestSave(unittest.TestCase):
     @parameterized.expand(
