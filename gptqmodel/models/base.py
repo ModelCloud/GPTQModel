@@ -218,7 +218,6 @@ class BaseGPTQModel(nn.Module):
         if self.monkey_patch_forward:
             self.monkey_patch_forward()
 
-
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
