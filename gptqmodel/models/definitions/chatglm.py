@@ -2,6 +2,7 @@ from ..base import BaseGPTQModel
 
 
 class ChatGLM(BaseGPTQModel):
+    require_trust_remote_code = True
     require_monkeypatch = True
 
     base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
