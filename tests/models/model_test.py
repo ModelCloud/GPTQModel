@@ -26,7 +26,7 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
-    BATCH_SIZE = 8
+    BATCH_SIZE = "auto"
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -167,8 +167,11 @@ class ModelTest(unittest.TestCase):
 
         except BaseException as e:
             if 'torch.OutOfMemoryError' in str(e):
-                self.BATCH_SIZE-=2 if self.BATCH_SIZE > 2 else 1
-                if self.BATCH_SIZE > 0:
+                if self.BATCH_SIZE=="auto":
+                    self.BATCH_SIZE="16"
+                else:
+                    self.BATCH_SIZE =f"{int(self.BATCH_SIZE) / 2}"
+                if int(self.BATCH_SIZE) > 0:
                     self.quant_lm_eval()
                     print(f"eeeeeeeeeeeeeeeeeeeeee!!!!! batch size: {self.BATCH_SIZE}")
                 else:
