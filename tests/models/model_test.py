@@ -1,5 +1,8 @@
 # -- do not touch
+import gc
 import os
+
+import torch.cuda
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -23,6 +26,7 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
+    BATCH_SIZE = 8
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -96,6 +100,8 @@ class ModelTest(unittest.TestCase):
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
         del model
+        gc.collect()
+        torch.cuda.empty_cache()
         return q_model, q_tokenizer
 
 
@@ -117,12 +123,12 @@ class ModelTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             results = model.lm_eval(
                 model="vllm",
-                model_args=f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,trust_remote_code={trust_remote_code}",
+                model_args=f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}",
                 output_path=tmp_dir,
                 tasks=self.TASK_NAME,
                 apply_chat_template=apply_chat_template,
                 trust_remote_code=trust_remote_code,
-                batch_size=8,
+                batch_size=self.BATCH_SIZE,
             )
             print('--------Eval Result---------')
             print(make_table(results))
