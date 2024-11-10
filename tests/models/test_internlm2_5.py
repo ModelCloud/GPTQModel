@@ -7,6 +7,7 @@ class TestInternlm2_5(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3575
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
+    BATCH_SIZE = 6
 
     def test_internlm2_5(self):
         # transformers<=4.44.2 run normal

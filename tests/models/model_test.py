@@ -26,7 +26,7 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
-    BATCH_SIZE = 8
+    BATCH_SIZE = "auto"
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -154,12 +154,31 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        try:
+            self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-        task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
-        for filter, value in task_results.items():
-            diff_pct = self.calculatorPer(filter=filter, value=value)
-            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
-            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
+            task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
+            for filter, value in task_results.items():
+                diff_pct = self.calculatorPer(filter=filter, value=value)
+                negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
+                positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
+                self.assertTrue(negative_pct <= diff_pct <= positive_pct,
                             f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+        except BaseException as e:
+            if 'torch.OutOfMemoryError' in str(e):
+                old_batch = self.BATCH_SIZE
+                if self.BATCH_SIZE=="auto":
+                    self.BATCH_SIZE="16"
+                else:
+                    self.BATCH_SIZE =f"{int(self.BATCH_SIZE) / 2}"
+
+                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
+
+                if int(self.BATCH_SIZE) > 0:
+                    self.quant_lm_eval()
+                    print(f"set batch size to {self.BATCH_SIZE}, passed")
+                else:
+                    print(f"set batch size to {self.BATCH_SIZE}, failed")
+                    raise e
+

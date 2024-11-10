@@ -10,6 +10,7 @@ class TestFalcon(ModelTest):
     TRUST_REMOTE_CODE = True
     TORCH_DTYPE = torch.float16
     QUANT_ARC_MAX_NEGATIVE_DELTA = 0.52
+    BATCH_SIZE = 6
 
     def test_falcon(self):
         self.quant_lm_eval()

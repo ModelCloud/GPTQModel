@@ -7,6 +7,7 @@ class TestMpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4454
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = False
+    BATCH_SIZE = 6
 
     def test_mpt(self):
         self.quant_lm_eval()
