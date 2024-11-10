@@ -7,6 +7,7 @@ class TestMistral(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5597
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
+    BATCH_SIZE = 6
 
     def test_mistral(self):
         self.quant_lm_eval()

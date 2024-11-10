@@ -8,6 +8,7 @@ class TestLlama3_1(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
     QUANT_ARC_MAX_NEGATIVE_DELTA = 0.15
+    BATCH_SIZE = 6
 
     def test_llama3_1(self):
         self.quant_lm_eval()

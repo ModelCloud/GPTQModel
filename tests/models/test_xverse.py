@@ -7,6 +7,7 @@ class TestXVerse(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4044
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
+    BATCH_SIZE = 6
 
     def test_xverse(self):
         self.quant_lm_eval()
