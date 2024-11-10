@@ -167,14 +167,18 @@ class ModelTest(unittest.TestCase):
 
         except BaseException as e:
             if 'torch.OutOfMemoryError' in str(e):
+                old_batch = self.BATCH_SIZE
                 if self.BATCH_SIZE=="auto":
                     self.BATCH_SIZE="16"
                 else:
                     self.BATCH_SIZE =f"{int(self.BATCH_SIZE) / 2}"
+
+                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
+
                 if int(self.BATCH_SIZE) > 0:
                     self.quant_lm_eval()
-                    print(f"eeeeeeeeeeeeeeeeeeeeee!!!!! batch size: {self.BATCH_SIZE}")
+                    print(f"set batch size to {self.BATCH_SIZE}, passed")
                 else:
-                    print(f"eeeeeeeeeeeeeeeeeeeeee!!!!! batch size: {self.BATCH_SIZE}")
+                    print(f"set batch size to {self.BATCH_SIZE}, failed")
                     raise e
 
