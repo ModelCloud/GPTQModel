@@ -179,7 +179,7 @@ jobs:
           name: dist
           path: dist
 
-  torch_2_4:
+  torch2_4:
     needs:
       - build-zen4
       - list-test-files
@@ -287,7 +287,7 @@ jobs:
 
       - name: Run tests
         timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 40 }}
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 
       - name: Clear cache
