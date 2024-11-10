@@ -95,7 +95,7 @@ class ModelTest(unittest.TestCase):
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-
+        del model
         return q_model, q_tokenizer
 
 
