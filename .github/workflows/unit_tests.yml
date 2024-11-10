@@ -34,7 +34,7 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   MAX_JOBS: 4
   ZEN4_SERVER: 10.0.14.247
-  CPU_TEST_FILES: "test_ipex.py"
+  TORCH_2_5_TESTS: "test_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
   IGNORED_TEST_FILES: "test_tgi.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -77,12 +77,56 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
 
+  list-test-files:
+    runs-on: ubuntu-latest
+    outputs:
+      torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
+      gpu-files: ${{ steps.files.outputs.gpu-files }}
+
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: List files
+        id: files
+        run: |
+          script="
+          import json
+          import os
+
+          cpu_file_list = [f.strip().removesuffix('.py') for f in '${TORCH_2_5_TESTS}'.split(',') if f.strip()]
+          test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
+          cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
+
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
+
+          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
+          all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${TORCH_2_5_TESTS}']
+
+          gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
+
+          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
+          "
+
+          test_files=$(python3 -c "$script")
+          IFS='|' read -r cpu_test_files gpu_test_files <<< "$test_files"
+          echo "torch-2-5-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
+          echo "gpu-files=$gpu_test_files" >> "$GITHUB_OUTPUT"
+
+          echo "Test files: $test_files"
+          echo "CPU Test files: $cpu_test_files"
+          echo "GPU Test files: $gpu_test_files"
+          echo "Ignored Test files: $IGNORED_TEST_FILES"
+
   build-zen4:
     runs-on: [self-hosted, zen4]
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
     steps:
 
       - name: Checkout Codes
@@ -135,51 +179,7 @@ jobs:
           name: dist
           path: dist
 
-  list-test-files:
-    runs-on: ubuntu-latest
-    outputs:
-      cpu-files: ${{ steps.files.outputs.cpu-files }}
-      gpu-files: ${{ steps.files.outputs.gpu-files }}
-
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: List files
-        id: files
-        run: |
-          script="
-          import json
-          import os
-
-          cpu_file_list = [f.strip().removesuffix('.py') for f in '${CPU_TEST_FILES}'.split(',') if f.strip()]
-          test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
-          cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
-
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
-
-          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
-          all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${CPU_TEST_FILES}']
-
-          gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list)]
-
-          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
-          "
-
-          test_files=$(python3 -c "$script")
-          IFS='|' read -r cpu_test_files gpu_test_files <<< "$test_files"
-          echo "cpu-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
-          echo "gpu-files=$gpu_test_files" >> "$GITHUB_OUTPUT"
-
-          echo "Test files: $test_files"
-          echo "CPU Test files: $cpu_test_files"
-          echo "GPU Test files: $gpu_test_files"
-          echo "Ignored Test files: $IGNORED_TEST_FILES"
-
-  gpu:
+  torch2_4:
     needs:
       - build-zen4
       - list-test-files
@@ -187,7 +187,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '')
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
         - /home/ci/models:/monster/data/model
     strategy:
@@ -287,7 +287,7 @@ jobs:
 
       - name: Run tests
         timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 40 }}
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 
       - name: Clear cache
@@ -300,22 +300,22 @@ jobs:
         if: always()
         run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
-  cpu:
+  torch2_5:
     needs:
       - build-zen4
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.cpu-files != '[]'
+    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     timeout-minutes: 60
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.5.1-python311
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.5.1
       volumes:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
       matrix:
-        test_script:  ${{ fromJSON(needs.list-test-files.outputs.cpu-files) }}
+        test_script:  ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -357,8 +357,8 @@ jobs:
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
       - name: Install wheel
-        run: uv pip install GPUtil intel_extension_for_pytorch dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: uv pip install GPUtil intel_extension_for_pytorch auto_round dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) }} && !cancelled()
+        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
