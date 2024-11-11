@@ -117,7 +117,6 @@ jobs:
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
-      - release-source
     if: needs.check-vm.outputs.zen4_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
@@ -189,7 +188,9 @@ jobs:
     strategy:
       fail-fast: false
     runs-on: self-hosted
-    needs: check-vm
+    needs: 
+      - check-vm
+      - release-zen4
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
     env:
