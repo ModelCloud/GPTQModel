@@ -45,6 +45,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
+  MAX_PARALLEL: ${{ github.event.inputs.max-parallel }}
   MAX_JOBS: 4
 
 concurrency:
