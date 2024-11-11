@@ -192,7 +192,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(inputs.max-parallel).size }}
+      max-parallel: 6
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
