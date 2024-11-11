@@ -104,11 +104,13 @@ GPTQModel is validated for Linux x86_64 with Nvidia GPUs. Windows WSL2 may work 
 
 ## Install
 
-### PIP 
+### PIP/UV 
 
 ```bash
-# You can install optional modules like autoround, ipex, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation gptqmodel[auto_round,vllm,sglang,bitblas,ipex]
+# You can install optional modules like autoround, ipex, vllm, sglang, bitblas, and ipex.
+# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas,ipex,auto_round]
 pip install -v gptqmodel --no-build-isolation
+uv pip install -v gptqmodel --no-build-isolation
 ```
 
 ### Install from source
@@ -118,11 +120,9 @@ pip install -v gptqmodel --no-build-isolation
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # pip: compile and install
-# You can install optional modules like autoround, ipex, vllm, sglang, or bitblas. Example: pip install -v --no-build-isolation .[auto_round,vllm,sglang,bitblas,ipex]
+# You can install optional modules like autoround, ipex, vllm, sglang, bitblas, and ipex.
+# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas,ipex,auto_round]
 pip install -v . --no-build-isolation
-
-# uv: compile and install 
-uv pip install -v . --no-build-isolation
 ```
 
 ### Quantization and Inference
