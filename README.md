@@ -125,14 +125,6 @@ pip install -v . --no-build-isolation
 uv pip install -v . --no-build-isolation
 ```
 
-### Script installation  
-```bash
-# You can pass modules as arguments, e.g., --vllm --sglang --bitblas. Example: bash install.sh --vllm --sglang --bitblas
-bash install.sh
-```
-
-
-
 ### Quantization and Inference
 
 Below is a basic sample using `GPTQModel` to quantize a llm model and perform post-quantization inference:
