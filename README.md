@@ -91,8 +91,8 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 
 
 ## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
+![plus-v2 5v3@2x](https://github.com/user-attachments/assets/dd223d08-f790-41ff-814d-4c2a98e4a3de)
 
-![image](https://github.com/user-attachments/assets/9df7e05d-ca8d-4ac7-a74d-552e100dd8a5)
 
 ## Platform Requirements
 
