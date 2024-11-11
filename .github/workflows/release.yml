@@ -6,6 +6,10 @@ defaults:
 on:
   release:
     types: [ published ]
+    inputs:
+      max-parallel: '{"size": 6}'
+      upload_release: 'false'
+      upload_pypi: 'false'
   repository_dispatch:
   workflow_dispatch:
     inputs:
