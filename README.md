@@ -7,7 +7,7 @@
 </p>
 
 ## News
-* 11/10/2024 🚀 [1.2.0-DEV] Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. 
+* 11/11/2024 🚀 [1.2.0] Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
 * 10/29/2024 🚀 [v1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 * 10/12/2024 ✨ [v1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
 * 10/11/2024 ✨ [v1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Add wheel for python 3.12 and cuda 11.8.
@@ -53,6 +53,10 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 ## Why should you use GPTQModel?
 
 GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge that ModelCloud, together with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements and model support.
+
+## Why GPTQ specifically and not the dozens of other low-bit quantizers?
+
+Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has currently the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
 * 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
@@ -121,19 +125,9 @@ pip install -v . --no-build-isolation
 uv pip install -v . --no-build-isolation
 ```
 
-### Script installation  
-```bash
-# You can pass modules as arguments, e.g., --vllm --sglang --bitblas. Example: bash install.sh --vllm --sglang --bitblas
-bash install.sh
-```
-
-
-
 ### Quantization and Inference
 
-> warning: this is just a showcase of the usage of basic apis in GPTQModel, which uses only one sample to quantize a much small model, quality of quantized model using such little samples may not good.
-
-Below is an example for the simplest use of `gptqmodel` to quantize a model and inference after quantization:
+Below is a basic sample using `GPTQModel` to quantize a llm model and perform post-quantization inference:
 
 ```py
 from datasets import load_dataset
@@ -177,104 +171,19 @@ For more advanced features of model quantization, please reference to [this scri
 
 Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
 
-### Evaluation on Downstream Tasks
+### Evaluation and Quality Benchmarks
 
-You can use tasks defined in `gptqmodel.eval_tasks` to evaluate model's performance on specific down-stream task before and after quantization.
+GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and we highly recommend avoid using PPL and use `lm-eval` to validate post-quantization model quality. 
 
-The predefined tasks support all causal-language-models implemented in [🤗 transformers](https://github.com/huggingface/transformers) and in this project.
-
-<details>
-
-<summary>Below is an example to evaluate `EleutherAI/gpt-j-6b` on sequence-classification task using `cardiffnlp/tweet_sentiment_multilingual` dataset:</summary>
-
-```python
-from functools import partial
-
-import datasets
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-from gptqmodel import GPTQModel, QuantizeConfig
-from gptqmodel.eval_tasks import SequenceClassificationTask
-
-MODEL = "EleutherAI/gpt-j-6b"
-DATASET = "cardiffnlp/tweet_sentiment_multilingual"
-TEMPLATE = "Question:What's the sentiment of the given text? Choices are {labels}.\nText: {text}\nAnswer:"
-ID2LABEL = {
-    0: "negative",
-    1: "neutral",
-    2: "positive"
-}
-LABELS = list(ID2LABEL.values())
-
-
-def ds_refactor_fn(samples):
-    text_data = samples["text"]
-    label_data = samples["label"]
-
-    new_samples = {"prompt": [], "label": []}
-    for text, label in zip(text_data, label_data):
-        prompt = TEMPLATE.format(labels=LABELS, text=text)
-        new_samples["prompt"].append(prompt)
-        new_samples["label"].append(ID2LABEL[label])
-
-    return new_samples
-
-
-#  model = AutoModelForCausalLM.from_pretrained(MODEL).eval().half().to("cuda:0")
-model = GPTQModel.load(MODEL, QuantizeConfig())
-tokenizer = AutoTokenizer.from_pretrained(MODEL)
-
-task = SequenceClassificationTask(
-    model=model,
-    tokenizer=tokenizer,
-    classes=LABELS,
-    data_name_or_path=DATASET,
-    prompt_col_name="prompt",
-    label_col_name="label",
-    **{
-        "num_samples": 1000,  # how many samples will be sampled to evaluation
-        "sample_max_len": 1024,  # max tokens for each sample
-        "block_max_len": 2048,  # max tokens for each data block
-        # function to load dataset, one must only accept data_name_or_path as input
-        # and return datasets.Dataset
-        "load_fn": partial(datasets.load_dataset, name="english"),
-        # function to preprocess dataset, which is used for datasets.Dataset.map,
-        # must return Dict[str, list] with only two keys: [prompt_col_name, label_col_name]
-        "preprocess_fn": ds_refactor_fn,
-        # truncate label when sample's length exceed sample_max_len
-        "truncate_prompt": False
-    }
-)
-
-# note that max_new_tokens will be automatically specified internally based on given classes
-print(task.run())
-
-# self-consistency
-print(
-    task.run(
-        generation_config=GenerationConfig(
-            num_beams=3,
-            num_return_sequences=3,
-            do_sample=True
-        )
-    )
-)
 ```
-
-</details>
-
-## Learn More
-
-[tutorials](docs/tutorial) provide step-by-step guidance to integrate `gptqmodel` with your own project and some best practice principles.
-
-[examples](examples/README.md) provide plenty of example scripts to use `gptqmodel` in different ways.
-
-## Supported Evaluation Tasks
-
-Currently, `gptqmodel` supports: `LanguageModelingTask`, `SequenceClassificationTask` and `TextSummarizationTask`; more Tasks will come soon!
+# currently gptqmodel is merged into lm-eval main but not yet released on pypi
+pip install lm-eval[gptqmodel]
+```
 
 ### Which kernel is used by default?
 
-GPTQModel will use Marlin, Exllama v2, Triton kernels in that order for maximum inference performance.
+* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled. 
+* `CPU`: Intel/IPEX kernel  
 
 ## Citation
 ```
