@@ -5,10 +5,13 @@ from torch import device
 CPU = device("cpu")
 CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
+XPU = device("xpu")
+XPU_0 = device("xpu:0")
 
 class DEVICE(Enum):
     CPU = "cpu"
     CUDA = "cuda"
+    XPU = "xpu"
 
 
 def get_device_by_type(type_value: str):
