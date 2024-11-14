@@ -90,6 +90,7 @@ class BaseGPTQModel(nn.Module):
     def __init__(
         self,
         model: PreTrainedModel,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         quantized: bool,
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
@@ -100,6 +101,7 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
+        self.tokenizer = tokenizer
         self._quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.quantize_config = quantize_config
@@ -128,7 +130,6 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -160,8 +161,8 @@ class BaseGPTQModel(nn.Module):
 
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            if tokenizer:
-                vocab = tokenizer.get_vocab()
+            if self.tokenizer:
+                vocab = self.tokenizer.get_vocab()
 
                 # auto select the best pad token to use
                 for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
@@ -170,8 +171,8 @@ class BaseGPTQModel(nn.Module):
                         pad_token_id = token_id
                         break
             else:
-                logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
-
+                logger.warning("Model config does not have pad token mapped, and tokenizer is not loaded.")
+                
             if not pad_token_id and isinstance(self.config.eos_token_id, list):  # Llama-3.1-8B-Instruct's eos_token_id is a list
                 pad_token_id = self.config.eos_token_id[0]
             elif not pad_token_id:
@@ -195,7 +196,6 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -273,7 +273,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, self.tokenizer,)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
@@ -319,7 +319,7 @@ class BaseGPTQModel(nn.Module):
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
-                                       tokenizer=None,
+                                       tokenizer=self.tokenizer,
                                        bits=self.quantize_config.bits,
                                        group_size=self.quantize_config.group_size,
                                        sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
@@ -803,10 +803,11 @@ class BaseGPTQModel(nn.Module):
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        model = ModelLoader.from_pretrained(pretrained_model_id_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
+        model,tokenizer = ModelLoader.from_pretrained(pretrained_model_id_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
         return cls(
             model,
             quantized=False,
+            tokenizer=tokenizer,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             model_id_or_path=pretrained_model_id_or_path
@@ -826,9 +827,10 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         if not torch.cuda.is_available():
+            logger.warning("No GPU detected, using IPEX backend.")
             backend = BACKEND.IPEX
 
-        model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
+        model, tokenizer, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
             backend=backend,
@@ -856,6 +858,7 @@ class BaseGPTQModel(nn.Module):
         return cls(
             model,
             quantized=True,
+            tokenizer=tokenizer,
             quantize_config=quantize_config,
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=load_quantized_model,
