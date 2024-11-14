@@ -3,12 +3,14 @@ from __future__ import annotations
 import os.path
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
+
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
 from ..utils import BACKEND
-from ..utils.model import check_and_get_model_type
 from ..utils.logger import setup_logger
+from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
 from .definitions.baichuan import BaiChuanGPTQ
 from .definitions.bloom import BloomGPTQ
@@ -22,6 +24,7 @@ from .definitions.deepseek_v2 import DeepSeekV2GPTQ
 from .definitions.exaone import ExaoneGPTQ
 from .definitions.gemma import GemmaGPTQ
 from .definitions.gemma2 import Gemma2GPTQ
+from .definitions.glm import GLM
 from .definitions.gpt2 import GPT2GPTQ
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ
 from .definitions.gpt_neox import GPTNeoXGPTQ
@@ -51,7 +54,6 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-from huggingface_hub import list_repo_files
 
 logger = setup_logger()
 
@@ -64,6 +66,7 @@ MODEL_MAP = {
     "opt": OPTGPTQ,
     "moss": MOSSGPTQ,
     "chatglm": ChatGLM,
+    "glm": GLM,
     "gpt_bigcode": GPTBigCodeGPTQ,
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
