@@ -174,7 +174,7 @@ class GPTQModel:
         **model_init_kwargs,
     ) -> BaseGPTQModel:
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
-            logger.warning("Model is already quantized, will use `from_quantized` to load quantized model."
+            logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
