@@ -1,6 +1,5 @@
 import gc
 import os
-from logging import getLogger
 
 import accelerate
 import threadpoolctl as tctl
@@ -11,9 +10,9 @@ from tqdm import tqdm
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .model import recurse_getattr, recurse_setattr
+from ..utils.logger import setup_logger
 
-logger = getLogger(__name__)
-
+logger = setup_logger()
 
 def prepare_model_for_bitblas_load(
         model,

@@ -4,15 +4,15 @@ import ctypes
 import operator
 import os
 from functools import reduce
-from logging import getLogger
 from typing import List, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from ...utils.logger import setup_logger
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 BITBLAS_TARGET = None
 BITBLAS_DATABASE_PATH = None

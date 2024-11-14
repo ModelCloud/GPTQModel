@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -24,15 +23,9 @@ from ..utils.model import (auto_dtype_from_config, check_requires_version, conve
                            find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import CPU, DEVICE, SUPPORTED_MODELS
+from ..utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class ModelLoader():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining

@@ -1,20 +1,18 @@
 # Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
 # GPTQModel/licences/LICENSE.apache
 
-from logging import getLogger
-
 import numpy as np
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-
+from ...utils.logger import setup_logger
 marlin_import_exception = None
 try:
     import gptqmodel_marlin_cuda
 except ImportError as e:
     marlin_import_exception = e
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 
 def mul(A, B, C, s, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):

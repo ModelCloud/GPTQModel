@@ -1,6 +1,4 @@
 import math
-from logging import getLogger
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,8 +7,9 @@ import transformers
 from ..triton_utils.dequant import QuantLinearFunction
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
+from ...utils.logger import setup_logger
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 
 class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
