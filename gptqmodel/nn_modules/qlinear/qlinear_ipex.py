@@ -8,6 +8,7 @@ import torch.nn as nn
 import transformers
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 from ...utils.logger import setup_logger
 
 logger = setup_logger()

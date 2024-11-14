@@ -1,10 +1,13 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
 import math
+
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 from ...utils.logger import setup_logger
+
 exllama_v2_import_exception = None
 try:
     from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix

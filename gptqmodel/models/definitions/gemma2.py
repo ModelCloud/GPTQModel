@@ -1,6 +1,6 @@
 from ...utils import BACKEND
-from ..base import BaseGPTQModel
 from ...utils.logger import setup_logger
+from ..base import BaseGPTQModel
 
 logger = setup_logger()
 
