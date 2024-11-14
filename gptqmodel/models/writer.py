@@ -21,7 +21,8 @@ from transformers.utils.generic import ContextManagers
 from ..quantization import QuantizeConfig
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT,
                                    META_FIELD_DAMP_PERCENT, META_FIELD_QUANTIZER, META_FIELD_URI,
-                                   META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
+                                   META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2, QUANT_METHOD_FIELD,
+                                   META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL)
 from ..utils.backend import BACKEND
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
                            get_model_files_size, get_moe_layer_modules, make_quant)
@@ -100,6 +101,21 @@ class ModelWriter():
         quantize_config.meta_set(
             key=META_FIELD_DAMP_AUTO_INCREMENT,
             value=quantize_config.damp_auto_increment
+        )
+
+        quantize_config.meta_set(
+            key=META_FIELD_STATIC_GROUPS,
+            value=quantize_config.static_groups
+        )
+
+        quantize_config.meta_set(
+            key=META_FIELD_TRUE_SEQUENTIAL,
+            value=quantize_config.true_sequential
+        )
+
+        quantize_config.meta_set(
+            key=QUANT_METHOD_FIELD,
+            value=quantize_config.quant_method
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
