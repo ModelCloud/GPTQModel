@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
+from ..utils.logger import setup_logger
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -41,14 +41,7 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 # See https://github.com/huggingface/transformers/issues/34366
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -826,6 +819,7 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         if not torch.cuda.is_available():
+            logger.warning("No GPU detected, using IPEX backend.")
             backend = BACKEND.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(

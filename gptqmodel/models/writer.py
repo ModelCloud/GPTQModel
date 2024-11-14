@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import csv
 import json
-import logging
 import os
 import re
 from os.path import isfile, join
@@ -28,14 +27,9 @@ from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_lay
                            get_model_files_size, get_moe_layer_modules, make_quant)
 from ..version import __version__
 from ._const import CPU
+from ..utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = setup_logger()
 
 QUANT_LOG_LAYER = "layer"
 QUANT_LOG_MODULE = "module"

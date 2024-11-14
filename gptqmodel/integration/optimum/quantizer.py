@@ -15,7 +15,6 @@
 import json
 import os
 from dataclasses import dataclass
-from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -47,8 +46,9 @@ from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
 from ...utils.backend import BACKEND
 from ...utils.importer import select_quant_linear
 from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
+from ...utils.logger import setup_logger
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 OPTIMUM_INSTALL_HINT = "optimum not installed. Please install via `pip install optimum`."
 
