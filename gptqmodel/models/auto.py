@@ -3,10 +3,9 @@ from __future__ import annotations
 import os.path
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
-
+import logging
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from transformers import AutoConfig
-from transformers.utils.hub import cached_file
 
 from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
@@ -53,6 +52,14 @@ from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from huggingface_hub import list_repo_files
+
+logger = logging.getLogger(__name__)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("%(levelname)s - %(message)s")
+handler.setFormatter(formatter)
+logger.propagate = False
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -161,14 +168,20 @@ class GPTQModel:
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_id_or_path: str,
+        model_id_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
-        model_type = check_and_get_model_type(pretrained_model_id_or_path, trust_remote_code)
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+            logger.warning("Model is already quantized, will use `from_quantized` to load quantized model."
+                           "If you want to quantize the model, please pass un_quantized model path or id, and use "
+                           "`from_pretrained` with `quantize_config`.")
+            return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
-            pretrained_model_id_or_path=pretrained_model_id_or_path,
+            pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             **model_init_kwargs,
