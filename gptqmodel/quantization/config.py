@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 from packaging import version
 from transformers.utils.hub import cached_file
 
-from ...utils.logger import setup_logger
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 
@@ -115,7 +115,6 @@ class QuantizeConfig():
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
-    runtime_format: FORMAT = field(default=FORMAT.GPTQ)
 
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False

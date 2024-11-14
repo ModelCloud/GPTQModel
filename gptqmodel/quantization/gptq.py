@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import transformers
 
-from ...utils.logger import setup_logger
+from ..utils.logger import setup_logger
 from .quantizer import Quantizer
 
 logger = setup_logger()

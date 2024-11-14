@@ -153,7 +153,7 @@ class GPTQModel:
             )
         else:
             return cls.from_pretrained(
-                pretrained_model_id_or_path=model_id_or_path,
+                model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
                 trust_remote_code=trust_remote_code,
                 **kwargs,
