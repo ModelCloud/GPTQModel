@@ -83,9 +83,9 @@ class BaseGPTQModel(nn.Module):
     def __init__(
         self,
         model: PreTrainedModel,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         quantized: bool,
         quantize_config: QuantizeConfig,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
@@ -266,7 +266,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, self.tokenizer,)
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound

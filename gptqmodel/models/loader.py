@@ -81,7 +81,11 @@ class ModelLoader():
 
         config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
+        except Exception as e:
+            logger.warning(f"Failed to load tokenizer from {pretrained_model_id_or_path}, error: {e}")
+            tokenizer = None
 
         if torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config)
@@ -209,7 +213,11 @@ class ModelLoader():
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
         
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        except Exception as e:
+            logger.warning(f"Failed to load tokenizer from {model_id_or_path}, error: {e}")
+            tokenizer = None
 
         quantize_config = QuantizeConfig.from_pretrained(model_id_or_path, **cached_file_kwargs, **kwargs)
 
