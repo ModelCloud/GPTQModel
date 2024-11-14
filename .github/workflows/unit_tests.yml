@@ -16,6 +16,10 @@ on:
         description: 'GitHub ref: Branch, Tag or Commit SHA'
         required: false
         default: ''
+      pr_number:
+        description: 'PR Number'
+        required: false
+        type: number
       test_names:
         description: 'Input Test(s) to Run (default all)'
         required: false
@@ -89,6 +93,14 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: List files
         id: files
