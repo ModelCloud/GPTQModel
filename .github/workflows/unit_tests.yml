@@ -296,6 +296,26 @@ jobs:
           echo "-----------"
           nvcc --version
 
+      - name: Find suitable GPU
+        run: |
+          timestamp=$(date +%s%3N)
+          gpu_id=-1
+
+          while [ "$gpu_id" -lt 0 ]; do
+            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+
+            if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "No available GPU, waiting 5 seconds..."
+              sleep 5
+            else
+              echo "Allocated GPU ID: $gpu_id"
+            fi
+          done
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
+          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
+
       - name: Run tests
         timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 40 }}
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
