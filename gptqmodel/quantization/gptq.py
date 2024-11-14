@@ -4,15 +4,15 @@
 import math
 import os
 import time
-from logging import getLogger
 
 import torch
 import torch.nn as nn
 import transformers
 
+from ...utils.logger import setup_logger
 from .quantizer import Quantizer
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False

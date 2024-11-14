@@ -3,12 +3,12 @@ from __future__ import annotations
 import os.path
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
-import logging
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from transformers import AutoConfig
 
 from ..utils import BACKEND
 from ..utils.model import check_and_get_model_type
+from ..utils.logger import setup_logger
 from .base import BaseGPTQModel, QuantizeConfig
 from .definitions.baichuan import BaiChuanGPTQ
 from .definitions.bloom import BloomGPTQ
@@ -53,13 +53,7 @@ from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from huggingface_hub import list_repo_files
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = setup_logger()
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,

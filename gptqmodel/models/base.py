@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
+from ..utils.logger import setup_logger
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -41,14 +41,7 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 # See https://github.com/huggingface/transformers/issues/34366
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -90,6 +83,7 @@ class BaseGPTQModel(nn.Module):
     def __init__(
         self,
         model: PreTrainedModel,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         quantized: bool,
         quantize_config: QuantizeConfig,
         qlinear_kernel: nn.Module = None,
@@ -100,6 +94,7 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
+        self.tokenizer = tokenizer
         self._quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.quantize_config = quantize_config
@@ -128,7 +123,6 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -160,8 +154,8 @@ class BaseGPTQModel(nn.Module):
 
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            if tokenizer:
-                vocab = tokenizer.get_vocab()
+            if self.tokenizer:
+                vocab = self.tokenizer.get_vocab()
 
                 # auto select the best pad token to use
                 for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
@@ -195,7 +189,6 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -273,7 +266,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
+        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, self.tokenizer,)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
@@ -319,7 +312,7 @@ class BaseGPTQModel(nn.Module):
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
-                                       tokenizer=None,
+                                       tokenizer=self.tokenizer,
                                        bits=self.quantize_config.bits,
                                        group_size=self.quantize_config.group_size,
                                        sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
@@ -826,6 +819,7 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         if not torch.cuda.is_available():
+            logger.warning("No GPU detected, using IPEX backend.")
             backend = BACKEND.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
