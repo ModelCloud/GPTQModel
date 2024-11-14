@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 from packaging import version
 from transformers.utils.hub import cached_file
 
-from ...utils.logger import setup_logger
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 

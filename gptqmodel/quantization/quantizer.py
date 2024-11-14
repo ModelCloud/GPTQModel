@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 
-from ...utils.logger import setup_logger
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 
