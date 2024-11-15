@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-from ..utils.logger import setup_logger
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -24,6 +23,7 @@ from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantize
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
+from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
@@ -73,7 +73,7 @@ class BaseGPTQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
-    # monkey patch api for trust_remote_code=True models that have broken transformer compat 
+    # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
 
     # allow models to define optional notes that output messages to users that want to use this model

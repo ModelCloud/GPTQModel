@@ -5,7 +5,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 from ...utils.logger import setup_logger
+
 marlin_import_exception = None
 try:
     import gptqmodel_marlin_cuda

@@ -7,8 +7,8 @@ from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT
-from .backend import BACKEND
 from ..utils.logger import setup_logger
+from .backend import BACKEND
 
 logger = setup_logger()
 

@@ -45,8 +45,8 @@ if OPTIMUM_AVAILABLE and is_accelerate_available():
 from ...quantization import FORMAT, FORMAT_FIELD_JSON, GPTQ, QuantizeConfig
 from ...utils.backend import BACKEND
 from ...utils.importer import select_quant_linear
-from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
 from ...utils.logger import setup_logger
+from ...utils.model import convert_gptq_v1_to_v2_format, convert_gptq_v2_to_v1_format, gptqmodel_post_init
 
 logger = setup_logger()
 

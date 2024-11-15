@@ -13,5 +13,5 @@ def setup_logger():
     logger.propagate = False
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
-    
+
     return logger

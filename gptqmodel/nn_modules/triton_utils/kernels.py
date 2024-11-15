@@ -3,8 +3,8 @@ import triton
 import triton.language as tl
 from torch.cuda.amp import custom_bwd, custom_fwd
 
-from . import custom_autotune
 from ...utils.logger import setup_logger
+from . import custom_autotune
 
 logger = setup_logger()
 

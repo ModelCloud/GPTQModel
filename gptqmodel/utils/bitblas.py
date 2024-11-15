@@ -9,8 +9,8 @@ from tqdm import tqdm
 
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .model import recurse_getattr, recurse_setattr
 from ..utils.logger import setup_logger
+from .model import recurse_getattr, recurse_setattr
 
 logger = setup_logger()
 
