@@ -9,8 +9,8 @@ import lm_eval
 import psutil
 import torch
 import torch.nn as nn
-from clearml import Task
 from accelerate.hooks import remove_hook_from_module
+from clearml import Task
 from gpuutils import GpuUtils
 from lm_eval.loggers import EvaluationTracker, WandbLogger
 from lm_eval.models.huggingface import HFLM
@@ -27,11 +27,11 @@ from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.plotly import create_plotly
 from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
+from ..utils.plotly import create_plotly
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
@@ -762,7 +762,7 @@ class BaseGPTQModel(nn.Module):
         show_config: bool = False,
         trust_remote_code: bool = False,
     ):
-        if model is "hf":
+        if model == "hf":
             model = HFLM(
                 pretrained=self,
                 batch_size=batch_size,
