@@ -122,9 +122,13 @@ class ModelTest(unittest.TestCase):
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
+            if self.USE_VLLM:
+                model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}"
+            else:
+                model_args = f"pretrained={model.model_id_or_path},gptqmodel=True"
             results = model.lm_eval(
                 model="vllm" if self.USE_VLLM else "hf",
-                model_args=f"pretrained={model.model_id_or_path},gptqmodel=True",
+                model_args=model_args,
                 output_path=tmp_dir,
                 tasks=self.TASK_NAME,
                 apply_chat_template=apply_chat_template,
