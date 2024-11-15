@@ -9,6 +9,7 @@ import lm_eval
 import psutil
 import torch
 import torch.nn as nn
+from clearml import Task
 from accelerate.hooks import remove_hook_from_module
 from gpuutils import GpuUtils
 from lm_eval.loggers import EvaluationTracker, WandbLogger
@@ -26,6 +27,7 @@ from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
+from ..utils.plotly import create_plotly
 from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
@@ -44,6 +46,8 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
 logger = setup_logger()
+
+task = Task.init(project_name='quantize_track', task_name='Experiment', task_type=Task.TaskTypes.optimizer)
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -446,6 +450,11 @@ class BaseGPTQModel(nn.Module):
 
         layer_count = len(layers)
         layer_pb = tqdm(range(layer_count))
+        gpu_memorys = []
+        cpu_memorys = []
+        durations = []
+        avg_losses = []
+        module_names = []
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -455,7 +464,21 @@ class BaseGPTQModel(nn.Module):
 
             gpu_memory = GpuUtils.get_memory_usage() / (1024 ** 3)
             cpu_memory = psutil.virtual_memory().used / (1024 ** 3)
+            task.get_logger().report_scalar(
+                title='GPU Memory',
+                series='GPU Memory',
+                value=gpu_memory,
+                iteration=i,
+            )
 
+            task.get_logger().report_scalar(
+                title='CPU Memory',
+                series='CPU Memory',
+                value=cpu_memory,
+                iteration=i,
+            )
+            gpu_memorys.append(gpu_memory)
+            cpu_memorys.append(cpu_memory)
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU and torch.cuda.is_available():
                 move_to(layer, CUDA_0)
@@ -527,6 +550,23 @@ class BaseGPTQModel(nn.Module):
                         actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
+                    task.get_logger().report_scalar(
+                        title='Quantization Loss',
+                        series=f'layer_{i}_loss',
+                        value=avg_loss,
+                        iteration=j,
+                    )
+
+                    task.get_logger().report_scalar(
+                        title='Quantization Time',
+                        series=f'layer_{i}_time',
+                        value=duration,
+                        iteration=j,
+                    )
+                    durations.append(duration)
+                    avg_losses.append(avg_loss)
+                    module_names.append(f"layer-{i}-{name}")
+
                     stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                             QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}"}
                     if self.quantize_config.dynamic is not None:
@@ -577,7 +617,15 @@ class BaseGPTQModel(nn.Module):
         logger.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
             logger.info(module_log)
-
+        x = list(range(layer_count))
+        gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layers", yaxis_title="GPU usage")
+        cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layers", yaxis_title="CPU usage")
+        loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layers", yaxis_title="loss")
+        time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layers", yaxis_title="time")
+        task.get_logger().report_plotly('GPU', 'GPU', gpu_fig)
+        task.get_logger().report_plotly('CPU', 'CPU', cpu_fig)
+        task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+        task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
