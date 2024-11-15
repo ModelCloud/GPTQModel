@@ -193,4 +193,4 @@ class ModelTest(unittest.TestCase):
                 else:
                     print(f"set batch size to {self.BATCH_SIZE}, failed")
                     raise e
-
+            else: raise e

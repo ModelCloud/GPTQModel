@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -18,6 +17,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import select_quant_linear
+from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
@@ -25,14 +25,7 @@ from ..utils.model import (auto_dtype_from_config, check_requires_version, conve
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import CPU, DEVICE, SUPPORTED_MODELS
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class ModelLoader():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining

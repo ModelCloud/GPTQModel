@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import csv
 import json
-import logging
 import os
 import re
 from os.path import isfile, join
@@ -19,22 +18,18 @@ from transformers.modeling_utils import no_init_weights, shard_checkpoint
 from transformers.utils.generic import ContextManagers
 
 from ..quantization import QuantizeConfig
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT,
-                                   META_FIELD_DAMP_PERCENT, META_FIELD_QUANTIZER, META_FIELD_URI,
-                                   META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
+from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
+                                   META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS,
+                                   META_FIELD_TRUE_SEQUENTIAL, META_FIELD_URI, META_QUANTIZER_GPTQMODEL,
+                                   META_VALUE_URI, MIN_VERSION_WITH_V2, QUANT_METHOD_FIELD)
 from ..utils.backend import BACKEND
+from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
                            get_model_files_size, get_moe_layer_modules, make_quant)
 from ..version import __version__
 from ._const import CPU
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = setup_logger()
 
 QUANT_LOG_LAYER = "layer"
 QUANT_LOG_MODULE = "module"
@@ -100,6 +95,21 @@ class ModelWriter():
         quantize_config.meta_set(
             key=META_FIELD_DAMP_AUTO_INCREMENT,
             value=quantize_config.damp_auto_increment
+        )
+
+        quantize_config.meta_set(
+            key=META_FIELD_STATIC_GROUPS,
+            value=quantize_config.static_groups
+        )
+
+        quantize_config.meta_set(
+            key=META_FIELD_TRUE_SEQUENTIAL,
+            value=quantize_config.true_sequential
+        )
+
+        quantize_config.meta_set(
+            key=QUANT_METHOD_FIELD,
+            value=quantize_config.quant_method
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.

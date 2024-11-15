@@ -1,5 +1,4 @@
 from collections import OrderedDict
-from logging import getLogger
 
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
@@ -8,7 +7,10 @@ from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT
+from ..utils.logger import setup_logger
 from .backend import BACKEND
+
+logger = setup_logger()
 
 backend_dict = OrderedDict({
     BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
@@ -25,8 +27,6 @@ format_dict = {
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
 }
-
-logger = getLogger(__name__)
 
 
 # auto select the correct/optimal QuantLinear class

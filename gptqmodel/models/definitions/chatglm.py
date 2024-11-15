@@ -19,6 +19,7 @@ class ChatGLM(BaseGPTQModel):
     # fix: chatglm-3 and glm-4 have broken transformer (latest) compat due to missing/wrong type-hints
     def monkey_patch(self):
         from typing import Optional
+
         import torch
 
         def forward(

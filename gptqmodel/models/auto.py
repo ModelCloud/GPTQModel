@@ -5,10 +5,11 @@ from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from huggingface_hub import list_repo_files
 from transformers import AutoConfig
-from transformers.utils.hub import cached_file
 
 from ..utils import BACKEND
+from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
 from .definitions.baichuan import BaiChuanGPTQ
@@ -23,6 +24,7 @@ from .definitions.deepseek_v2 import DeepSeekV2GPTQ
 from .definitions.exaone import ExaoneGPTQ
 from .definitions.gemma import GemmaGPTQ
 from .definitions.gemma2 import Gemma2GPTQ
+from .definitions.glm import GLM
 from .definitions.gpt2 import GPT2GPTQ
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ
 from .definitions.gpt_neox import GPTNeoXGPTQ
@@ -52,7 +54,8 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-from huggingface_hub import list_repo_files
+
+logger = setup_logger()
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -63,6 +66,7 @@ MODEL_MAP = {
     "opt": OPTGPTQ,
     "moss": MOSSGPTQ,
     "chatglm": ChatGLM,
+    "glm": GLM,
     "gpt_bigcode": GPTBigCodeGPTQ,
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
@@ -152,7 +156,7 @@ class GPTQModel:
             )
         else:
             return cls.from_pretrained(
-                pretrained_model_id_or_path=model_id_or_path,
+                model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
                 trust_remote_code=trust_remote_code,
                 **kwargs,
@@ -161,14 +165,20 @@ class GPTQModel:
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_id_or_path: str,
+        model_id_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
         **model_init_kwargs,
     ) -> BaseGPTQModel:
-        model_type = check_and_get_model_type(pretrained_model_id_or_path, trust_remote_code)
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+            logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
+                           "If you want to quantize the model, please pass un_quantized model path or id, and use "
+                           "`from_pretrained` with `quantize_config`.")
+            return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
-            pretrained_model_id_or_path=pretrained_model_id_or_path,
+            pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             **model_init_kwargs,
