@@ -676,7 +676,7 @@ class BaseGPTQModel(nn.Module):
 
     def lm_eval(
         self,
-        model: Optional[str] = None,
+        model: Optional[str] = "hf",
         model_args: str = "",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
@@ -709,7 +709,7 @@ class BaseGPTQModel(nn.Module):
         show_config: bool = False,
         trust_remote_code: bool = False,
     ):
-        if model is None:
+        if model is "hf":
             model = HFLM(
                 pretrained=self,
                 batch_size=batch_size,

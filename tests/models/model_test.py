@@ -125,7 +125,7 @@ class ModelTest(unittest.TestCase):
             if self.USE_VLLM:
                 model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}"
             else:
-                model_args = f"pretrained={model.model_id_or_path}"
+                model_args = ""
             results = model.lm_eval(
                 model="vllm" if self.USE_VLLM else "hf",
                 model_args=model_args,
