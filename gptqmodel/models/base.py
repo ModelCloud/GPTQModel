@@ -6,9 +6,11 @@ from typing import Dict, List, Optional, Union
 
 import accelerate
 import lm_eval
+import psutil
 import torch
 import torch.nn as nn
 from accelerate.hooks import remove_hook_from_module
+from gpuutils import GpuUtils
 from lm_eval.loggers import EvaluationTracker, WandbLogger
 from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
@@ -450,6 +452,9 @@ class BaseGPTQModel(nn.Module):
             if isinstance(layer, MllamaCrossAttentionDecoderLayer):
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
+
+            gpu_memory = GpuUtils.get_memory_usage() / (1024 ** 3)
+            cpu_memory = psutil.virtual_memory().used / (1024 ** 3)
 
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU and torch.cuda.is_available():
