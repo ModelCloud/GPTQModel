@@ -122,25 +122,15 @@ class ModelTest(unittest.TestCase):
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            if self.USE_VLLM:
-                results = model.lm_eval(
-                    model="vllm",
-                    model_args=f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}",
-                    output_path=tmp_dir,
-                    tasks=self.TASK_NAME,
-                    apply_chat_template=apply_chat_template,
-                    trust_remote_code=trust_remote_code,
-                    batch_size=self.BATCH_SIZE,
-                )
-            else:
-                results = model.lm_eval(
-                    model=None,
-                    output_path=tmp_dir,
-                    tasks=self.TASK_NAME,
-                    apply_chat_template=apply_chat_template,
-                    trust_remote_code=trust_remote_code,
-                    batch_size=self.BATCH_SIZE,
-                )
+            results = model.lm_eval(
+                model="vllm" if self.USE_VLLM else "hf",
+                model_args=f"pretrained={model.model_id_or_path},gptqmodel=True",
+                output_path=tmp_dir,
+                tasks=self.TASK_NAME,
+                apply_chat_template=apply_chat_template,
+                trust_remote_code=trust_remote_code,
+                batch_size=self.BATCH_SIZE,
+            )
 
             print('--------Eval Result---------')
             print(make_table(results))
