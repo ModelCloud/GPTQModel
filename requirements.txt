@@ -17,3 +17,4 @@ huggingface-hub>=0.26.2
 lm_eval==0.4.4
 setuptools>=75.5.0
 clearml>=1.16.5
+Random-Word>=1.0.11

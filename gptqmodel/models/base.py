@@ -46,8 +46,6 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 logger = setup_logger()
 
-task = Task.init(project_name='quantize_track', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
-
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
@@ -194,6 +192,7 @@ class BaseGPTQModel(nn.Module):
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: str = None,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -217,6 +216,10 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
+        if logger_board == "clearml":
+            task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
+        else:
+            task = None
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
@@ -460,24 +463,24 @@ class BaseGPTQModel(nn.Module):
             if isinstance(layer, MllamaCrossAttentionDecoderLayer):
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
+            if task is not None:
+                gpu_memory = get_GPU_memory()
+                cpu_memory = get_cpu_memory()
+                task.get_logger().report_scalar(
+                    title='GPU Memory',
+                    series='GPU Memory',
+                    value=gpu_memory,
+                    iteration=i,
+                )
 
-            gpu_memory = get_GPU_memory()
-            cpu_memory = get_cpu_memory()
-            task.get_logger().report_scalar(
-                title='GPU Memory',
-                series='GPU Memory',
-                value=gpu_memory,
-                iteration=i,
-            )
-
-            task.get_logger().report_scalar(
-                title='CPU Memory',
-                series='CPU Memory',
-                value=cpu_memory,
-                iteration=i,
-            )
-            gpu_memorys.append(gpu_memory)
-            cpu_memorys.append(cpu_memory)
+                task.get_logger().report_scalar(
+                    title='CPU Memory',
+                    series='CPU Memory',
+                    value=cpu_memory,
+                    iteration=i,
+                )
+                gpu_memorys.append(gpu_memory)
+                cpu_memorys.append(cpu_memory)
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU and torch.cuda.is_available():
                 move_to(layer, CUDA_0)
@@ -549,19 +552,20 @@ class BaseGPTQModel(nn.Module):
                         actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
-                    task.get_logger().report_scalar(
-                        title='Quantization Loss',
-                        series=f'layer_{i}_loss',
-                        value=avg_loss,
-                        iteration=name_index,
-                    )
+                    if task is not None:
+                        task.get_logger().report_scalar(
+                            title='Quantization Loss',
+                            series=f'layer_{i}_loss',
+                            value=avg_loss,
+                            iteration=name_index,
+                        )
 
-                    task.get_logger().report_scalar(
-                        title='Quantization Time',
-                        series=f'layer_{i}_time',
-                        value=duration,
-                        iteration=name_index,
-                    )
+                        task.get_logger().report_scalar(
+                            title='Quantization Time',
+                            series=f'layer_{i}_time',
+                            value=duration,
+                            iteration=name_index,
+                        )
                     durations.append(duration)
                     avg_losses.append(avg_loss)
                     module_names.append(f"layer-{i}-{name}")
@@ -616,15 +620,16 @@ class BaseGPTQModel(nn.Module):
         logger.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
             logger.info(module_log)
-        x = list(range(layer_count))
-        gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-        cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-        loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
-        time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
-        task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-        task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-        task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-        task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+        if task is not None:
+            x = list(range(layer_count))
+            gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+            cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+            loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
+            time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
+            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
