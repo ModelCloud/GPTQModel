@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
+from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
@@ -16,13 +17,14 @@ backend_dict = OrderedDict({
     BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
+    BACKEND.CUDA: [CudaQuantLinear],
     BACKEND.BITBLAS: [BitBLASQuantLinear],
     BACKEND.IPEX: [IPEXQuantLinear],
 })
 
 format_dict = {
-    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.TRITON],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.TRITON],
+    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.CUDA],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.CUDA],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -68,4 +70,4 @@ def select_quant_linear(
     elif backend == BACKEND.IPEX:
         return IPEXQuantLinear
     else:
-        return ExllamaV2QuantLinear
+        return CudaQuantLinear

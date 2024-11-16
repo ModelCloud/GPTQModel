@@ -10,6 +10,7 @@ class BACKEND(Enum):
     IPEX = 5
     VLLM = 6
     SGLANG = 7
+    CUDA = 8
 
 def get_backend(backend: str):
     try:

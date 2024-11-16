@@ -28,7 +28,7 @@ except Exception:
 def ipex_dtype() -> torch.dtype:
     if not IPEX_AVAILABLE:
         raise ImportError("intel_extension_for_pytorch not installed. "
-                          "Please install via via 'pip install intel_extension_for_pytorch")
+                          "Please install via 'pip install intel_extension_for_pytorch'")
 
     return torch.bfloat16
 

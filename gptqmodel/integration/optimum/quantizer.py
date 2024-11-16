@@ -289,6 +289,20 @@ class GPTQModelQuantizer(object):
         return model
 
     def convert_gptq_v2_to_v1(self, model: nn.Module):
+        if self.bits != 4:
+            cuda_name_modules = {}
+            from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+            for name, module in model.named_modules():
+                if isinstance(module, CudaQuantLinear):
+                    cuda_name_modules[name] = module.gptqmodel_cuda
+                    module.gptqmodel_cuda = None
+
+            for name, module in model.named_modules():
+                if isinstance(module, CudaQuantLinear) and name in cuda_name_modules:
+                    module.gptqmodel_cuda = cuda_name_modules[name]
+
+            del cuda_name_modules
+
         model = convert_gptq_v2_to_v1_format(
             model, quantize_config=self.quantize_config, qlinear_kernel=self.qlinear_kernel
         )
