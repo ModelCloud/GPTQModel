@@ -261,7 +261,7 @@ jobs:
           file_glob: true
           overwrite: true
 
-      - name: Waiting for confirm
+      - name: Waiting for confirmation
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
           timestamp=$(date +%s%3N)
