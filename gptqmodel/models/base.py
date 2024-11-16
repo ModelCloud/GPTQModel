@@ -553,14 +553,14 @@ class BaseGPTQModel(nn.Module):
                         title='Quantization Loss',
                         series=f'layer_{i}_loss',
                         value=avg_loss,
-                        iteration=j,
+                        iteration=i,
                     )
 
                     task.get_logger().report_scalar(
                         title='Quantization Time',
                         series=f'layer_{i}_time',
                         value=duration,
-                        iteration=j,
+                        iteration=i,
                     )
                     durations.append(duration)
                     avg_losses.append(avg_loss)
