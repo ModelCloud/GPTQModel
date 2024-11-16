@@ -272,7 +272,7 @@ jobs:
             if [ "$status" == "2" ]; then
                 echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
             elif [ "$status" -lt 0 ]; then
-              for i in {1..5}; do echo "="; done
+              for i in {1..5}; do echo "."; done
               echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
               for i in {1..5}; do echo "."; done
               echo "click http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
