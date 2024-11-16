@@ -34,7 +34,7 @@ from ..utils.plotly import create_plotly
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
-
+from random_word import RandomWords
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -46,7 +46,7 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 logger = setup_logger()
 
-task = Task.init(project_name='quantize_track', task_name='Experiment', task_type=Task.TaskTypes.optimizer)
+task = Task.init(project_name='quantize_track', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
