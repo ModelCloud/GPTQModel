@@ -6,12 +6,10 @@ from typing import Dict, List, Optional, Union
 
 import accelerate
 import lm_eval
-import psutil
 import torch
 import torch.nn as nn
 from accelerate.hooks import remove_hook_from_module
 from clearml import Task
-from gpuutils import GpuUtils
 from lm_eval.loggers import EvaluationTracker, WandbLogger
 from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
@@ -25,6 +23,7 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
+from ..utils.device import get_GPU_memory, get_cpu_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
@@ -462,8 +461,8 @@ class BaseGPTQModel(nn.Module):
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
 
-            gpu_memory = GpuUtils.get_memory_usage() / (1024 ** 3)
-            cpu_memory = psutil.virtual_memory().used / (1024 ** 3)
+            gpu_memory = get_GPU_memory()
+            cpu_memory = get_cpu_memory()
             task.get_logger().report_scalar(
                 title='GPU Memory',
                 series='GPU Memory',
