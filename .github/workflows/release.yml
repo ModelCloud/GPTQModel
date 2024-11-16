@@ -33,12 +33,12 @@ on:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
         required: false
-        default: 'false'
+        default: false
       upload_pypi:
         description: 'upload to PyPI'
         type: boolean
         required: false
-        default: 'false'
+        default: false
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -198,8 +198,6 @@ jobs:
           overwrite: true
 
   release-source:
-    strategy:
-      fail-fast: false
     runs-on: self-hosted
     needs: 
       - check-vm
@@ -263,8 +261,30 @@ jobs:
           file_glob: true
           overwrite: true
 
-      - name: Upload sdist to pypi
+      - name: Waiting for confirm
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
+        run: |
+          timestamp=$(date +%s%3N)
+          status=-1
+
+          while [ "$status" -lt 0 ]; do
+            status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
+            if [ "$status" == "2" ]; then
+                echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+            elif [ "$status" -lt 0 ]; then
+              for i in {1..5}; do echo "."; done
+              echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
+              for i in {1..5}; do echo "."; done
+              echo "click http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
+              sleep 5
+            else
+              echo "release has been confirmed"
+              echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+            fi
+          done
+
+      - name: Upload sdist to pypi
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
