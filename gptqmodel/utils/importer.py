@@ -70,4 +70,5 @@ def select_quant_linear(
     elif backend == BACKEND.IPEX:
         return IPEXQuantLinear
     else:
+        print("cuda?")
         return CudaQuantLinear

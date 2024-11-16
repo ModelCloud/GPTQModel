@@ -22,7 +22,7 @@ except ImportError:
     _gptqmodel_cuda_available = False
 
 class CudaQuantLinear(BaseQuantLinear):
-    SUPPORTED_BITS = [2, 3, 4, 8]
+    SUPPORTS_BITS = [2, 3, 4, 8]
 
     def __init__(
         self,
@@ -160,7 +160,6 @@ class CudaQuantLinear(BaseQuantLinear):
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
 
-        zeros -= 1
         zeros = zeros.numpy().astype(np.uint32)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
         i = 0
@@ -251,7 +250,6 @@ class CudaQuantLinear(BaseQuantLinear):
                 ).to(torch.int16 if self.bits == 8 else torch.int8)
                 zeros = torch.bitwise_and(zeros, (2**self.bits) - 1)
 
-                zeros = zeros + 1
                 zeros = zeros.reshape(self.scales.shape)
 
                 weight = torch.bitwise_right_shift(
@@ -272,7 +270,6 @@ class CudaQuantLinear(BaseQuantLinear):
                     dim=2,
                 )
 
-                zeros = zeros + 1
                 zeros = zeros.reshape(self.scales.shape)
 
                 weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
