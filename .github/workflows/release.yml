@@ -250,7 +250,7 @@ jobs:
             status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}")
 
             if [ "$status" -lt 0 ]; then
-              echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp to confirm releasing to pypi"
+              echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
               sleep 5
             else
               echo "rlease has been confirmed"
