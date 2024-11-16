@@ -269,15 +269,19 @@ jobs:
 
           while [ "$status" -lt 0 ]; do
             status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
-
-            if [ "$status" -lt 0 ]; then
+            if [ "$status" == "2" ]; then
+                echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+            elif [ "$status" -lt 0 ]; then
+              for i in {1..5}; do echo "="; done
               echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
+              for i in {1..5}; do echo "."; done
+              echo "click http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
               sleep 5
             else
               echo "rlease has been confirmed"
+              echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
             fi
           done
-          echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
 
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
