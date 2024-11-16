@@ -9,13 +9,11 @@ import lm_eval
 import torch
 import torch.nn as nn
 from accelerate.hooks import remove_hook_from_module
-from clearml import Task
 from lm_eval.loggers import EvaluationTracker, WandbLogger
 from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable
 from packaging import version
-from random_word import RandomWords
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
@@ -218,6 +216,14 @@ class BaseGPTQModel(nn.Module):
             raise ValueError("Calibration dataset must not be empty.")
 
         if logger_board == "clearml":
+            try:
+                from clearml import Task
+                from random_word import RandomWords
+            except ImportError as _:
+                raise ImportError(
+                    "The logger_board is set to 'clearml', but required dependencies are missing. "
+                    "Please install them by running: pip install gptqmodel[logger]"
+                )
             task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
         else:
             task = None
