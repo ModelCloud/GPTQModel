@@ -533,7 +533,7 @@ class BaseGPTQModel(nn.Module):
                 for h in handles:
                     h.remove()
 
-                for name in subset:
+                for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
@@ -553,14 +553,14 @@ class BaseGPTQModel(nn.Module):
                         title='Quantization Loss',
                         series=f'layer_{i}_loss',
                         value=avg_loss,
-                        iteration=i,
+                        iteration=name_index,
                     )
 
                     task.get_logger().report_scalar(
                         title='Quantization Time',
                         series=f'layer_{i}_time',
                         value=duration,
-                        iteration=i,
+                        iteration=name_index,
                     )
                     durations.append(duration)
                     avg_losses.append(avg_loss)
