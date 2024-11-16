@@ -15,6 +15,7 @@ from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable
 from packaging import version
+from random_word import RandomWords
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
@@ -23,7 +24,7 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
-from ..utils.device import get_GPU_memory, get_cpu_memory
+from ..utils.device import get_cpu_memory, get_GPU_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
@@ -34,7 +35,7 @@ from ..utils.plotly import create_plotly
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
-from random_word import RandomWords
+
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -192,7 +193,7 @@ class BaseGPTQModel(nn.Module):
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        logger_board: str = None,
+        logger_board: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
