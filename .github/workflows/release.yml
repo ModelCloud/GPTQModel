@@ -278,7 +278,7 @@ jobs:
               echo "click http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
               sleep 5
             else
-              echo "rlease has been confirmed"
+              echo "release has been confirmed"
               echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
             fi
           done
