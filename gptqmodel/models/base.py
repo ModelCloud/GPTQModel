@@ -617,12 +617,12 @@ class BaseGPTQModel(nn.Module):
         for module_log in self.quant_log:
             logger.info(module_log)
         x = list(range(layer_count))
-        gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layers", yaxis_title="GPU usage")
-        cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layers", yaxis_title="CPU usage")
-        loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layers", yaxis_title="loss")
-        time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layers", yaxis_title="time")
-        task.get_logger().report_plotly('GPU', 'GPU', gpu_fig)
-        task.get_logger().report_plotly('CPU', 'CPU', cpu_fig)
+        gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+        cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+        loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
+        time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
+        task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+        task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
         task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
         task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
         self.qlinear_kernel = pack_model(
