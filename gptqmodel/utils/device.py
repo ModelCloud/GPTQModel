@@ -1,3 +1,7 @@
+import os
+
+import GPUtil
+import psutil
 import torch
 
 
@@ -11,3 +15,17 @@ def check_cuda(raise_exception: bool = True) -> bool:
             return False
     else:
         return True
+
+# unit: GiB
+def get_GPU_memory():
+    index = [int(s.strip()) for s in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if s][0]
+    gpu = GPUtil.getGPUs()[index]
+    free = gpu.memoryFree
+    total = gpu.memoryTotal
+    return (total - free) / 1024
+
+# unit: GiB
+def get_cpu_memory():
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    return memory_info.rss / 1024 / 1024 / 1024

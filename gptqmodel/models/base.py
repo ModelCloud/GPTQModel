@@ -22,12 +22,14 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
+from ..utils.device import get_cpu_memory, get_GPU_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
+from ..utils.plotly import create_plotly
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
@@ -189,6 +191,7 @@ class BaseGPTQModel(nn.Module):
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -212,6 +215,18 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
+        if logger_board == "clearml":
+            try:
+                from clearml import Task
+                from random_word import RandomWords
+            except ImportError as _:
+                raise ImportError(
+                    "The logger_board is set to 'clearml', but required dependencies are missing. "
+                    "Please install them by running: pip install gptqmodel[logger]"
+                )
+            task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
+        else:
+            task = None
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
@@ -444,13 +459,35 @@ class BaseGPTQModel(nn.Module):
 
         layer_count = len(layers)
         layer_pb = tqdm(range(layer_count))
+        gpu_memorys = []
+        cpu_memorys = []
+        durations = []
+        avg_losses = []
+        module_names = []
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
             if isinstance(layer, MllamaCrossAttentionDecoderLayer):
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
+            if task is not None:
+                gpu_memory = get_GPU_memory()
+                cpu_memory = get_cpu_memory()
+                task.get_logger().report_scalar(
+                    title='GPU Memory',
+                    series='GPU Memory',
+                    value=gpu_memory,
+                    iteration=i,
+                )
 
+                task.get_logger().report_scalar(
+                    title='CPU Memory',
+                    series='CPU Memory',
+                    value=cpu_memory,
+                    iteration=i,
+                )
+                gpu_memorys.append(gpu_memory)
+                cpu_memorys.append(cpu_memory)
             force_layer_back_to_cpu = False
             if get_device(layer) == CPU and torch.cuda.is_available():
                 move_to(layer, CUDA_0)
@@ -506,7 +543,7 @@ class BaseGPTQModel(nn.Module):
                 for h in handles:
                     h.remove()
 
-                for name in subset:
+                for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
@@ -522,6 +559,24 @@ class BaseGPTQModel(nn.Module):
                         actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
+                    if task is not None:
+                        task.get_logger().report_scalar(
+                            title='Quantization Loss',
+                            series=f'layer_{i}_loss',
+                            value=avg_loss,
+                            iteration=name_index,
+                        )
+
+                        task.get_logger().report_scalar(
+                            title='Quantization Time',
+                            series=f'layer_{i}_time',
+                            value=duration,
+                            iteration=name_index,
+                        )
+                    durations.append(duration)
+                    avg_losses.append(avg_loss)
+                    module_names.append(f"layer-{i}-{name}")
+
                     stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                             QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}"}
                     if self.quantize_config.dynamic is not None:
@@ -572,7 +627,16 @@ class BaseGPTQModel(nn.Module):
         logger.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
             logger.info(module_log)
-
+        if task is not None:
+            x = list(range(layer_count))
+            gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+            cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+            loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
+            time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
+            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
@@ -709,7 +773,7 @@ class BaseGPTQModel(nn.Module):
         show_config: bool = False,
         trust_remote_code: bool = False,
     ):
-        if model is "hf":
+        if model == "hf":
             model = HFLM(
                 pretrained=self,
                 batch_size=batch_size,
