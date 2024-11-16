@@ -1,7 +1,6 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
-from logging import getLogger
 
 import numpy as np
 import torch
@@ -10,7 +9,9 @@ import transformers
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-logger = getLogger(__name__)
+from ...utils.logger import setup_logger
+
+logger = setup_logger()
 
 BITS_DTYPE_MAPPING = {
     4: "int4_clip",

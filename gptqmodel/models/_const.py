@@ -27,6 +27,7 @@ SUPPORTED_MODELS = [
     "gpt_bigcode",
     "codegen",
     "chatglm",
+    "glm",
     "RefinedWebModel",
     "RefinedWeb",
     "baichuan",

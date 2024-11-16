@@ -1,6 +1,5 @@
 # Copyright (c) Microsoft Corporation.
 # License: GPTQModel/licenses/LICENSE.mit
-import logging
 import os
 import subprocess
 from typing import List
@@ -9,7 +8,9 @@ from thefuzz import process
 from tvm.target import Target
 from tvm.target.tag import list_tags
 
-logger = logging.getLogger(__name__)
+from ...utils.logger import setup_logger
+
+logger = setup_logger()
 
 TARGET_MISSING_ERROR = (
     "TVM target not found. Please set the TVM target environment variable using `export TVM_TARGET=<target>`, "

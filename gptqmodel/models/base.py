@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -24,6 +23,7 @@ from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantize
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.importer import select_quant_linear
+from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
@@ -41,14 +41,7 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 # See https://github.com/huggingface/transformers/issues/34366
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -80,7 +73,7 @@ class BaseGPTQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     model_loader = AutoModelForCausalLM
 
-    # monkey patch api for trust_remote_code=True models that have broken transformer compat 
+    # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
 
     # allow models to define optional notes that output messages to users that want to use this model
@@ -683,7 +676,7 @@ class BaseGPTQModel(nn.Module):
 
     def lm_eval(
         self,
-        model: Optional[str] = None,
+        model: Optional[str] = "hf",
         model_args: str = "",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
@@ -716,7 +709,7 @@ class BaseGPTQModel(nn.Module):
         show_config: bool = False,
         trust_remote_code: bool = False,
     ):
-        if model is None:
+        if model is "hf":
             model = HFLM(
                 pretrained=self,
                 batch_size=batch_size,
@@ -826,6 +819,7 @@ class BaseGPTQModel(nn.Module):
         **kwargs,
     ):
         if not torch.cuda.is_available():
+            logger.warning("No GPU detected, using IPEX backend.")
             backend = BACKEND.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(

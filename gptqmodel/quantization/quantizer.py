@@ -1,12 +1,12 @@
 # License: GPTQModel/licenses/LICENSE.mit
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
-from logging import getLogger
-
 import torch
 import torch.nn as nn
 
-logger = getLogger(__name__)
+from ..utils.logger import setup_logger
+
+logger = setup_logger()
 
 
 def quantize(x, scale, zero, maxq):

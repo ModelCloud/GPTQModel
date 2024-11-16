@@ -16,6 +16,10 @@ on:
         description: 'GitHub ref: Branch, Tag or Commit SHA'
         required: false
         default: ''
+      pr_number:
+        description: 'PR Number'
+        required: false
+        type: number
       test_names:
         description: 'Input Test(s) to Run (default all)'
         required: false
@@ -90,6 +94,15 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
       - name: List files
         id: files
         run: |
@@ -134,6 +147,15 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: Print Env
         run: |
@@ -192,7 +214,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(inputs.max-parallel).size }}
+      max-parallel: 6
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
@@ -202,6 +224,15 @@ jobs:
         with:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: Print Env
         run: |
@@ -254,7 +285,7 @@ jobs:
           uv pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           uv pip install dist/*.whl
           bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          uv pip install transformers GPUtil -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install transformers GPUtil numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Check platform
         run: |
@@ -286,7 +317,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Run tests
-        timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 40 }}
+        timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 60 }}
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 
@@ -322,6 +353,15 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: Print Env
         run: |
@@ -359,6 +399,30 @@ jobs:
       - name: Install wheel
         run: uv pip install GPUtil intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
+      - name: Find suitable GPU
+        run: |
+          timestamp=$(date +%s%3N)
+          gpu_id=-1
+
+          while [ "$gpu_id" -lt 0 ]; do
+            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+
+            if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "No available GPU, waiting 5 seconds..."
+              sleep 5
+            else
+              echo "Allocated GPU ID: $gpu_id"
+            fi
+          done
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
+          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
+
       - name: Run tests
         if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+
+      - name: Release GPU
+        if: always()
+        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"

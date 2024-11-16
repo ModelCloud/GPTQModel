@@ -3,13 +3,11 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
-import logging
 import operator
 import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from logging import getLogger
 from typing import List, Optional
 
 import accelerate
@@ -31,13 +29,9 @@ from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLi
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
+from .logger import setup_logger
 
-logger = getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = setup_logger()
 
 
 def recurse_getattr(obj, attr: str):
