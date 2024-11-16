@@ -1,5 +1,4 @@
 import math
-from logging import getLogger
 
 import numpy as np
 import torch
@@ -7,8 +6,9 @@ import torch.nn as nn
 import transformers
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.utils.logger import setup_logger
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 try:
     import gptqmodel_cuda_64
@@ -21,15 +21,21 @@ except ImportError:
     gptqmodel_cuda_64 = None
     _gptqmodel_cuda_available = False
 
-
-class TritonV2QuantLinear(BaseQuantLinear):
-    QUANT_TYPE = "cuda"
-    SUPPORTS_BITS = [2, 3, 4, 8]
+class CudaQuantLinear(BaseQuantLinear):
+    SUPPORTED_BITS = [2, 3, 4, 8]
 
     def __init__(
-        self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, bias: bool, kernel_switch_threshold=128,
-        trainable=False,
-        weight_dtype=torch.float16,**kwargs
+        self,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        infeatures: int,
+        outfeatures: int,
+        bias: bool,
+        kernel_switch_threshold=128,
+        weight_dtype=torch.float16,
+        **kwargs,
     ):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         global _gptqmodel_cuda_available
@@ -92,8 +98,6 @@ class TritonV2QuantLinear(BaseQuantLinear):
         if infeatures % 64 != 0 or outfeatures % 64 != 0:
             self.gptqmodel_cuda_available = False
 
-        self.trainable = trainable
-
     def post_init(self):
         pass
 
@@ -152,8 +156,6 @@ class TritonV2QuantLinear(BaseQuantLinear):
                     qweight[row] |= intweight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -188,8 +190,6 @@ class TritonV2QuantLinear(BaseQuantLinear):
                     qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
                 i += 10
                 col += 1
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -240,8 +240,6 @@ class TritonV2QuantLinear(BaseQuantLinear):
                     self.qzeros,
                     self.g_idx,
                 )
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
         else:
             if self.wf.device != self.qzeros.device:
                 self.wf = self.wf.to(self.qzeros.device)
@@ -285,8 +283,6 @@ class TritonV2QuantLinear(BaseQuantLinear):
                 weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
                 weight = weight & 0x7
                 weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-            else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
             weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
             num_itr = self.g_idx.shape[0] // x.shape[-1]
@@ -308,4 +304,5 @@ class TritonV2QuantLinear(BaseQuantLinear):
         out = out + self.bias if self.bias is not None else out
         return out
 
-__all__ = ["TritonV2QuantLinear"]
+
+__all__ = ["CudaQuantLinear"]
