@@ -268,7 +268,7 @@ jobs:
           status=-1
 
           while [ "$status" -lt 0 ]; do
-            status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}")
+            status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
 
             if [ "$status" -lt 0 ]; then
               echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
