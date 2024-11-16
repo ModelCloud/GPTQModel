@@ -29,12 +29,12 @@ on:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
         required: false
-        default: 'false'
+        default: false
       upload_pypi:
         description: 'upload to PyPI'
         type: boolean
         required: false
-        default: 'false'
+        default: false
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -186,8 +186,6 @@ jobs:
           overwrite: true
 
   release-source:
-    strategy:
-      fail-fast: false
     runs-on: self-hosted
     needs: check-vm
     container:
