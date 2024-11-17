@@ -29,7 +29,6 @@ from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
-from ..utils.plotly import create_plotly
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
@@ -219,6 +218,7 @@ class BaseGPTQModel(nn.Module):
             try:
                 from clearml import Task
                 from random_word import RandomWords
+                from ..utils.plotly import create_plotly
             except ImportError as _:
                 raise ImportError(
                     "The logger_board is set to 'clearml', but required dependencies are missing. "
