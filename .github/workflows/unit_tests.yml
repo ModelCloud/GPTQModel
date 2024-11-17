@@ -31,7 +31,7 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '{"size": 6}'
+        default: '6'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -57,6 +57,7 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       tag: ${{ steps.get_ip.outputs.tag }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
+      max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     steps:
       - name: Print env
         run: |
@@ -80,6 +81,11 @@ jobs:
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
+
+          max_p=${{ github.event.inputs.max-parallel }}
+          max_p="{\"size\": ${max_p:-6}}"
+          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
+          echo "max-parallel=$max_p"
 
   list-test-files:
     runs-on: ubuntu-latest
@@ -214,7 +220,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
@@ -345,6 +351,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
     steps:
