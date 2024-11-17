@@ -28,7 +28,7 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '{"size": 6}'
+        default: '6'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
@@ -63,6 +63,7 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       zen4_list: ${{ steps.assign.outputs.zen4_list }}
+      max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     steps:
       - name: Print env
         run: |
@@ -79,6 +80,11 @@ jobs:
           echo "ip=${ZEN4_SERVER}" >> "$GITHUB_OUTPUT"
           echo "GPU_IP=${ZEN4_SERVER}" >> $GITHUB_ENV
           echo "ip: $ip"
+
+          max_p=${{ github.event.inputs.max-parallel }}
+          max_p="{\"size\": ${max_p:-6}}"
+          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
+          echo "max-parallel=$max_p"
 
       - name: Assign tasks
         id: assign
@@ -115,9 +121,9 @@ jobs:
   release-zen4:
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: 6
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
