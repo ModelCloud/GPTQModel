@@ -74,17 +74,17 @@ jobs:
           echo "upload_release: ${{ inputs.upload_release }}"
           echo "upload_pypi: ${{ inputs.upload_pypi }}"
 
-          max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-6}}"
-          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
-          echo "max-parallel=$max_p"
-
       - name: Select server
         id: get_ip
         run: |
           echo "ip=${ZEN4_SERVER}" >> "$GITHUB_OUTPUT"
           echo "GPU_IP=${ZEN4_SERVER}" >> $GITHUB_ENV
           echo "ip: $ip"
+
+          max_p=${{ github.event.inputs.max-parallel }}
+          max_p="{\"size\": ${max_p:-6}}"
+          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
+          echo "max-parallel=$max_p"
 
       - name: Assign tasks
         id: assign
