@@ -38,7 +38,7 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   MAX_JOBS: 4
   ZEN4_SERVER: 10.0.14.247
-  TORCH_2_5_TESTS: "test_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
+  TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
   IGNORED_TEST_FILES: "test_tgi.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -380,6 +380,8 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+          ip=${{ needs.check-vm.outputs.ip }}
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Download wheel
         continue-on-error: true
