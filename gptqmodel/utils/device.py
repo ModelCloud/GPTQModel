@@ -1,8 +1,8 @@
 
 import torch
-from device_smi import DeviceSMI
+from device_smi import Device
 
-from ._const import CPU, CUDA_0
+from gptqmodel.models._const import CUDA_0, CPU
 
 
 def check_cuda(raise_exception: bool = True) -> bool:
@@ -18,12 +18,12 @@ def check_cuda(raise_exception: bool = True) -> bool:
 
 # unit: GiB
 def get_gpu_usage_memory():
-    smi = DeviceSMI(CUDA_0)
-    info = smi.get_info()
+    smi = Device(CUDA_0)
+    info = smi.info()
     return info.__dict__["memory_used"] / 1024 / 1024 / 1024 #GB
 
 # unit: GiB
 def get_cpu_usage_memory():
-    smi = DeviceSMI(CPU)
-    info = smi.get_info()
+    smi = Device(CPU)
+    info = smi.info()
     return info.__dict__["memory_used"] / 1024 / 1024 / 1024 #GB
