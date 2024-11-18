@@ -1,8 +1,8 @@
-import os
 
-from DeviceSMI import DeviceSMI
-from ._const import CPU, CUDA_0
 import torch
+from device_smi import DeviceSMI
+
+from ._const import CPU, CUDA_0
 
 
 def check_cuda(raise_exception: bool = True) -> bool:

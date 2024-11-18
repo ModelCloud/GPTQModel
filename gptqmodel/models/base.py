@@ -22,7 +22,7 @@ from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
-from ..utils.device import get_gpu_usage_memory, get_cpu_usage_memory
+from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
@@ -218,6 +218,7 @@ class BaseGPTQModel(nn.Module):
             try:
                 from clearml import Task
                 from random_word import RandomWords
+
                 from ..utils.plotly import create_plotly
             except ImportError as _:
                 raise ImportError(
