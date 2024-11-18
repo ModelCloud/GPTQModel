@@ -16,4 +16,4 @@ protobuf>=5.28.3
 huggingface-hub>=0.26.2
 lm_eval==0.4.4
 setuptools>=75.5.0
-device-smi>=0.0.1
+device-smi>=0.0.1.dev0
