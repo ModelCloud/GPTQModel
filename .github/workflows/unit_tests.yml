@@ -324,7 +324,7 @@ jobs:
 
       - name: Run tests
         timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 60 }}
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 
       - name: Clear cache
@@ -427,7 +427,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Run tests
-        if: ${{ !github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script) && !cancelled() }}
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
