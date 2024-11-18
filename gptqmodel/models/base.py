@@ -72,7 +72,7 @@ class BaseGPTQModel(nn.Module):
     dynamic_expert_index: Optional[str] = None
 
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    model_loader = AutoModelForCausalLM
+    loader = AutoModelForCausalLM
 
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False

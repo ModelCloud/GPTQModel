@@ -40,7 +40,7 @@ QUANT_LOG_TIME = "time"
 
 class ModelWriter():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    model_loader = AutoModelForCausalLM
+    loader = AutoModelForCausalLM
 
     @classmethod
     def save_quantized(
@@ -324,7 +324,7 @@ class ModelWriter():
         transformers.modeling_utils._init_weights = False
         init_contexts = [no_init_weights()]
         with ContextManagers(init_contexts):
-            model = cls.model_loader.from_config(
+            model = cls.loader.from_config(
                 config, torch_dtype=torch.float16
             )
 
