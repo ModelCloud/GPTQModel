@@ -248,7 +248,7 @@ setup(
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
-        'logger': ["clearml", "random_word", "GPUtil", "plotly"],
+        'logger': ["clearml", "random_word", "device-smi", "plotly"],
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",
