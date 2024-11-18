@@ -29,7 +29,7 @@ logger = setup_logger()
 
 class ModelLoader():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    model_loader = AutoModelForCausalLM
+    loader = AutoModelForCausalLM
 
     @classmethod
     def from_pretrained(
@@ -95,7 +95,7 @@ class ModelLoader():
         if model_init_kwargs.get("cpu") != "cpu":
             torch.cuda.empty_cache()
 
-        model = cls.model_loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
@@ -322,7 +322,7 @@ class ModelLoader():
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            model = cls.model_loader.from_config(
+            model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
             model.checkpoint_file_name = model_save_name
