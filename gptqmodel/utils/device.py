@@ -20,10 +20,10 @@ def check_cuda(raise_exception: bool = True) -> bool:
 def get_gpu_usage_memory():
     smi = DeviceSMI(CUDA_0)
     info = smi.get_info()
-    return info.__dict__["memory_used"] / 1024 / 1024 / 1024
+    return info.__dict__["memory_used"] / 1024 / 1024 / 1024 #GB
 
 # unit: GiB
 def get_cpu_usage_memory():
     smi = DeviceSMI(CPU)
     info = smi.get_info()
-    return info.__dict__["memory_used"] / 1024 / 1024 / 1024
+    return info.__dict__["memory_used"] / 1024 / 1024 / 1024 #GB
