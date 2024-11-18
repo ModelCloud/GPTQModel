@@ -1,8 +1,8 @@
-import os
 
-import GPUtil
-import psutil
 import torch
+from device_smi import Device
+
+from gptqmodel.models._const import CUDA_0, CPU
 
 
 def check_cuda(raise_exception: bool = True) -> bool:
@@ -17,15 +17,11 @@ def check_cuda(raise_exception: bool = True) -> bool:
         return True
 
 # unit: GiB
-def get_GPU_memory():
-    index = [int(s.strip()) for s in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if s][0]
-    gpu = GPUtil.getGPUs()[index]
-    free = gpu.memoryFree
-    total = gpu.memoryTotal
-    return (total - free) / 1024
+def get_gpu_usage_memory():
+    smi = Device(CUDA_0)
+    return smi.memory_used() / 1024 / 1024 / 1024 #GB
 
 # unit: GiB
-def get_cpu_memory():
-    process = psutil.Process()
-    memory_info = process.memory_info()
-    return memory_info.rss / 1024 / 1024 / 1024
+def get_cpu_usage_memory():
+    smi = Device(CPU)
+    return smi.memory_used() / 1024 / 1024 / 1024 #GB
