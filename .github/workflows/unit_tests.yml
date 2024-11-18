@@ -380,6 +380,8 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+          ip=${{ needs.check-vm.outputs.ip }}
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Download wheel
         continue-on-error: true
@@ -408,9 +410,6 @@ jobs:
 
       - name: Find suitable GPU
         run: |
-          ip=${{ needs.check-vm.outputs.ip }}
-          echo "GPU_IP=$ip" >> $GITHUB_ENV
-
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
