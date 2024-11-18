@@ -408,6 +408,9 @@ jobs:
 
       - name: Find suitable GPU
         run: |
+          ip=${{ needs.check-vm.outputs.ip }}
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
+
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
