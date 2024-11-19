@@ -1,5 +1,4 @@
 import gc
-from logging import getLogger
 
 import accelerate
 import torch
@@ -8,9 +7,10 @@ from tqdm import tqdm
 
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
+from ..utils.logger import setup_logger
 from .model import recurse_getattr, recurse_setattr
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 
 def prepare_model_for_marlin_load(

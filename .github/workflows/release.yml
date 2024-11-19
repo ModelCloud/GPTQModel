@@ -17,6 +17,10 @@ on:
         description: 'GitHub ref: Branch, Tag or Commit SHA'
         required: false
         default: ''
+      pr_number:
+        description: 'PR Number'
+        required: false
+        type: number
       target:
         description: 'CUDA Torch Python version separated by space, check http://10.0.14.247/gpu/runner/docker to get all supported combinations'
         required: false
@@ -24,17 +28,17 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '{"size": 6}'
+        default: '6'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
         required: false
-        default: 'false'
+        default: false
       upload_pypi:
         description: 'upload to PyPI'
         type: boolean
         required: false
-        default: 'false'
+        default: false
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -59,6 +63,7 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       zen4_list: ${{ steps.assign.outputs.zen4_list }}
+      max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     steps:
       - name: Print env
         run: |
@@ -75,6 +80,11 @@ jobs:
           echo "ip=${ZEN4_SERVER}" >> "$GITHUB_OUTPUT"
           echo "GPU_IP=${ZEN4_SERVER}" >> $GITHUB_ENV
           echo "ip: $ip"
+
+          max_p=${{ github.event.inputs.max-parallel }}
+          max_p="{\"size\": ${max_p:-6}}"
+          echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
+          echo "max-parallel=$max_p"
 
       - name: Assign tasks
         id: assign
@@ -111,9 +121,9 @@ jobs:
   release-zen4:
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-      max-parallel: 6
     runs-on: [ self-hosted, zen4 ]
     needs:
       - check-vm
@@ -127,6 +137,15 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+    
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: Print Env
         run: |
@@ -185,8 +204,6 @@ jobs:
           overwrite: true
 
   release-source:
-    strategy:
-      fail-fast: false
     runs-on: self-hosted
     needs: 
       - check-vm
@@ -201,6 +218,15 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+    
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: Install requirements
         run: uv pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -241,10 +267,32 @@ jobs:
           file_glob: true
           overwrite: true
 
-      - name: Upload sdist to pypi
+      - name: Waiting for confirmation
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
+        run: |
+          timestamp=$(date +%s%3N)
+          status=-1
+
+          while [ "$status" -lt 0 ]; do
+            status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
+            if [ "$status" == "2" ]; then
+                echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+            elif [ "$status" -lt 0 ]; then
+              for i in {1..5}; do echo "."; done
+              echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
+              for i in {1..5}; do echo "."; done
+              echo "click http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
+              sleep 5
+            else
+              echo "release has been confirmed"
+              echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
+            fi
+          done
+
+      - name: Upload sdist to pypi
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
         env:
           TWINE_USERNAME: "__token__"
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
           python -m twine upload dist/*gz

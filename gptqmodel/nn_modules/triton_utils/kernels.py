@@ -1,13 +1,12 @@
-from logging import getLogger
-
 import torch
 import triton
 import triton.language as tl
 from torch.cuda.amp import custom_bwd, custom_fwd
 
+from ...utils.logger import setup_logger
 from . import custom_autotune
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 
 # code based https://github.com/fpgaminer/GPTQ-triton

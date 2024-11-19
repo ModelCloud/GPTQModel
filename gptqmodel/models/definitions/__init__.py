@@ -10,6 +10,7 @@ from .deepseek_v2 import DeepSeekV2GPTQ
 from .exaone import ExaoneGPTQ
 from .gemma import GemmaGPTQ
 from .gemma2 import Gemma2GPTQ
+from .glm import GLM
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ

@@ -1,11 +1,12 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
 import math
-from logging import getLogger
 
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+from ...utils.logger import setup_logger
 
 exllama_v2_import_exception = None
 try:
@@ -13,7 +14,7 @@ try:
 except ImportError as e:
     exllama_v2_import_exception = e
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 
 

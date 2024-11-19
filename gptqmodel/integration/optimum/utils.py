@@ -12,7 +12,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 import os
-from logging import getLogger
 from typing import Callable, Optional, Union
 
 import torch
@@ -20,11 +19,13 @@ from torch import nn
 from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import Conv1D
 
+from ...utils.logger import setup_logger
 from .constants import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
 
 ori_save_pretrained = PreTrainedModel.save_pretrained
 
-logger = getLogger(__name__)
+logger = setup_logger()
+
 
 """
 Set of utilities to get specific attributes of a model

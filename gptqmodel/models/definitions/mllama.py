@@ -6,7 +6,7 @@ from ..base import BaseGPTQModel
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
 class MLlamaGPTQ(BaseGPTQModel):
     # AutoModelForPreTraining return a correct MLlamaForConditionalGeneration for mllama.
-    model_loader = AutoModelForPreTraining
+    loader = AutoModelForPreTraining
 
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.

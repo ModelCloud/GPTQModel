@@ -14,7 +14,7 @@ def main():
     global quantized_model_id
 
     parser = ArgumentParser()
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
     args = parser.parse_args()
 
     backend = get_backend(args.backend)

@@ -104,8 +104,6 @@ additional_setup_kwargs = {}
 
 include_dirs = ["gptqmodel_cuda"]
 
-extensions = []
-
 if BUILD_CUDA_EXT:
     from distutils.sysconfig import get_python_lib
 
@@ -147,6 +145,23 @@ if BUILD_CUDA_EXT:
             "--use_fast_math",
         ],
     }
+
+    extensions = [
+        cpp_ext.CUDAExtension(
+            "gptqmodel_cuda_64",
+            [
+                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
+                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
+            ]
+        ),
+        cpp_ext.CUDAExtension(
+            "gptqmodel_cuda_256",
+            [
+                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
+                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
+            ]
+        )
+    ]
 
     # Marlin is not ROCm-compatible, CUDA only
     if COMPILE_MARLIN:
@@ -229,10 +244,12 @@ setup(
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
         'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
-        'bitblas': ["bitblas>=0.0.1.dev13"],
+        'bitblas': ["bitblas==0.0.1.dev13"],
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
+        'logger': ["clearml", "random_word", "device-smi", "plotly"],
+        'eval': ["lm_eval>=0.4.4"],
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",

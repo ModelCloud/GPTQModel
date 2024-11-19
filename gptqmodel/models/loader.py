@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -18,6 +17,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import select_quant_linear
+from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
@@ -25,18 +25,11 @@ from ..utils.model import (auto_dtype_from_config, check_requires_version, conve
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import CPU, DEVICE, SUPPORTED_MODELS
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class ModelLoader():
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    model_loader = AutoModelForCausalLM
+    loader = AutoModelForCausalLM
 
     @classmethod
     def from_pretrained(
@@ -102,7 +95,7 @@ class ModelLoader():
         if model_init_kwargs.get("cpu") != "cpu":
             torch.cuda.empty_cache()
 
-        model = cls.model_loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
@@ -329,7 +322,7 @@ class ModelLoader():
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            model = cls.model_loader.from_config(
+            model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
             model.checkpoint_file_name = model_save_name
