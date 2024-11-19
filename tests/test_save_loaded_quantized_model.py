@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 import torch
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, GPTQModel, get_best_device
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
@@ -24,7 +24,7 @@ class TestSave(unittest.TestCase):
     )
     def test_save(self, backend):
         prompt = "I am in Paris and"
-        device = torch.device("cuda:0") if backend != BACKEND.IPEX else torch.device("cpu")
+        device = torch.device("cuda:0") if backend != BACKEND.IPEX else get_best_device()
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 

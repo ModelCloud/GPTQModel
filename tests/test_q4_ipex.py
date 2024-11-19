@@ -17,7 +17,7 @@ GENERATE_EVAL_SIZE = 100
 
 class TestsIPEX(unittest.TestCase):
 
-    def test_ipex_format(self):
+    def test_cpu_ipex_format(self):
         prompt = "I am in Paris and"
         expected_output = "<s> I am in Paris and I am a tourist"
         device = torch.device("cpu")
@@ -27,6 +27,28 @@ class TestsIPEX(unittest.TestCase):
         model_q = GPTQModel.load(
             model_id,
             backend=BACKEND.IPEX,
+            device=device,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+        input = tokenizer(prompt, return_tensors="pt").to(device)
+
+        result = model_q.generate(**input, num_beams=1, max_new_tokens=5)
+        output = tokenizer.decode(result[0])
+        self.assertTrue(output == expected_output)
+
+    @unittest.skipIf(not torch.xpu.is_available(), reason="No XPU found")
+    def test_xpu_ipex_format(self):
+        prompt = "I am in Paris and"
+        expected_output = "<s> I am in Paris and I am a tourist"
+        device = torch.device("xpu:0")
+
+        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit" # "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+
+        model_q = GPTQModel.load(
+            model_id,
+            backend=BACKEND.IPEX,
+            device=device,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
