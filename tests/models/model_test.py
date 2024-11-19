@@ -175,7 +175,7 @@ class ModelTest(unittest.TestCase):
             if isinstance(e, torch.OutOfMemoryError):
                 old_batch = self.BATCH_SIZE
                 if self.BATCH_SIZE=="auto":
-                    self.BATCH_SIZE="16"
+                    self.BATCH_SIZE="8"
                 else:
                     self.BATCH_SIZE =f"{int(self.BATCH_SIZE) / 2}"
 
