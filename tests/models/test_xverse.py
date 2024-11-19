@@ -11,6 +11,7 @@ class TestXVerse(ModelTest):
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
     BATCH_SIZE = 6
+    USE_VLLM = False
 
     @classmethod
     def setUpClass(cls):

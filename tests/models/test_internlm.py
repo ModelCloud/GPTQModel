@@ -9,6 +9,7 @@ class TestInternlm(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.4164
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4309
     TRUST_REMOTE_CODE = True
+    USE_VLLM = False
 
     @classmethod
     def setUpClass(cls):
