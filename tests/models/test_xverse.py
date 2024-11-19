@@ -1,6 +1,7 @@
 import subprocess
 import sys
 
+from gptqmodel.models import XverseGPTQ
 from model_test import ModelTest  # noqa: E402
 
 
@@ -15,9 +16,7 @@ class TestXVerse(ModelTest):
 
     @classmethod
     def setUpClass(cls):
-        # XVerse does not work with the latest transformers and tokenizers
-        # https://github.com/vllm-project/vllm/issues/9961
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers==4.38.2"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", f"transformers{XverseGPTQ.require_transformers_version}"])
         subprocess.check_call([sys.executable, "-m", "pip", "install", "tokenizers==0.15.2"])
 
     def test_xverse(self):
