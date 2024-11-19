@@ -29,6 +29,7 @@ class ModelTest(unittest.TestCase):
     BATCH_SIZE = "auto"
     USE_VLLM = True
     MAX_LENGTH = 2048
+    MODEL_MAX_LEN = 4096
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -125,7 +126,7 @@ class ModelTest(unittest.TestCase):
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
             if self.USE_VLLM:
-                model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len=4096"
+                model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
             else:
                 model_args = ""
             results = model.lm_eval(
@@ -180,6 +181,7 @@ class ModelTest(unittest.TestCase):
                     self.BATCH_SIZE="8"
                 else:
                     self.BATCH_SIZE =f"{int(int(self.BATCH_SIZE) / 2)}"
+                    self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
 
                 print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
 
