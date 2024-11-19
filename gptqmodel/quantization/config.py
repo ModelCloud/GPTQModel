@@ -336,6 +336,7 @@ class QuantizeConfig():
             "desc_act": self.desc_act,
             "sym": self.sym,
             "lm_head": self.lm_head,
+            QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,
         }
