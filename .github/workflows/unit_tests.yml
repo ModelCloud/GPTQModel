@@ -406,7 +406,9 @@ jobs:
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
       - name: Install wheel
-        run: uv pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 device-smi dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+        run: |
+          uv pip install device-smi -i https://pypi.org/simple
+          uv pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Find suitable GPU
         run: |
