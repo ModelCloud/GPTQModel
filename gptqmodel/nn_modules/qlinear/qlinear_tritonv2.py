@@ -6,9 +6,14 @@ import torch.nn as nn
 import transformers
 
 from ...utils.logger import setup_logger
-from ..triton_utils.dequant import QuantLinearFunction
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
+
+triton_import_exception = None
+try:
+    from ..triton_utils.dequant import QuantLinearFunction
+except ImportError as e:
+    triton_import_exception = e
 
 logger = setup_logger()
 
@@ -27,6 +32,10 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     """
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, bias, **kwargs,):
+        if triton_import_exception is not None:
+            raise ValueError(
+                f"Trying to use the triton backend, but could not import the triton with the following error: {triton_import_exception}"
+            )
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         self.infeatures = infeatures
         self.outfeatures = outfeatures
