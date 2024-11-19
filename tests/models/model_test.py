@@ -21,7 +21,7 @@ from transformers import AutoTokenizer  # noqa: E402
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.15  # -10%
+    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.15  # -15%
     QUANT_ARC_MAX_POSITIVE_DELTA = 0.2  # 20%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
