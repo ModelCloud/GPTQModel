@@ -32,7 +32,7 @@ class ModelTest(unittest.TestCase):
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
-    USE_VLLM = True
+    USE_VLLM = False
     MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
 
