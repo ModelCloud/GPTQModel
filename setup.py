@@ -249,6 +249,7 @@ setup(
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "device-smi", "plotly"],
+        'eval': ["lm_eval>=0.4.4"],
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",

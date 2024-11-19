@@ -1,6 +1,5 @@
 accelerate>=1.1.1
 datasets>=3.1.0
-sentencepiece>=0.2.0
 numpy>=1.26.4
 rouge>=1.0.1
 gekko>=1.1.1
@@ -14,6 +13,5 @@ packaging>=24.2
 ninja>=1.11.1.1
 protobuf>=5.28.3
 huggingface-hub>=0.26.2
-lm_eval==0.4.4
 setuptools>=75.5.0
 device-smi>=0.0.1.dev0
