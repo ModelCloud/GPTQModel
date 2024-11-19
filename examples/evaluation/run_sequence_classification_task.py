@@ -38,13 +38,14 @@ def main():
     )
     parser.add_argument("--sample_max_len", type=int, default=1024, help="max tokens for each sample")
     parser.add_argument("--block_max_len", type=int, default=2048, help="max tokens for each data block")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX'])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)
 
-    model = GPTQModel.from_pretrained(args.base_model_dir, QuantizeConfig())
-    model.to("cuda:0")
+    model = GPTQModel.load(args.base_model_dir, QuantizeConfig())
+    device = "cpu" if not torch.cuda.is_available() or args.backend == "IPEX" else "cuda:0"
+    model.to(device)
 
     task = SequenceClassificationTask(
         model=model,
@@ -69,7 +70,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    model = GPTQModel.from_quantized(args.quantized_model_dir, device="cuda:0", backend=get_backend(args.backend))
+    model = GPTQModel.from_quantized(args.quantized_model_dir, device=device, backend=get_backend(args.backend))
     task.model = model
     task.device = model.device
     print(f"eval result for quantized model: {task.run()}")

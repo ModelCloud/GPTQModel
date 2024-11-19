@@ -1,6 +1,5 @@
 import copy
 import json
-import logging
 import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
@@ -10,13 +9,9 @@ from typing import Any, Dict, Optional, Tuple, Union
 from packaging import version
 from transformers.utils.hub import cached_file
 
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+from ..utils.logger import setup_logger
+
+logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_JSON = "checkpoint_format"
@@ -39,6 +34,9 @@ META_VALUE_URI = "https://github.com/modelcloud/gptqmodel"
 META_FIELD_DAMP_PERCENT = "damp_percent"
 META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
 
+META_FIELD_STATIC_GROUPS = "static_groups"
+META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
+
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
 
@@ -49,7 +47,7 @@ class FORMAT:
     GPTQ_V2 = "gptq_v2"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
-    QBITS = "qbits"
+    IPEX = "ipex"
 
 
 # quant methods
@@ -64,7 +62,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
-        FORMAT.QBITS,
+        FORMAT.IPEX,
     },
     QUANT_METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
@@ -117,7 +115,6 @@ class QuantizeConfig():
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
-    runtime_format: FORMAT = field(default=FORMAT.GPTQ)
 
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False
@@ -213,7 +210,7 @@ class QuantizeConfig():
     @classmethod
     # normalize quant config for compat and also performs validation
     def from_quant_config(cls, quantize_cfg, format: str = None):
-        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}
+        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS, FORMAT.IPEX}
         format_auto_inferred = False
         # compat: format can be passed in via from_quantized() if field missing from json
         if format:
@@ -337,11 +334,9 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
-            "static_groups": self.static_groups,
             "sym": self.sym,
             "lm_head": self.lm_head,
-            "true_sequential": self.true_sequential,
-            QUANT_METHOD_FIELD: self.quant_method,
+            QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_JSON: self.format,
             META_FIELD: self.meta,
         }
@@ -412,4 +407,4 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
 class BaseQuantizeConfig(QuantizeConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        logging.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
+        logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")

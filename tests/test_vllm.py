@@ -1,11 +1,12 @@
 import gc
 import os
+import subprocess
+import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import subprocess  # noqa: E402
-import sys  # noqa: E402
+import importlib.util  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
@@ -16,11 +17,15 @@ class TestLoadVLLM(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+        if importlib.util.find_spec("flashinfer") is None:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
+
+        if importlib.util.find_spec("vllm") is None:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+
         from vllm import SamplingParams  # noqa: E402
-        self.MODEL_ID = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-        self.SHARDED_MODEL_ID = "ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
+        self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        self.SHARDED_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
         self.prompts = [
             "The capital of France is",
         ]
@@ -34,7 +39,7 @@ class TestLoadVLLM(unittest.TestCase):
         torch.cuda.empty_cache()
 
     def test_load_vllm(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
@@ -64,7 +69,7 @@ class TestLoadVLLM(unittest.TestCase):
         self.release_vllm_model()
 
     def test_load_shared_vllm(self):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.SHARDED_MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,

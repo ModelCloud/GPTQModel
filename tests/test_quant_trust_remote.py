@@ -16,7 +16,7 @@ from transformers import AutoTokenizer  # noqa: E402
 class TestQuantWithTrustRemoteTrue(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "openbmb/MiniCPM-2B-dpo-bf16"
+        self.MODEL_ID = "/monster/data/model/MiniCPM-2B-dpo-bf16"
         self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID, use_fast=True, trust_remote_code=True)
 
         if not self.tokenizer.pad_token_id:
@@ -32,7 +32,7 @@ class TestQuantWithTrustRemoteTrue(unittest.TestCase):
             format=FORMAT.GPTQ,
         )
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             self.MODEL_ID,
             quantize_config=quantize_config,
             trust_remote_code=True,
@@ -41,7 +41,7 @@ class TestQuantWithTrustRemoteTrue(unittest.TestCase):
         model.quantize(self.calibration_dataset, batch_size=64)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 

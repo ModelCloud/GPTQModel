@@ -3,7 +3,7 @@ from gptqmodel import GPTQModel
 from gptqmodel.quantization.config import AutoRoundQuantizeConfig  # noqa: E402
 from transformers import AutoTokenizer
 
-pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "./autoround/TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
@@ -19,25 +19,26 @@ def main():
         group_size=128
     )
 
-    model = GPTQModel.from_pretrained(
+    model = GPTQModel.load(
         pretrained_model_id,
         quantize_config=quantize_config,
     )
 
     model.quantize(examples)
 
-    model.save_quantized(quantized_model_id)
+    model.save(quantized_model_id)
 
     tokenizer.save_pretrained(quantized_model_id)
 
     del model
 
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     model = GPTQModel.from_quantized(
         quantized_model_id,
-        device="cuda:0",
+        device=device,
     )
 
-    input_ids = torch.ones((1, 1), dtype=torch.long, device="cuda:0")
+    input_ids = torch.ones((1, 1), dtype=torch.long, device=device)
     outputs = model(input_ids=input_ids)
     print(f"output logits {outputs.logits.shape}: \n", outputs.logits)
     # inference with model.generate

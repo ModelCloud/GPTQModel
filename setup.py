@@ -2,15 +2,13 @@ import os
 import subprocess
 import sys
 import urllib
-import urllib.request
 import urllib.error
-
+import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
-os.environ["BUILD_CUDA_EXT"] = "1"
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
@@ -58,8 +56,11 @@ common_setup_kwargs = {
 }
 
 
-def get_cuda_version_tag(is_cuda_release: bool = True) -> str:
+def get_version_tag(is_cuda_release: bool = True) -> str:
     import torch
+
+    if not BUILD_CUDA_EXT:
+        return common_setup_kwargs["version"]
 
     default_cuda_version = torch.version.cuda
     CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", default_cuda_version).split("."))
@@ -78,10 +79,6 @@ def get_cuda_version_tag(is_cuda_release: bool = True) -> str:
     return common_setup_kwargs["version"]
 
 
-if BUILD_CUDA_EXT:
-    if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+{get_cuda_version_tag(True)}"
-
 with open('requirements.txt') as f:
     requirement_list = f.read().splitlines()
     if os.getenv("CI"):
@@ -95,15 +92,17 @@ import torch  # noqa: E402
 if TORCH_CUDA_ARCH_LIST is None:
     at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
     if not at_least_one_cuda_v6:
-        raise EnvironmentError(
-            "GPTQModel requires at least one GPU device with CUDA compute capability >= `6.0`."
-        )
+        BUILD_CUDA_EXT = False
+
+if BUILD_CUDA_EXT:
+    if CUDA_RELEASE == "1":
+        common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
+else:
+    common_setup_kwargs["version"] += "+cpu"
 
 additional_setup_kwargs = {}
 
 include_dirs = ["gptqmodel_cuda"]
-
-extensions = []
 
 if BUILD_CUDA_EXT:
     from distutils.sysconfig import get_python_lib
@@ -147,6 +146,23 @@ if BUILD_CUDA_EXT:
         ],
     }
 
+    extensions = [
+        cpp_ext.CUDAExtension(
+            "gptqmodel_cuda_64",
+            [
+                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
+                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
+            ]
+        ),
+        cpp_ext.CUDAExtension(
+            "gptqmodel_cuda_256",
+            [
+                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
+                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
+            ]
+        )
+    ]
+
     # Marlin is not ROCm-compatible, CUDA only
     if COMPILE_MARLIN:
         extensions.append(
@@ -175,20 +191,6 @@ if BUILD_CUDA_EXT:
 
     extensions.append(
         cpp_ext.CUDAExtension(
-            "gptqmodel_exllama_kernels",
-            [
-                "gptqmodel_ext/exllama/exllama_ext.cpp",
-                "gptqmodel_ext/exllama/cuda_buffers.cu",
-                "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        )
-    )
-    extensions.append(
-        cpp_ext.CUDAExtension(
             "gptqmodel_exllamav2_kernels",
             [
                 "gptqmodel_ext/exllamav2/ext.cpp",
@@ -210,7 +212,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
 
-        wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_cuda_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
+        wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
         wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{gptqmodel_version}", wheel_name=wheel_filename)
         print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
@@ -222,7 +224,7 @@ class CachedWheelsCommand(_bdist_wheel):
                 os.makedirs(self.dist_dir)
 
             impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_cuda_version_tag()}-{impl_tag}-{abi_tag}-{plat_tag}"
+            archive_basename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{impl_tag}-{abi_tag}-{plat_tag}"
 
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
@@ -242,10 +244,12 @@ setup(
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
         'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
-        'bitblas': ["bitblas>=0.0.1.dev13"],
+        'bitblas': ["bitblas==0.0.1.dev13"],
         'hf': ["optimum>=1.21.2"],
-        'qbits': ["intel_extension_for_transformers>=1.4.2"],
+        'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
+        'logger': ["clearml", "random_word", "device-smi", "plotly"],
+        'eval': ["lm_eval>=0.4.4"],
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",

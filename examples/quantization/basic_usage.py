@@ -1,16 +1,19 @@
 import os
 
+import torch
 from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
+    import pdb
+    pdb.set_trace()
     calibration_dataset = [
         tokenizer(
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
@@ -23,13 +26,13 @@ def main():
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
-    model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
+    model = GPTQModel.load(pretrained_model_id, quantize_config)
 
     # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
     model.quantize(calibration_dataset)
 
     # save quantized model
-    model.save_quantized(quantized_model_id)
+    model.save(quantized_model_id)
 
     # push quantized model to Hugging Face Hub.
     # to use use_auth_token=True, Login first via huggingface-cli login.
@@ -46,12 +49,13 @@ def main():
     # model.push_to_hub(repo_id, save_dir=quantized_model_dir, use_safetensors=True, commit_message=commit_message, use_auth_token=True)
 
     # save quantized model using safetensors
-    model.save_quantized(quantized_model_id, use_safetensors=True)
+    model.save(quantized_model_id, use_safetensors=True)
 
     # load quantized model to the first GPU
-    model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0")
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    model = GPTQModel.load(quantized_model_id, device=device)
 
-    # load quantized model to CPU with QBits kernel linear.
+    # load quantized model to CPU with IPEX kernel linear.
     # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
 
     # download quantized model from Hugging Face Hub and load to the first GPU

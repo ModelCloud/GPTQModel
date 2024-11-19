@@ -16,7 +16,7 @@ from transformers import AutoTokenizer  # noqa: E402
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestDynamic(unittest.TestCase):
-    NATIVE_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     tmp_dir = None
 
     def calculate_avg_ppl(self, model, tokenizer):
@@ -61,13 +61,13 @@ class TestDynamic(unittest.TestCase):
             dynamic=dynamic,
             group_size=128,
         )
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             cls.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
         model.quantize(cls.calibration_dataset, batch_size=4)
 
-        model.save_quantized(
+        model.save(
             cls.tmp_dir.name,
         )
 
@@ -84,7 +84,7 @@ class TestDynamic(unittest.TestCase):
     )
 
     def test_dynamic_bits(self, backend):
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             self.tmp_dir.name,
             backend=backend,
         )

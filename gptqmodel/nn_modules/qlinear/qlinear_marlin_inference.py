@@ -3,10 +3,15 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-import gptqmodel_marlin_cuda_inference
 import torch
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
+
+marlin_import_exception = None
+try:
+    import gptqmodel_marlin_cuda_inference
+except ImportError as e:
+    marlin_import_exception = e
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -138,6 +143,11 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
+        if marlin_import_exception is not None:
+            raise ValueError(
+                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
+            )
+
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
         self.original_infeatures = infeatures

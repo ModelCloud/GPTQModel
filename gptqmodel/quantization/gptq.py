@@ -4,15 +4,15 @@
 import math
 import os
 import time
-from logging import getLogger
 
 import torch
 import torch.nn as nn
 import transformers
 
+from ..utils.logger import setup_logger
 from .quantizer import Quantizer
 
-logger = getLogger(__name__)
+logger = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -183,9 +183,14 @@ class GPTQ:
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
+
+        if math.isnan(avg_loss):
+            print("Losses sum item:", torch.sum(Losses).item())
+            raise ValueError("Quantization failed due to NaN loss")
 
         group_size = group_size if group_size != -1 else self.columns
         if static_groups and actorder:

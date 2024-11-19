@@ -10,6 +10,7 @@ from .deepseek_v2 import DeepSeekV2GPTQ
 from .exaone import ExaoneGPTQ
 from .gemma import GemmaGPTQ
 from .gemma2 import Gemma2GPTQ
+from .glm import GLM
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
 from .gpt_neox import GPTNeoXGPTQ
@@ -24,6 +25,7 @@ from .minicpm3 import MiniCPM3GPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
 from .mllama import MLlamaGPTQ
+from .mobilellm import MobileLLMGPTQ
 from .moss import MOSSGPTQ
 from .mpt import MPTGPTQ
 from .opt import OPTGPTQ

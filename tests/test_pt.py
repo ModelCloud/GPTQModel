@@ -3,7 +3,7 @@ import unittest
 from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoTokenizer
 
-pretrained_model_id = "facebook/opt-125m"
+pretrained_model_id = "/monster/data/model/opt-125m" # "facebook/opt-125m"
 quantized_model_id = "facebook-opt-125m"
 
 class Test_save_load_pt_weight(unittest.TestCase):
@@ -22,13 +22,13 @@ class Test_save_load_pt_weight(unittest.TestCase):
             group_size=128,
         )
 
-        model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
+        model = GPTQModel.load(pretrained_model_id, quantize_config)
 
         model.quantize(calibration_dataset)
 
-        model.save_quantized(quantized_model_id, use_safetensors=False)
+        model.save(quantized_model_id, use_safetensors=False)
 
-        model = GPTQModel.from_quantized(quantized_model_id, device="cuda:0", use_safetensors=False)
+        model = GPTQModel.load(quantized_model_id, device="cuda:0", use_safetensors=False)
 
         result = tokenizer.decode(model.generate(**tokenizer("gptqmodel is an easy-to-use model quantization library", return_tensors="pt").to(model.device))[0])
 

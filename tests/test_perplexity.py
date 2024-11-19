@@ -16,8 +16,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
-    TINYLLAMA_MODEL_ID = "ModelCloud/tinyllama-15M-stories"
-    OPT_MODEL_ID = "facebook/opt-125m"
+    TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories" # "ModelCloud/tinyllama-15M-stories"
+    OPT_MODEL_ID = "/monster/data/model/opt-125m" # "facebook/opt-125m"
 
     OPT_DATASET_PATH = "wikitext"
     OPT_DATASET_NAME = "wikitext-2-raw-v1"
@@ -128,7 +128,7 @@ class TestPerplexity(unittest.TestCase):
 
         dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(format)
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             model_id,
             quantize_config=quantize_config,
         )
@@ -137,13 +137,13 @@ class TestPerplexity(unittest.TestCase):
         model.quantize(dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 
             del model
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
             )

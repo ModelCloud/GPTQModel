@@ -1,39 +1,41 @@
 import os
 import subprocess
+import sys
 from argparse import ArgumentParser
 
-from future.moves import sys
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "./TinyLlama/TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     global quantized_model_id
 
     parser = ArgumentParser()
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'QBITS', 'SGLANG', 'VLLM'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
     args = parser.parse_args()
 
     backend = get_backend(args.backend)
 
-    device = 'cpu' if backend == BACKEND.QBITS else 'cuda:0'
+    device = 'cpu' if backend == BACKEND.IPEX else 'cuda:0'
 
     if backend == BACKEND.SGLANG:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang>=0.1.19"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
     elif backend == BACKEND.VLLM:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.5.1"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
 
     prompt = "I am in Paris and"
 
     if backend == BACKEND.SGLANG or backend == BACKEND.VLLM:
-        quantized_model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        quantized_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         if backend == BACKEND.SGLANG:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang>=0.1.19"])
-            model = GPTQModel.from_quantized(
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
+            model = GPTQModel.load(
                 quantized_model_id,
                 device=device,
                 backend=backend,
@@ -44,8 +46,8 @@ def main():
             model.shutdown()
             del model
         else:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.5.1"])
-            model = GPTQModel.from_quantized(
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+            model = GPTQModel.load(
                 quantized_model_id,
                 device=device,
                 backend=backend,
@@ -67,16 +69,16 @@ def main():
         )
 
         # load un-quantized model, by default, the model will always be loaded into CPU memory
-        model = GPTQModel.from_pretrained(pretrained_model_id, quantize_config)
+        model = GPTQModel.load(pretrained_model_id, quantize_config)
 
         # quantize model, the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
         model.quantize(examples)
 
         # save quantized model
-        model.save_quantized(quantized_model_id)
+        model.save(quantized_model_id)
         tokenizer.save_pretrained(quantized_model_id)
 
-        model = GPTQModel.from_quantized(
+        model = GPTQModel.load(
             quantized_model_id,
             device=device,
             backend=backend,

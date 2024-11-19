@@ -14,7 +14,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestLmHead(unittest.TestCase):
-    MODEL_ID = "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
+    MODEL_ID = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse" # "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
     DEVICE = "cuda:0"
 
     @classmethod
@@ -32,7 +32,7 @@ class TestLmHead(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
         inputs = tokenizer(prompt, return_tensors="pt").to(device=self.DEVICE)
 
-        model = GPTQModel.from_quantized(self.MODEL_ID, use_safetensors=True, device=self.DEVICE)
+        model = GPTQModel.load(self.MODEL_ID, use_safetensors=True, device=self.DEVICE)
 
        # validate lm_head is loaded as quantized layer
         assert model.model.lm_head.__class__.__name__ == "ExllamaV2QuantLinear"

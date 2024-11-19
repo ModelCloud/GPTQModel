@@ -24,7 +24,7 @@ class TestQuantization(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        self.pretrained_model_id = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
+        self.pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
@@ -33,7 +33,7 @@ class TestQuantization(unittest.TestCase):
     @parameterized.expand(
         [
             (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, BACKEND.QBITS, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.IPEX, False, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
@@ -59,14 +59,14 @@ class TestQuantization(unittest.TestCase):
         else:
             raise ValueError(f"Invalid quantization method: {method}")
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
         model.quantize(self.calibration_dataset, batch_size=128)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
-            model.save_quantized(tmpdirname)
+            model.save(tmpdirname)
 
             logging.info(f"Saved config mem: {model.quantize_config}")
 
@@ -77,9 +77,9 @@ class TestQuantization(unittest.TestCase):
                 assert model.quantize_config.to_dict() == file_dict
                 logging.info(f"Saved config file: {file_dict}")
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
+                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 backend=backend,
             )
 
@@ -92,7 +92,7 @@ class TestQuantization(unittest.TestCase):
             torch.cuda.empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
-            if not sym and format == FORMAT.GPTQ or format == FORMAT.QBITS:
+            if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
                 return
 
             # test compat: 1) with simple dict type 2) is_marlin_format
@@ -104,30 +104,13 @@ class TestQuantization(unittest.TestCase):
                 "is_marlin_format": backend == BACKEND.MARLIN,
             }
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
+                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
                 quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
 
             del model
             torch.cuda.empty_cache()
-
-            # test checkpoint_format hint to from_quantized()
-            os.remove(f"{tmpdirname}/{QUANT_CONFIG_FILENAME}")
-
-            compat_quantize_config = {
-                "bits": bits,
-                "group_size": 128,
-                "sym": sym,
-                "desc_act": False if format == FORMAT.MARLIN else True,
-            }
-            model = GPTQModel.from_quantized(
-                tmpdirname,
-                device="cuda:0" if backend != BACKEND.QBITS else "cpu",
-                quantize_config=compat_quantize_config,
-                format=format,
-            )
-            assert isinstance(model.quantize_config, QuantizeConfig)
 

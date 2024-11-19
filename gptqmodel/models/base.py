@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -18,18 +17,21 @@ from packaging import version
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
-from .writer import ModelWriter
 
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import (FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig)
+from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
+from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
+from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility
-from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix, get_module_by_name_suffix,
-                           get_moe_layer_modules, move_to, nested_move_to, pack_model, simple_dispatch_model)
+from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
+                           get_module_by_name_suffix, get_moe_layer_modules, move_to,
+                           nested_move_to, pack_model, simple_dispatch_model)
 from ._const import CPU, CUDA_0
 from .loader import ModelLoader
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -40,15 +42,7 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 # See https://github.com/huggingface/transformers/issues/34366
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
-
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.propagate = False
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
+logger = setup_logger()
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -78,7 +72,10 @@ class BaseGPTQModel(nn.Module):
     dynamic_expert_index: Optional[str] = None
 
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    model_loader = AutoModelForCausalLM
+    loader = AutoModelForCausalLM
+
+    # monkey patch api for trust_remote_code=True models that have broken transformer compat
+    require_monkeypatch = False
 
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
@@ -92,7 +89,7 @@ class BaseGPTQModel(nn.Module):
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
-        model_name_or_path: str = None,
+        model_id_or_path: str = None,
     ):
         super().__init__()
 
@@ -105,7 +102,13 @@ class BaseGPTQModel(nn.Module):
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
-        self.model_name_or_path = model_name_or_path
+        self.model_id_or_path = model_id_or_path
+        # stores all per-layer quant stats such as avg loss and processing time
+        self.quant_log = []
+
+        # apply patching of broken trust_remote_code models here
+        if self.require_monkeypatch:
+            self.monkey_patch()
 
     @property
     def quantized(self):
@@ -116,10 +119,10 @@ class BaseGPTQModel(nn.Module):
         return getattr(self.model, "hf_device_map", None)
 
     def _prepare_dataset_for_quantization(
-            self,
-            calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
-            batch_size: int = 1,
-            tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        self,
+        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -163,7 +166,7 @@ class BaseGPTQModel(nn.Module):
             else:
                 logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
 
-            if not pad_token_id and isinstance(self.config.eos_token_id, list): # Llama-3.1-8B-Instruct's eos_token_id is a list
+            if not pad_token_id and isinstance(self.config.eos_token_id, list):  # Llama-3.1-8B-Instruct's eos_token_id is a list
                 pad_token_id = self.config.eos_token_id[0]
             elif not pad_token_id:
                 pad_token_id = self.config.eos_token_id
@@ -187,7 +190,8 @@ class BaseGPTQModel(nn.Module):
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-    ):
+        logger_board: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
@@ -195,6 +199,11 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
+
+        backend = BACKEND.AUTO
+        if not torch.cuda.is_available():
+            self.quantize_config.format = FORMAT.IPEX
+            backend = BACKEND.IPEX
 
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throw_error=True)
@@ -205,6 +214,20 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
+        if logger_board == "clearml":
+            try:
+                from clearml import Task
+                from random_word import RandomWords
+
+                from ..utils.plotly import create_plotly
+            except ImportError as _:
+                raise ImportError(
+                    "The logger_board is set to 'clearml', but required dependencies are missing. "
+                    "Please install them by running: pip install gptqmodel[logger]"
+                )
+            task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
+        else:
+            task = None
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
@@ -212,7 +235,7 @@ class BaseGPTQModel(nn.Module):
             group_size=self.quantize_config.group_size,
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
-            backend=BACKEND.AUTO,
+            backend=backend,
             format=self.quantize_config.format,
         )
 
@@ -221,7 +244,7 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) < min_calibration_dataset_size:
             logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
-                             f"Current size: {len(calibration_dataset)}.")
+                           f"Current size: {len(calibration_dataset)}.")
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
@@ -248,12 +271,12 @@ class BaseGPTQModel(nn.Module):
 
         if avg < min_calibration_dataset_input_ids_avg_length:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                             f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
             for name, device in device_map.items():
-                if device == "cpu":
+                if device == "cpu" and torch.cuda.is_available():
                     logger.info(f"truly offloading {name} to cpu with hook.")
                     module = get_module_by_name_suffix(self.model, name)
                     remove_hook_from_module(module, recurse=True)
@@ -305,21 +328,21 @@ class BaseGPTQModel(nn.Module):
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
 
             self.autoround = AutoRound(self.model,
-                                  tokenizer=None,
-                                  bits=self.quantize_config.bits,
-                                  group_size=self.quantize_config.group_size,
-                                  sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
-                                  dataset=dataloader, seqlen=seqlen, nblocks=self.quantize_config.nblocks,
-                                  iters=self.quantize_config.iters, lr=self.quantize_config.lr,
-                                  minmax_lr=self.quantize_config.minmax_lr,
-                                  enable_quanted_input=self.quantize_config.enable_quanted_input,
-                                  device=self.hf_device_map,
-                                  amp=self.quantize_config.amp,
-                                  low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
-                                  seed=self.quantize_config.seed,
-                                  gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
-                                  scale_dtype=self.quantize_config.scale_dtype, layer_config=self.quantize_config.layer_config,
-                                  enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
+                                       tokenizer=None,
+                                       bits=self.quantize_config.bits,
+                                       group_size=self.quantize_config.group_size,
+                                       sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
+                                       dataset=dataloader, seqlen=seqlen, nblocks=self.quantize_config.nblocks,
+                                       iters=self.quantize_config.iters, lr=self.quantize_config.lr,
+                                       minmax_lr=self.quantize_config.minmax_lr,
+                                       enable_quanted_input=self.quantize_config.enable_quanted_input,
+                                       device=self.hf_device_map,
+                                       amp=self.quantize_config.amp,
+                                       low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
+                                       seed=self.quantize_config.seed,
+                                       gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
+                                       scale_dtype=self.quantize_config.scale_dtype, layer_config=self.quantize_config.layer_config,
+                                       enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
 
             model, _ = self.autoround.quantize()
 
@@ -336,7 +359,7 @@ class BaseGPTQModel(nn.Module):
                 bits=self.quantize_config.bits,
                 dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
-                backend=BACKEND.AUTO,
+                backend=backend,
                 desc_act=self.quantize_config.desc_act,
                 force_layer_back_to_cpu=True,
                 format=self.quantize_config.format,
@@ -386,7 +409,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU:
+        if get_device(layers[0]) == CPU and torch.cuda.is_available():
             layers[0] = layers[0].to(CUDA_0)
             force_layer_back_to_cpu = True
 
@@ -431,24 +454,43 @@ class BaseGPTQModel(nn.Module):
         if self.dynamic_expert_index is not None:
             num_experts = getattr(self.model.config, self.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
-                                                      num_experts=num_experts)
+                                                  num_experts=num_experts)
 
         quantizers = {}
 
-        # stores all per-layer quant stats such as avg loss and processing time
-        quant_log = []
-
         layer_count = len(layers)
         layer_pb = tqdm(range(layer_count))
+        gpu_memorys = []
+        cpu_memorys = []
+        durations = []
+        avg_losses = []
+        module_names = []
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
             if isinstance(layer, MllamaCrossAttentionDecoderLayer):
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
+            if task is not None:
+                gpu_memory = get_gpu_usage_memory()
+                cpu_memory = get_cpu_usage_memory()
+                task.get_logger().report_scalar(
+                    title='GPU Memory',
+                    series='GPU Memory',
+                    value=gpu_memory,
+                    iteration=i,
+                )
 
+                task.get_logger().report_scalar(
+                    title='CPU Memory',
+                    series='CPU Memory',
+                    value=cpu_memory,
+                    iteration=i,
+                )
+                gpu_memorys.append(gpu_memory)
+                cpu_memorys.append(cpu_memory)
             force_layer_back_to_cpu = False
-            if get_device(layer) == CPU:
+            if get_device(layer) == CPU and torch.cuda.is_available():
                 move_to(layer, CUDA_0)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
@@ -499,10 +541,12 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
                     with torch.no_grad():
                         layer(*layer_input, **additional_layer_inputs)
+
+                    torch.cuda.empty_cache()
                 for h in handles:
                     h.remove()
 
-                for name in subset:
+                for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
@@ -518,12 +562,30 @@ class BaseGPTQModel(nn.Module):
                         actorder=actorder,
                         static_groups=self.quantize_config.static_groups,
                     )
-                    stat = {"layer": i, "module": name, "avg_loss": f"{avg_loss:.5f}",
-                            "damp_percent": f"{damp_percent:.5f}", "time": f"{duration:.3f}"}
+                    if task is not None:
+                        task.get_logger().report_scalar(
+                            title='Quantization Loss',
+                            series=f'layer_{i}_loss',
+                            value=avg_loss,
+                            iteration=name_index,
+                        )
+
+                        task.get_logger().report_scalar(
+                            title='Quantization Time',
+                            series=f'layer_{i}_time',
+                            value=duration,
+                            iteration=name_index,
+                        )
+                    durations.append(duration)
+                    avg_losses.append(avg_loss)
+                    module_names.append(f"layer-{i}-{name}")
+
+                    stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
-                    quant_log.append(stat)
+                    self.quant_log.append(stat)
                     logger.info(stat)
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
@@ -555,6 +617,8 @@ class BaseGPTQModel(nn.Module):
                     )
                     layer_outputs.append([layer_output])
 
+                torch.cuda.empty_cache()
+
             layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
             del layer
             del gptq
@@ -565,16 +629,25 @@ class BaseGPTQModel(nn.Module):
             )  # TODO: is it really OK to cache only the first positional argument?
             torch.cuda.empty_cache()
 
-        logger.info(f"Quantization summary:\n{quant_log}")
-        for module_log in quant_log:
+        logger.info(f"Quantization summary:\n{self.quant_log}")
+        for module_log in self.quant_log:
             logger.info(module_log)
-
+        if task is not None:
+            x = list(range(layer_count))
+            gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+            cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+            loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
+            time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
+            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=BACKEND.AUTO,
+            backend=backend,
             desc_act=self.quantize_config.desc_act,
             force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
@@ -591,7 +664,7 @@ class BaseGPTQModel(nn.Module):
 
         torch.cuda.empty_cache()
 
-        return quant_log
+        return self.quant_log
 
     @property
     def device(self):
@@ -616,6 +689,19 @@ class BaseGPTQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
+    def save(
+            self,
+            save_dir: str,
+            safetensors_metadata: Optional[Dict[str, str]] = None,
+            use_safetensors: bool = True,
+            max_shard_size: Optional[str] = None,
+            **kwargs,
+    ):
+        if self.quantized:
+            self.save_quantized(save_dir, safetensors_metadata, use_safetensors, max_shard_size)
+        else:
+            self.save_pretrained(save_dir, **kwargs)
+
     def save_quantized(
         self,
         save_dir: str,
@@ -634,7 +720,7 @@ class BaseGPTQModel(nn.Module):
             use_safetensors=use_safetensors,
             max_shard_size=max_shard_size,
             quantized=self.quantized,
-            model_name_or_path=self.model_name_or_path,
+            model_id_or_path=self.model_id_or_path,
             model=self.model,
             load_quantized_model=self.load_quantized_model,
             qlinear_kernel=self.qlinear_kernel,
@@ -645,9 +731,9 @@ class BaseGPTQModel(nn.Module):
             base_modules=self.base_modules,
             lm_head=self.lm_head,
             layer_modules=self.layer_modules,
-            checkpoint_file_name=checkpoint_file_name
+            checkpoint_file_name=checkpoint_file_name,
+            quant_log=self.quant_log,
         )
-        
 
     def save_pretrained(
         self,
@@ -659,6 +745,8 @@ class BaseGPTQModel(nn.Module):
 
     def lm_eval(
         self,
+        model: Optional[str] = "hf",
+        model_args: str = "",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
@@ -688,22 +776,23 @@ class BaseGPTQModel(nn.Module):
         wandb_project: Optional[str] = None,
         wandb_name: Optional[str] = None,
         show_config: bool = False,
+        trust_remote_code: bool = False,
     ):
-        LM = HFLM(
-            pretrained=self,
-            batch_size=batch_size,
-            max_batch_size=max_batch_size,
-        )
+        if model == "hf":
+            model = HFLM(
+                pretrained=self,
+                batch_size=batch_size,
+                max_batch_size=max_batch_size,
+                trust_remote_code=trust_remote_code,
+            )
         # evaluation_tracker need model_args cannot be None
-        model_args = ""
         if evaluation_tracker is None and output_path is not None:
             evaluation_tracker = EvaluationTracker(output_path=output_path)
-
         results = lm_eval.simple_evaluate(
-            model=LM,
+            model=model,
             model_args=model_args,
             tasks=tasks,
-            device=self.device,
+            device=str(self.device),
             num_fewshot=num_fewshot,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
@@ -770,49 +859,46 @@ class BaseGPTQModel(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: str,
+        pretrained_model_id_or_path: str,
         quantize_config: QuantizeConfig,
         trust_remote_code: bool = False,
         torch_dtype: [str | torch.dtype] = "auto",
         **model_init_kwargs,
     ):
-        model = ModelLoader.from_pretrained(pretrained_model_name_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
+        model = ModelLoader.from_pretrained(pretrained_model_id_or_path, trust_remote_code, torch_dtype, cls.require_trust_remote_code, require_transformers_version=cls.require_transformers_version, **model_init_kwargs)
         return cls(
             model,
             quantized=False,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            model_name_or_path=pretrained_model_name_or_path
+            model_id_or_path=pretrained_model_id_or_path
         )
 
     @classmethod
     def from_quantized(
         cls,
-        model_name_or_path: Optional[str],
+        model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-        max_memory: Optional[dict] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
         torch_dtype: [str | torch.dtype] = "auto",
-        quantize_config: Optional[QuantizeConfig] = None,
         use_safetensors: bool = True,
         trust_remote_code: bool = False,
-        format: Optional[FORMAT] = None,
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
+        if not torch.cuda.is_available():
+            logger.warning("No GPU detected, using IPEX backend.")
+            backend = BACKEND.IPEX
 
         model, quantize_config, qlinear_kernel, load_quantized_model, generate, checkpoint_file_name = ModelLoader.from_quantized(
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
             device_map=device_map,
-            max_memory=max_memory,
             backend=backend,
             device=device,
             torch_dtype=torch_dtype,
-            quantize_config=quantize_config,
             use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
-            format=format,
             verify_hash=verify_hash,
             require_trust_remote_code=cls.require_trust_remote_code,
             require_transformers_version=cls.require_transformers_version,
@@ -837,9 +923,8 @@ class BaseGPTQModel(nn.Module):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=load_quantized_model,
             trust_remote_code=trust_remote_code,
-            model_name_or_path=model_name_or_path,
+            model_id_or_path=model_id_or_path,
         )
-
 
     def __getattr__(self, item):
         try:

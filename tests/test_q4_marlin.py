@@ -69,7 +69,7 @@ class TestQ4Marlin(unittest.TestCase):
         device = torch.device("cuda:0")
 
         try:
-            model_q = GPTQModel.from_quantized(model_id, revision=revision, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, revision=revision, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
@@ -93,9 +93,9 @@ class TestQ4Marlin(unittest.TestCase):
 
     def test_bias(self):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
-        model_id = "s3nh/starcoderbase-1b-GPTQ"
+        model_id = "/monster/data/model/starcoderbase-1b-GPTQ"
         try:
-            model_q = GPTQModel.from_quantized(model_id, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
@@ -108,7 +108,7 @@ class TestQ4Marlin(unittest.TestCase):
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_proj.bias) > 0)
         self.assertTrue(torch.count_nonzero(model_q.model.transformer.h[0].attn.c_attn.bias) > 0)
 
-        model_id = "Xenova/starcoderbase-1b"
+        model_id = "/monster/data/model/starcoderbase-1b"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         prompt = "Today I am in Paris and"
@@ -125,7 +125,7 @@ class TestQ4Marlin(unittest.TestCase):
         "ModelCloud/tinyllama-15M-stories" should be loaded with BACKEND.MARLIN after quantization using MarlinQuantLinear.
         MarlinInferenceQuantLinear does not support outfeatures = 288, because 288 is not divisible by 64.
         """
-        model_id = "ModelCloud/tinyllama-15M-stories"
+        model_id = "/monster/data/model/tinyllama-15M-stories"
         format=FORMAT.GPTQ
         quantize_config = QuantizeConfig(
             bits=4,
@@ -138,20 +138,20 @@ class TestQ4Marlin(unittest.TestCase):
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
         calibration_dataset = [tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             model_id,
             quantize_config=quantize_config,
         )
         model.quantize(calibration_dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_quantized(
+            model.save(
                 tmp_dir,
             )
 
             del model
 
-            model = GPTQModel.from_quantized(
+            model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
                 backend=BACKEND.MARLIN,

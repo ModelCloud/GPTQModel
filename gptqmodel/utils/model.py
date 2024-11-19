@@ -3,13 +3,11 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
-import logging
+import operator
 import os
 import re
 import shutil
-import operator
 from concurrent.futures import ThreadPoolExecutor
-from logging import getLogger
 from typing import List, Optional
 
 import accelerate
@@ -17,28 +15,23 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from huggingface_hub import HfApi, hf_hub_download, list_repo_files
+from huggingface_hub import HfApi, hf_hub_download
+from packaging import version
 from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
-from packaging import version
 
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..nn_modules.qlinear.qlinear_qbits import QBitsQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
+from .logger import setup_logger
 
-logger = getLogger(__name__)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger = setup_logger()
 
 
 def recurse_getattr(obj, attr: str):
@@ -431,19 +424,13 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
     # post init for bitblas backend.
-    device_to_buffers_size = {}
-
-    model_uses_qbits = False
 
     # exllamav2
     fixed_bytes = {}
     model_uses_exllamav2 = False
 
     for name, submodule in model.named_modules():
-        if isinstance(submodule, QBitsQuantLinear):
-            model_uses_qbits = True
-            submodule.post_init(quantize_config)
-        elif isinstance(submodule, ExllamaV2QuantLinear):
+        if isinstance(submodule, ExllamaV2QuantLinear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
@@ -464,16 +451,15 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         if isinstance(submodule, ExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(temp_dq=model.device_tensors[device])
-        elif isinstance(submodule, BaseQuantLinear) and not model_uses_qbits:
+        elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
-    if not model_uses_qbits:
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
     return model
 
 
-def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs):
+def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model_basenames: List[str], **cached_file_kwargs):
     """
     Retrives (and if necessary downloads from Hugging Face Hub) the model checkpoint. Sharding is supported. All the `possible_model_basenames` (e.g. `["model", "model-4bit-gptq"]`) will be explored over all `extensions` (e.g. `[".bin", ".safetensors"]`).
     """
@@ -481,18 +467,18 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
     resolved_archive_file = None
     true_model_basename = None
 
-    if os.path.isdir(model_name_or_path):
+    if os.path.isdir(model_id_or_path):
         for ext in extensions:
             for possible_model_basename in possible_model_basenames:
                 shard_index_name = possible_model_basename + ext + ".index.json"
                 searched_files.append(shard_index_name)
-                possible_index_file = os.path.join(model_name_or_path, shard_index_name)
+                possible_index_file = os.path.join(model_id_or_path, shard_index_name)
                 if os.path.isfile(possible_index_file):
                     # The model is sharded over several checkpoints.
                     possible_model_basename = possible_index_file.replace(ext + ".index.json", "")
                     return True, possible_index_file, possible_model_basename
                 else:
-                    model_save_name = os.path.join(model_name_or_path, possible_model_basename)
+                    model_save_name = os.path.join(model_id_or_path, possible_model_basename)
                     searched_files.append(possible_model_basename + ext)
                     if os.path.isfile(model_save_name + ext):
                         resolved_archive_file = model_save_name + ext
@@ -503,7 +489,7 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
             for possible_model_basename in possible_model_basenames:
                 shard_index_name = possible_model_basename + ext + ".index.json"
                 shard_index = cached_file(
-                    model_name_or_path,
+                    model_id_or_path,
                     shard_index_name,
                     **cached_file_kwargs,
                 )
@@ -516,14 +502,14 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
                         shards = list(set(index_json["weight_map"].values()))
                         for shard in shards:
                             resolved_archive_file = cached_file(
-                                model_name_or_path,
+                                model_id_or_path,
                                 shard,
                                 **cached_file_kwargs,
                             )
                         return True, shard_index, possible_model_basename
                 else:
                     resolved_archive_file = cached_file(
-                        model_name_or_path,
+                        model_id_or_path,
                         possible_model_basename + ext,
                         **cached_file_kwargs,
                     )
@@ -536,7 +522,7 @@ def get_checkpoints(model_name_or_path: str, extensions: List[str], possible_mod
 
     if resolved_archive_file is None:
         raise FileNotFoundError(
-            f"Could not find a model in {model_name_or_path} with a name in {', '.join(searched_files)}. Please specify the argument model_basename to use a custom file name."
+            f"Could not find a model in {model_id_or_path} with a name in {', '.join(searched_files)}. Please specify the argument model_basename to use a custom file name."
         )
 
     return False, resolved_archive_file, true_model_basename

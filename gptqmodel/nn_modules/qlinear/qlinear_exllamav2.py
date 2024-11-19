@@ -1,14 +1,20 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
 import math
-from logging import getLogger
 
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
 
-logger = getLogger(__name__)
+from ...utils.logger import setup_logger
+
+exllama_v2_import_exception = None
+try:
+    from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
+except ImportError as e:
+    exllama_v2_import_exception = e
+
+logger = setup_logger()
 
 
 
@@ -104,6 +110,12 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool,  **kwargs,):
+
+        if exllama_v2_import_exception is not None:
+            raise ValueError(
+                f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_v2_import_exception}"
+            )
+
         self.group_size = group_size if group_size != -1 else infeatures
         # auto pad
         self.outfeatures = outfeatures + (-outfeatures % 32)

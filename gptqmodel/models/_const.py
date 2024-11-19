@@ -27,6 +27,7 @@ SUPPORTED_MODELS = [
     "gpt_bigcode",
     "codegen",
     "chatglm",
+    "glm",
     "RefinedWebModel",
     "RefinedWeb",
     "baichuan",
@@ -59,6 +60,7 @@ SUPPORTED_MODELS = [
     "grinmoe",
     "mllama",
     "granite",
+    "mobilellm",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
