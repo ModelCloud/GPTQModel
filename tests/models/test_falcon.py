@@ -11,6 +11,7 @@ class TestFalcon(ModelTest):
     TORCH_DTYPE = torch.float16
     QUANT_ARC_MAX_NEGATIVE_DELTA = 0.52
     BATCH_SIZE = 6
+    USE_VLLM = False
 
     def test_falcon(self):
         self.quant_lm_eval()
