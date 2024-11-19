@@ -23,6 +23,6 @@ class TestInternlm2_5(ModelTest):
 
     @classmethod
     def tearDownClass(cls):
-        subprocess.check_call([sys.executable, "-m", "pip", "-U", "install", "transformers"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "transformers"])
 
 
