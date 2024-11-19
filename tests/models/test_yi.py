@@ -7,6 +7,7 @@ class TestYi(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2986
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
+    BATCH_SIZE = 4
 
     def test_yi(self):
         self.quant_lm_eval()

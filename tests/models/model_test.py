@@ -160,9 +160,9 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        try:
-            self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
+        try:
             task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
             for filter, value in task_results.items():
                 diff_pct = self.calculatorPer(filter=filter, value=value)
@@ -175,9 +175,9 @@ class ModelTest(unittest.TestCase):
             if isinstance(e, torch.OutOfMemoryError):
                 old_batch = self.BATCH_SIZE
                 if self.BATCH_SIZE=="auto":
-                    self.BATCH_SIZE="16"
+                    self.BATCH_SIZE="8"
                 else:
-                    self.BATCH_SIZE =f"{int(self.BATCH_SIZE) / 2}"
+                    self.BATCH_SIZE =f"{int(int(self.BATCH_SIZE) / 2)}"
 
                 print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
 
