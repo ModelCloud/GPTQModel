@@ -1,7 +1,6 @@
 import subprocess
 import sys
 
-from gptqmodel.models import InternLMGPTQ
 from model_test import ModelTest  # noqa: E402
 
 
@@ -14,8 +13,7 @@ class TestInternlm(ModelTest):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", f"transformers{InternLMGPTQ.require_transformers_version}"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers==4.44.2"])
 
     def test_internlm(self):
         # transformers<=4.44.2 run normal
