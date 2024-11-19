@@ -172,7 +172,7 @@ class ModelTest(unittest.TestCase):
                             f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
 
         except BaseException as e:
-            if 'torch.OutOfMemoryError' in str(e):
+            if isinstance(e, torch.OutOfMemoryError):
                 old_batch = self.BATCH_SIZE
                 if self.BATCH_SIZE=="auto":
                     self.BATCH_SIZE="16"
