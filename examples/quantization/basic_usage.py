@@ -1,7 +1,7 @@
 import os
 
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -12,8 +12,6 @@ quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
-    import pdb
-    pdb.set_trace()
     calibration_dataset = [
         tokenizer(
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
@@ -52,7 +50,7 @@ def main():
     model.save(quantized_model_id, use_safetensors=True)
 
     # load quantized model to the first GPU
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device = get_best_device()
     model = GPTQModel.load(quantized_model_id, device=device)
 
     # load quantized model to CPU with IPEX kernel linear.
