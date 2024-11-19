@@ -91,7 +91,12 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Platform Requirements
 
-GPTQModel is validated for Linux x86_64 with Nvidia GPUs. Windows WSL2 may work but un-tested. 
+GPTQModel is validated for Linux x86_64 with the following devices:
+| NV GPU     | ✅   |
+| Intel CPU  | ✅   |
+| Intel GPU  | ✅   |
+
+Windows WSL2 may work but un-tested.
 
 ## Install
 
@@ -112,7 +117,7 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # pip: compile and install
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas, and ipex.
-# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas,ipex,auto_round]
+# Example: pip install -v --no-build-isolation .[vllm,sglang,bitblas,ipex,auto_round]
 pip install -v . --no-build-isolation
 ```
 
@@ -123,7 +128,7 @@ Below is a basic sample using `GPTQModel` to quantize a llm model and perform po
 ```py
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
@@ -147,7 +152,7 @@ model.quantize(calibration_dataset)
 
 model.save(quant_path)
 
-model = GPTQModel.load(quant_path)
+model = GPTQModel.load(quant_path, device=get_best_device())
 
 result = model.generate(
   **tokenizer(
@@ -173,8 +178,9 @@ pip install lm-eval[gptqmodel]
 
 ### Which kernel is used by default?
 
-* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled. 
-* `CPU`: Intel/IPEX kernel  
+* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
+* `CPU`: Intel/IPEX kernel
+* `XPU`: Intel/IPEX kernel
 
 ## Citation
 ```
