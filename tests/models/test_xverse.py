@@ -16,7 +16,7 @@ class TestXVerse(ModelTest):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.check_call([sys.executable, "-m", "pip", "install", f"transformers=={XverseGPTQ.require_transformers_version}"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", f"transformers{XverseGPTQ.require_transformers_version}"])
 
     def test_xverse(self):
         self.quant_lm_eval()

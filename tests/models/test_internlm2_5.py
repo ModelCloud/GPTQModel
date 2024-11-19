@@ -17,7 +17,7 @@ class TestInternlm2_5(ModelTest):
     @classmethod
     def setUpClass(cls):
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", f"transformers=={InternLMGPTQ.require_transformers_version}"])
+            [sys.executable, "-m", "pip", "install", f"transformers{InternLMGPTQ.require_transformers_version}"])
 
     def test_internlm2_5(self):
         # transformers<=4.44.2 run normal
