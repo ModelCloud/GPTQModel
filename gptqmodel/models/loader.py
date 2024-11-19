@@ -7,6 +7,7 @@ import torch
 import transformers
 from gptqmodel.utils.device import check_cuda
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import __version__ as transformers_version
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
@@ -60,10 +61,6 @@ class ModelLoader():
             )
 
         if require_transformers_version:
-            # Do not import version at the top of the file, if you reinstall transformers after the program starts,
-            # the version may not be what you expected.
-            import transformers
-            transformers_version = transformers.__version__
             passed = check_requires_version(require_transformers_version, current_version=transformers_version)
             if passed is not None:
                 if not passed:
@@ -163,10 +160,6 @@ class ModelLoader():
             )
 
         if require_transformers_version:
-            # Do not import version at the top of the file, if you reinstall transformers after the program starts,
-            # the version may not be what you expected.
-            import transformers
-            transformers_version = transformers.__version__
             passed = check_requires_version(require_transformers_version, current_version=transformers_version)
             if passed is not None:
                 if not passed:
