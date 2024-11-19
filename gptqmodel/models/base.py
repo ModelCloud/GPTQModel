@@ -16,7 +16,6 @@ from lm_eval.utils import handle_non_serializable
 from packaging import version
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
-from transformers.models.mllama.modeling_mllama import MllamaCrossAttentionDecoderLayer
 
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
@@ -468,7 +467,7 @@ class BaseGPTQModel(nn.Module):
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
-            if isinstance(layer, MllamaCrossAttentionDecoderLayer):
+            if layer.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
             if task is not None:

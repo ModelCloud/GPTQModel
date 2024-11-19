@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 from model_test import ModelTest  # noqa: E402
 
 
@@ -8,9 +11,18 @@ class TestInternlm2_5(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
     BATCH_SIZE = 6
+    USE_VLLM = False
+
+    @classmethod
+    def setUpClass(cls):
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers==4.44.2"])
 
     def test_internlm2_5(self):
         # transformers<=4.44.2 run normal
         self.quant_lm_eval()
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.check_call([sys.executable, "-m", "pip", "-U", "install", "transformers"])
 
 
