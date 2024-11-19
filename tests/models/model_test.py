@@ -110,7 +110,6 @@ class ModelTest(unittest.TestCase):
         torch.cuda.empty_cache()
         return q_model, q_tokenizer
 
-
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
         if tokenizer_path is None:
             tokenizer_path = model_id_or_path
@@ -126,34 +125,54 @@ class ModelTest(unittest.TestCase):
         return model, tokenizer
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            if self.USE_VLLM:
-                model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
-            else:
-                model_args = ""
-            results = model.lm_eval(
-                model="vllm" if self.USE_VLLM else "hf",
-                model_args=model_args,
-                output_path=tmp_dir,
-                tasks=self.TASK_NAME,
-                apply_chat_template=apply_chat_template,
-                trust_remote_code=trust_remote_code,
-                batch_size=self.BATCH_SIZE,
-            )
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                if self.USE_VLLM:
+                    model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
+                else:
+                    model_args = ""
+                results = model.lm_eval(
+                    model="vllm" if self.USE_VLLM else "hf",
+                    model_args=model_args,
+                    output_path=tmp_dir,
+                    tasks=self.TASK_NAME,
+                    apply_chat_template=apply_chat_template,
+                    trust_remote_code=trust_remote_code,
+                    batch_size=self.BATCH_SIZE,
+                )
 
-            print('--------Eval Result---------')
-            print(make_table(results))
-            if "groups" in results:
-                print(make_table(results, "groups"))
-            print('--------Eval Result End---------')
-            task_results = {
-                metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
-                if metric != 'alias' and 'stderr' not in metric
-            }
-            print(task_results)
-            if os.path.exists(model.model_id_or_path):
-                shutil.rmtree(model.model_id_or_path)
-            return task_results
+                print('--------Eval Result---------')
+                print(make_table(results))
+                if "groups" in results:
+                    print(make_table(results, "groups"))
+                print('--------Eval Result End---------')
+                task_results = {
+                    metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
+                    if metric != 'alias' and 'stderr' not in metric
+                }
+                print(task_results)
+                if os.path.exists(model.model_id_or_path):
+                    shutil.rmtree(model.model_id_or_path)
+                return task_results
+        except BaseException as e:
+            if isinstance(e, torch.OutOfMemoryError):
+                old_batch = self.BATCH_SIZE
+                if self.BATCH_SIZE == "auto":
+                    self.BATCH_SIZE = "8"
+                else:
+                    self.BATCH_SIZE = f"{int(int(self.BATCH_SIZE) / 2)}"
+                    self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
+
+                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
+
+                if int(self.BATCH_SIZE) > 0:
+                    self.lm_eval(model, apply_chat_template, trust_remote_code)
+                    print(f"set batch size to {self.BATCH_SIZE}, passed")
+                else:
+                    print(f"set batch size to {self.BATCH_SIZE}, failed")
+                    raise e
+            else:
+                raise e
 
     def calculatorPer(self, filter, value):
         if "norm" in filter:
@@ -167,31 +186,9 @@ class ModelTest(unittest.TestCase):
     def quant_lm_eval(self):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-        try:
-            task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
-            for filter, value in task_results.items():
-                diff_pct = self.calculatorPer(filter=filter, value=value)
-                negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
-                positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
-                self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
-
-        except BaseException as e:
-            if isinstance(e, torch.OutOfMemoryError):
-                old_batch = self.BATCH_SIZE
-                if self.BATCH_SIZE=="auto":
-                    self.BATCH_SIZE="8"
-                else:
-                    self.BATCH_SIZE =f"{int(int(self.BATCH_SIZE) / 2)}"
-                    self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
-
-                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
-
-                if int(self.BATCH_SIZE) > 0:
-                    self.quant_lm_eval()
-                    print(f"set batch size to {self.BATCH_SIZE}, passed")
-                else:
-                    print(f"set batch size to {self.BATCH_SIZE}, failed")
-                    raise e
-            else:
-                raise e
+        task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
+        for filter, value in task_results.items():
+            diff_pct = self.calculatorPer(filter=filter, value=value)
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
+            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
