@@ -17,7 +17,7 @@ GENERATE_EVAL_SIZE = 100
 
 class TestsIPEX(unittest.TestCase):
 
-    def test_cpu_ipex_format(self):
+    def test_ipex_format(self):
         prompt = "I am in Paris and"
         expected_output = "<s> I am in Paris and I am in love with"
         device = get_best_device()
