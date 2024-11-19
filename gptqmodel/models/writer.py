@@ -107,11 +107,6 @@ class ModelWriter():
             value=quantize_config.true_sequential
         )
 
-        quantize_config.meta_set(
-            key=QUANT_METHOD_FIELD,
-            value=quantize_config.quant_method
-        )
-
         # The config, quantize_config and model may be edited in place in save_quantized.
         config = copy.deepcopy(model.config)
         quantize_config = copy.deepcopy(quantize_config)
