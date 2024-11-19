@@ -17,3 +17,7 @@ class TestInternlm(ModelTest):
     def test_internlm(self):
         # transformers<=4.44.2 run normal
         self.quant_lm_eval()
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.check_call([sys.executable, "-m", "pip", "-U", "install", "transformers"])

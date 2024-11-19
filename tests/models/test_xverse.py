@@ -21,3 +21,8 @@ class TestXVerse(ModelTest):
 
     def test_xverse(self):
         self.quant_lm_eval()
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.check_call([sys.executable, "-m", "pip", "-U", "install", "transformers"])
+        subprocess.check_call([sys.executable, "-m", "pip", "-U", "install", "tokenizers"])
