@@ -7,6 +7,7 @@ class TestDeci(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5222
     QUANT_ARC_MAX_NEGATIVE_DELTA = 0.55
     TRUST_REMOTE_CODE = True
+    USE_VLLM = False
     BATCH_SIZE = 6
 
     def test_deci(self):
