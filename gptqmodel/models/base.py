@@ -29,7 +29,7 @@ from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
-from ._const import CPU, CUDA_0
+from ._const import CPU, get_best_device
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
@@ -200,6 +200,8 @@ class BaseGPTQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
 
+        best_device = get_best_device()
+
         backend = BACKEND.AUTO
         if not torch.cuda.is_available():
             self.quantize_config.format = FORMAT.IPEX
@@ -276,11 +278,11 @@ class BaseGPTQModel(nn.Module):
         device_map = self.hf_device_map
         if device_map:
             for name, device in device_map.items():
-                if device == "cpu" and torch.cuda.is_available():
+                if device == "cpu" and best_device != CPU:
                     logger.info(f"truly offloading {name} to cpu with hook.")
                     module = get_module_by_name_suffix(self.model, name)
                     remove_hook_from_module(module, recurse=True)
-                    accelerate.cpu_offload_with_hook(module, CUDA_0)
+                    accelerate.cpu_offload_with_hook(module, best_device)
 
         calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
 
@@ -409,8 +411,8 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU and torch.cuda.is_available():
-            layers[0] = layers[0].to(CUDA_0)
+        if get_device(layers[0]) == CPU and best_device != CPU:
+            layers[0] = layers[0].to(best_device)
             force_layer_back_to_cpu = True
 
         ori_outside_layer_module_devices = {}
@@ -490,8 +492,8 @@ class BaseGPTQModel(nn.Module):
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
             force_layer_back_to_cpu = False
-            if get_device(layer) == CPU and torch.cuda.is_available():
-                move_to(layer, CUDA_0)
+            if get_device(layer) == CPU and best_device != CPU:
+                move_to(layer, best_device)
                 force_layer_back_to_cpu = True
             cur_layer_device = get_device(layer)
             full = find_layers(layer)

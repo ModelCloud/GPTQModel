@@ -1,5 +1,5 @@
+import torch
 from enum import Enum
-
 from torch import device
 
 CPU = device("cpu")
@@ -19,6 +19,15 @@ def get_device_by_type(type_value: str):
         if enum_constant.value == type_value:
             return enum_constant
     raise ValueError(f"Invalid type_value str: {type_value}")
+
+
+def get_best_device():
+    if torch.cuda.is_available():
+        return CUDA_0
+    elif torch.xpu.is_available():
+        return XPU_0
+    else:
+        return CPU
 
 SUPPORTED_MODELS = [
     "bloom",
