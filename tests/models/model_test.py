@@ -125,7 +125,7 @@ class ModelTest(unittest.TestCase):
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         with tempfile.TemporaryDirectory() as tmp_dir:
             if self.USE_VLLM:
-                model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}"
+                model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len=4096"
             else:
                 model_args = ""
             results = model.lm_eval(
