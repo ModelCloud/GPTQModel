@@ -17,6 +17,7 @@ class TestXVerse(ModelTest):
     @classmethod
     def setUpClass(cls):
         subprocess.check_call([sys.executable, "-m", "pip", "install", f"transformers{XverseGPTQ.require_transformers_version}"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "tokenizers==0.15.2"])
 
     def test_xverse(self):
         self.quant_lm_eval()
@@ -24,3 +25,4 @@ class TestXVerse(ModelTest):
     @classmethod
     def tearDownClass(cls):
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "transformers"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "tokenizers"])

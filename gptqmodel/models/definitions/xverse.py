@@ -2,7 +2,7 @@ from ..base import BaseGPTQModel
 
 
 class XverseGPTQ(BaseGPTQModel):
-    require_transformers_version = "<=4.39.0"
+    require_transformers_version = "<=4.38.2"
     base_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"
