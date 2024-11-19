@@ -87,7 +87,7 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=4)
+        model.quantize(calibration_dataset)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
