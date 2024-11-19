@@ -37,7 +37,7 @@ env:
   MAX_JOBS: 4
   ZEN4_SERVER: 10.0.14.199
   CPU_TEST_FILES: "test_qbits.py"
-  IGNORED_TEST_FILES: "test_tgi.py"
+  IGNORED_TEST_FILES: "test_tgi.py,test_model_gptneox.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}

@@ -2,7 +2,7 @@ from model_test import ModelTest
 
 class TestGptNeoX(ModelTest):
     # TODO: this model requires 24G vram at least.
-    NATIVE_MODEL_ID = "EleutherAI/gpt-neox-20b"
+    NATIVE_MODEL_ID = "/monster/data/model/gpt-neox-20b"
 
     def test_gptneox(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID)
