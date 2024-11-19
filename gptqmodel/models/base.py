@@ -540,6 +540,8 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
                     with torch.no_grad():
                         layer(*layer_input, **additional_layer_inputs)
+
+                    torch.cuda.empty_cache()
                 for h in handles:
                     h.remove()
 
@@ -613,6 +615,8 @@ class BaseGPTQModel(nn.Module):
                         cur_layer_device if calibration_enable_gpu_cache else CPU,
                     )
                     layer_outputs.append([layer_output])
+
+                torch.cuda.empty_cache()
 
             layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
             del layer
