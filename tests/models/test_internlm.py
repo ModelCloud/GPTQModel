@@ -1,7 +1,3 @@
-import subprocess
-import sys
-
-from gptqmodel.models import InternLMGPTQ  # noqa: E402
 from model_test import ModelTest  # noqa: E402
 
 
@@ -12,14 +8,6 @@ class TestInternlm(ModelTest):
     TRUST_REMOTE_CODE = True
     USE_VLLM = False
 
-    @classmethod
-    def setUpClass(cls):
-        subprocess.check_call([sys.executable, "-m", "pip", "install", f"transformers{InternLMGPTQ.require_transformers_version}"])
-
     def test_internlm(self):
         # transformers<=4.44.2 run normal
         self.quant_lm_eval()
-
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "transformers"])
