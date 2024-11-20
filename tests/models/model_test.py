@@ -1,7 +1,7 @@
 # -- do not touch
 import gc
 import os
-
+from functools import partial
 import torch.cuda
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -17,6 +17,9 @@ from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+
+def filter_max_length(x, max_length):
+    return len(x["text"]) <= max_length
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
@@ -61,11 +64,9 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        def filter_max_length(x):
-            return len(x["text"]) <= self.MAX_LENGTH
 
         traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
-                                 split="train").filter(filter_max_length)
+                                 split="train").filter(partial(filter_max_length, max_length=self.MODEL_MAX_LEN))
         return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
