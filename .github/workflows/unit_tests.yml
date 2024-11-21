@@ -40,7 +40,7 @@ env:
   ZEN4_SERVER: 10.0.14.247
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
   TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
-  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral,models/test_deepseekv2_lite"
+  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
