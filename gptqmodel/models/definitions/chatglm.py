@@ -80,5 +80,6 @@ class ChatGLM(BaseGPTQModel):
 
             return hidden_states, presents, all_hidden_states, all_self_attentions
 
-        chatglm_transformer = type(self.model.transformer.encoder)
-        chatglm_transformer.forward = forward
+        if not self.load_quantized_model:
+            chatglm_transformer = type(self.model.transformer.encoder)
+            chatglm_transformer.forward = forward
