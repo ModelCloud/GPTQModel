@@ -829,5 +829,5 @@ class BaseGPTQModel(nn.Module):
 
 
 __all__ = ["BaseGPTQModel"]
-BaseGPTQModel = ModelLoader(BaseGPTQModel)
-BaseGPTQModel = ModelWriter(BaseGPTQModel)
+
+BaseGPTQModel = ModelLoader(ModelWriter(BaseGPTQModel))
