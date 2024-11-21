@@ -131,11 +131,11 @@ jobs:
 
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list) and f not in transformers_diff_list]
 
-          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}')
+          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}|json.dumps(transformers_test_files)')
           "
 
           test_files=$(python3 -c "$script")
-          IFS='|' read -r cpu_test_files gpu_test_files <<< "$test_files"
+          IFS='|' read -r cpu_test_files gpu_test_files transformers_test_files <<< "$test_files"
           echo "torch-2-5-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
           echo "gpu-files=$gpu_test_files" >> "$GITHUB_OUTPUT"
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
