@@ -324,7 +324,7 @@ def ModelWriter(cls):
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in layer_modules for ignore_layer in sublist
+                        not name.endswith(ignore_layer) for sublist in self.layer_modules for ignore_layer in sublist
                 ):
                     # log non-lm-head quantizerd layers only
                     if name is not self.lm_head:
@@ -355,6 +355,6 @@ def ModelWriter(cls):
         torch.cuda.empty_cache()
         return model
 
-    cls.get_model_with_quantize_ = get_model_with_quantize
+    cls.get_model_with_quantize = get_model_with_quantize
 
     return cls
