@@ -39,8 +39,6 @@ QUANT_LOG_TIME = "time"
 
 
 def ModelWriter(cls):
-    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    loader = AutoModelForCausalLM
 
     def save_pretrained(
             self,
