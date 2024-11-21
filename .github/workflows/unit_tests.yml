@@ -385,6 +385,8 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+          ip=${{ needs.check-vm.outputs.ip }}
+          echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Download wheel
         continue-on-error: true
@@ -415,6 +417,26 @@ jobs:
           uv pip install dist/*.whl
           bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
           uv pip install transformers==4.38.2 numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+
+      - name: Find suitable GPU
+        run: |
+          timestamp=$(date +%s%3N)
+          gpu_id=-1
+
+          while [ "$gpu_id" -lt 0 ]; do
+            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+
+            if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "No available GPU, waiting 5 seconds..."
+              sleep 5
+            else
+              echo "Allocated GPU ID: $gpu_id"
+            fi
+          done
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
+          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Run tests
         timeout-minutes: ${{ env.BITBLAS == '1' && 120 || 60 }}
@@ -497,26 +519,6 @@ jobs:
         run: |
           uv pip install device-smi -i https://pypi.org/simple
           uv pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-
-      - name: Find suitable GPU
-        run: |
-          timestamp=$(date +%s%3N)
-          gpu_id=-1
-
-          while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
-
-            if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
-              echo "No available GPU, waiting 5 seconds..."
-              sleep 5
-            else
-              echo "Allocated GPU ID: $gpu_id"
-            fi
-          done
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
-          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
