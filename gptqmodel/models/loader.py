@@ -58,15 +58,20 @@ def ModelLoader(cls):
         if cls.require_transformers_version:
             # Do not import version at the top of the file, if you reinstall transformers after the program starts,
             # the version may not be what you expected.
-            from transformers import __version__ as transformers_version
+            import transformers.__version__ as transformers_version
             passed = check_requires_version(cls.require_transformers_version, current_version=transformers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(
-                        f"{pretrained_model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
+            if passed is not None and not passed:
+                raise ValueError(f"{pretrained_model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
             else:
-                raise ValueError(
-                    f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
+                raise ValueError(f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
+
+        if cls.require_tokenizers_version:
+            import tokenizers.__version__ as tokenizers_version
+            passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
+            if passed is not None and not passed:
+                raise ValueError(f"{pretrained_model_id_or_path} requires transformers version {cls.require_tokenizers_version} current transformers version is {tokenizers_version} ")
+            else:
+                raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
 
         def skip(*args, **kwargs):
             pass
@@ -161,12 +166,18 @@ def ModelLoader(cls):
         if cls.require_transformers_version:
             from transformers import __version__ as transformers_version
             passed = check_requires_version(cls.require_transformers_version, current_version=transformers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(
-                        f"{model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
+            if passed is not None and not passed:
+                raise ValueError(f"{model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
             else:
                 raise ValueError(f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
+
+        if cls.require_tokenizers_version:
+            import tokenizers.__version__ as tokenizers_version
+            passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
+            if passed is not None and not passed:
+                raise ValueError(f"{model_id_or_path} requires transformers version {cls.require_tokenizers_version} current transformers version is {tokenizers_version} ")
+            else:
+                raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
