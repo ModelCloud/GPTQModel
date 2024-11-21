@@ -69,7 +69,7 @@ def ModelLoader(cls):
             from tokenizers import __version__ as tokenizers_version
             passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
             if passed is not None and not passed:
-                raise ValueError(f"{pretrained_model_id_or_path} requires transformers version {cls.require_tokenizers_version} current transformers version is {tokenizers_version} ")
+                raise ValueError(f"{pretrained_model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
             else:
                 raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
 
@@ -175,7 +175,7 @@ def ModelLoader(cls):
             from tokenizers import __version__ as tokenizers_version
             passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
             if passed is not None and not passed:
-                raise ValueError(f"{model_id_or_path} requires transformers version {cls.require_tokenizers_version} current transformers version is {tokenizers_version} ")
+                raise ValueError(f"{model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
             else:
                 raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
 
