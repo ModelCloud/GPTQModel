@@ -38,80 +38,76 @@ QUANT_LOG_DAMP = "damp"
 QUANT_LOG_TIME = "time"
 
 
-class ModelWriter():
-    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    loader = AutoModelForCausalLM
+def ModelWriter(cls):
 
-    @classmethod
-    def save_quantized(
-            cls,
+    def save_pretrained(
+            self,
             save_dir: str,
-            quantized: bool,
-            model_id_or_path: str,
-            model: PreTrainedModel,
-            load_quantized_model: bool,
-            qlinear_kernel: nn.Module,
-            trust_remote_code: bool,
+            **kwargs,
+    ):
+        logger.warning("You are using save_pretrained, which will re-direct to save_quantized.")
+        self.save_quantized(save_dir=save_dir, **kwargs)
+
+    cls.save_pretrained = save_pretrained
+
+    def save_quantized(
+            self,
+            save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             use_safetensors: bool = True,
             max_shard_size: Optional[str] = None,
-            quantize_config: QuantizeConfig = None,
-            dynamic_expert_index: Optional[str] = None,
-            base_modules: List[str] = None,
-            lm_head: str = None,
-            layer_modules: List[List[str]] = None,
-            checkpoint_file_name=None,
-            quant_log:Optional[List[Dict[str, str]]]=None,
+            model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
-        if quant_log:
+        if self.quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
                 w.writerow([QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME])
-                w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS), entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in quant_log])
+                w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
+                              entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in self.quant_log])
 
-        pre_quantized_size_mb = get_model_files_size(model_id_or_path)
+        pre_quantized_size_mb = get_model_files_size(self.model_id_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
         # write gptqmodel tooling fingerprint to config
-        quantize_config.meta_set_versionable(
+        self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
             value=META_QUANTIZER_GPTQMODEL,
             version=__version__,
         )
 
-        quantize_config.meta_set(
+        self.quantize_config.meta_set(
             key=META_FIELD_URI,
             value=META_VALUE_URI,
         )
 
-        quantize_config.meta_set(
+        self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
-            value=quantize_config.damp_percent
+            value=self.quantize_config.damp_percent
         )
 
-        quantize_config.meta_set(
+        self.quantize_config.meta_set(
             key=META_FIELD_DAMP_AUTO_INCREMENT,
-            value=quantize_config.damp_auto_increment
+            value=self.quantize_config.damp_auto_increment
         )
 
-        quantize_config.meta_set(
+        self.quantize_config.meta_set(
             key=META_FIELD_STATIC_GROUPS,
-            value=quantize_config.static_groups
+            value=self.quantize_config.static_groups
         )
 
-        quantize_config.meta_set(
+        self.quantize_config.meta_set(
             key=META_FIELD_TRUE_SEQUENTIAL,
-            value=quantize_config.true_sequential
+            value=self.quantize_config.true_sequential
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
-        config = copy.deepcopy(model.config)
-        quantize_config = copy.deepcopy(quantize_config)
+        config = copy.deepcopy(self.model.config)
+        quantize_config = copy.deepcopy(self.quantize_config)
 
-        if not quantized:
+        if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
         if quantize_config.format == FORMAT.GPTQ_V2:
@@ -119,7 +115,8 @@ class ModelWriter():
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        if not load_quantized_model:
+        if not self.load_quantized_model:
+            model = self.model
             # # internal is always gptq v2 but allow users to pass gptq (v1) via config
             if quantize_config.format == FORMAT.GPTQ:
                 # fix ModelCloud/GPTQModel/issues/47
@@ -141,17 +138,12 @@ class ModelWriter():
 
                 # Model qzeros may be edited in place.
                 model = convert_gptq_v2_to_v1_format(
-                    model, quantize_config=quantize_config, qlinear_kernel=qlinear_kernel
+                    model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
         else:
-            model = cls.get_model_with_quantize(
+            model = self.get_model_with_quantize(
                 quantize_config=quantize_config,
-                model_id_or_path=model_id_or_path,
-                dynamic_expert_index=dynamic_expert_index,
-                lm_head=lm_head,
-                base_modules=base_modules,
-                layer_modules=layer_modules,
-                checkpoint_file_name=checkpoint_file_name,
+                model_id_or_path=self.model_id_or_path,
             )
 
         model.to(CPU)
@@ -165,7 +157,7 @@ class ModelWriter():
         else:
             model_save_name = model_base_name + ".pt"
 
-        if not qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
+        if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
 
@@ -291,19 +283,12 @@ class ModelWriter():
         quantize_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
-        if trust_remote_code:
-            copy_py_files(save_dir, model_id_or_path=model_id_or_path)
+        if self.trust_remote_code:
+            copy_py_files(save_dir, model_id_or_path=self.model_id_or_path)
 
-    @classmethod
-    def get_model_with_quantize(cls,
-                                quantize_config,
-                                model_id_or_path,
-                                dynamic_expert_index,
-                                lm_head,
-                                base_modules,
-                                layer_modules,
-                                checkpoint_file_name,
-        ):
+    cls.save_quantized = save_quantized
+
+    def get_model_with_quantize(self, quantize_config, model_id_or_path):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -323,24 +308,24 @@ class ModelWriter():
                 config, torch_dtype=torch.float16
             )
 
-            if dynamic_expert_index is not None:
-                num_experts = getattr(config, dynamic_expert_index)
-                layer_modules = get_moe_layer_modules(layer_modules=layer_modules,
+            if self.dynamic_expert_index is not None:
+                num_experts = getattr(config, self.dynamic_expert_index)
+                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
                                                       num_experts=num_experts)
 
             layers = find_layers(model)
-            ignore_layers = [lm_head] + base_modules
+            ignore_layers = [self.lm_head] + self.base_modules
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == lm_head:
+                if quantize_config.lm_head and name == self.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in layer_modules for ignore_layer in sublist
+                        not name.endswith(ignore_layer) for sublist in self.layer_modules for ignore_layer in sublist
                 ):
                     # log non-lm-head quantizerd layers only
-                    if name is not lm_head:
+                    if name is not self.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del layers[name]
 
@@ -360,10 +345,14 @@ class ModelWriter():
             model,
             dtype=torch.float16,
             # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=checkpoint_file_name,
+            checkpoint=self.checkpoint_file_name,
             # device_map=device_map,
             # offload_state_dict=True,
             # offload_buffers=True,
         )
         torch.cuda.empty_cache()
         return model
+
+    cls.get_model_with_quantize = get_model_with_quantize
+
+    return cls
