@@ -131,7 +131,7 @@ jobs:
 
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list) and f not in transformers_diff_list]
 
-          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}|json.dumps(transformers_test_files)')
+          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}|{json.dumps(transformers_test_files)}')
           "
 
           test_files=$(python3 -c "$script")
