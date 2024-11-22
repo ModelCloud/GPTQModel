@@ -1,7 +1,7 @@
 # -- do not touch
 import gc
 import os
-from functools import partial
+
 import torch.cuda
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
