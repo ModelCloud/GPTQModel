@@ -6,7 +6,7 @@ import accelerate
 import torch
 import transformers
 from gptqmodel.utils.device import check_cuda
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 

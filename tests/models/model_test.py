@@ -1,7 +1,7 @@
 # -- do not touch
 import gc
 import os
-from functools import partial
+
 import torch.cuda
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -18,9 +18,6 @@ from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
-def filter_max_length(x, max_length):
-    return len(x["text"]) <= max_length
-
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
@@ -31,7 +28,7 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
     USE_VLLM = False
-    MAX_LENGTH = 2048
+    INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
 
     def generate(self, model, tokenizer, prompt=None):
@@ -64,10 +61,16 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
+        traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz", split="train")
+        datas = []
+        for index, sample in enumerate(traindata):
+            tokenized = tokenizer(sample['text'])
+            if len(tokenized[0]) < self.INPUTS_MAX_LENGTH:
+                datas.append(tokenized)
+                if len(datas) >= 1024:
+                    break
 
-        traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
-                                 split="train").filter(partial(filter_max_length, max_length=self.MODEL_MAX_LEN))
-        return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        return datas
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         quantize_config = QuantizeConfig(

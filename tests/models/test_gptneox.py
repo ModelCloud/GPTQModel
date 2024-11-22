@@ -1,5 +1,6 @@
 from model_test import ModelTest  # noqa: E402
 
+
 # TODO, this model requires 24G vram at least
 class TestGptNeoX(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gpt-neox-20b" # "EleutherAI/gpt-neox-20b"

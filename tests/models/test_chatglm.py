@@ -1,5 +1,6 @@
 from model_test import ModelTest  # noqa: E402
 
+
 # The official THUDM/chatglm3-6b's tokenization_chatglm.py has compatibility issues with transformers.
 # It will throw a TypeError: ChatGLMTokenizer._pad() got an unexpected keyword argument 'padding_side'
 # Adding a temporary padding_side parameter to the _pad method in tokenization_chatglm.py can prevent errors.
