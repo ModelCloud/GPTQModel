@@ -63,6 +63,7 @@ class BaseGPTQModel(nn.Module):
     require_trust_remote_code = None
     # some models require transformer version(internalm require '<=4.42.2')
     require_transformers_version: Optional[str] = None
+    require_tokenizers_version: Optional[str] = None
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction

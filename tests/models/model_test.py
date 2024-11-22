@@ -76,20 +76,20 @@ class ModelTest(unittest.TestCase):
         return datas
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
-        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
-        calibration_dataset = self.load_dataset(tokenizer)
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
             format=FORMAT.GPTQ,
         )
-
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype
         )
+
+        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+        calibration_dataset = self.load_dataset(tokenizer)
 
         # mpt model need
         if not model.config.pad_token_id:
