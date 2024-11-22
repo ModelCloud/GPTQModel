@@ -8,7 +8,7 @@ class TestGpt2(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2270
     TORCH_DTYPE = torch.float16
     TRUST_REMOTE_CODE = True
-    MAX_LENGTH = 1024
+    INPUTS_MAX_LENGTH = 1024
 
     def test_gpt2(self):
         self.quant_lm_eval()

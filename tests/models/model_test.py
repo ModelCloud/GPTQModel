@@ -28,7 +28,7 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
     USE_VLLM = False
-    MAX_LENGTH = 2048
+    INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
 
     def generate(self, model, tokenizer, prompt=None):
@@ -65,7 +65,7 @@ class ModelTest(unittest.TestCase):
         datas = []
         for index, sample in enumerate(traindata):
             tokenized = tokenizer(sample['text'])
-            if len(tokenized[0]) < self.MAX_LENGTH:
+            if len(tokenized[0]) < self.INPUTS_MAX_LENGTH:
                 datas.append(tokenized)
                 if len(datas) >= 1024:
                     break
