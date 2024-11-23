@@ -37,7 +37,7 @@ env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
   MAX_JOBS: 4
-  ZEN4_SERVER: 10.0.14.247
+  ZEN4_SERVER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
   TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral"
