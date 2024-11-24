@@ -99,7 +99,8 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        if not model.quantized:
+        is_quantized = model.quantized
+        if not is_quantized:
             model.quantize(calibration_dataset)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
@@ -113,7 +114,7 @@ class ModelTest(unittest.TestCase):
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-        if not model.quantized:
+        if not is_quantized:
             del model
             gc.collect()
             torch.cuda.empty_cache()
