@@ -65,7 +65,7 @@ class ModelTest(unittest.TestCase):
         datas = []
         for index, sample in enumerate(traindata):
             tokenized = tokenizer(sample['text'])
-            if len(tokenized[0]) < self.INPUTS_MAX_LENGTH:
+            if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
                 datas.append(tokenized)
                 if len(datas) >= 1024:
                     break
