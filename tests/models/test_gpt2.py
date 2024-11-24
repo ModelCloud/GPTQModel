@@ -1,6 +1,6 @@
 import torch  # noqa: E402
 
-from tests.model_test import ModelTest
+from model_test import ModelTest
 
 
 class TestGpt2(ModelTest):

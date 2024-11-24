@@ -1,4 +1,4 @@
-from tests.model_test import ModelTest
+from model_test import ModelTest
 
 
 # TODO, this model requires 24G vram at least
