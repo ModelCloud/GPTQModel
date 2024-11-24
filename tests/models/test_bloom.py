@@ -1,12 +1,7 @@
-import os
-import sys
 
 import torch  # noqa: E402
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, parent_dir)
-
-from model_test import ModelTest
+from tests.model_test import ModelTest
 
 
 class TestBloom(ModelTest):

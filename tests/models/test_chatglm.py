@@ -1,10 +1,4 @@
-import os
-import sys
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, parent_dir)
-
-from model_test import ModelTest
+from tests.model_test import ModelTest
 
 
 # The official THUDM/chatglm3-6b's tokenization_chatglm.py has compatibility issues with transformers.
