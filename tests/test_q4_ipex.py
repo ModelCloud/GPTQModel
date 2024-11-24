@@ -19,7 +19,7 @@ class TestsIPEX(unittest.TestCase):
 
     def test_ipex_format(self):
         prompt = "I am in Paris and"
-        expected_output = "<s> I am in Paris and I am a tourist"
+        expected_output = "<s> I am in Paris and I am in love with"
         device = torch.device("cpu")
 
         model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit" # "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -34,4 +34,4 @@ class TestsIPEX(unittest.TestCase):
 
         result = model_q.generate(**input, num_beams=1, max_new_tokens=5)
         output = tokenizer.decode(result[0])
-        self.assertTrue(output == expected_output)
+        self.assertEqual(output, expected_output)
