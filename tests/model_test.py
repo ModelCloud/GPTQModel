@@ -11,7 +11,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import GPTQModel, BACKEND  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
@@ -27,16 +27,19 @@ class ModelTest(unittest.TestCase):
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
+    LOAD_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
+    DELETE_QUANTIZED_MODEL = True
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = "I am in Paris and"
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE, max_new_tokens=self.GENERATE_EVAL_SIZE)
+        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE,
+                             max_new_tokens=self.GENERATE_EVAL_SIZE)
         output = tokenizer.decode(res[0])
         print(f"Result is: \n{output}")
         return output
@@ -82,10 +85,12 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype
+            torch_dtype=torch_dtype,
+            backend=self.LOAD_BACKEND,
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+
         calibration_dataset = self.load_dataset(tokenizer)
 
         # mpt model need
@@ -94,7 +99,8 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset)
+        if not model.quantized:
+            model.quantize(calibration_dataset)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
@@ -107,10 +113,13 @@ class ModelTest(unittest.TestCase):
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
-        return q_model, q_tokenizer
+        if not model.quantized:
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+            return q_model, q_tokenizer
+        else:
+            return model, tokenizer
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
         if tokenizer_path is None:
@@ -126,7 +135,7 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 if self.USE_VLLM:
@@ -153,7 +162,7 @@ class ModelTest(unittest.TestCase):
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
-                if os.path.exists(model.model_id_or_path):
+                if delete_quantized_model and os.path.exists(model.model_id_or_path):
                     shutil.rmtree(model.model_id_or_path)
                 return task_results
         except BaseException as e:
@@ -168,7 +177,7 @@ class ModelTest(unittest.TestCase):
                 print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
 
                 if int(self.BATCH_SIZE) > 0:
-                    self.lm_eval(model, apply_chat_template, trust_remote_code)
+                    self.lm_eval(model, apply_chat_template, trust_remote_code, delete_quantized_model)
                     print(f"set batch size to {self.BATCH_SIZE}, passed")
                 else:
                     print(f"set batch size to {self.BATCH_SIZE}, failed")
@@ -186,11 +195,18 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
+                                                     torch_dtype=self.TORCH_DTYPE)
 
-        task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
+        task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE,
+                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE,
+                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+        self.check_results(task_results)
+
+    def check_results(self, task_results):
         for filter, value in task_results.items():
             diff_pct = self.calculatorPer(filter=filter, value=value)
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
+                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
