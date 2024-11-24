@@ -34,4 +34,4 @@ class TestsIPEX(unittest.TestCase):
 
         result = model_q.generate(**input, num_beams=1, max_new_tokens=5)
         output = tokenizer.decode(result[0])
-        self.assertTrue(output == expected_output)
+        self.assertEqual(output, expected_output)
