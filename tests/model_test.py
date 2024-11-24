@@ -177,7 +177,10 @@ class ModelTest(unittest.TestCase):
                 print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
 
                 if int(self.BATCH_SIZE) > 0:
-                    self.lm_eval(model, apply_chat_template, trust_remote_code, delete_quantized_model)
+                    self.lm_eval(model=model,
+                                 apply_chat_template=apply_chat_template,
+                                 trust_remote_code=trust_remote_code,
+                                 delete_quantized_model=delete_quantized_model)
                     print(f"set batch size to {self.BATCH_SIZE}, passed")
                 else:
                     print(f"set batch size to {self.BATCH_SIZE}, failed")
@@ -198,8 +201,9 @@ class ModelTest(unittest.TestCase):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
                                                      torch_dtype=self.TORCH_DTYPE)
 
-        task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE,
+        task_results = self.lm_eval(model=self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
+                                    trust_remote_code=self.TRUST_REMOTE_CODE,
                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
         self.check_results(task_results)
 
