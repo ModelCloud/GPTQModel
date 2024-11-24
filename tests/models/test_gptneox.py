@@ -1,4 +1,4 @@
-from model_test import ModelTest  # noqa: E402
+from model_test import ModelTest
 
 
 # TODO, this model requires 24G vram at least
