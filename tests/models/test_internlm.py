@@ -1,4 +1,4 @@
-from tests.model_test import ModelTest  # noqa: E402
+from model_test import ModelTest  # noqa: E402
 
 
 class TestInternlm(ModelTest):

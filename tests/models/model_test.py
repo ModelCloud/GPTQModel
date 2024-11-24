@@ -11,7 +11,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import GPTQModel, BACKEND  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
@@ -27,11 +27,9 @@ class ModelTest(unittest.TestCase):
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
-    LOAD_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
-    DELETE_QUANTIZED_MODEL = True
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -85,12 +83,10 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype,
-            backend=self.LOAD_BACKEND,
+            torch_dtype=torch_dtype
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
-
         calibration_dataset = self.load_dataset(tokenizer)
 
         # mpt model need
@@ -99,8 +95,7 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        if not model.quantized:
-            model.quantize(calibration_dataset)
+        model.quantize(calibration_dataset)
         if need_eval:
             test_dir = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(test_dir, "test_quantized_model")
@@ -113,13 +108,10 @@ class ModelTest(unittest.TestCase):
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-        if not model.quantized:
-            del model
-            gc.collect()
-            torch.cuda.empty_cache()
-            return q_model, q_tokenizer
-        else:
-            return model, tokenizer
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+        return q_model, q_tokenizer
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
         if tokenizer_path is None:
@@ -135,7 +127,7 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 if self.USE_VLLM:
@@ -162,7 +154,7 @@ class ModelTest(unittest.TestCase):
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
-                if delete_quantized_model and os.path.exists(model.model_id_or_path):
+                if os.path.exists(model.model_id_or_path):
                     shutil.rmtree(model.model_id_or_path)
                 return task_results
         except BaseException as e:
@@ -177,7 +169,7 @@ class ModelTest(unittest.TestCase):
                 print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
 
                 if int(self.BATCH_SIZE) > 0:
-                    self.lm_eval(model, apply_chat_template, trust_remote_code, delete_quantized_model)
+                    self.lm_eval(model, apply_chat_template, trust_remote_code)
                     print(f"set batch size to {self.BATCH_SIZE}, passed")
                 else:
                     print(f"set batch size to {self.BATCH_SIZE}, failed")
@@ -199,11 +191,7 @@ class ModelTest(unittest.TestCase):
                                                      torch_dtype=self.TORCH_DTYPE)
 
         task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE,
-                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
-        self.check_results(task_results)
-
-    def check_results(self, task_results):
+                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE)
         for filter, value in task_results.items():
             diff_pct = self.calculatorPer(filter=filter, value=value)
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
