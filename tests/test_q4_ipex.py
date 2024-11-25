@@ -4,7 +4,7 @@ import os
 import torch
 
 from gptqmodel import BACKEND
-from .models.model_test import ModelTest
+from models.model_test import ModelTest
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
