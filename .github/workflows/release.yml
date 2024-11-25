@@ -22,7 +22,7 @@ on:
         required: false
         type: number
       target:
-        description: 'CUDA Torch Python version separated by space, check http://10.0.14.247/gpu/runner/docker to get all supported combinations'
+        description: 'CUDA Torch Python version separated by space, check http://10.0.14.248/gpu/runner/docker to get all supported combinations'
         required: false
         default: ''
       max-parallel:
@@ -42,7 +42,7 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  ZEN4_SERVER: 10.0.14.247
+  ZEN4_SERVER: 10.0.14.248
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
   CI: 1
@@ -175,7 +175,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          uv pip install dist/$whl
+          uv pip install dist/$whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Upload wheel
         continue-on-error: true
