@@ -32,7 +32,6 @@ is_quantized_model = hasattr(config, "quantization_config")
 if is_quantized_model:
     print("load quantized model, will use BACKEND.IPEX")
     model = GPTQModel.load(ars.model, backend=BACKEND.IPEX)
-    model.to(torch.device("cpu"))
 else:
     model = AutoModelForCausalLM.from_pretrained(ars.model, device_map="cpu", torch_dtype=torch.bfloat16)
 
