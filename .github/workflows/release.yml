@@ -124,7 +124,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
-    runs-on: [ self-hosted, zen4 ]
+    runs-on: self-hosted
     needs:
       - check-vm
     if: needs.check-vm.outputs.zen4_list != '' && !cancelled()
