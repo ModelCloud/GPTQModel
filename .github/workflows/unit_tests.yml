@@ -146,7 +146,7 @@ jobs:
           echo "Transformers Test files: $transformers_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  build-zen4:
+  build:
     runs-on: [self-hosted, zen4]
     needs: check-vm
     if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == '' && !cancelled()
@@ -215,11 +215,11 @@ jobs:
 
   torch2_4:
     needs:
-      - build-zen4
+      - build
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
@@ -344,11 +344,11 @@ jobs:
 
   transformers_diff:
     needs:
-      - build-zen4
+      - build
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
@@ -450,11 +450,11 @@ jobs:
 
   torch2_5:
     needs:
-      - build-zen4
+      - build
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.5.1
       volumes:
