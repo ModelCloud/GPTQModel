@@ -1,5 +1,4 @@
-from model_test import ModelTest  # noqa: E402
-
+from model_test import ModelTest
 
 class TestOpt(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/opt-125m" # "facebook/opt-125m"

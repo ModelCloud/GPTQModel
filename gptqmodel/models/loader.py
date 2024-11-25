@@ -6,8 +6,7 @@ import accelerate
 import torch
 import transformers
 from gptqmodel.utils.device import check_cuda
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
-from transformers import __version__ as transformers_version
+from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
@@ -27,18 +26,14 @@ from ._const import get_best_device, DEVICE, SUPPORTED_MODELS
 
 logger = setup_logger()
 
-class ModelLoader():
-    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    loader = AutoModelForCausalLM
-
+def ModelLoader(cls):
     @classmethod
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
+            quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
-            require_trust_remote_code=None,
-            require_transformers_version: Optional[str] = None,
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
@@ -55,20 +50,30 @@ class ModelLoader():
             model_init_kwargs["device_map"] = "xpu" if torch.xpu.is_available() else "cpu"
             torch_dtype = ipex_dtype()
 
-        if require_trust_remote_code and not trust_remote_code:
+        if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        if require_transformers_version:
-            passed = check_requires_version(require_transformers_version, current_version=transformers_version)
+        if cls.require_transformers_version:
+            # Do not import version at the top of the file, if you reinstall transformers after the program starts,
+            # the version may not be what you expected.
+            from transformers import __version__ as transformers_version
+            passed = check_requires_version(cls.require_transformers_version, current_version=transformers_version)
             if passed is not None:
                 if not passed:
-                    raise ValueError(
-                        f"{pretrained_model_id_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
+                  raise ValueError(f"{pretrained_model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
             else:
-                raise ValueError(
-                    f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
+                raise ValueError(f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
+
+        if cls.require_tokenizers_version:
+            from tokenizers import __version__ as tokenizers_version
+            passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
+            if passed is not None:
+                if not passed:
+                    raise ValueError(f"{pretrained_model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
+            else:
+                raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
 
         def skip(*args, **kwargs):
             pass
@@ -112,7 +117,15 @@ class ModelLoader():
             model.seqlen = 4096
         model.eval()
 
-        return model
+        return cls(
+            model,
+            quantized=False,
+            quantize_config=quantize_config,
+            trust_remote_code=trust_remote_code,
+            model_id_or_path=pretrained_model_id_or_path
+        )
+
+    cls.from_pretrained = from_pretrained
 
     @classmethod
     def from_quantized(
@@ -125,13 +138,6 @@ class ModelLoader():
             use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
-            require_trust_remote_code: bool = False,
-            require_transformers_version: Optional[str] = None,
-            dynamic_expert_index: Optional[str] = None,
-            base_modules: List[str] = None,
-            layer_modules: List[List[str]] = None,
-            lm_head: str = "lm_head",
-            layer_type: Union[List[str], str] = None,
             **kwargs,
     ):
         if backend == BACKEND.VLLM:
@@ -157,19 +163,28 @@ class ModelLoader():
                 "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu and xpu quantization and inference.")
 
         """load quantized model from local disk"""
-        if require_trust_remote_code and not trust_remote_code:
+        if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        if require_transformers_version:
-            passed = check_requires_version(require_transformers_version, current_version=transformers_version)
+        if cls.require_transformers_version:
+            from transformers import __version__ as transformers_version
+            passed = check_requires_version(cls.require_transformers_version, current_version=transformers_version)
             if passed is not None:
                 if not passed:
-                    raise ValueError(
-                        f"{model_id_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
+                    raise ValueError(f"{model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
             else:
-                raise ValueError(f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
+                raise ValueError(f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
+
+        if cls.require_tokenizers_version:
+            from tokenizers import __version__ as tokenizers_version
+            passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
+            if passed is not None:
+                if not passed:
+                    raise ValueError(f"{model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
+            else:
+                raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
@@ -238,13 +253,11 @@ class ModelLoader():
                 )
                 model.config = hf_config
                 cls.generate = lambda self, **kwargs: sglang_generate(self.model, **kwargs)
-            return (
+            return cls(
                 model,
-                quantize_config,
-                None,  # qlinear_kernel
-                False,  # load_quantized_model
-                cls.generate,
-                None # return None if is SGLANG or VLLM
+                quantized=True,
+                quantize_config=quantize_config,
+                qlinear_kernel=None,
             )
 
         if quantize_config.format == FORMAT.MARLIN:
@@ -330,24 +343,24 @@ class ModelLoader():
             )
             model.checkpoint_file_name = model_save_name
 
-            if dynamic_expert_index is not None:
-                num_experts = getattr(config, dynamic_expert_index)
-                layer_modules = get_moe_layer_modules(layer_modules=layer_modules,
+            if cls.dynamic_expert_index is not None:
+                num_experts = getattr(config, cls.dynamic_expert_index)
+                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 
             layers = find_layers(model)
-            ignore_layers = [lm_head] + base_modules
+            ignore_layers = [cls.lm_head] + cls.base_modules
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == lm_head:
+                if quantize_config.lm_head and name == cls.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in layer_modules for ignore_layer in sublist
+                        not name.endswith(ignore_layer) for sublist in cls.layer_modules for ignore_layer in sublist
                 ):
                     # log non-lm-head quantizerd layers only
-                    if name is not lm_head:
+                    if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del layers[name]
 
@@ -385,7 +398,7 @@ class ModelLoader():
             else:
                 device_map = accelerate.infer_auto_device_map(
                     model,
-                    no_split_module_classes=[layer_type] if isinstance(layer_type, str) else layer_type,
+                    no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
                 )
 
         load_checkpoint_in_model = False
@@ -507,11 +520,16 @@ class ModelLoader():
 
         model.eval()
 
-        return (
+        return cls(
             model,
-            quantize_config,
-            qlinear_kernel,
-            True,  # load_quantized_model
-            None, # return None if not SGLANG or VLLM
-            model.checkpoint_file_name
+            quantized=True,
+            quantize_config=quantize_config,
+            qlinear_kernel=qlinear_kernel,
+            load_quantized_model=True,
+            trust_remote_code=trust_remote_code,
+            model_id_or_path=model_id_or_path,
         )
+
+    cls.from_quantized = from_quantized
+
+    return cls

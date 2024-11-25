@@ -1,8 +1,7 @@
 
 import torch
 from device_smi import Device
-
-from gptqmodel.models._const import CUDA_0, CPU
+from gptqmodel.models._const import CPU, CUDA_0
 
 
 def check_cuda(raise_exception: bool = True) -> bool:

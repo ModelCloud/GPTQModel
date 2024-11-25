@@ -1,4 +1,4 @@
-from model_test import ModelTest  # noqa: E402
+from model_test import ModelTest
 
 
 class TestXVerse(ModelTest):
@@ -8,6 +8,7 @@ class TestXVerse(ModelTest):
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
     BATCH_SIZE = 6
+    USE_VLLM = False
 
     def test_xverse(self):
         self.quant_lm_eval()

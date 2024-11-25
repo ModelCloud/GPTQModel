@@ -8,7 +8,7 @@
 </p>
 
 ## News
-* 11/16/2024 [1.2.2-dev] HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. 
+* 11/19/2024 [1.2.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.2) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
 * 11/11/2024 🚀 [1.2.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.1) Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
 * 10/29/2024 🚀 [1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 * 10/12/2024 ✨ [1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
@@ -16,12 +16,12 @@
 * 10/08/2024 ✨ [1.0.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.7) Fixed marlin (faster) kernel was not auto-selected for some models.
 * 09/26/2024 ✨ [1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed quantized Llama 3.2 vision quantized loader.
 * 09/26/2024 ✨ [1.0.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.5) Partial Llama 3.2 Vision model support (mllama): only text-layer quantization layers are supported for now.
-* 09/26/2024 ✨ [1.0.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.4) Integrated Liger Kernel support for ~1/2 memory reduction on some models during quantization. Added control toggle disable parallel packing. 
-* 09/18/2024 ✨ [1.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.3) Added Microsoft GRIN-MoE and MiniCPM3 support.
 
 <details>
     
 <summary>Archived News:</summary>
+* 09/26/2024 ✨ [1.0.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.4) Integrated Liger Kernel support for ~1/2 memory reduction on some models during quantization. Added control toggle disable parallel packing. 
+* 09/18/2024 ✨ [1.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.3) Added Microsoft GRIN-MoE and MiniCPM3 support.
 * 08/16/2024 ✨ [1.0.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.2) Support Intel/AutoRound v0.3, pre-built whl packages, and PyPI release. 
 * 08/14/2024 ✨ [1.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.0) 40% faster `packing`, Fixed Python 3.9 compat, added `lm_eval` api. 
 * 08/10/2024 🚀 [0.9.11](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.11) Added LG EXAONE 3.0 model support. New `dynamic` per layer/module flexible quantization where each layer/module may have different bits/params. Added proper sharding support to `backend.BITBLAS`. Auto-heal quantization errors due to small damp values. 
@@ -66,11 +66,12 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
+## Quality: GPTQModel 4Bit Quantized models can match and sometimes exceed BF16:
+🤗 [ModelCloud quantized ultra-high recovery vortex-series models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
+
+![image](https://github.com/user-attachments/assets/e19dcabc-ba47-467c-ac86-3b411d31df2d)
 
 ## Model Support:  🚀 (Added by GPTQModel) 
-[🤗 Pre-quantized models on HF](https://hf.co/ModelCloud)
-
-
 | Model            |     |                |     |                  |     |            |     |     |     |     |
 | ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- | --- | --- |
 | Baichuan         | ✅   | Falon          | ✅   | Llama 3.2 Vision | 🚀  | Qwen       | ✅   |     |     |     |
@@ -83,10 +84,6 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MPT              | ✅   |            |     |     |     |     |
 | DeepSeek-V2-Lite | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |     |     |     |
 | EXAONE 3.0       | 🚀  | Llama 1/2/3    | ✅   | Phi/Phi-3        | 🚀  |            |     |     |     |     |## Compatiblity 
-
-
-## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
-![plus-v2 5v3@2x](https://github.com/user-attachments/assets/dd223d08-f790-41ff-814d-4c2a98e4a3de)
 
 
 ## Platform Requirements
