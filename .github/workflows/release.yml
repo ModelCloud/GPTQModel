@@ -42,7 +42,7 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  ZEN4_SERVER: 10.0.14.248
+  PUBLIC_SERVER: 10.0.14.248
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
   CI: 1
@@ -77,8 +77,8 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          echo "ip=${ZEN4_SERVER}" >> "$GITHUB_OUTPUT"
-          echo "GPU_IP=${ZEN4_SERVER}" >> $GITHUB_ENV
+          echo "ip=${PUBLIC_SERVER}" >> "$GITHUB_OUTPUT"
+          echo "GPU_IP=${PUBLIC_SERVER}" >> $GITHUB_ENV
           echo "ip: $ip"
 
           max_p=${{ github.event.inputs.max-parallel }}
@@ -162,7 +162,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          bash -c "$(curl -L http://${ZEN4_SERVER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://${PUBLIC_SERVER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
