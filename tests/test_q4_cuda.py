@@ -1,10 +1,10 @@
 # -- do not touch
 import os
 
-from gptqmodel import BACKEND
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+
+from gptqmodel import BACKEND  # noqa: E402
 
 import unittest  # noqa: E402
 

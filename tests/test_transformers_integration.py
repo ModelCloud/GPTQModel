@@ -1,17 +1,17 @@
 # -- do not touch
 import os
-import tempfile
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel.integration.optimum.quantizer import GPTQConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
+from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 GENERATE_EVAL_SIZE = 100
 

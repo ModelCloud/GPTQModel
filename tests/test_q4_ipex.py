@@ -1,13 +1,13 @@
 # -- do not touch
 import os
 
-import torch
-
-from gptqmodel import BACKEND
-from .models.model_test import ModelTest
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+
+import torch  # noqa: E402
+
+from gptqmodel import BACKEND  # noqa: E402
+from .models.model_test import ModelTest  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
 

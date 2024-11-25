@@ -1,7 +1,13 @@
-import unittest
+# -- do not touch
+import os
 
-from gptqmodel import GPTQModel, QuantizeConfig
-from transformers import AutoTokenizer
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
+import unittest  # noqa: E402
+
+from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 pretrained_model_id = "/monster/data/model/opt-125m" # "facebook/opt-125m"
 quantized_model_id = "facebook-opt-125m"

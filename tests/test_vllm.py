@@ -1,10 +1,13 @@
-import gc
+# -- do not touch
 import os
-import subprocess
-import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+
+import gc  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
 
 import importlib.util  # noqa: E402
 import unittest  # noqa: E402
