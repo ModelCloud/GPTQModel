@@ -622,6 +622,11 @@ class BaseGPTQModel(nn.Module):
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
                     additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+
+                if hasattr(layer, "reuse_kv"):
+                    if layer.reuse_kv:
+                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                        
                 with torch.no_grad():
                     layer_output = move_to(
                         layer(*layer_input, **additional_layer_inputs)[0],
