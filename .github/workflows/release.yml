@@ -49,7 +49,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 4
+  MAX_JOBS: 8
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
@@ -118,7 +118,7 @@ jobs:
 
           echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
 
-  release-zen4:
+  release:
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
@@ -130,7 +130,6 @@ jobs:
     if: needs.check-vm.outputs.zen4_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
-    timeout-minutes: 70
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -207,7 +206,7 @@ jobs:
     runs-on: self-hosted
     needs: 
       - check-vm
-      - release-zen4
+      - release
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
     env:
