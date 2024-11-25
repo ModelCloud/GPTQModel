@@ -62,7 +62,7 @@ jobs:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
-      zen4_list: ${{ steps.assign.outputs.zen4_list }}
+      task_list: ${{ steps.assign.outputs.task_list }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     steps:
       - name: Print env
@@ -116,18 +116,18 @@ jobs:
             echo "task list: $list_1"
           fi
 
-          echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
+          echo "task_list=$list_1" >> "$GITHUB_OUTPUT"
 
   release:
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
-        tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
+        tag: ${{ fromJSON(needs.check-vm.outputs.task_list) }}
     runs-on: self-hosted
     needs:
       - check-vm
-    if: needs.check-vm.outputs.zen4_list != '' && !cancelled()
+    if: needs.check-vm.outputs.task_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
     steps:
