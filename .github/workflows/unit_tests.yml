@@ -219,7 +219,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != "[]"
+    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
