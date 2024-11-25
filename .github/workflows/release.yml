@@ -175,7 +175,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          uv pip install dist/$whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
