@@ -1,19 +1,29 @@
 import time
 import torch
-torch.set_num_threads(8)
+import argparse
 from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
-import intel_extension_for_pytorch as ipex
 
-batch_size = 2
+parser = argparse.ArgumentParser(description="Benchmark IPEX vs HF on a pre-trained model.")
+parser.add_argument("--model", type=str, required=True, help="Path or name of the pre-trained model.")
+parser.add_argument("--cores", type=int, default=8, help="Number of CPU cores to use.")
+parser.add_argument("--batch", type=int, default=2, help="Batch size for processing messages.")
+parser.add_argument("--backend", type=str, choices=["ipex", "hf"], default="ipex", help="Backend to optimize the model. Choose between 'ipex' and 'hf'.")
+ars = parser.parse_args()
 
-model_name = "/monster/data/model/Meta-Llama-3.1-8B-Instruct/"
+# Set the number of threads to use
+torch.set_num_threads(ars.cores)
+print("use torch thread:", torch.get_num_threads())
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", torch_dtype=torch.bfloat16)
+tokenizer = AutoTokenizer.from_pretrained(ars.model)
+model = AutoModelForCausalLM.from_pretrained(ars.model, device_map="cpu", torch_dtype=torch.bfloat16)
 model.eval()
 
-model = ipex.llm.optimize(model, dtype=torch.bfloat16)
+if ars.backend == "ipex":
+    import intel_extension_for_pytorch as ipex
+    model = ipex.llm.optimize(model, dtype=torch.bfloat16)
+
+print(f"use backend: {ars.backend} load model: {ars.model}")
 
 tokenizer.pad_token_id = 128004 # <|finetune_right_pad_id|>
 model.pad_token_id = tokenizer.pad_token_id
@@ -35,14 +45,13 @@ messages = [
     {"role": "user", "content": "How do plants adapt to survive in extreme desert environments?"},
     {"role": "user", "content": "What strategies can help reduce stress during exam preparation?"},
     {"role": "user", "content": "Describe the cultural importance of tea ceremonies in Japan."},
-    {"role": "user", "content": "What are the main benefits of meditation for mental health?"},
-    {"role": "user", "content": "How has social media impacted modern interpersonal communication?"}
 ]
 
-if batch_size > len(messages):
+print(f"total messages: {len(messages)}, batch_size: {ars.batch}")
+if ars.batch > len(messages):
     raise ValueError("batch_size should be less than or equal to the number of messages")
 
-messages = [[messages[i]] for i in range(batch_size)]
+messages = [[messages[i]] for i in range(ars.batch)]
 
 with torch.no_grad(), torch.amp.autocast("cpu", dtype=torch.bfloat16):
     start = time.time()
@@ -61,6 +70,3 @@ with torch.no_grad(), torch.amp.autocast("cpu", dtype=torch.bfloat16):
     print(f"generate use :{total_time}")
     print(f"total new token: {new_token_len}")
     print(f"token/sec: {(new_token_len/total_time):.4f}")
-
-if __name__ == '__main__':
-    pass
