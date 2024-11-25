@@ -42,14 +42,14 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  ZEN4_SERVER: 10.0.14.248
+  RUNNER: 10.0.14.248
   TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
   CI: 1
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 4
+  MAX_JOBS: 8
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
@@ -62,7 +62,7 @@ jobs:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
-      zen4_list: ${{ steps.assign.outputs.zen4_list }}
+      task_list: ${{ steps.assign.outputs.task_list }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     steps:
       - name: Print env
@@ -77,8 +77,8 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          echo "ip=${ZEN4_SERVER}" >> "$GITHUB_OUTPUT"
-          echo "GPU_IP=${ZEN4_SERVER}" >> $GITHUB_ENV
+          echo "ip=${RUNNER}" >> "$GITHUB_OUTPUT"
+          echo "GPU_IP=${RUNNER}" >> $GITHUB_ENV
           echo "ip: $ip"
 
           max_p=${{ github.event.inputs.max-parallel }}
@@ -116,21 +116,20 @@ jobs:
             echo "task list: $list_1"
           fi
 
-          echo "zen4_list=$list_1" >> "$GITHUB_OUTPUT"
+          echo "task_list=$list_1" >> "$GITHUB_OUTPUT"
 
-  release-zen4:
+  release:
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
       matrix:
-        tag: ${{ fromJSON(needs.check-vm.outputs.zen4_list) }}
+        tag: ${{ fromJSON(needs.check-vm.outputs.task_list) }}
     runs-on: self-hosted
     needs:
       - check-vm
-    if: needs.check-vm.outputs.zen4_list != '' && !cancelled()
+    if: needs.check-vm.outputs.task_list != '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
-    timeout-minutes: 70
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -163,7 +162,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          bash -c "$(curl -L http://${ZEN4_SERVER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://${RUNNER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -207,7 +206,7 @@ jobs:
     runs-on: self-hosted
     needs: 
       - check-vm
-      - release-zen4
+      - release
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
     env:
