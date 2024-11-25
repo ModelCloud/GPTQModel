@@ -54,6 +54,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+from .definitions.hymba import  HymbaGPTQ
 
 logger = setup_logger()
 
@@ -102,6 +103,7 @@ MODEL_MAP = {
     "mllama": MLlamaGPTQ,
     "granite": GraniteGPTQ,
     "mobilellm": MobileLLMGPTQ,
+    "hymba": HymbaGPTQ,
 }
 
 

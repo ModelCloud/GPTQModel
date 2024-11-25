@@ -471,6 +471,7 @@ class BaseGPTQModel(nn.Module):
         durations = []
         avg_losses = []
         module_names = []
+        shared_kv_cache_dict = {}
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -546,9 +547,15 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
                     with torch.no_grad():
-                        layer(*layer_input, **additional_layer_inputs)
-
-                    torch.cuda.empty_cache()
+                        if hasattr(layer, "reuse_kv"):
+                            if layer.reuse_kv:
+                                layer(*layer_input, **additional_layer_inputs, kv_last_layer=shared_kv_cache_dict[-1])
+                            else:
+                                layer_output = layer(*layer_input, **additional_layer_inputs)
+                                if shared_kv_cache_dict.get(i) is None:
+                                    shared_kv_cache_dict[i] = layer_output[-1]
+                        else:
+                            layer(*layer_input, **additional_layer_inputs)
                 for h in handles:
                     h.remove()
 

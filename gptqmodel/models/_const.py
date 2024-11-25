@@ -61,6 +61,7 @@ SUPPORTED_MODELS = [
     "mllama",
     "granite",
     "mobilellm",
+    "hymba"
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
