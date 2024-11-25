@@ -11,9 +11,13 @@ parser.add_argument("--batch", type=int, default=2, help="Batch size for process
 parser.add_argument("--backend", type=str, choices=["ipex", "hf"], default="ipex", help="Backend to optimize the model. Choose between 'ipex' and 'hf'.")
 ars = parser.parse_args()
 
+print("use model: ", ars.model)
+print("use cores: ", ars.cores)
+print("use batch: ", ars.batch)
+print("use backend: ", ars.backend)
+
 # Set the number of threads to use
 torch.set_num_threads(ars.cores)
-print("use torch thread:", torch.get_num_threads())
 
 tokenizer = AutoTokenizer.from_pretrained(ars.model)
 model = AutoModelForCausalLM.from_pretrained(ars.model, device_map="cpu", torch_dtype=torch.bfloat16)
@@ -22,8 +26,6 @@ model.eval()
 if ars.backend == "ipex":
     import intel_extension_for_pytorch as ipex
     model = ipex.llm.optimize(model, dtype=torch.bfloat16)
-
-print(f"use backend: {ars.backend} load model: {ars.model}")
 
 tokenizer.pad_token_id = 128004 # <|finetune_right_pad_id|>
 model.pad_token_id = tokenizer.pad_token_id
@@ -47,7 +49,6 @@ messages = [
     {"role": "user", "content": "Describe the cultural importance of tea ceremonies in Japan."},
 ]
 
-print(f"total messages: {len(messages)}, batch_size: {ars.batch}")
 if ars.batch > len(messages):
     raise ValueError("batch_size should be less than or equal to the number of messages")
 
