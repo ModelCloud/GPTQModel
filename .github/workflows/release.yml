@@ -92,7 +92,7 @@ jobs:
           input="${{ github.event.inputs.target }}"
 
           if [[ -z "$input" ]]; then
-            server_lists=$(curl -s "http://${{ env.GPU_IP }}/gpu/runner/docker?json=1")
+            server_lists=$(curl -s "http://${RUNNER}/gpu/runner/docker?json=1")
             echo "lists=$server_lists"
 
             IFS=$'+' read -r list_1 list_2 <<< "$server_lists"
@@ -206,7 +206,6 @@ jobs:
     runs-on: self-hosted
     needs: 
       - check-vm
-      - release
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
     env:
@@ -273,14 +272,14 @@ jobs:
           status=-1
 
           while [ "$status" -lt 0 ]; do
-            status=$(curl -s "http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
+            status=$(curl -s "http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
             if [ "$status" == "2" ]; then
                 echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
             elif [ "$status" -lt 0 ]; then
               for i in {1..5}; do echo "."; done
-              echo "open http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
+              echo "open http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
               for i in {1..5}; do echo "."; done
-              echo "click http://${{ env.GPU_IP }}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
+              echo "click http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
               sleep 5
             else
               echo "release has been confirmed"
