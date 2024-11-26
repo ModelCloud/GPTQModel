@@ -5,11 +5,11 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import gc  # noqa: E402
-import torch.cuda  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
