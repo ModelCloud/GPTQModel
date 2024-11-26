@@ -15,6 +15,7 @@ from gptqmodel.quantization import FORMAT  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+
 class TestQ4Marlin(unittest.TestCase):
 
     @parameterized.expand(

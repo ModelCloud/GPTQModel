@@ -11,6 +11,7 @@ from gptqmodel import GPTQModel  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
 
+
 class TestLmEval(unittest.TestCase):
 
     @classmethod
