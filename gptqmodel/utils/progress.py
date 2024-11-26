@@ -4,11 +4,16 @@ import time
 
 
 class ProgressBar:
-    def __init__(self, total, prefix='', length=40, fill='█', desc=""):
-        if isinstance(total, range):
-            self.total = len(total)
-        else:
-            self.total= total
+    def __init__(self, data, prefix='', length=40, fill='█', desc=""):
+        self.list = []
+        if isinstance(data, range):
+            self.total = len(data)
+        elif isinstance(data, list):
+            self.list = data
+            self.total = len(data)
+        elif isinstance(data, int):
+            self.total= data
+
         self.prefix = prefix
         self.length = length
         self.fill = fill
@@ -50,6 +55,8 @@ class ProgressBar:
         return self
 
     def __next__(self):
+        if self.list:
+            return self.list.pop(0)
         if self.current < self.total - 1:
             self.current += 1
             self.print_bar(self.current)

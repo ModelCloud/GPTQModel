@@ -8,9 +8,10 @@ from typing import Dict, List, Optional
 import torch
 from datasets import Dataset, load_dataset
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
-from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
+
+from gptqmodel.utils.progress import ProgressBar
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ def load_model_tokenizer(
 def benchmark_generation_speed(model, tokenizer, examples, generation_config):
     generation_time_list = []
     num_generated_tokens_list = []
-    progress_bar = tqdm(examples)
+    progress_bar = ProgressBar(examples)
     for example in progress_bar:
         input_ids = example["input_ids"].to(model.device)
 
