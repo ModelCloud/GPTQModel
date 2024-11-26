@@ -35,7 +35,7 @@ class ProgressBar:
     def calc_time(self, iteration):
         used_time = int(time.time() - self.time)
         formatted_time = str(datetime.timedelta(seconds=used_time))
-        remaining = str(datetime.timedelta(seconds=int((used_time / iteration) * self.total)))
+        remaining = str(datetime.timedelta(seconds=int((used_time / max(iteration, 1)) * self.total)))
         return f"{formatted_time} / {remaining}"
 
     def log(self, bar, log):
