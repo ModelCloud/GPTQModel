@@ -35,6 +35,7 @@ def prepare_dataset_for_bench(tokenizer, batch_size=8):
 
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 # load model, check model backend
+start_load = time.time()
 config = AutoConfig.from_pretrained(ars.model)
 is_quantized_model = hasattr(config, "quantization_config")
 if is_quantized_model:
@@ -44,16 +45,17 @@ if is_quantized_model:
     model = GPTQModel.load(ars.model, backend=BACKEND.IPEX)
 else:
     model = AutoModelForCausalLM.from_pretrained(ars.model, device_map="cpu", torch_dtype=torch.bfloat16)
-
+print(f"load model use: {time.time() - start_load}")
 
 # set model to eval mode
 model.eval()
 
-
 if ars.backend == "ipex" and not is_quantized_model:
+    start_opt = time.time()
     import intel_extension_for_pytorch as ipex
     model = ipex.llm.optimize(model, dtype=torch.bfloat16)
-    # model.forward = torch.compile(model.forward, dynamic=True, backend="ipex")
+    model.forward = torch.compile(model.forward, dynamic=True, backend="ipex")
+    print(f"use ipex optimize model use: {time.time() - start_opt}")
 
 
 # load tokenizer, and normalize the pad_token_id
