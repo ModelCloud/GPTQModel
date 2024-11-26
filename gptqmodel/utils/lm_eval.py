@@ -1,11 +1,14 @@
 import json
 from typing import List, Optional, Union
 
-from lm_eval import simple_evaluate
-from lm_eval.loggers import EvaluationTracker, WandbLogger
-from lm_eval.models.huggingface import HFLM
-from lm_eval.tasks import TaskManager
-from lm_eval.utils import handle_non_serializable
+try:
+    from lm_eval import simple_evaluate
+    from lm_eval.loggers import EvaluationTracker, WandbLogger
+    from lm_eval.models.huggingface import HFLM
+    from lm_eval.tasks import TaskManager
+    from lm_eval.utils import handle_non_serializable
+except:
+    raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
 
 def lm_eval(
