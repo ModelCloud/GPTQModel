@@ -1,4 +1,6 @@
+import datetime
 import sys
+import time
 
 
 class ProgressBar:
@@ -12,6 +14,7 @@ class ProgressBar:
         self.fill = fill
         self.description = ''
         self.current = 0
+        self.time = time.time()
 
     def set_description(self, description):
         self.description = description
@@ -20,13 +23,21 @@ class ProgressBar:
         percent = ("{0:.1f}").format(100 * (iteration / float(self.total)))
         filled_length = int(self.length * iteration // self.total)
         bar = self.fill * filled_length + '-' * (self.length - filled_length)
-        sys.stdout.write(f'\r{self.prefix} {self.description} |{bar}| {percent}% Complete')
-        sys.stdout.flush()
+        self.write_log(bar, f"{self.calc_time(iteration)} [{iteration}/{self.total}] {percent}% Complete")
+
+    def calc_time(self, iteration):
+        used_time = int(time.time() - self.time)
+        formatted_time = str(datetime.timedelta(seconds=used_time))
+        remaining = str(datetime.timedelta(seconds=int((used_time / iteration) * (self.total))))
+        return f"{formatted_time} / {remaining}"
 
     def update(self):
         for i in range(1, self.total + 1):
             self.print_bar(i)
-        sys.stdout.write(f'\r{self.prefix} {self.description} |{"-" * self.length}| 100.0% Complete\n')
+        self.write_log(f"{'-' * self.length}","100.0% Complete")
+
+    def write_log(self,bar, log):
+        sys.stdout.write(f'\r{self.prefix} {self.description} |{bar}| {log}\n')
         sys.stdout.flush()
 
     # fix TypeError: 'ProgressBar' object does not support the context manager protocol
@@ -34,8 +45,7 @@ class ProgressBar:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.write(f'\r{self.prefix} {self.description} |{"-" * self.length}| 100.0% Complete\n')
-        sys.stdout.flush()
+        self.write_log(f"{'-' * self.length}","100.0% Complete")
 
     def __iter__(self):
         return self
