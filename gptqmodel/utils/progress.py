@@ -4,7 +4,7 @@ import time
 
 
 class ProgressBar:
-    def __init__(self, total, prefix='', length=40, fill='█'):
+    def __init__(self, total, prefix='', length=40, fill='█', desc=""):
         if isinstance(total, range):
             self.total = len(total)
         else:
@@ -12,7 +12,7 @@ class ProgressBar:
         self.prefix = prefix
         self.length = length
         self.fill = fill
-        self.description = ''
+        self.description = desc
         self.current = 0
         self.time = time.time()
 
@@ -37,8 +37,7 @@ class ProgressBar:
         self.write_log(f"{'-' * self.length}","100.0%")
 
     def write_log(self,bar, log):
-        sys.stdout.write(f'\r{self.prefix} {self.description} |{bar}| {log}\n')
-        sys.stdout.flush()
+        print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
 
     # fix TypeError: 'ProgressBar' object does not support the context manager protocol
     def __enter__(self):
