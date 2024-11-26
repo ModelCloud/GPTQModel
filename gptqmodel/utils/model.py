@@ -274,7 +274,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
         else:
             qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
-        pbar.update()
+        pbar.progress()
 
 
 def pack_model(
