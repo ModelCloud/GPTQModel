@@ -24,11 +24,11 @@ class ProgressBar:
     def set_description(self, description):
         self.description = description
 
-    def print_bar(self, iteration):
+    def progress(self, iteration):
         percent = ("{0:.1f}").format(100 * (iteration / float(self.total)))
         filled_length = int(self.length * iteration // self.total)
         bar = self.fill * filled_length + '-' * (self.length - filled_length)
-        self.write_log(bar, f"{self.calc_time(iteration)} [{iteration}/{self.total}] {percent}%")
+        self.log(bar, f"{self.calc_time(iteration)} [{iteration}/{self.total}] {percent}%")
 
     def calc_time(self, iteration):
         used_time = int(time.time() - self.time)
@@ -38,10 +38,10 @@ class ProgressBar:
 
     def update(self):
         for i in range(1, self.total + 1):
-            self.print_bar(i)
-        self.write_log(f"{'-' * self.length}","100.0%")
+            self.progress(i)
+        self.log(f"{'-' * self.length}", "100.0%")
 
-    def write_log(self,bar, log):
+    def log(self, bar, log):
         print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
 
     # fix TypeError: 'ProgressBar' object does not support the context manager protocol
@@ -49,7 +49,7 @@ class ProgressBar:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.write_log(f"{'-' * self.length}","100.0%")
+        self.log(f"{'-' * self.length}", "100.0%")
 
     def __iter__(self):
         return self
@@ -59,7 +59,7 @@ class ProgressBar:
             return self.list.pop(0)
         if self.current < self.total - 1:
             self.current += 1
-            self.print_bar(self.current)
+            self.progress(self.current)
             return self.current
         else:
             raise StopIteration
