@@ -50,7 +50,7 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has currently the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
-* 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
+* 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted), `Hymba`.
 * ✨ 100% CI coverage for all supported models including quality/ppl regression.
 * 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
@@ -73,17 +73,17 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |     |     |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- | --- | --- |
-| Baichuan         | ✅   | Falon          | ✅   | Llama 3.2 Vision | 🚀  | Qwen       | ✅   |     |     |     |
-| Bloom            | ✅   | Gemma 2        | 🚀  | LongLLaMA        | ✅   | Qwen2MoE   | 🚀  |     |     |     |
-| ChatGLM          | 🚀  | GPTBigCod      | ✅   | MiniCPM3         | 🚀  | RefinedWeb | ✅   |     |     |     |
-| CodeGen          | ✅   | GPTNeoX        | ✅   | Mistral          | ✅   | StableLM   | ✅   |     |     |     |
-| Cohere           | ✅   | GPT-2          | ✅   | Mixtral          | ✅   | StarCoder2 | ✅   |     |     |     |
-| DBRX Converted   | 🚀  | GPT-J          | ✅   | MobileLLM        | 🚀  | XVERSE     | ✅   |     |     |     |
-| Deci             | ✅   | Granite        | 🚀  | MOSS             | ✅   | Yi         | ✅   |     |     |     |
-| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MPT              | ✅   |            |     |     |     |     |
-| DeepSeek-V2-Lite | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |     |     |     |
-| EXAONE 3.0       | 🚀  | Llama 1/2/3    | ✅   | Phi/Phi-3        | 🚀  |            |     |     |     |     |## Compatiblity 
+| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- | --- | --- | --- |
+| Baichuan         | ✅   | Falon          | ✅   | Llama 1/2/3 | ✅  | Phi/Phi-3       | 🚀   |     |     |     |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision        | 🚀   | Qwen   | ✅  |     |     |     |
+| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA         | ✅  | Qwen2MoE | 🚀   |     |     |     |
+| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3          | ✅   | RefinedWeb   | ✅   |     |     |     |
+| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | StableLM | ✅   |     |     |     |
+| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral        | ✅  | StarCoder2     | ✅   |     |     |     |
+| Deci             | ✅   | Granite        | 🚀  | MobileLLM             | 🚀   | XVERSE         | ✅   |     |     |     |
+| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS              | ✅   | Yi         |  ✅   |     |     |     |
+| DeepSeek-V2-Lite | 🚀  | Hymba | 🚀  | MPT              | ✅   |            |     |     |     |     |
+| EXAONE 3.0       | 🚀  | InternLM 1/2.5    | 🚀   | OPT       | ✅  |            |     |     |     |     |## Compatiblity 
 
 
 ## Platform Requirements
