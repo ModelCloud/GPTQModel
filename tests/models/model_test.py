@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.utils.lm_eval import lm_eval
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -143,8 +145,9 @@ class ModelTest(unittest.TestCase):
                     model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
                 else:
                     model_args = ""
-                results = model.lm_eval(
-                    model="vllm" if self.USE_VLLM else "hf",
+                results = lm_eval(
+                    model,
+                    load_type="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
                     output_path=tmp_dir,
                     tasks=self.TASK_NAME,
