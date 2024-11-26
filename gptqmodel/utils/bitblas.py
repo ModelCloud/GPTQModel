@@ -5,8 +5,8 @@ import accelerate
 import threadpoolctl as tctl
 import torch
 from accelerate.utils import find_tied_parameters
-from tqdm import tqdm
 
+from .progress import ProgressBar
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -96,8 +96,8 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
         os.environ["NUMEXPR_MAX_THREADS"] = "1"
 
         # Note that due to tvm compilation of per layer modules shapes, the first layer loop is
-        # relatively much slower if caching is not available. As such tqdm time remaining is highly inaccurate
-        for name, module in tqdm(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
+        # relatively much slower if caching is not available. estimate time remaining is highly inaccurate
+        for name, module in ProgressBar(model.named_modules(), desc=message):
             if not isinstance(module, model_quantlinear):
                 continue
 

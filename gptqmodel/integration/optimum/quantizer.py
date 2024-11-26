@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
 from transformers.utils.quantization_config import GPTQConfig, QuantizationMethod
@@ -27,6 +26,7 @@ from transformers.utils.quantization_config import GPTQConfig, QuantizationMetho
 from .constants import GPTQ_CONFIG
 from .data import get_dataset, prepare_dataset
 from .utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
+from ...utils.progress import ProgressBar
 
 try:
     from optimum.utils import is_accelerate_available
@@ -515,7 +515,7 @@ class GPTQModelQuantizer(object):
 
         # Step 3: Quantize the blocks
         quantizers = {}
-        for i, block in enumerate(tqdm(blocks, desc=f"Quantizing {self.block_name_to_quantize} blocks ")):
+        for i, block in enumerate(ProgressBar(blocks, desc=f"Quantizing {self.block_name_to_quantize} blocks ")):
             logger.info(f"Start quantizing block {self.block_name_to_quantize} {i + 1}/{len(blocks)}")
 
             if not self.cache_block_outputs:
@@ -547,7 +547,7 @@ class GPTQModelQuantizer(object):
                 else:
                     layers_name_list = [list(layers.keys())]
             logger.info(f"Module to quantize {layers_name_list}")
-            for subset_name_list in tqdm(layers_name_list, leave=False, desc="Quantizing layers inside the block"):
+            for subset_name_list in ProgressBar(layers_name_list, desc="Quantizing layers inside the block"):
                 subset_layers = {name: layers[name] for name in subset_name_list}
                 gptq = {}
                 handles = []

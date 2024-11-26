@@ -17,19 +17,19 @@ import torch.nn as nn
 import transformers
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
-from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
+from .backend import BACKEND
+from .importer import select_quant_linear
+from .logger import setup_logger
+from .progress import ProgressBar
 from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .backend import BACKEND
-from .importer import select_quant_linear
-from .logger import setup_logger
 
 logger = setup_logger()
 
@@ -274,7 +274,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
         else:
             qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
-        pbar.update()
+        pbar.progress()
 
 
 def pack_model(
@@ -328,7 +328,7 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with tqdm(total=len(names), leave=True) as pbar:
+        with ProgressBar(len(names)) as pbar:
             def wrapper(name):
                 pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
 

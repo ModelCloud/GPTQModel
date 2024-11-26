@@ -3,7 +3,8 @@ import sys
 import numpy as np
 import torch
 from datasets import load_dataset
-from tqdm import tqdm
+
+from gptqmodel.utils.progress import ProgressBar
 
 
 class Perplexity:
@@ -119,7 +120,7 @@ class Perplexity:
         curr_ppl = 0
         all_perplexity = []
 
-        with tqdm(range(len(tokens[0]) // n_ctx), desc="Perplexity: - ") as progress:
+        with ProgressBar(range(len(tokens[0]) // n_ctx), desc="Perplexity: - ") as progress:
             for i in progress:
                 # Process each batch of tokens
                 nll, count = self._process_batch(i, n_ctx, n_batch, tokens, nll, count)

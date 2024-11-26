@@ -7,12 +7,12 @@ import accelerate
 import torch
 import torch.nn as nn
 from accelerate.hooks import remove_hook_from_module
-
 from packaging import version
-from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
-
+from ._const import CPU, CUDA_0
+from .loader import ModelLoader
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -24,9 +24,7 @@ from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
-from ._const import CPU, CUDA_0
-from .loader import ModelLoader
-from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
+from ..utils.progress import ProgressBar
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -461,7 +459,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        layer_pb = tqdm(range(layer_count))
+        layer_pb = ProgressBar(layer_count)
         gpu_memorys = []
         cpu_memorys = []
         durations = []
