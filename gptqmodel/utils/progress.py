@@ -56,6 +56,7 @@ class ProgressBar:
 
     def __next__(self):
         if self.list:
+            self.current += 1
             return self.list.pop(0)
         if self.current < self.total - 1:
             self.current += 1
