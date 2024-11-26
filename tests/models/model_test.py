@@ -147,7 +147,7 @@ class ModelTest(unittest.TestCase):
                     model_args = ""
                 results = lm_eval(
                     model,
-                    load_type="vllm" if self.USE_VLLM else "hf",
+                    model_name="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
                     output_path=tmp_dir,
                     tasks=self.TASK_NAME,

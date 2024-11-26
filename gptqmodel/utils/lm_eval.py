@@ -11,7 +11,7 @@ from lm_eval.utils import handle_non_serializable
 def lm_eval(
         model,
         model_args: str = "",
-        load_type: Optional[str] = "hf",
+        model_name: Optional[str] = "hf",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
@@ -43,8 +43,8 @@ def lm_eval(
         show_config: bool = False,
         trust_remote_code: bool = False,
 ):
-    if load_type == "hf":
-        load_type = HFLM(
+    if model_name == "hf":
+        model_name = HFLM(
             pretrained=model,
             batch_size=batch_size,
             max_batch_size=max_batch_size,
@@ -54,7 +54,7 @@ def lm_eval(
     if evaluation_tracker is None and output_path is not None:
         evaluation_tracker = EvaluationTracker(output_path=output_path)
     results = simple_evaluate(
-        model=load_type,
+        model=model_name,
         model_args=model_args,
         tasks=tasks,
         device=str(model.device),
