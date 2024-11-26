@@ -29,7 +29,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, bias, **kwargs,):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         self.infeatures = infeatures
-        self.outfeatures = outfeatures
+        self.outfeatures = outfeatures + (-outfeatures % 32) 
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
