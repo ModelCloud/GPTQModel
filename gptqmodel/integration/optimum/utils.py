@@ -19,8 +19,8 @@ from torch import nn
 from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import Conv1D
 
-from ...utils.logger import setup_logger
 from .constants import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
+from ...utils.logger import setup_logger
 
 ori_save_pretrained = PreTrainedModel.save_pretrained
 
@@ -126,6 +126,7 @@ def monkey_patch_gptqmodel_into_transformers():
         """
         import importlib
 
+        from transformers.utils.quantization_config import ExllamaVersion
         from packaging import version
         print("monkey patch postin")
         if self.bits not in [2, 3, 4, 8]:
@@ -152,19 +153,47 @@ def monkey_patch_gptqmodel_into_transformers():
                     ['wikitext2','c4','c4-new'], but we found {self.dataset}"""
                 )
 
-        if self.use_exllama is None:
+        if self.disable_exllama is None and self.use_exllama is None:
             # New default behaviour
             self.use_exllama = True
+        elif self.disable_exllama is not None and self.use_exllama is None:
+            # Follow pattern of old config
+            logger.warning(
+                "Using `disable_exllama` is deprecated and will be removed in version 4.37. Use `use_exllama` instead and specify the version with `exllama_config`."
+                "The value of `use_exllama` will be overwritten by `disable_exllama` passed in `GPTQConfig` or stored in your config file."
+            )
+            self.use_exllama = not self.disable_exllama
+            self.disable_exllama = None
+        elif self.disable_exllama is not None and self.use_exllama is not None:
+            # Only happens if user explicitly passes in both arguments
+            raise ValueError("Cannot specify both `disable_exllama` and `use_exllama`. Please use just `use_exllama`")
+
+        if self.exllama_config is None:
+            self.exllama_config = {"version": ExllamaVersion.ONE}
+        else:
+            if "version" not in self.exllama_config:
+                raise ValueError("`exllama_config` needs to have a `version` key.")
+            elif self.exllama_config["version"] not in [ExllamaVersion.ONE, ExllamaVersion.TWO]:
+                exllama_version = self.exllama_config["version"]
+                raise ValueError(
+                    f"Only supported versions are in [ExllamaVersion.ONE, ExllamaVersion.TWO] - not recognized version {exllama_version}"
+                )
 
         if self.bits == 4 and self.use_exllama:
-            optimum_version = version.parse(importlib.metadata.version("optimum"))
-            # autogptq_version = version.parse(importlib.metadata.version("auto_gptq"))
-            # if optimum_version <= version.parse("1.13.2") or autogptq_version <= version.parse("0.4.2"):
-            if optimum_version <= version.parse("1.13.2"):
-                raise ValueError(
-                    # f"You need optimum > 1.13.2 and auto-gptq > 0.4.2 . Make sure to have that version installed - detected version : optimum {optimum_version} and autogptq {autogptq_version}"
-                    f"You need optimum > 1.13.2 . Make sure to have that version installed - detected version : optimum {optimum_version}"
+            if self.exllama_config["version"] == ExllamaVersion.ONE:
+                logger.info(
+                    "You have activated exllama backend. Note that you can get better inference "
+                    "speed using exllamav2 kernel by setting `exllama_config`."
                 )
+            elif self.exllama_config["version"] == ExllamaVersion.TWO:
+                optimum_version = version.parse(importlib.metadata.version("optimum"))
+                # autogptq_version = version.parse(importlib.metadata.version("auto_gptq"))
+                # if optimum_version <= version.parse("1.13.2") or autogptq_version <= version.parse("0.4.2"):
+                if optimum_version <= version.parse("1.13.2"):
+                    raise ValueError(
+                        # f"You need optimum > 1.13.2 and auto-gptq > 0.4.2 . Make sure to have that version installed - detected version : optimum {optimum_version} and autogptq {autogptq_version}"
+                        f"You need optimum > 1.13.2 . Make sure to have that version installed - detected version : optimum {optimum_version}"
+                    )
         if self.modules_in_block_to_quantize is not None:
             optimum_version = version.parse(importlib.metadata.version("optimum"))
             if optimum_version < version.parse("1.15.0"):

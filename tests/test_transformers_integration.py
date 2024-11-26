@@ -9,11 +9,13 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel.integration.optimum.quantizer import GPTQConfig  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100
+
+from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
+
 
 class TestTransformersIntegration(unittest.TestCase):
 
@@ -29,14 +31,16 @@ class TestTransformersIntegration(unittest.TestCase):
     def test_load_gptq_model_with_exllama(self):
         model_id = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        gptq_config = GPTQConfig(bits=4)
+        gptq_config = GPTQConfig(bits=4, exllama_config={
+            "version": exllama_version,
+        })
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
             quantization_config=gptq_config
         )
         reference_output = "</s>The International Space Station (ISS) is a large space station that is located in the International"
-        self.assertResult(model, tokenizer, True, reference_output)
+        self.assertResult(model, tokenizer, True, exllama_version, reference_output)
 
     def test_quant_and_load(self):
         model_id = "/monster/data/model/opt-125m"
@@ -49,7 +53,9 @@ class TestTransformersIntegration(unittest.TestCase):
                                  sym=True,
                                  model_seqlen=2048,
                                  desc_act=False,
-                                 dataset=calibration_dataset)
+                                 exllama_config={
+                                     "version": exllama_version,
+                                 }, dataset=calibration_dataset)
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
@@ -59,7 +65,7 @@ class TestTransformersIntegration(unittest.TestCase):
         print("model", model)
 
         reference_output = "</s>The International Space Station (ISS) is a large space station that is located in the International Space Station"
-        self.assertResult(model, tokenizer, False, reference_output)
+        self.assertResult(model, tokenizer, False, exllama_version, reference_output)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save_pretrained(
@@ -68,20 +74,23 @@ class TestTransformersIntegration(unittest.TestCase):
 
             del model
 
-            gptq_config = GPTQConfig(bits=4)
+            gptq_config = GPTQConfig(bits=4, exllama_config={
+                "version": exllama_version,
+            })
             model = AutoModelForCausalLM.from_pretrained(
                 tmp_dir, device_map="auto", quantization_config=gptq_config,
             )
 
-            self.assertResult(model, tokenizer, True, reference_output)
+            self.assertResult(model, tokenizer, True, exllama_version, reference_output)
 
-    def assertResult(self, model, tokenizer, load_quant_model, reference_output):
-        if load_quant_model:
-            self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaV2QuantLinear)
-        else:
-            # only use ExllamaV2QuantLinear for inference, pack use TritonV2QuantLinear.
-            self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, TritonV2QuantLinear)
-
+    def assertResult(self, model, tokenizer, load_quant_model, exllama_version, reference_output):
+        if exllama_version == 1:
+            self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaQuantLinear)
+        elif exllama_version == 2:
+            if load_quant_model:
+                self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaV2QuantLinear)
+            else:
+                self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaQuantLinear)
         inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
         res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
         predicted_text = tokenizer.decode(res[0])
