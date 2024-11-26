@@ -465,6 +465,7 @@ class BaseGPTQModel(nn.Module):
         durations = []
         avg_losses = []
         module_names = []
+        shared_kv_cache_dict = {}
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -539,10 +540,15 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs["position_ids"] = layer_position_ids
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-                    with torch.no_grad():
-                        layer(*layer_input, **additional_layer_inputs)
 
-                    torch.cuda.empty_cache()
+                    if hasattr(layer, "reuse_kv"):
+                        if layer.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i-1)
+
+                    with torch.no_grad():
+                        layer_output = layer(*layer_input, **additional_layer_inputs)
+                        if shared_kv_cache_dict.get(i) is None:
+                            shared_kv_cache_dict[i] = layer_output[-1]
                 for h in handles:
                     h.remove()
 
@@ -610,6 +616,11 @@ class BaseGPTQModel(nn.Module):
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
                     additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+
+                if hasattr(layer, "reuse_kv"):
+                    if layer.reuse_kv:
+                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                        
                 with torch.no_grad():
                     layer_output = move_to(
                         layer(*layer_input, **additional_layer_inputs)[0],
