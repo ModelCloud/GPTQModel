@@ -71,8 +71,8 @@ def select_quant_linear(
         return ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA:
         return ExllamaQuantLinear
-    elif backend == BACKEND.QBITS:
-        return QBitsQuantLinear
+    elif backend == BACKEND.CUDA:
+        return CudaQuantLinear
     elif backend == BACKEND.IPEX:
         return IPEXQuantLinear
     else:
