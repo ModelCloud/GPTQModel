@@ -103,7 +103,7 @@ def ModelLoader(cls):
         model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
+        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
         if any(k in model_config for k in seq_len_keys):
             for key in seq_len_keys:
                 if key in model_config:
@@ -502,7 +502,7 @@ def ModelLoader(cls):
 
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
-        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
+        seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
         if any(k in model_config for k in seq_len_keys):
             for key in seq_len_keys:
                 if key in model_config:
