@@ -13,8 +13,10 @@ import torch
 import transformers
 from safetensors.torch import save_file as safe_save
 from transformers import AutoConfig
-from transformers.modeling_utils import no_init_weights, shard_checkpoint
+from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
+from huggingface_hub import split_torch_state_dict_into_shards
+from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN, PYTORCH_WEIGHTS_FILE_PATTERN
 
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
                                    META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
@@ -53,7 +55,6 @@ def ModelWriter(cls):
             safetensors_metadata: Optional[Dict[str, str]] = None,
             use_safetensors: bool = True,
             max_shard_size: Optional[str] = None,
-            model_base_name: Optional[str] = None
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -152,7 +153,7 @@ def ModelWriter(cls):
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
             model_save_name = model_base_name + ".safetensors"
         else:
-            model_save_name = model_base_name + ".pt"
+            model_save_name = model_base_name + ".bin"
 
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
@@ -199,8 +200,13 @@ def ModelWriter(cls):
                 torch.save(model.state_dict(), join(save_dir, model_save_name))
             total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
         else:
+            if use_safetensors:
+                file_name_pattern = SAFETENSORS_WEIGHTS_FILE_PATTERN
+            else:
+                file_name_pattern = PYTORCH_WEIGHTS_FILE_PATTERN
+
             # Shard checkpoint
-            shards, index = shard_checkpoint(state_dict, max_shard_size=max_shard_size, weights_name=model_save_name)
+            state_dict_split= split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size, filename_pattern=file_name_pattern)
 
             # Clean the folder from a previous save
             for filename in os.listdir(save_dir):
@@ -220,7 +226,8 @@ def ModelWriter(cls):
 
             total_size_mb = 0
             # Save the model
-            for shard_file, shard in shards.items():
+            for filename, tensors in state_dict_split.filename_to_tensors.items():
+                shard = {tensor: state_dict[tensor] for tensor in tensors}
                 if use_safetensors:
                     if safetensors_metadata is None:
                         safetensors_metadata = {}
@@ -252,19 +259,19 @@ def ModelWriter(cls):
                     # otherwise it raises an OSError
                     safetensors_metadata["format"] = "pt"
 
-                    safe_save(shard, join(save_dir, shard_file), safetensors_metadata)
+                    safe_save(shard, join(save_dir, filename), safetensors_metadata)
                 else:
-                    torch.save(shard, join(save_dir, shard_file))
-                shard_size_mb = os.path.getsize(join(save_dir, shard_file)) / (1024 * 1024)
+                    torch.save(shard, join(save_dir, filename))
+                shard_size_mb = os.path.getsize(join(save_dir, filename)) / (1024 * 1024)
                 total_size_mb += shard_size_mb
 
-            if index is not None:
-                index_save_name = model_save_name + ".index.json"
-                index_save_path = join(save_dir, index_save_name)
-                # Save the index as well
-                with open(index_save_path, "w", encoding="utf-8") as f:
-                    content = json.dumps(index, indent=2, sort_keys=True) + "\n"
-                    f.write(content)
+            if state_dict_split.is_sharded:
+                index = {
+                    "metadata": state_dict_split.metadata,
+                    "weight_map": state_dict_split.tensor_to_filename,
+                }
+                with open(os.path.join(save_dir, "model.safetensors.index.json"), "w") as f:
+                    f.write(json.dumps(index, indent=2))
 
         total_size_gb = total_size_mb / 1024
         size_diff_mb = pre_quantized_size_mb - total_size_mb
