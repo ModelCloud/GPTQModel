@@ -1,13 +1,16 @@
 # -- do not touch
 import os
+
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from lm_eval.utils import make_table
+from lm_eval.utils import make_table  # noqa: E402
+from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestLmEval(unittest.TestCase):
 
@@ -20,7 +23,8 @@ class TestLmEval(unittest.TestCase):
            model = GPTQModel.load(
                self.MODEL_ID
            )
-           results = model.lm_eval(
+           results = lm_eval(
+                model,
                 output_path=tmp_dir,
                 tasks='arc_challenge',
             )

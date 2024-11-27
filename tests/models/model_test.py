@@ -1,15 +1,17 @@
 # -- do not touch
-import gc
 import os
 
-import torch.cuda
+from gptqmodel.utils.lm_eval import lm_eval
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+
+import gc  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
@@ -143,8 +145,9 @@ class ModelTest(unittest.TestCase):
                     model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
                 else:
                     model_args = ""
-                results = model.lm_eval(
-                    model="vllm" if self.USE_VLLM else "hf",
+                results = lm_eval(
+                    model,
+                    model_name="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
                     output_path=tmp_dir,
                     tasks=self.TASK_NAME,

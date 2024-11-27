@@ -36,8 +36,8 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  MAX_JOBS: 4
-  ZEN4_SERVER: 10.0.14.248
+  MAX_JOBS: 8
+  RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
   TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral"
@@ -56,7 +56,6 @@ jobs:
       image:  modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
-      tag: ${{ steps.get_ip.outputs.tag }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     steps:
@@ -68,12 +67,11 @@ jobs:
       - name: Select server
         id: get_ip
         run: |
-          echo "ip=$ZEN4_SERVER" >> "$GITHUB_OUTPUT"
-          echo "tag=zen4" >> "$GITHUB_OUTPUT"
+          echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
 
-          echo "GPU_IP=$ZEN4_SERVER" >> $GITHUB_ENV
+          echo "GPU_IP=$RUNNER" >> $GITHUB_ENV
 
-          echo "tag: $tag, ip: $ip"
+          echo "ip: $ip"
 
           if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
             run_id="${{ github.event.inputs.artifact_id }}"
@@ -146,10 +144,10 @@ jobs:
           echo "Transformers Test files: $transformers_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  build-zen4:
-    runs-on: [self-hosted, zen4]
+  build:
+    runs-on: self-hosted
     needs: check-vm
-    if: needs.check-vm.outputs.tag == 'zen4' && github.event.inputs.artifact_id == '' && !cancelled()
+    if: github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
     steps:
@@ -182,8 +180,8 @@ jobs:
 
       - name: Install requirements
         run: |
-          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          uv pip install transformers -U
+          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
+          pip install transformers -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         timeout-minutes: 35
@@ -200,7 +198,7 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          uv pip install dist/$whl
+          pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -215,11 +213,11 @@ jobs:
 
   torch2_4:
     needs:
-      - build-zen4
+      - build
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '')
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
@@ -294,14 +292,14 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          uv pip install dist/*.whl
-          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          uv pip install transformers numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install dist/*.whl
+          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
+          pip install transformers numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Check platform
         run: |
-          ip=${ZEN4_SERVER}
+          ip=${RUNNER}
           echo "GPU_IP=$ip" >> $GITHUB_ENV
           echo "-----------"
           pip show torch
@@ -344,11 +342,11 @@ jobs:
 
   transformers_diff:
     needs:
-      - build-zen4
+      - build
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != ''
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
@@ -412,12 +410,12 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          uv pip install dist/*.whl
-          bash -c "$(curl -L http://$ZEN4_SERVER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          uv pip install transformers==4.38.2 numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install dist/*.whl
+          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
+          pip install transformers==4.38.2 numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" = "test_xverse" ]; then
-            uv pip install tokenizers==0.15.2
+            pip install tokenizers==0.15.2 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
 
       - name: Find suitable GPU
@@ -450,11 +448,11 @@ jobs:
 
   torch2_5:
     needs:
-      - build-zen4
+      - build
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build-zen4.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.5.1
       volumes:
@@ -517,8 +515,9 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install device-smi -i https://pypi.org/simple
-          uv pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install device-smi -i https://pypi.org/simple
+          pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          pip install dist/*.whl
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}

@@ -3,8 +3,8 @@ import gc
 import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
-from tqdm import tqdm
 
+from .progress import ProgressBar
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -112,7 +112,7 @@ def convert_to_marlin(
         # TODO: load directly Marlin QuantLinear.
         message = "Overriding QuantLinear layers to use Marlin's QuantLinear"
 
-    for name, module in tqdm(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
+    for name, module in ProgressBar(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
         if not isinstance(module, model_quantlinear):
             continue
 

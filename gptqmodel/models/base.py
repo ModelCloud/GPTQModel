@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import copy
-import json
 from typing import Dict, List, Optional, Union
 
 import accelerate
-import lm_eval
 import torch
 import torch.nn as nn
 from accelerate.hooks import remove_hook_from_module
-from lm_eval.loggers import EvaluationTracker, WandbLogger
-from lm_eval.models.huggingface import HFLM
-from lm_eval.tasks import TaskManager
-from lm_eval.utils import handle_non_serializable
 from packaging import version
-from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
+from ._const import CPU, CUDA_0, get_best_device
+from .loader import ModelLoader
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -28,9 +24,6 @@ from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
-from ._const import CPU, get_best_device
-from .loader import ModelLoader
-from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -467,12 +460,13 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        layer_pb = tqdm(range(layer_count))
+        layer_pb = ProgressBar(range(layer_count))
         gpu_memorys = []
         cpu_memorys = []
         durations = []
         avg_losses = []
         module_names = []
+        shared_kv_cache_dict = {}
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -547,10 +541,15 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs["position_ids"] = layer_position_ids
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-                    with torch.no_grad():
-                        layer(*layer_input, **additional_layer_inputs)
 
-                    torch.cuda.empty_cache()
+                    if hasattr(layer, "reuse_kv"):
+                        if layer.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i-1)
+
+                    with torch.no_grad():
+                        layer_output = layer(*layer_input, **additional_layer_inputs)
+                        if shared_kv_cache_dict.get(i) is None:
+                            shared_kv_cache_dict[i] = layer_output[-1]
                 for h in handles:
                     h.remove()
 
@@ -618,6 +617,11 @@ class BaseGPTQModel(nn.Module):
                     additional_layer_inputs["position_ids"] = layer_position_ids
                 for k, v in layer_input_kwargs[j].items():
                     additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+
+                if hasattr(layer, "reuse_kv"):
+                    if layer.reuse_kv:
+                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                        
                 with torch.no_grad():
                     layer_output = move_to(
                         layer(*layer_input, **additional_layer_inputs)[0],
@@ -711,118 +715,6 @@ class BaseGPTQModel(nn.Module):
             self.save_pretrained(save_dir, **kwargs)
 
 
-    def lm_eval(
-        self,
-        model: Optional[str] = "hf",
-        model_args: str = "",
-        tasks: Optional[List[Union[str, dict, object]]] = None,
-        num_fewshot: Optional[int] = None,
-        batch_size: Optional[Union[int, str]] = 32,
-        max_batch_size: Optional[int] = 64,
-        use_cache: Optional[str] = None,
-        cache_requests: bool = False,
-        rewrite_requests_cache: bool = False,
-        delete_requests_cache: bool = False,
-        limit: Optional[Union[int, float]] = None,
-        bootstrap_iters: int = 100000,
-        check_integrity: bool = False,
-        write_out: bool = False,
-        log_samples: bool = True,
-        evaluation_tracker: Optional[EvaluationTracker] = None,
-        system_instruction: Optional[str] = None,
-        apply_chat_template: bool = False,
-        fewshot_as_multiturn: bool = False,
-        gen_kwargs: Optional[str] = None,
-        task_manager: Optional[TaskManager] = None,
-        verbosity: str = "INFO",
-        predict_only: bool = False,
-        random_seed: int = 0,
-        numpy_random_seed: int = 1234,
-        torch_random_seed: int = 1234,
-        fewshot_random_seed: int = 1234,
-        output_path: Optional[str] = None,
-        wandb_project: Optional[str] = None,
-        wandb_name: Optional[str] = None,
-        show_config: bool = False,
-        trust_remote_code: bool = False,
-    ):
-        if model == "hf":
-            model = HFLM(
-                pretrained=self,
-                batch_size=batch_size,
-                max_batch_size=max_batch_size,
-                trust_remote_code=trust_remote_code,
-            )
-        # evaluation_tracker need model_args cannot be None
-        if evaluation_tracker is None and output_path is not None:
-            evaluation_tracker = EvaluationTracker(output_path=output_path)
-        results = lm_eval.simple_evaluate(
-            model=model,
-            model_args=model_args,
-            tasks=tasks,
-            device=str(self.device),
-            num_fewshot=num_fewshot,
-            batch_size=batch_size,
-            max_batch_size=max_batch_size,
-            use_cache=use_cache,
-            cache_requests=cache_requests,
-            rewrite_requests_cache=rewrite_requests_cache,
-            delete_requests_cache=delete_requests_cache,
-            limit=limit,
-            bootstrap_iters=bootstrap_iters,
-            check_integrity=check_integrity,
-            write_out=write_out,
-            log_samples=log_samples,
-            evaluation_tracker=evaluation_tracker,
-            system_instruction=system_instruction,
-            apply_chat_template=apply_chat_template,
-            fewshot_as_multiturn=fewshot_as_multiturn,
-            gen_kwargs=gen_kwargs,
-            task_manager=task_manager,
-            verbosity=verbosity,
-            predict_only=predict_only,
-            random_seed=random_seed,
-            numpy_random_seed=numpy_random_seed,
-            torch_random_seed=torch_random_seed,
-            fewshot_random_seed=fewshot_random_seed,
-        )
-
-        if results is not None:
-            if log_samples:
-                samples = results.pop("samples")
-
-            dumped = json.dumps(
-                results, indent=2, default=handle_non_serializable, ensure_ascii=False
-            )
-            if show_config:
-                print(dumped)
-
-            # Add W&B logging
-            if wandb_project is not None:
-                wandb_logger = WandbLogger(
-                    project=wandb_project, job_type="eval", name=wandb_name
-                )
-                wandb_logger.post_init(results)
-                wandb_logger.log_eval_result()
-                if log_samples:
-                    wandb_logger.log_eval_samples(samples=samples)
-
-            evaluation_tracker.save_results_aggregated(
-                results=results, samples=samples if log_samples else None
-            )
-
-            if log_samples:
-                for task_name, config in results["configs"].items():
-                    evaluation_tracker.save_results_samples(
-                        task_name=task_name, samples=samples[task_name]
-                    )
-
-            if (evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub):
-                evaluation_tracker.recreate_metadata_card()
-
-            return results
-        else:
-            raise ValueError('lm_eval run fail, check your code!!!')
 
     def __getattr__(self, item):
         try:

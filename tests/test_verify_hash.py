@@ -1,6 +1,12 @@
-import unittest
+# -- do not touch
+import os
 
-from gptqmodel import BACKEND, GPTQModel
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
+import unittest  # noqa: E402
+
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 
 class TestVerifyHashFunction(unittest.TestCase):

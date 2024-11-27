@@ -1,7 +1,9 @@
 # -- do not touch
 import os
-import tempfile
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
@@ -9,11 +11,10 @@ from datasets import load_dataset
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear  # noqa: E402
-from gptqmodel.quantization import FORMAT
+from gptqmodel.quantization import FORMAT  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 class TestQ4Marlin(unittest.TestCase):
 
