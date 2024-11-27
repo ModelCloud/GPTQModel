@@ -18,6 +18,7 @@ class TestsIPEX(ModelTest):
     TORCH_DTYPE = torch.float16
     LOAD_BACKEND = BACKEND.IPEX
     DELETE_QUANTIZED_MODEL = False
+    USE_VLLM = False
 
     def test_ipex_format(self):
         self.quant_lm_eval()
