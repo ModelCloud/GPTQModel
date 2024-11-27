@@ -22,7 +22,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import get_best_device, DEVICE, SUPPORTED_MODELS
+from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS
 
 logger = setup_logger()
 
@@ -47,7 +47,7 @@ def ModelLoader(cls):
                     f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-ipex`."
                 )
 
-            model_init_kwargs["device_map"] = "xpu" if torch.xpu.is_available() else "cpu"
+            model_init_kwargs["device_map"] = "xpu" if is_torch_support_xpu() else "cpu"
             torch_dtype = ipex_dtype()
 
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -100,7 +100,7 @@ def ModelLoader(cls):
         if model_init_kwargs.get("cpu") != "cpu":
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            elif torch.xpu.is_available():
+            elif is_torch_support_xpu():
                 torch.xpu.empty_cache()
 
         model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)

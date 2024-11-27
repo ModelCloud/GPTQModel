@@ -14,6 +14,10 @@ class DEVICE(Enum):
     XPU = "xpu"
 
 
+def is_torch_support_xpu():
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 def get_device_by_type(type_value: str):
     for enum_constant in DEVICE:
         if enum_constant.value == type_value:
@@ -24,7 +28,7 @@ def get_device_by_type(type_value: str):
 def get_best_device():
     if torch.cuda.is_available():
         return CUDA_0
-    elif torch.xpu.is_available():
+    elif is_torch_support_xpu():
         return XPU_0
     else:
         return CPU
