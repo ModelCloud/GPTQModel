@@ -29,6 +29,7 @@ if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
 else:
     FORCE_BUILD = False
 
+extensions = []
 common_setup_kwargs = {
     "version": gptqmodel_version,
     "name": "gptqmodel",

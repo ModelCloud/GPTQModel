@@ -22,7 +22,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import CPU, DEVICE, SUPPORTED_MODELS
+from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS
 
 logger = setup_logger()
 
@@ -44,10 +44,10 @@ def ModelLoader(cls):
                 pass
             except Exception as e:
                 raise ValueError(
-                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-ipex`."
                 )
 
-            model_init_kwargs["device_map"] = "cpu"
+            model_init_kwargs["device_map"] = "xpu" if is_torch_support_xpu() else "cpu"
             torch_dtype = ipex_dtype()
 
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -98,7 +98,10 @@ def ModelLoader(cls):
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         if model_init_kwargs.get("cpu") != "cpu":
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif is_torch_support_xpu():
+                torch.xpu.empty_cache()
 
         model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
@@ -144,7 +147,7 @@ def ModelLoader(cls):
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
         if backend == BACKEND.IPEX:
-            device = CPU
+            device = get_best_device()
             try:
                 pass
             except Exception as e:
@@ -157,7 +160,7 @@ def ModelLoader(cls):
 
         if backend != BACKEND.IPEX and not torch.cuda.is_available():
             raise EnvironmentError(
-                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu only quantization and inference.")
+                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu and xpu quantization and inference.")
 
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
