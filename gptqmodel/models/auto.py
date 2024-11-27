@@ -56,6 +56,7 @@ from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from .definitions.hymba import  HymbaGPTQ
 from .definitions.olmo2 import Olmo2GPTQ
+from .definitions.ovis import OvisGPTQ
 
 logger = setup_logger()
 
@@ -106,6 +107,7 @@ MODEL_MAP = {
     "mobilellm": MobileLLMGPTQ,
     "hymba": HymbaGPTQ,
     "olmo2": Olmo2GPTQ,
+    "ovis": OvisGPTQ,
 }
 
 
