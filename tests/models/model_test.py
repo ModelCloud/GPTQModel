@@ -90,7 +90,7 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
-            device_map="cpu" if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            device_map={"":"cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -128,7 +128,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
-            device_map="cpu" if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            device_map={"":"cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         return model, tokenizer
