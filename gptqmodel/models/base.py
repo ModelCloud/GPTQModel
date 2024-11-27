@@ -24,6 +24,7 @@ from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
+from ..utils.progress import ProgressBar
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
