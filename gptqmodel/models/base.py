@@ -459,7 +459,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        layer_pb = ProgressBar(layer_count)
+        layer_pb = ProgressBar(range(layer_count))
         gpu_memorys = []
         cpu_memorys = []
         durations = []

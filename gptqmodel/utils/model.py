@@ -329,7 +329,7 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with ProgressBar(len(names)) as pbar:
+        with ProgressBar(total=len(names)) as pbar:
             def wrapper(name):
                 pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
 
