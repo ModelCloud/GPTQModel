@@ -3,6 +3,7 @@ import contextlib
 import os
 
 from gptqmodel.utils.lm_eval import lm_eval
+from ovis_calibration_dataset import get_calib_dataset
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -93,8 +94,8 @@ class ModelTest(unittest.TestCase):
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
-
-        calibration_dataset = self.load_dataset(tokenizer)
+        is_ovis_model = "Ovis" in model_id_or_path
+        calibration_dataset = self.load_dataset(tokenizer) if not is_ovis_model else get_calib_dataset(model)
 
         # mpt model need
         if not model.config.pad_token_id:
