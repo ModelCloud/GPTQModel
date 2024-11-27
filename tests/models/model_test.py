@@ -128,6 +128,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            device="cpu" if self.LOAD_BACKEND == BACKEND.IPEX else "auto"
         )
 
         return model, tokenizer
