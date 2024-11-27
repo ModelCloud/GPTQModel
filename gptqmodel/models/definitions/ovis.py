@@ -1,4 +1,3 @@
-# Copyright (c) 2024 AIDC-AI
 from ..base import BaseGPTQModel
 
 
