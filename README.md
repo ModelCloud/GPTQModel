@@ -74,8 +74,8 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- |
-| Baichuan         | ✅   | Falon          | ✅   | Llama 1/2/3      | ✅   | Olmo2      | 🚀  |
+| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- |
+| Baichuan         | ✅   | Falon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
 | Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |
 | ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |
 | CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |
