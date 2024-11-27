@@ -7,7 +7,9 @@ class TestHymba(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4317
     MODEL_MAX_LEN = 8192
     TRUST_REMOTE_CODE = True
-    BATCH_SIZE = 6
+    # Hymba currently only supports a batch size of 1.
+    # See https://huggingface.co/nvidia/Hymba-1.5B-Instruct
+    BATCH_SIZE = 1
 
     def test_hymba(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
