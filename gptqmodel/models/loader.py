@@ -47,7 +47,7 @@ def ModelLoader(cls):
                     f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-ipex`."
                 )
 
-            model_init_kwargs["device_map"] = "xpu" if is_torch_support_xpu() else "cpu"
+            model_init_kwargs["device_map"] = {"":"xpu"} if is_torch_support_xpu() else {"":"cpu"}
             torch_dtype = ipex_dtype()
 
         if cls.require_trust_remote_code and not trust_remote_code:
