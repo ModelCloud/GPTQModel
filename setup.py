@@ -104,6 +104,8 @@ additional_setup_kwargs = {}
 
 include_dirs = ["gptqmodel_cuda"]
 
+extensions = []
+
 if BUILD_CUDA_EXT:
     from distutils.sysconfig import get_python_lib
 
