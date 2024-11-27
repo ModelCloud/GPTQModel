@@ -1,4 +1,5 @@
 # -- do not touch
+import contextlib
 import os
 
 from gptqmodel.utils.lm_eval import lm_eval
@@ -104,18 +105,10 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
         if not is_quantized:
             model.quantize(calibration_dataset)
-        if need_eval:
-            test_dir = os.path.dirname(os.path.abspath(__file__))
-            save_dir = os.path.join(test_dir, "test_quantized_model")
-            os.makedirs(save_dir, exist_ok=True)
-            model.save(save_dir)
-            tokenizer.save_pretrained(save_dir)
-            q_model, q_tokenizer = self.loadQuantModel(save_dir, trust_remote_code=trust_remote_code)
-        else:
-            with tempfile.TemporaryDirectory() as tmpdirname:
-                model.save(tmpdirname)
-                tokenizer.save_pretrained(tmpdirname)
-                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+        with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
+            model.save(tmpdirname)
+            tokenizer.save_pretrained(tmpdirname)
+            q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
         if not is_quantized:
             del model
             gc.collect()
