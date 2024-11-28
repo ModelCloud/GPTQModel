@@ -8,9 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
-from gptqmodel_exllama_kernels import make_q4, q4_matmul
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel_exllama_kernels import make_q4, q4_matmul
 
 logger = getLogger(__name__)
 

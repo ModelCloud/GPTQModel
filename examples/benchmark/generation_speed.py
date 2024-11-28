@@ -8,10 +8,9 @@ from typing import Dict, List, Optional
 import torch
 from datasets import Dataset, load_dataset
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
+from gptqmodel.utils.progress import ProgressBar
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
-
-from gptqmodel.utils.progress import ProgressBar
 
 logger = logging.getLogger(__name__)
 

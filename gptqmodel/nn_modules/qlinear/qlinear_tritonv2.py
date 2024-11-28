@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-
 from packaging import version
 
 from ...utils.logger import setup_logger
@@ -12,12 +11,13 @@ from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
 
 try:
-    from ..triton_utils.dequant import QuantLinearFunction
     from triton import __version__ as triton_version
+
+    from ..triton_utils.dequant import QuantLinearFunction
     if version.parse(triton_version) < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
     TRITON_AVAILABLE = True
-except ImportError as e:
+except ImportError:
     TRITON_AVAILABLE = False
 
 TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"

@@ -1,22 +1,20 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import GPTQModel, BACKEND, exllama_set_max_input_length  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, exllama_set_max_input_length  # noqa: E402
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 REFERENCE = torch.Tensor(
     [

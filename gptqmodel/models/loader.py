@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
 import accelerate
 import torch
 import transformers
 from gptqmodel.utils.device import check_cuda
+from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
@@ -19,12 +21,10 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
-                           find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
+                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS
-from packaging.version import Version, InvalidVersion
-from importlib.metadata import version, PackageNotFoundError
+from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, is_torch_support_xpu
 
 logger = setup_logger()
 

@@ -10,9 +10,6 @@ from accelerate.hooks import remove_hook_from_module
 from packaging import version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
-from ._const import CPU, CUDA_0, get_best_device
-from .loader import ModelLoader
-from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -25,6 +22,9 @@ from ..utils.model import (check_to_quantized, find_layers, get_device, get_modu
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
 from ..utils.progress import ProgressBar
+from ._const import CPU, get_best_device
+from .loader import ModelLoader
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -623,7 +623,7 @@ class BaseGPTQModel(nn.Module):
                 if hasattr(layer, "reuse_kv"):
                     if layer.reuse_kv:
                         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
-                        
+
                 with torch.no_grad():
                     layer_output = move_to(
                         layer(*layer_input, **additional_layer_inputs)[0],

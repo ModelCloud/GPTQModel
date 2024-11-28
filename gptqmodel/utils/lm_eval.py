@@ -7,7 +7,7 @@ try:
     from lm_eval.models.huggingface import HFLM
     from lm_eval.tasks import TaskManager
     from lm_eval.utils import handle_non_serializable
-except:
+except BaseException:
     raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
 
