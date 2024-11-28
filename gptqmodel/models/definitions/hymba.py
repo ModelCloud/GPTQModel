@@ -4,6 +4,14 @@ from ..base import BaseGPTQModel
 class HymbaGPTQ(BaseGPTQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
+    require_pkgs_version = ["tiktoken>=0.7.0",
+                            "sentencepiece>=0.2.0",
+                            "protobuf>=5.28.3",
+                            "ninja>=1.11.1.1",
+                            "einops>=0.8.0",
+                            "mamba_ssm>=2.2.2",
+                            "causal_conv1d>=1.4.0",
+                            "attn_gym>=0.0.3.dev5"]
 
     base_modules = ["model.embed_tokens", "model.final_layernorm"]
 
