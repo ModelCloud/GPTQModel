@@ -1124,28 +1124,25 @@ class TestsQ4ExllamaV1(ModelTest):
         )
 
     def test_exllama_buffer_size(self):
+        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded/"
         prompt = "I am in Paris and" * 450
         device = torch.device("cuda:0")
 
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
-            MODEL_ID,
+            model_id,
             revision=revision,
             device="cuda:0",
             backend=BACKEND.EXLLAMA_V1,
         )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
         self.assertTrue(
             inp["input_ids"].shape[1] > EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
         )  # 2048 is the default max_input_length
-
-        # with self.assertRaises(RuntimeError) as cm:
-        #     _ = model_q.generate(**inp, num_beams=1, min_new_tokens=3, max_new_tokens=3)
-        # self.assertIn("temp_state buffer is too small", str(cm.exception))
 
         model_q = exllama_set_max_input_length(model_q, 4096)
 
