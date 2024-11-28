@@ -23,8 +23,56 @@ from ..utils.model import (auto_dtype_from_config, check_requires_version, conve
                            find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS
+from packaging.version import Version, InvalidVersion
+from importlib.metadata import version
 
 logger = setup_logger()
+
+def parse_version_string(version_str: str):
+    try:
+        return Version(version_str)
+    except InvalidVersion:
+        raise ValueError(f"Invalid version format: {version_str}")
+
+
+def parse_requirement(req):
+    for op in [">=", "<=", ">", "<", "=="]:
+        if op in req:
+            pkg, version_required = req.split(op, 1)
+            return pkg.strip(), op, version_required.strip()
+    raise ValueError(f"Unsupported version constraint in: {req}")
+
+
+def compare_versions(installed_version, required_version, operator):
+    installed = parse_version_string(installed_version)
+    required = parse_version_string(required_version)
+    if operator == ">":
+        return installed > required
+    elif operator == ">=":
+        return installed >= required
+    elif operator == "<":
+        return installed < required
+    elif operator == "<=":
+        return installed <= required
+    elif operator == "==":
+        return installed == required
+    else:
+        raise ValueError(f"Unsupported operator: {operator}")
+
+
+def check_versions(model_id_or_path: str, requirements: List[str]):
+    for req in requirements:
+        try:
+            pkg, operator, version_required = parse_requirement(req)
+            installed_version = version(pkg)
+            if not installed_version:
+                print(f"{pkg}: Package is not installed")
+                continue
+
+            if not compare_versions(installed_version, version_required, operator):
+                raise ValueError(f"{model_id_or_path} requires version {req}, but current {pkg} version is {installed_version} ")
+        except Exception as e:
+            raise ValueError(f"check_versions error: {str(e)}")
 
 def ModelLoader(cls):
     @classmethod
@@ -74,6 +122,8 @@ def ModelLoader(cls):
                     raise ValueError(f"{pretrained_model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
             else:
                 raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
+
+        check_versions(pretrained_model_id_or_path, cls.require_pkgs_version)
 
         def skip(*args, **kwargs):
             pass
@@ -185,6 +235,8 @@ def ModelLoader(cls):
                     raise ValueError(f"{model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
             else:
                 raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
+
+        check_versions(model_id_or_path, cls.require_pkgs_version)
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
