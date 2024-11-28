@@ -254,10 +254,7 @@ class BaseGPTQModel(nn.Module):
         for row in calibration_dataset:
             input_ids = row["input_ids"]
             if isinstance(input_ids, torch.Tensor):
-                if input_ids.dim() == 1:
-                    input_ids_length = input_ids.shape[0]
-                else:
-                    raise ValueError("Expected a 1-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(input_ids.dim()))
+                input_ids_length = input_ids.numel()
             else:
                 input_ids_length = len(input_ids)
 
@@ -431,11 +428,20 @@ class BaseGPTQModel(nn.Module):
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
         for example in calibration_dataset:
             for k, v in example.items():
-                if len(v.shape) == 1:
-                    v = v.unsqueeze(0)
-                example[k] = move_to(v, cur_layer_device)
+                if isinstance(v, list):
+                    for i in range(len(v)):
+                        if len(v[i].shape) == 1:
+                            v[i] = v[i].unsqueeze(0)
+                        v[i] = move_to(v[i], cur_layer_device)
+                else:
+                    if len(v.shape) == 1:
+                        v = v.unsqueeze(0)
+                    example[k] = move_to(v, cur_layer_device)
             try:
-                self.model(**example)
+                if self.__class__.__name__ == "OvisGPTQ":
+                    self.generate(**example)
+                else:
+                    self.model(**example)
             except ValueError:
                 pass
         handle.remove()

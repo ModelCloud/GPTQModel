@@ -41,3 +41,4 @@ from .xverse import XverseGPTQ
 from .yi import YiGPTQ
 from .hymba import HymbaGPTQ
 from .olmo2 import Olmo2GPTQ
+from .ovis import OvisGPTQ
