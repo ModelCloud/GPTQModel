@@ -106,10 +106,12 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
         if not is_quantized:
             model.quantize(calibration_dataset)
-        with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
-            model.save(tmpdirname)
-            tokenizer.save_pretrained(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+
+            with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
+                model.save(tmpdirname)
+                tokenizer.save_pretrained(tmpdirname)
+                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+
         if not is_quantized:
             del model
             gc.collect()
