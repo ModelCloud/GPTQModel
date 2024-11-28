@@ -1,15 +1,13 @@
 # -- do not touch
 import os
 
-from gptqmodel import BACKEND
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import GPTQModel, exllama_set_max_input_length  # noqa: E402
+from gptqmodel import GPTQModel, BACKEND, exllama_set_max_input_length  # noqa: E402
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
