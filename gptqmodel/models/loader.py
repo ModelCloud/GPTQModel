@@ -61,6 +61,8 @@ def compare_versions(installed_version, required_version, operator):
 
 
 def check_versions(model_id_or_path: str, requirements: List[str]):
+    if requirements is None:
+        return
     for req in requirements:
         pkg, operator, version_required = parse_requirement(req)
         try:
