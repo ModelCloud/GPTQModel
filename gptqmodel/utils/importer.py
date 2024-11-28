@@ -1,5 +1,7 @@
 from collections import OrderedDict
 
+import torch
+from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
@@ -10,7 +12,6 @@ from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLi
 from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
-from .backend import BACKEND
 
 logger = setup_logger()
 
@@ -25,8 +26,8 @@ backend_dict = OrderedDict({
 })
 
 format_dict = {
-    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.CUDA],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.CUDA],
+    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -53,13 +54,19 @@ def select_quant_linear(
             for v in values:
                 in_allow_backends = k in allow_backends
                 validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
-                check_pack_func = hasattr(v, "pack") if pack else True
-                if in_allow_backends:
-                    if validate and check_pack_func:
+                if in_allow_backends and validate:
+                    if pack:
+                        check_pack_func = hasattr(v, "pack")
+                        if check_pack_func:
+                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                            return v
+                    else:
                         logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                         return v
+
         if err:
             raise err
+
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
         if not TRITON_AVAILABLE:
@@ -76,6 +83,22 @@ def select_quant_linear(
     elif backend == BACKEND.CUDA:
         return CudaQuantLinear
     elif backend == BACKEND.IPEX:
+        from ..nn_modules.qlinear.qlinear_ipex import IPEX_AVAILABLE
+        if not IPEX_AVAILABLE:
+            raise ValueError("IPEX is not available.")
+
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return True
+
+        # XPU is not available, check CPU
+        from device_smi import Device
+        smi = Device("cpu")
+        info = smi.info()
+        # debug print:
+        print(info)
+        if hasattr(info, "features") and "avx512_vnni" not in info.features:
+            raise ValueError("CPU does not support AVX512_VNNI.")
+
         return IPEXQuantLinear
     else:
         return CudaQuantLinear

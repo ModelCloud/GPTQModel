@@ -211,7 +211,7 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
-        if logger_board == "clearml":
+        if logger_board== "clearml":
             try:
                 from clearml import Task
                 from random_word import RandomWords
@@ -225,6 +225,7 @@ class BaseGPTQModel(nn.Module):
             task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
         else:
             task = None
+
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
@@ -233,6 +234,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
+            pack=True,
             format=self.quantize_config.format,
         )
 
@@ -656,6 +658,7 @@ class BaseGPTQModel(nn.Module):
             task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
             task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+
         self.qlinear_kernel = pack_model(
             model=self.model,
             quantizers=quantizers,
