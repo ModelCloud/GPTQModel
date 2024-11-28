@@ -125,7 +125,6 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
-            use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
@@ -153,7 +152,6 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 backend=backend,
-                use_safetensors=use_safetensors,
                 trust_remote_code=trust_remote_code,
                 verify_hash=verify_hash,
                 **kwargs,
@@ -195,7 +193,6 @@ class GPTQModel:
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
-        use_safetensors: bool = True,
         trust_remote_code: bool = False,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
@@ -211,7 +208,6 @@ class GPTQModel:
             device_map=device_map,
             device=device,
             backend=backend,
-            use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,
             **kwargs,

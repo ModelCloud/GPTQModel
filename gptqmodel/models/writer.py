@@ -53,7 +53,6 @@ def ModelWriter(cls):
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            use_safetensors: bool = True,
             max_shard_size: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
@@ -149,61 +148,50 @@ def ModelWriter(cls):
 
         model_base_name = "model"
 
-        if use_safetensors:
-            state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
-            model_save_name = model_base_name + ".safetensors"
-        else:
-            model_save_name = "pytorch_" + model_base_name + ".bin"
+        state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
+        model_save_name = model_base_name + ".safetensors"
 
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
 
         if max_shard_size is None:
-            if use_safetensors:
-                if safetensors_metadata is None:
-                    safetensors_metadata = {}
-                elif not isinstance(safetensors_metadata, dict):
-                    raise TypeError("safetensors_metadata must be a dictionary.")
-                else:
-                    logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
-                    new_safetensors_metadata = {}
-                    converted_keys = False
-                    for key, value in safetensors_metadata.items():
-                        if not isinstance(key, str) or not isinstance(value, str):
-                            converted_keys = True
-                            try:
-                                new_key = str(key)
-                                new_value = str(value)
-                            except Exception as e:
-                                raise TypeError(
-                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
-                                )
-                            if new_key in new_safetensors_metadata:
-                                logger.warning(
-                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
-                                )
-                            new_safetensors_metadata[new_key] = new_value
-                    safetensors_metadata = new_safetensors_metadata
-                    if converted_keys:
-                        logger.debug(
-                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
-                        )
-
-                # Format is required to enable Accelerate to load the metadata
-                # otherwise it raises an OSError
-                safetensors_metadata["format"] = "pt"
-                safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
+            if safetensors_metadata is None:
+                safetensors_metadata = {}
+            elif not isinstance(safetensors_metadata, dict):
+                raise TypeError("safetensors_metadata must be a dictionary.")
             else:
-                logger.warning(
-                    "We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
-                torch.save(model.state_dict(), join(save_dir, model_save_name))
+                logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                new_safetensors_metadata = {}
+                converted_keys = False
+                for key, value in safetensors_metadata.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        converted_keys = True
+                        try:
+                            new_key = str(key)
+                            new_value = str(value)
+                        except Exception as e:
+                            raise TypeError(
+                                f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
+                            )
+                        if new_key in new_safetensors_metadata:
+                            logger.warning(
+                                f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
+                            )
+                        new_safetensors_metadata[new_key] = new_value
+                safetensors_metadata = new_safetensors_metadata
+                if converted_keys:
+                    logger.debug(
+                        f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
+                    )
+
+            # Format is required to enable Accelerate to load the metadata
+            # otherwise it raises an OSError
+            safetensors_metadata["format"] = "pt"
+            safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
             total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
         else:
-            if use_safetensors:
-                file_name_pattern = SAFETENSORS_WEIGHTS_FILE_PATTERN
-            else:
-                file_name_pattern = PYTORCH_WEIGHTS_FILE_PATTERN
+            file_name_pattern = SAFETENSORS_WEIGHTS_FILE_PATTERN
 
             # Shard checkpoint
             state_dict_split= split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size, filename_pattern=file_name_pattern)
@@ -228,40 +216,37 @@ def ModelWriter(cls):
             # Save the model
             for filename, tensors in state_dict_split.filename_to_tensors.items():
                 shard = {tensor: state_dict[tensor] for tensor in tensors}
-                if use_safetensors:
-                    if safetensors_metadata is None:
-                        safetensors_metadata = {}
-                    elif not isinstance(safetensors_metadata, dict):
-                        raise TypeError("safetensors_metadata must be a dictionary.")
-                    else:
-                        logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
-                        new_safetensors_metadata = {}
-                        converted_keys = False
-                        for key, value in safetensors_metadata.items():
-                            if not isinstance(key, str) or not isinstance(value, str):
-                                converted_keys = True
-                                try:
-                                    new_key = str(key)
-                                    new_value = str(value)
-                                except Exception as e:
-                                    raise TypeError(
-                                        f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
-                                if new_key in new_safetensors_metadata:
-                                    logger.warning(
-                                        f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
-                                new_safetensors_metadata[new_key] = new_value
-                        safetensors_metadata = new_safetensors_metadata
-                        if converted_keys:
-                            logger.debug(
-                                f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
-
-                    # Format is required to enable Accelerate to load the metadata
-                    # otherwise it raises an OSError
-                    safetensors_metadata["format"] = "pt"
-
-                    safe_save(shard, join(save_dir, filename), safetensors_metadata)
+                if safetensors_metadata is None:
+                    safetensors_metadata = {}
+                elif not isinstance(safetensors_metadata, dict):
+                    raise TypeError("safetensors_metadata must be a dictionary.")
                 else:
-                    torch.save(shard, join(save_dir, filename))
+                    logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                    new_safetensors_metadata = {}
+                    converted_keys = False
+                    for key, value in safetensors_metadata.items():
+                        if not isinstance(key, str) or not isinstance(value, str):
+                            converted_keys = True
+                            try:
+                                new_key = str(key)
+                                new_value = str(value)
+                            except Exception as e:
+                                raise TypeError(
+                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
+                            if new_key in new_safetensors_metadata:
+                                logger.warning(
+                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
+                            new_safetensors_metadata[new_key] = new_value
+                    safetensors_metadata = new_safetensors_metadata
+                    if converted_keys:
+                        logger.debug(
+                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
+
+                # Format is required to enable Accelerate to load the metadata
+                # otherwise it raises an OSError
+                safetensors_metadata["format"] = "pt"
+
+                safe_save(shard, join(save_dir, filename), safetensors_metadata)
                 shard_size_mb = os.path.getsize(join(save_dir, filename)) / (1024 * 1024)
                 total_size_mb += shard_size_mb
 

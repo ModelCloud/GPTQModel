@@ -135,7 +135,6 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
-            use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
@@ -291,11 +290,7 @@ def ModelLoader(cls):
             "model",
         ]
 
-        extensions = []
-        if use_safetensors:
-            extensions.append(".safetensors")
-        else:
-            extensions += [".pt", ".pth"]
+        extensions = [".safetensors"]
 
         model_id_or_path = str(model_id_or_path)
 

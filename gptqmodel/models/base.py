@@ -706,12 +706,11 @@ class BaseGPTQModel(nn.Module):
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            use_safetensors: bool = True,
             max_shard_size: Optional[str] = None,
             **kwargs,
     ):
         if self.quantized:
-            self.save_quantized(save_dir, safetensors_metadata, use_safetensors, max_shard_size)
+            self.save_quantized(save_dir, safetensors_metadata, max_shard_size)
         else:
             self.save_pretrained(save_dir, **kwargs)
 

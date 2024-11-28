@@ -32,7 +32,7 @@ class TestLmHead(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
         inputs = tokenizer(prompt, return_tensors="pt").to(device=self.DEVICE)
 
-        model = GPTQModel.load(self.MODEL_ID, use_safetensors=True, device=self.DEVICE)
+        model = GPTQModel.load(self.MODEL_ID, device=self.DEVICE)
 
        # validate lm_head is loaded as quantized layer
         assert model.model.lm_head.__class__.__name__ == "ExllamaV2QuantLinear"
