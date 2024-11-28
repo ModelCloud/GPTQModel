@@ -428,7 +428,6 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     device_to_buffers_size = {}
     # exllama
     model_uses_exllama = False
-    model_uses_qbits = False
 
     # exllamav2
     fixed_bytes = {}
