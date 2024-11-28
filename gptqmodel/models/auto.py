@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os.path
+import torch
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
@@ -203,6 +204,11 @@ class GPTQModel:
         verify_hash: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> BaseGPTQModel:
+
+        if backend == BACKEND.AUTO and not torch.cuda.is_available():
+            logger.warning("No cuda fuond, use ipex backend")
+            backend = BACKEND.IPEX
+
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
