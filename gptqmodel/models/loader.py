@@ -190,6 +190,11 @@ def ModelLoader(cls):
             raise EnvironmentError(
                 "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu and xpu quantization and inference.")
 
+        if backend == BACKEND.TRITON:
+            from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
+            if not TRITON_AVAILABLE:
+                raise ValueError(TRITON_INSTALL_HINT)
+
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(

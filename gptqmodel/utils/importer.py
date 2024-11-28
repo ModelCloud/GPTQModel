@@ -8,7 +8,7 @@ from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear
+from ..nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear, TRITON_AVAILABLE, TRITON_INSTALL_HINT
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 
@@ -62,6 +62,8 @@ def select_quant_linear(
             raise err
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
+        if not TRITON_AVAILABLE:
+            raise ValueError(TRITON_INSTALL_HINT)
         return TritonV2QuantLinear
     elif backend == BACKEND.BITBLAS:
         return BitBLASQuantLinear
