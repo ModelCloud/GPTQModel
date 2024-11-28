@@ -1,5 +1,5 @@
 from collections import OrderedDict
-
+import torch
 from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
@@ -25,8 +25,8 @@ backend_dict = OrderedDict({
 })
 
 format_dict = {
-    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.CUDA],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.TRITON, BACKEND.CUDA],
+    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -60,6 +60,7 @@ def select_quant_linear(
                         return v
         if err:
             raise err
+
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
         if not TRITON_AVAILABLE:
@@ -76,6 +77,20 @@ def select_quant_linear(
     elif backend == BACKEND.CUDA:
         return CudaQuantLinear
     elif backend == BACKEND.IPEX:
+        import intel_pytorch_extension as ipex
+        if not ipex.is_available():
+            raise ImportError("Intel PyTorch Extension is not available.")
+
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return True
+
+        # XPU is not available, check CPU
+        from device_smi import Device
+        smi = Device("cpu")
+        info = smi.info()
+        if "avx512_vnni" not in info["features"]:
+            raise ValueError("CPU does not support AVX512_VNNI.")
+
         return IPEXQuantLinear
     else:
         return CudaQuantLinear
