@@ -94,8 +94,6 @@ def select_quant_linear(
         from device_smi import Device
         smi = Device("cpu")
         info = smi.info()
-        # debug print:
-        print(info)
         if hasattr(info, "features") and "avx512_vnni" not in info.features:
             raise ValueError("CPU does not support AVX512_VNNI.")
 
