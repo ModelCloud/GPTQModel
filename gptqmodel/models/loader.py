@@ -22,7 +22,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
                            find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS, CPU, XPU_0
+from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS
 
 logger = setup_logger()
 
@@ -147,10 +147,7 @@ def ModelLoader(cls):
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
         if backend == BACKEND.IPEX:
-            if is_torch_support_xpu():
-                device = XPU_0
-            else:
-                device =  CPU
+            device = get_best_device(backend)
 
             try:
                 pass

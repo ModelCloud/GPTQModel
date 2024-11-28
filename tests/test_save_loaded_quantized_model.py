@@ -26,7 +26,7 @@ class TestSave(unittest.TestCase):
     )
     def test_save(self, backend):
         prompt = "I am in Paris and"
-        device = torch.device("cuda:0") if backend != BACKEND.IPEX else get_best_device()
+        device = get_best_device(backend)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 

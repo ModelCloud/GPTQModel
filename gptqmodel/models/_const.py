@@ -1,6 +1,7 @@
 import torch
 from enum import Enum
 from torch import device
+from ..utils import BACKEND
 
 CPU = device("cpu")
 CUDA = device("cuda")
@@ -25,8 +26,8 @@ def get_device_by_type(type_value: str):
     raise ValueError(f"Invalid type_value str: {type_value}")
 
 
-def get_best_device():
-    if torch.cuda.is_available():
+def get_best_device(beckend=BACKEND.AUTO):
+    if torch.cuda.is_available() and beckend != BACKEND.IPEX:
         return CUDA_0
     elif is_torch_support_xpu():
         return XPU_0
