@@ -12,7 +12,7 @@ from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear 
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
-from test_q4_exllama import REFERENCE, get_diff  # noqa: E402
+from test_q4_exllama_v1 import REFERENCE, get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 GENERATE_EVAL_SIZE = 100

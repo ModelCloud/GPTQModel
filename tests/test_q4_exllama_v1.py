@@ -1051,7 +1051,7 @@ def get_diff(a, ref):
     eps = 1e-6
     return f"Maxdiff: {(a - ref).abs().max()}, Mean relative diff: {((a - ref).abs() / (ref.abs() + eps)).mean()}"
 
-class TestsQ4Exllama(unittest.TestCase):
+class TestsQ4ExllamaV1(unittest.TestCase):
     def test_exllama(self):
         group_size = 128
 
