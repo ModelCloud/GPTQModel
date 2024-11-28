@@ -24,7 +24,7 @@ from ..utils.model import (auto_dtype_from_config, check_requires_version, conve
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import get_best_device, is_torch_support_xpu, DEVICE, SUPPORTED_MODELS
 from packaging.version import Version, InvalidVersion
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 
 logger = setup_logger()
 
@@ -62,17 +62,13 @@ def compare_versions(installed_version, required_version, operator):
 
 def check_versions(model_id_or_path: str, requirements: List[str]):
     for req in requirements:
+        pkg, operator, version_required = parse_requirement(req)
         try:
-            pkg, operator, version_required = parse_requirement(req)
             installed_version = version(pkg)
-            if not installed_version:
-                print(f"{pkg}: Package is not installed")
-                continue
-
             if not compare_versions(installed_version, version_required, operator):
                 raise ValueError(f"{model_id_or_path} requires version {req}, but current {pkg} version is {installed_version} ")
-        except Exception as e:
-            raise ValueError(f"check_versions error: {str(e)}")
+        except PackageNotFoundError:
+            raise ValueError(f"{model_id_or_path} requires version {req}, but {pkg} not installed.")
 
 def ModelLoader(cls):
     @classmethod
