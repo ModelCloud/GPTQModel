@@ -1,7 +1,7 @@
 import datetime
-
 import time
 from warnings import warn
+
 
 class ProgressBarWarning(Warning):
     def __init__(self, msg, fp_write=None, *a, **k):

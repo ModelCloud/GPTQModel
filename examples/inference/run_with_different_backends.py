@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-import torch
 from argparse import ArgumentParser
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend, get_best_device

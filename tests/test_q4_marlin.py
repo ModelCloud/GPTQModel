@@ -7,7 +7,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from datasets import load_dataset
+from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear  # noqa: E402

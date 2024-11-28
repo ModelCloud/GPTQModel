@@ -31,6 +31,7 @@ from .definitions.gpt_neox import GPTNeoXGPTQ
 from .definitions.gptj import GPTJGPTQ
 from .definitions.granite import GraniteGPTQ
 from .definitions.grinmoe import GrinMOEGPTQ
+from .definitions.hymba import HymbaGPTQ
 from .definitions.internlm import InternLMGPTQ
 from .definitions.internlm2 import InternLM2GPTQ
 from .definitions.llama import LlamaGPTQ
@@ -43,6 +44,7 @@ from .definitions.mllama import MLlamaGPTQ
 from .definitions.mobilellm import MobileLLMGPTQ
 from .definitions.moss import MOSSGPTQ
 from .definitions.mpt import MPTGPTQ
+from .definitions.olmo2 import Olmo2GPTQ
 from .definitions.opt import OPTGPTQ
 from .definitions.phi import PhiGPTQ
 from .definitions.phi3 import Phi3GPTQ
@@ -54,8 +56,6 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-from .definitions.hymba import  HymbaGPTQ
-from .definitions.olmo2 import Olmo2GPTQ
 
 logger = setup_logger()
 

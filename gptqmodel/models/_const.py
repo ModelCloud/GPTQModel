@@ -1,6 +1,8 @@
-import torch
 from enum import Enum
+
+import torch
 from torch import device
+
 from ..utils import BACKEND
 
 CPU = device("cpu")
