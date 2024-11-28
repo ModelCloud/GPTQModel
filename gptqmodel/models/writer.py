@@ -153,7 +153,7 @@ def ModelWriter(cls):
             state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
             model_save_name = model_base_name + ".safetensors"
         else:
-            model_save_name = model_base_name + ".bin"
+            model_save_name = "pytorch_" + model_base_name + ".bin"
 
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
@@ -219,7 +219,7 @@ def ModelWriter(cls):
                 if (
                         filename.startswith(model_base_name)
                         and isfile(full_filename)
-                        and filename not in shards.keys()
+                        and filename not in state_dict_split.filename_to_tensors.keys()
                         and reg.fullmatch(filename_no_suffix) is not None
                 ):
                     os.remove(full_filename)
@@ -270,8 +270,13 @@ def ModelWriter(cls):
                     "metadata": state_dict_split.metadata,
                     "weight_map": state_dict_split.tensor_to_filename,
                 }
-                with open(os.path.join(save_dir, "model.safetensors.index.json"), "w") as f:
-                    f.write(json.dumps(index, indent=2))
+
+                index_save_name = model_save_name + ".index.json"
+                index_save_path = join(save_dir, index_save_name)
+                # Save the index as well
+                with open(index_save_path, "w", encoding="utf-8") as f:
+                    content = json.dumps(index, indent=2, sort_keys=True) + "\n"
+                    f.write(content)
 
         total_size_gb = total_size_mb / 1024
         size_diff_mb = pre_quantized_size_mb - total_size_mb
