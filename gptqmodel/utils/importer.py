@@ -53,11 +53,16 @@ def select_quant_linear(
             for v in values:
                 in_allow_backends = k in allow_backends
                 validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
-                check_pack_func = hasattr(v, "pack") if pack else True
-                if in_allow_backends:
-                    if validate and check_pack_func:
+                if in_allow_backends and validate:
+                    if pack:
+                        check_pack_func = hasattr(v, "pack") if pack else True
+                        if check_pack_func:
+                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                            return v
+                    else:
                         logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                         return v
+
         if err:
             raise err
 
