@@ -2,7 +2,6 @@ accelerate>=1.1.1
 datasets>=3.1.0
 numpy>=1.26.4
 torch>=2.0.0
-triton>=2.0.0
 safetensors>=0.4.5
 transformers>=4.46.3
 threadpoolctl>=3.5.0
