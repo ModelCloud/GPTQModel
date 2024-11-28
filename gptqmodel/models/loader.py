@@ -192,7 +192,7 @@ def ModelLoader(cls):
 
         if backend == BACKEND.TRITON:
             from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
-            if TRITON_AVAILABLE is False:
+            if not TRITON_AVAILABLE:
                 raise ValueError(TRITON_INSTALL_HINT)
 
         """load quantized model from local disk"""
