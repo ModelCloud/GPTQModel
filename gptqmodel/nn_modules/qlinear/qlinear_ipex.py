@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.models._const import DEVICE
+from gptqmodel.models._const import is_torch_support_xpu, DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...utils.logger import setup_logger
@@ -20,7 +20,7 @@ BITS_DTYPE_MAPPING = {
 IPEX_AVAILABLE = False
 IPEX_ERROR_LOG = None
 try:
-    from intel_extension_for_pytorch.nn.modules.weight_only_quantization import WeightOnlyQuantizedLinear
+    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
     IPEX_AVAILABLE = True
 except Exception:
     IPEX_ERROR_LOG = Exception
@@ -30,7 +30,7 @@ def ipex_dtype() -> torch.dtype:
         raise ImportError("intel_extension_for_pytorch not installed. "
                           "Please install via 'pip install intel_extension_for_pytorch'")
 
-    return torch.bfloat16
+    return torch.float16 if is_torch_support_xpu() else torch.bfloat16
 
 
 def convert_dtype_torch2str(dtype):
@@ -50,7 +50,7 @@ def convert_dtype_torch2str(dtype):
 
 class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
-    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
 
     def __init__(
         self,
@@ -63,7 +63,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         bias: bool,
         kernel_switch_threshold=128,
         training=False,
-        weight_dtype=torch.bfloat16,
+        weight_dtype=None,
         **kwargs,
     ):
         self.sym = False
@@ -71,6 +71,8 @@ class IPEXQuantLinear(BaseQuantLinear):
 
         if bits not in [4]:
             raise NotImplementedError("Only 4-bits is supported for IPEX.")
+        if weight_dtype is None:
+            weight_dtype = torch.float16 if is_torch_support_xpu() else torch.bfloat16
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
@@ -79,6 +81,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.maxq = 2**self.bits - 1
         self.weight_dtype = weight_dtype
         self.asym = True
+        self.init_ipex = False
 
         self.register_buffer(
             "qweight",
@@ -119,11 +122,13 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)
-        assert self.qweight.device.type == "cpu"
+        assert self.qweight.device.type in ("cpu", "xpu")
+
+    def init_ipex_linear(self):
         if not self.training and IPEX_AVAILABLE:
-            self.ipex_linear = WeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros, \
+            self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros, \
                                                                     self.infeatures, self.outfeatures, None, self.bias, \
-                                                                    self.group_size, self.g_idx, 0, 0)
+                                                                    self.group_size, self.g_idx, quant_method=0, dtype=0)
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
@@ -183,8 +188,14 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x: torch.Tensor):
-        if not self.training and hasattr(self, "ipex_linear"):
-            return self.ipex_linear(x)
+        if not self.init_ipex:
+            self.init_ipex_linear()
+            self.init_ipex = True
+
+        if hasattr(self, "ipex_linear"):
+            with torch.no_grad():
+                outputs = self.ipex_linear(x)
+            return outputs
 
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])

@@ -8,6 +8,7 @@
 </p>
 
 ## News
+* 11/27/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. 
 * 11/26/2024 [1.3.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.0) Zero-Day Hymba model support. Removed `tqdm` and `rogue` dependency. 
 * 11/24/2024 [1.2.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.3) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
 * 11/11/2024 🚀 [1.2.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.1) Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
@@ -73,23 +74,28 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ![image](https://github.com/user-attachments/assets/e19dcabc-ba47-467c-ac86-3b411d31df2d)
 
 ## Model Support:  🚀 (Added by GPTQModel) 
-| Model            |     |                |     |                  |     |            |     |     |     |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- | --- | --- | --- |
-| Baichuan         | ✅   | Falon          | ✅   | Llama 1/2/3 | ✅  | Phi/Phi-3       | 🚀   |     |     |     |
-| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision        | 🚀   | Qwen   | ✅  |     |     |     |
-| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA         | ✅  | Qwen2MoE | 🚀   |     |     |     |
-| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3          | ✅   | RefinedWeb   | ✅   |     |     |     |
-| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | StableLM | ✅   |     |     |     |
-| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral        | ✅  | StarCoder2     | ✅   |     |     |     |
-| Deci             | ✅   | Granite        | 🚀  | MobileLLM             | 🚀   | XVERSE         | ✅   |     |     |     |
-| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS              | ✅   | Yi         |  ✅   |     |     |     |
-| DeepSeek-V2-Lite | 🚀  | Hymba | 🚀  | MPT              | ✅   |            |     |     |     |     |
-| EXAONE 3.0       | 🚀  | InternLM 1/2.5    | 🚀   | OPT       | ✅  |            |     |     |     |     |## Compatiblity 
+| Model            |     |                |     |                  |     |            |     |
+| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- |
+| Baichuan         | ✅   | Falon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |
+| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |
+| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |
+| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | RefinedWeb | ✅   |
+| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | StableLM   | ✅   |
+| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StarCoder2 | ✅   |
+| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | XVERSE     | ✅   |
+| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | Yi         | ✅   |
+| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |
 
 
 ## Platform Requirements
 
-GPTQModel is validated for Linux x86_64 with Nvidia GPUs. Windows WSL2 may work but un-tested. 
+GPTQModel is validated for Linux x86_64 with the following devices:
+| NV GPU     | ✅   |
+| Intel CPU  | ✅   |
+| Intel GPU  | ✅   |
+
+Windows WSL2 may work but un-tested.
 
 ## Install
 
@@ -110,7 +116,7 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # pip: compile and install
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas, and ipex.
-# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas,ipex,auto_round]
+# Example: pip install -v --no-build-isolation .[vllm,sglang,bitblas,ipex,auto_round]
 pip install -v . --no-build-isolation
 ```
 
@@ -121,7 +127,7 @@ Below is a basic sample using `GPTQModel` to quantize a llm model and perform po
 ```py
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
@@ -145,7 +151,7 @@ model.quantize(calibration_dataset)
 
 model.save(quant_path)
 
-model = GPTQModel.load(quant_path)
+model = GPTQModel.load(quant_path, device=get_best_device())
 
 result = model.generate(
   **tokenizer(
@@ -171,8 +177,9 @@ pip install lm-eval[gptqmodel]
 
 ### Which kernel is used by default?
 
-* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled. 
-* `CPU`: Intel/IPEX kernel  
+* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
+* `CPU`: Intel/IPEX kernel
+* `XPU`: Intel/IPEX kernel
 
 ## Citation
 ```

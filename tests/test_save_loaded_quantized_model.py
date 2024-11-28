@@ -7,7 +7,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -27,7 +27,7 @@ class TestSave(unittest.TestCase):
     )
     def test_save(self, backend):
         prompt = "I am in Paris and"
-        device = torch.device("cuda:0") if backend != BACKEND.IPEX else torch.device("cpu")
+        device = torch.device("cuda:0") if backend != BACKEND.IPEX else get_best_device()
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 

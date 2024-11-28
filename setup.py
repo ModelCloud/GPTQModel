@@ -29,6 +29,7 @@ if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
 else:
     FORCE_BUILD = False
 
+extensions = []
 common_setup_kwargs = {
     "version": gptqmodel_version,
     "name": "gptqmodel",
@@ -103,6 +104,8 @@ else:
 additional_setup_kwargs = {}
 
 include_dirs = ["gptqmodel_cuda"]
+
+extensions = []
 
 if BUILD_CUDA_EXT:
     from distutils.sysconfig import get_python_lib

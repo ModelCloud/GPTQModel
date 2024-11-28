@@ -40,3 +40,4 @@ from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
 from .hymba import HymbaGPTQ
+from .olmo2 import Olmo2GPTQ

@@ -4,10 +4,6 @@ import time
 from warnings import warn
 
 class ProgressBarWarning(Warning):
-    """base class for all tqdm warnings.
-
-    Used for non-external-code-breaking errors, such as garbled printing.
-    """
     def __init__(self, msg, fp_write=None, *a, **k):
         if fp_write is not None:
             fp_write("\n" + self.__class__.__name__ + ": " + str(msg).rstrip() + '\n')
@@ -21,6 +17,8 @@ class ProgressBar:
                 total = len(iterable)
             except (TypeError, AttributeError):
                 total = None
+        elif total is not None and iterable is None:
+            iterable = range(total)
         if total == float("inf"):
             # Infinite iterations, behave same as unknown
             total = None
@@ -108,12 +106,11 @@ class ProgressBar:
         return id(self)
 
     def __iter__(self):
-        """Backward-compatibility to use: for x in tqdm(iterable)"""
-
-        # Inlining instance variables as locals (speed optimisation)
         iterable = self.iterable
 
         for obj in iterable:
+            self.current+=1
+            self.progress()
             yield obj
         return
 

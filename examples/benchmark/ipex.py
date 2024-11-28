@@ -1,7 +1,12 @@
 import os
 import time
 import argparse
-
+try:
+    from optimum.intel.utils.modeling_utils import bind_cores_for_best_perf
+    bind_cores_for_best_perf()
+except ImportError as e:
+    print(f"Error: {e}\nCannot Bind process to Single NUMA Region/Socket. Please check permissions as this may reduce performance by ~10%")
+    pass
 
 parser = argparse.ArgumentParser(description="Benchmark IPEX vs HF on a pre-trained model.")
 parser.add_argument("--model", type=str, required=True, help="Path or name of the pre-trained model.")
