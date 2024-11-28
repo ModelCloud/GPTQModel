@@ -304,7 +304,7 @@ def ModelWriter(cls):
 
             if self.dynamic_expert_index is not None:
                 num_experts = getattr(config, self.dynamic_expert_index)
-                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+                _ = get_moe_layer_modules(layer_modules=self.layer_modules,
                                                       num_experts=num_experts)
 
             layers = find_layers(model)

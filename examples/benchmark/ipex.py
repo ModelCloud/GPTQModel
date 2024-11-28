@@ -1,6 +1,8 @@
-import argparse
 import os
 import time
+
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 try:
     from optimum.intel.utils.modeling_utils import bind_cores_for_best_perf
@@ -8,6 +10,8 @@ try:
 except ImportError as e:
     print(f"Error: {e}\nCannot Bind process to Single NUMA Region/Socket. Please check permissions as this may reduce performance by ~10%")
     pass
+
+import argparse
 
 parser = argparse.ArgumentParser(description="Benchmark IPEX vs HF on a pre-trained model.")
 parser.add_argument("--model", type=str, required=True, help="Path or name of the pre-trained model.")
@@ -24,7 +28,6 @@ print("use backend: ", ars.backend)
 # Set the "OMP_NUM_THREADS" environment variable to the specified number of cores to control the number of threads used by OpenMP
 os.environ["OMP_NUM_THREADS"] = str(ars.cores)
 
-import torch
 
 # Set the number of threads used by PyTorch
 torch.set_num_threads(ars.cores)
@@ -40,7 +43,6 @@ def prepare_dataset_for_bench(tokenizer, batch_size=8):
     return input_tensors
 
 
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 # load model, check model backend
 start_load = time.time()

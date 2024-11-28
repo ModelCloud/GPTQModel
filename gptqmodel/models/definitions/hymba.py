@@ -28,7 +28,7 @@ class HymbaGPTQ(BaseGPTQModel):
 
     def monkey_patch(self):
         if hasattr(self.config, 'conv_dim'):
-            new_conv_dim = dict()
+            new_conv_dim = {}
             try:
                 for k, v in self.config.conv_dim.items():
                     if isinstance(k, str):
