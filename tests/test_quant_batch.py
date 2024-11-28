@@ -50,7 +50,7 @@ class TestQuantBatch(unittest.TestCase):
             group_size=128,
         )
 
-        model = GPTQModel.from_pretrained(
+        model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
