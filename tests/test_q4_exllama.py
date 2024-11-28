@@ -1123,7 +1123,7 @@ class TestsQ4Exllama(unittest.TestCase):
         prompt = "I am in Paris and" * 450
         device = torch.device("cuda:0")
 
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
