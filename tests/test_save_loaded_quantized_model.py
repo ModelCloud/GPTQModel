@@ -6,7 +6,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402

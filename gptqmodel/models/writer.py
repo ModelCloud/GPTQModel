@@ -11,12 +11,12 @@ from typing import Dict, Optional
 import accelerate
 import torch
 import transformers
+from huggingface_hub import split_torch_state_dict_into_shards
+from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
 from transformers import AutoConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
-from huggingface_hub import split_torch_state_dict_into_shards
-from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN, PYTORCH_WEIGHTS_FILE_PATTERN
 
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
                                    META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,

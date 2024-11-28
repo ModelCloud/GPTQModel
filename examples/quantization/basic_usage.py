@@ -1,6 +1,5 @@
 import os
 
-import torch
 from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
 
