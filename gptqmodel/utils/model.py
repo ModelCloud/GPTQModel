@@ -24,7 +24,7 @@ from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
-from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
