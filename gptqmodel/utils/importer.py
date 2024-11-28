@@ -82,9 +82,9 @@ def select_quant_linear(
     elif backend == BACKEND.CUDA:
         return CudaQuantLinear
     elif backend == BACKEND.IPEX:
-        import intel_pytorch_extension as ipex
-        if not ipex.is_available():
-            raise ImportError("Intel PyTorch Extension is not available.")
+        from ..nn_modules.qlinear.qlinear_ipex import IPEX_AVAILABLE
+        if not IPEX_AVAILABLE:
+            raise ValueError("IPEX is not available.")
 
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return True
