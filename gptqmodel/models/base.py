@@ -234,6 +234,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
+            pack=True,
             format=self.quantize_config.format,
         )
 
