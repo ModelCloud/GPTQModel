@@ -184,6 +184,7 @@ class BaseGPTQModel(nn.Module):
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -193,12 +194,13 @@ class BaseGPTQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
 
-        best_device = get_best_device()
+        best_device = get_best_device(backend)
 
-        backend = BACKEND.AUTO
         if not torch.cuda.is_available():
-            self.quantize_config.format = FORMAT.IPEX
             backend = BACKEND.IPEX
+
+        if backend == BACKEND.IPEX:
+            self.quantize_config.format = FORMAT.IPEX
 
         if self.quantize_config.format == FORMAT.MARLIN:
             _validate_marlin_compatibility(self.quantize_config, throw_error=True)

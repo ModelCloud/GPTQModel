@@ -90,6 +90,7 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
+            device_map={"":"cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -105,10 +106,12 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
         if not is_quantized:
             model.quantize(calibration_dataset)
-        with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
-            model.save(tmpdirname)
-            tokenizer.save_pretrained(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+
+            with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
+                model.save(tmpdirname)
+                tokenizer.save_pretrained(tmpdirname)
+                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+
         if not is_quantized:
             del model
             gc.collect()
@@ -127,6 +130,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            device_map={"":"cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         return model, tokenizer

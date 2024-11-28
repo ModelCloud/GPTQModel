@@ -79,7 +79,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.IPEX else get_best_device(),
+                device=get_best_device(backend),
                 backend=backend,
             )
 
@@ -106,7 +106,7 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.IPEX else get_best_device(),
+                device=get_best_device(backend),
                 quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)

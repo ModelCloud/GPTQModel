@@ -93,7 +93,7 @@ def ModelLoader(cls):
                     f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-ipex`."
                 )
 
-            model_init_kwargs["device_map"] = "xpu" if is_torch_support_xpu() else "cpu"
+            model_init_kwargs["device_map"] = {"":"xpu"} if is_torch_support_xpu() else {"":"cpu"}
             torch_dtype = ipex_dtype()
 
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -175,7 +175,8 @@ def ModelLoader(cls):
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
         if backend == BACKEND.IPEX:
-            device = get_best_device()
+            device = get_best_device(backend)
+
             try:
                 pass
             except Exception as e:
@@ -424,7 +425,7 @@ def ModelLoader(cls):
         if not isinstance(device_map, dict):
             if device is not None:
                 device = torch.device(device)
-                device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
+                device_map = {"": device.index if device.type in [DEVICE.CUDA, DEVICE.XPU] else device.type}
             else:
                 device_map = accelerate.infer_auto_device_map(
                     model,

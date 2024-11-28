@@ -19,9 +19,7 @@ def main():
     args = parser.parse_args()
 
     backend = get_backend(args.backend)
-    device = get_best_device()
-    if backend == BACKEND.IPEX and device.type == "cuda":
-        device = torch.device("cpu")
+    device = get_best_device(backend)
 
     if backend == BACKEND.SGLANG:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
