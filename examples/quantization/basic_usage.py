@@ -44,10 +44,10 @@ def main():
     # (uncomment the following three lines to enable this feature)
     # repo_id = f"YourUserName/{quantized_model_dir}"
     # commit_message = f"GPTQModel model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
-    # model.push_to_hub(repo_id, save_dir=quantized_model_dir, use_safetensors=True, commit_message=commit_message, use_auth_token=True)
+    # model.push_to_hub(repo_id, save_dir=quantized_model_dir, commit_message=commit_message, use_auth_token=True)
 
     # save quantized model using safetensors
-    model.save(quantized_model_id, use_safetensors=True)
+    model.save(quantized_model_id)
 
     # load quantized model to the first GPU
     device = get_best_device()
@@ -57,7 +57,7 @@ def main():
     # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
 
     # download quantized model from Hugging Face Hub and load to the first GPU
-    # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True,)
+    # model = GPTQModel.from_quantized(repo_id, device="cuda:0",)
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
