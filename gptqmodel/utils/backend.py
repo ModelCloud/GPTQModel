@@ -4,7 +4,7 @@ from enum import Enum
 class BACKEND(Enum):
     AUTO = 0  # choose the fastest one based on quant model compatibility
     TRITON = 1
-    EXLLAMA = 2
+    EXLLAMA_V1 = 2
     EXLLAMA_V2 = 3
     MARLIN = 4
     BITBLAS = 5

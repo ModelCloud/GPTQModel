@@ -21,12 +21,13 @@ def exllama_set_max_input_length(model, max_input_length: int):
             "The method exllama_set_max_input_length should be called only when using the exllama backend **with act-order**."
         )
 
-    uses_exllamav1 = False
+    uses_exllama_v1 = False
     for name, submodule in model.named_modules():
         if isinstance(submodule, ExllamaQuantLinear):
-            uses_exllamav1 = True
+            uses_exllama_v1 = True
+            break
 
-    if not uses_exllamav1:
+    if not uses_exllama_v1:
         raise ValueError(
             f"The function exllama_set_max_input_length was called, but the model (instance of {model.__class__.__name__}) does not use the exllama backend for GPTQ. An other implementation is used (exllamav2, triton) and that the call to exllama_set_max_input_length is unnecessary. Please remove the call to exllama_set_max_input_length or use the exllama v1 backend."
         )

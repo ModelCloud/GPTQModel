@@ -1065,7 +1065,7 @@ class TestsQ4Exllama(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            backend=BACKEND.EXLLAMA,
+            backend=BACKEND.EXLLAMA_V1,
             format=FORMAT.GPTQ,
         )
 
@@ -1130,7 +1130,7 @@ class TestsQ4Exllama(unittest.TestCase):
             model_id,
             revision=revision,
             device="cuda:0",
-            backend=BACKEND.EXLLAMA,
+            backend=BACKEND.EXLLAMA_V1,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1164,7 +1164,7 @@ class TestsQ4Exllama(unittest.TestCase):
         model_q = GPTQModel.from_quantized(
             model_id,
             device="cuda:0",
-            backend=BACKEND.EXLLAMA,
+            backend=BACKEND.EXLLAMA_V1,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -1189,7 +1189,7 @@ class TestsQ4Exllama(unittest.TestCase):
             model_id,
             revision=revision,
             device="cuda:0",
-            backend=BACKEND.EXLLAMA,
+            backend=BACKEND.EXLLAMA_V1,
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 

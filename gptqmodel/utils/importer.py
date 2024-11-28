@@ -17,7 +17,7 @@ logger = setup_logger()
 backend_dict = OrderedDict({
     BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
-    BACKEND.EXLLAMA: [ExllamaQuantLinear],
+    BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
     BACKEND.CUDA: [CudaQuantLinear],
     BACKEND.BITBLAS: [BitBLASQuantLinear],
@@ -69,7 +69,7 @@ def select_quant_linear(
         return MarlinQuantLinear if pack else MarlinInferenceQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         return ExllamaV2QuantLinear
-    elif backend == BACKEND.EXLLAMA:
+    elif backend == BACKEND.EXLLAMA_V1:
         return ExllamaQuantLinear
     elif backend == BACKEND.CUDA:
         return CudaQuantLinear
