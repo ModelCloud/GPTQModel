@@ -93,7 +93,7 @@ def select_quant_linear(
         from device_smi import Device
         smi = Device("cpu")
         info = smi.info()
-        if "avx512_vnni" not in info.features:
+        if hasattr(info, "features") and "avx512_vnni" not in info.features:
             raise ValueError("CPU does not support AVX512_VNNI.")
 
         return IPEXQuantLinear
