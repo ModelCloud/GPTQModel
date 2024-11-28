@@ -1047,6 +1047,8 @@ REFERENCE = torch.Tensor(
 
 GENERATE_EVAL_SIZE = 100
 
+MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+
 def get_diff(a, ref):
     eps = 1e-6
     return f"Maxdiff: {(a - ref).abs().max()}, Mean relative diff: {((a - ref).abs() / (ref.abs() + eps)).mean()}"
@@ -1123,16 +1125,15 @@ class TestsQ4ExllamaV1(unittest.TestCase):
         prompt = "I am in Paris and" * 450
         device = torch.device("cuda:0")
 
-        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
-            model_id,
+            MODEL_ID,
             revision=revision,
             device="cuda:0",
             backend=BACKEND.EXLLAMA_V1,
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
@@ -1160,13 +1161,12 @@ class TestsQ4ExllamaV1(unittest.TestCase):
 
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
 
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         model_q = GPTQModel.from_quantized(
-            model_id,
+            MODEL_ID,
             device="cuda:0",
             backend=BACKEND.EXLLAMA_V1,
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
@@ -1182,16 +1182,15 @@ class TestsQ4ExllamaV1(unittest.TestCase):
 
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\nThe stage is now set in a Parisian café. The café is filled with people, including a group of friends, a couple, and a group of tourists. The friends are discussing their plans for the"
 
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
-            model_id,
+            MODEL_ID,
             revision=revision,
             device="cuda:0",
             backend=BACKEND.EXLLAMA_V1,
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
