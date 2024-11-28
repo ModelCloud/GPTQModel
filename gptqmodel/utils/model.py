@@ -24,8 +24,9 @@ from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
-from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
@@ -424,6 +425,9 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
     # post init for bitblas backend.
+    device_to_buffers_size = {}
+    # exllama
+    model_uses_exllama = False
 
     # exllamav2
     fixed_bytes = {}
@@ -435,6 +439,86 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
+        elif isinstance(submodule, ExllamaQuantLinear):
+            model_uses_exllama = True
+            device = submodule.qweight.device
+            if device not in device_to_buffers_size:
+                device_to_buffers_size[device] = {
+                    "max_dq_buffer_size": 1,
+                    "max_inner_outer_dim": 1,
+                }
+            submodule._use_act_order = True if use_act_order else False
+
+            # Disable this heuristic for detecting act_order, but it could be used instead of the config.
+            """
+            if submodule.g_idx is None:
+                submodule.act_order = False
+            elif submodule.g_idx is not None and ((submodule.g_idx == 0).all() or torch.equal(submodule.g_idx.cpu(), torch.tensor([i // submodule.group_size for i in range(submodule.g_idx.shape[0])], dtype=torch.int32))):
+                submodule.g_idx = None
+                submodule.act_order = False
+            else:
+                submodule.act_order = True
+            """
+
+            device_to_buffers_size[device]["max_dq_buffer_size"] = max(
+                device_to_buffers_size[device]["max_dq_buffer_size"],
+                submodule.qweight.numel() * 8,
+                )
+
+            if use_act_order:
+                device_to_buffers_size[device]["max_inner_outer_dim"] = max(
+                    device_to_buffers_size[device]["max_inner_outer_dim"],
+                    submodule.infeatures,
+                    submodule.outfeatures,
+                )
+
+    if model_uses_exllama:
+        # To be honest this is quite ugly, not proud of this.
+        from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
+
+        device_to_buffers = {}
+
+        if use_act_order:
+            if max_input_length is None:
+                max_input_len = EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
+            else:
+                max_input_len = max_input_length
+        else:
+            if max_input_length is not None:
+                logger.info(
+                    "Using exllama backend without act-order, the parameter max_input_length was set although not needed, it will be ignored."
+                )
+            max_input_len = 1
+
+        for device, buffers_size in device_to_buffers_size.items():
+            # The temp_state buffer is required to reorder X in the act-order case.
+            # The temp_dq buffer is required to dequantize weights when using cuBLAS, typically for the prefill.
+            device_to_buffers[device] = {
+                "temp_state": torch.zeros(
+                    (max_input_len, buffers_size["max_inner_outer_dim"]),
+                    dtype=torch.float16,
+                    device=device,
+                ),
+                "temp_dq": torch.zeros(
+                    (1, buffers_size["max_dq_buffer_size"]),
+                    dtype=torch.float16,
+                    device=device,
+                ),
+                "max_dq_buffer_size": buffers_size["max_dq_buffer_size"],
+                "max_inner_outer_dim": buffers_size["max_inner_outer_dim"],
+            }
+
+        # Buffers need to be persistent to avoid any bug.
+        model.device_to_buffers = device_to_buffers
+
+        for device, buffers in model.device_to_buffers.items():
+            prepare_buffers(device, buffers["temp_state"], buffers["temp_dq"])
+
+        # Using the default from exllama repo here.
+        matmul_recons_thd = 8
+        matmul_fused_remap = False
+        matmul_no_half2 = False
+        set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
 
     if model_uses_exllamav2:
         from ..nn_modules.qlinear.qlinear_exllamav2 import ExLlamaV2DeviceTensors
