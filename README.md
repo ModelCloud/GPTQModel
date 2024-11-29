@@ -87,14 +87,15 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |
 
 
-## Platform Requirements
+## HW Accelerator Requirements
 
 GPTQModel is validated for Linux x86_64 with the following devices:
-| NV GPU     | ✅   |
-| Intel CPU  | ✅   |
-| Intel GPU  | ✅   |
 
-Windows WSL2 may work but un-tested.
+| Device           |     |                | 
+| ---------------- | --- | -------------- | 
+| Nvidia GPU     | ✅   | Ampere or Higher |
+| Intel/AMD CPU  | ✅   | `avx512_vnni` or `amx` |
+| Intel XPU  | ✅   |   Intel Datacenter Max |
 
 ## Install
 
