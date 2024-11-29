@@ -40,32 +40,36 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        backend: BACKEND,
-        format: FORMAT,
+        backend: BACKEND = BACKEND.AUTO,
+        format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         dynamic=None,
 ):
     # Handle the case where backend is AUTO.
     if backend == BACKEND.AUTO:
-        allow_backends = format_dict[format]
-        err = None
-        for k, values in backend_dict.items():
+        if not torch.cuda.is_available():
+            logger.warning("No cuda found, use IPEX backend")
+            backend = BACKEND.IPEX
+        else:
+            allow_backends = format_dict[format]
+            err = None
+            for k, values in backend_dict.items():
 
-            for v in values:
-                in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
-                if in_allow_backends and validate:
-                    if pack:
-                        check_pack_func = hasattr(v, "pack")
-                        if check_pack_func:
+                for v in values:
+                    in_allow_backends = k in allow_backends
+                    validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
+                    if in_allow_backends and validate:
+                        if pack:
+                            check_pack_func = hasattr(v, "pack")
+                            if check_pack_func:
+                                logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                                return v
+                        else:
                             logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                             return v
-                    else:
-                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
-                        return v
 
-        if err:
-            raise err
+            if err:
+                raise err
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:

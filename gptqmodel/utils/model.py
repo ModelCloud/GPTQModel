@@ -28,6 +28,7 @@ from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
+from .exllama import exllama_set_max_input_length
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
@@ -539,6 +540,9 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             submodule.post_init()
 
     torch.cuda.empty_cache()
+
+    # if use_act_order and max_input_length and isinstance(submodule, ExllamaQuantLinear):
+    #     model = exllama_set_max_input_length(model, max_input_length)
 
     return model
 
