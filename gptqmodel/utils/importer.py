@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 import torch
+
 from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
@@ -16,7 +17,7 @@ from ..utils.logger import setup_logger
 logger = setup_logger()
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
+    BACKEND.MARLIN: [MarlinInferenceQuantLinear],
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],

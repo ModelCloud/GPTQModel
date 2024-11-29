@@ -4,8 +4,8 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from ...utils.logger import setup_logger
 
 marlin_import_exception = None
@@ -275,4 +275,3 @@ def dequantize_qzeros(layer):
     return unpacked_qzeros
 
 
-__all__ = ["MarlinQuantLinear", "dequantize_weight"]

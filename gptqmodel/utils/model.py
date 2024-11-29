@@ -20,17 +20,16 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
-from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
+from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
+from ..quantization import FORMAT, QuantizeConfig
 
 logger = setup_logger()
 
@@ -270,10 +269,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        if QuantLinear is MarlinQuantLinear:
-            qlayers[name].pack(layers[name], scale)
-        else:
-            qlayers[name].pack(layers[name], scale, zero, g_idx)
+        qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
         pbar.progress()
 
