@@ -90,7 +90,7 @@ def select_quant_linear(
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return True
 
-        # XPU is not available, check CPU has AVX512
+        # Fallback to IPEX/CPU if cpu supports AVX512 
         from device_smi import Device
         if "avx512_vnni" not in Device("cpu").info().features:
             raise ValueError("CPU does not support AVX512_VNNI.")
