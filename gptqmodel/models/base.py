@@ -203,7 +203,7 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(
-                f"marlin format is not supported for quantization any more. you can use FORMAT.GPTQ, gptqmodel will auto convert it to marlin for loading"
+                f"FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
