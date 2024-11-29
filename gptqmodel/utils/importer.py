@@ -88,7 +88,7 @@ def select_quant_linear(
             raise ValueError("IPEX is not available.")
 
         if hasattr(torch, "xpu") and torch.xpu.is_available():
-            return True
+            return IPEXQuantLinear
 
         # Fallback to IPEX/CPU if cpu supports AVX512 
         from device_smi import Device
