@@ -6,8 +6,8 @@ from accelerate.utils import find_tied_parameters
 
 from .model import recurse_getattr, recurse_setattr
 from .progress import ProgressBar
-from ..nn_modules.qlinear.qlinear_marlin import _get_perms, unpack_qzeros
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
+from ..nn_modules.qlinear.qlinear_marlin_inference import _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 
