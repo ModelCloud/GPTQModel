@@ -92,8 +92,8 @@ def select_quant_linear(
 
         # Fallback to IPEX/CPU if cpu supports AVX512 
         from device_smi import Device
-        if "avx512_vnni" not in Device("cpu").info().features:
-            raise ValueError("CPU does not support AVX512_VNNI.")
+        if "avx512_vnni" not in Device("cpu").features:
+            raise ValueError("IPEX/CPU requires minimum avx512_vnni support.")
 
         return IPEXQuantLinear
     else:
