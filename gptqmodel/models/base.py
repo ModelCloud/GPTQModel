@@ -10,6 +10,9 @@ from accelerate.hooks import remove_hook_from_module
 from packaging import version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
+from ._const import CPU, get_best_device
+from .loader import ModelLoader
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -17,14 +20,10 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
 from ..utils.progress import ProgressBar
-from ._const import CPU, get_best_device
-from .loader import ModelLoader
-from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -203,7 +202,9 @@ class BaseGPTQModel(nn.Module):
             self.quantize_config.format = FORMAT.IPEX
 
         if self.quantize_config.format == FORMAT.MARLIN:
-            _validate_marlin_compatibility(self.quantize_config, throw_error=True)
+            raise ValueError(
+                f"marlin format is not supported any more. you can use FORMAT.GPQT, gptqmodel will auto convert it to marlin for loading"
+            )
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
