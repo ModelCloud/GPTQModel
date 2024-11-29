@@ -266,7 +266,7 @@ setup(
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "device-smi", "plotly"],
-        'eval': ["lm_eval>=0.4.4"],
+        'eval': ["lm_eval>=0.4.6"],
         'triton': ["triton>=2.0.0"]
     },
     include_dirs=include_dirs,
