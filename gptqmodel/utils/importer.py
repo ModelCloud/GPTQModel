@@ -1,13 +1,13 @@
 from collections import OrderedDict
 
 import torch
+
 from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
@@ -16,7 +16,7 @@ from ..utils.logger import setup_logger
 logger = setup_logger()
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
+    BACKEND.MARLIN: [MarlinInferenceQuantLinear],
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
@@ -75,7 +75,7 @@ def select_quant_linear(
     elif backend == BACKEND.BITBLAS:
         return BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
-        return MarlinQuantLinear if pack else MarlinInferenceQuantLinear
+        return MarlinInferenceQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         return ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:

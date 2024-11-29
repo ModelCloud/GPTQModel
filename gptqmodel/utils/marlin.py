@@ -4,11 +4,12 @@ import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
-from ..quantization import FORMAT, QuantizeConfig
-from ..utils.logger import setup_logger
 from .model import recurse_getattr, recurse_setattr
 from .progress import ProgressBar
+from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
+from ..nn_modules.qlinear.qlinear_marlin_inference import _get_perms, unpack_qzeros
+from ..quantization import FORMAT, QuantizeConfig
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 
@@ -89,7 +90,7 @@ def _validate_marlin_device_support() -> bool:
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion
 def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = False):
-    validate, err = MarlinQuantLinear.validate(cfg.bits, cfg.group_size, cfg.desc_act, cfg.sym, cfg.dynamic)
+    validate, err = MarlinInferenceQuantLinear.validate(cfg.bits, cfg.group_size, cfg.desc_act, cfg.sym, cfg.dynamic)
     if throw_error and err is not None:
         raise ValueError(err)
     return err
@@ -122,7 +123,7 @@ def convert_to_marlin(
         # We could use `torch.count_nonzero(module.bias) > 0` here to discard zero bias, but this has issues when
         # loading weights from checkpoints holding zero bias.
         with torch.device("meta"):
-            new_module = MarlinQuantLinear(
+            new_module = MarlinInferenceQuantLinear(
                 bits=4,
                 group_size=module.group_size,
                 sym=sym,
