@@ -22,7 +22,6 @@ BASE_WHEEL_URL = (
 )
 
 BUILD_CUDA_EXT = True
-COMPILE_MARLIN = True
 
 if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
     FORCE_BUILD = True
@@ -63,8 +62,7 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
     if not BUILD_CUDA_EXT:
         return common_setup_kwargs["version"]
 
-    default_cuda_version = torch.version.cuda
-    CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", default_cuda_version).split("."))
+    CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", torch.version.cuda).split("."))
 
     if not CUDA_VERSION:
         print(
@@ -155,32 +153,29 @@ if BUILD_CUDA_EXT:
             [
                 "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
                 "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
-            ]
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
         ),
         cpp_ext.CUDAExtension(
             "gptqmodel_cuda_256",
             [
                 "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
                 "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
-            ]
-        )
-    ]
-
-    # Marlin is not ROCm-compatible, CUDA only
-    if COMPILE_MARLIN:
-        extensions.append(
-            cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_cuda_inference",
-                [
-                    "gptqmodel_ext/marlin_inference/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin_inference/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin_inference/marlin_repack.cu",
-                ],
-                extra_compile_args=extra_compile_args,
-            )
-        )
-
-    extensions.append(
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        ),
+        cpp_ext.CUDAExtension(
+            "gptqmodel_marlin_kernels",
+            [
+                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                "gptqmodel_ext/marlin/marlin_repack.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        ),
         cpp_ext.CUDAExtension(
             "gptqmodel_exllama_kernels",
             [
@@ -192,9 +187,7 @@ if BUILD_CUDA_EXT:
             ],
             extra_link_args=extra_link_args,
             extra_compile_args=extra_compile_args,
-        )
-    )
-    extensions.append(
+        ),
         cpp_ext.CUDAExtension(
             "gptqmodel_exllamav2_kernels",
             [
@@ -205,7 +198,7 @@ if BUILD_CUDA_EXT:
             extra_link_args=extra_link_args,
             extra_compile_args=extra_compile_args,
         )
-    )
+    ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
@@ -253,7 +246,7 @@ setup(
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
-        'logger': ["clearml", "random_word", "device-smi", "plotly"],
+        'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.6"],
         'triton': ["triton>=2.0.0"]
     },
