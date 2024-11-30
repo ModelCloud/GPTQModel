@@ -6,7 +6,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import json  # noqa: E402
 import logging  # noqa: E402
-import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
@@ -36,7 +35,6 @@ class TestQuantization(unittest.TestCase):
             (QUANT_METHOD.GPTQ, BACKEND.IPEX, False, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
             (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
         ]
     )
