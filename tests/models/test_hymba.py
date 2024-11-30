@@ -1,4 +1,3 @@
-from gptqmodel import GPTQModel
 from model_test import ModelTest
 
 
