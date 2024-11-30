@@ -8,7 +8,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
@@ -91,10 +91,10 @@ class TestDynamic(unittest.TestCase):
         )
 
         for _, submodule in model.named_modules():
-            if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinInferenceQuantLinear):
+            if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinQuantLinear):
                 break
         else:
-            raise ValueError("Did not find a " + "tritonv2 linear layer" if backend == BACKEND.TRITON else "marlin inference linear layer")
+            raise ValueError("Did not find a " + "tritonv2 linear layer" if backend == BACKEND.TRITON else "marlin linear layer")
 
         dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 

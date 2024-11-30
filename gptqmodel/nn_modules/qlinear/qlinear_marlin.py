@@ -5,12 +5,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
+
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 marlin_import_exception = None
 try:
-    import gptqmodel_marlin_cuda_inference
+    import gptqmodel_marlin_kernels
 except ImportError as e:
     marlin_import_exception = e
 
@@ -116,7 +117,7 @@ def apply_gptq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = gptqmodel_marlin_cuda_inference.gptq_marlin_gemm(reshaped_x,
+    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
                                   weight,
                                   weight_scale,
                                   weight_zp,
@@ -135,7 +136,8 @@ def apply_gptq_marlin_linear(
 
     return output.reshape(out_shape)
 
-class MarlinInferenceQuantLinear(BaseQuantLinear):
+
+class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -292,7 +294,7 @@ class MarlinInferenceQuantLinear(BaseQuantLinear):
         self.zp = marlin_make_empty_g_idx(device)
 
         # Repack weights from autogptq format to marlin format.
-        marlin_qweight = gptqmodel_marlin_cuda_inference.gptq_marlin_repack(
+        marlin_qweight = gptqmodel_marlin_kernels.gptq_marlin_repack(
             self.qweight,
             self.g_idx_sort_indices,
             self.infeatures,
