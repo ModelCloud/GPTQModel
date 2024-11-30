@@ -11,7 +11,7 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import dequantize_weight  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import dequantize_weight  # noqa: E402
 from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
 
 

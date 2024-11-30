@@ -63,6 +63,8 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+          echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
+          echo "test_names: ${{ github.event.inputs.test_names }}"
 
       - name: Select server
         id: get_ip

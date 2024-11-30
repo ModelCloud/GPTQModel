@@ -20,16 +20,16 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
-from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
-from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
+from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..quantization import FORMAT, QuantizeConfig
 
 logger = setup_logger()
 
@@ -132,8 +132,8 @@ def make_quant(
     try:
         result = create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
     except NotImplementedError as e:
-        if QuantLinear == MarlinInferenceQuantLinear:
-            # If create MarlinInferenceQuantLinear fails, we try to convert to MarlinQuantLinear.
+        if QuantLinear == MarlinQuantLinear:
+            # If create MarlinQuantLinear fails, we try to convert to MarlinQuantLinear.
             # First use ExllamaV2QuantLinear to preload, then call convert_to_marlin().
             result = create_quant_layer(ExllamaV2QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
         else:

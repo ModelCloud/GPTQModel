@@ -7,7 +7,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -72,7 +72,7 @@ class TestQ4Marlin(unittest.TestCase):
 
         has_marlin = False
         for _, module in model_q.named_modules():
-            linear = MarlinInferenceQuantLinear
+            linear = MarlinQuantLinear
             if isinstance(module, linear):
                 has_marlin = True
                 break
