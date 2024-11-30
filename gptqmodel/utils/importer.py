@@ -2,7 +2,6 @@ from collections import OrderedDict
 
 import torch
 
-from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
@@ -12,6 +11,7 @@ from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLi
 from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
+from .backend import BACKEND
 
 logger = setup_logger()
 
@@ -90,7 +90,7 @@ def select_quant_linear(
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return IPEXQuantLinear
 
-        # Fallback to IPEX/CPU if cpu supports AVX512 
+        # Fallback to IPEX/CPU if cpu supports AVX512
         from device_smi import Device
         if "avx512_vnni" not in Device("cpu").features:
             raise ValueError("IPEX/CPU requires minimum avx512_vnni support.")

@@ -1,5 +1,5 @@
 from enum import Enum
-import torch
+
 
 class BACKEND(Enum):
     AUTO = 0  # choose the fastest one based on quant model compatibility

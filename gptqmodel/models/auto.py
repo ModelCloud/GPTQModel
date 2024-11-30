@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os.path
-import torch
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
+import torch
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
