@@ -170,18 +170,6 @@ if BUILD_CUDA_EXT:
     if COMPILE_MARLIN:
         extensions.append(
             cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_cuda",
-                [
-                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin/marlin_repack.cu",
-                ],
-                extra_compile_args=extra_compile_args,
-            )
-        )
-
-        extensions.append(
-            cpp_ext.CUDAExtension(
                 "gptqmodel_marlin_cuda_inference",
                 [
                     "gptqmodel_ext/marlin_inference/marlin_cuda.cpp",
