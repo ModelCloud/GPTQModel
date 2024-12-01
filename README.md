@@ -67,7 +67,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
-## Quality: GPTQModel 4Bit Quantized models can match and sometimes exceed BF16:
+## Quality: GPTQModel 4bit can match BF16:
 🤗 [ModelCloud quantized ultra-high recovery vortex-series models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 ![image](https://github.com/user-attachments/assets/e19dcabc-ba47-467c-ac86-3b411d31df2d)
