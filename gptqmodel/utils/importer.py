@@ -34,6 +34,28 @@ format_dict = {
 }
 
 
+def hf_select_quant_linear(
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        backend: BACKEND = BACKEND.AUTO,
+        format: FORMAT = FORMAT.GPTQ,
+        pack: bool = False,
+        dynamic=None,
+):
+    return select_quant_linear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        backend=backend,
+        format=format,
+        pack=pack,
+        dynamic=dynamic,
+    )
+
+
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
         bits: int,
@@ -48,7 +70,6 @@ def select_quant_linear(
     # Handle the case where backend is AUTO.
     if backend == BACKEND.AUTO:
         if not torch.cuda.is_available():
-            logger.warning("No cuda found, use IPEX backend")
             backend = BACKEND.IPEX
         else:
             allow_backends = format_dict[format]
