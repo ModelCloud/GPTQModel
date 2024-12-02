@@ -47,9 +47,9 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge that ModelCloud, together with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements and model support.
 
-## Why GPTQ specifically and not the dozens of other low-bit quantizers?
+## Why GPTQ and not other low-bit quantizers?
 
-Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has currently the optimal blend of quality and inference speed you would want to use in a real-world production system. 
+Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
 * 🚀 Extensive model support for: `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX`.
@@ -67,7 +67,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
-## Quality: GPTQModel 4Bit Quantized models can match and sometimes exceed BF16:
+## Quality: GPTQModel 4bit can match BF16:
 🤗 [ModelCloud quantized ultra-high recovery vortex-series models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 ![image](https://github.com/user-attachments/assets/e19dcabc-ba47-467c-ac86-3b411d31df2d)
@@ -75,7 +75,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |
 | ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- |
-| Baichuan         | ✅   | Falon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
+| Baichuan         | ✅   | Falcon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
 | Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |
 | ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |
 | CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |
