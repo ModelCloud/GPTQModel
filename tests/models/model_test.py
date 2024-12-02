@@ -36,6 +36,9 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
 
+    # quant config
+    DESC_ACT = True
+
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = "I am in Paris and"
@@ -83,6 +86,7 @@ class ModelTest(unittest.TestCase):
             bits=4,
             group_size=128,
             format=FORMAT.GPTQ,
+            desc_act=self.DESC_ACT,
         )
         model = GPTQModel.load(
             model_id_or_path,

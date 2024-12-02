@@ -17,7 +17,6 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.marlin import _validate_marlin_compatibility
 from ..utils.model import (check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
@@ -203,7 +202,9 @@ class BaseGPTQModel(nn.Module):
             self.quantize_config.format = FORMAT.IPEX
 
         if self.quantize_config.format == FORMAT.MARLIN:
-            _validate_marlin_compatibility(self.quantize_config, throw_error=True)
+            raise ValueError(
+                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
+            )
 
         if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")

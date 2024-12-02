@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 import torch
+
 from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
@@ -8,7 +9,6 @@ from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
@@ -16,7 +16,7 @@ from ..utils.logger import setup_logger
 logger = setup_logger()
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: [MarlinInferenceQuantLinear, MarlinQuantLinear],
+    BACKEND.MARLIN: [MarlinQuantLinear],
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
@@ -79,7 +79,7 @@ def select_quant_linear(
     elif backend == BACKEND.BITBLAS:
         return BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
-        return MarlinQuantLinear if pack else MarlinInferenceQuantLinear
+        return MarlinQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         return ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
@@ -94,7 +94,7 @@ def select_quant_linear(
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return IPEXQuantLinear
 
-        # Fallback to IPEX/CPU if cpu supports AVX512 
+        # Fallback to IPEX/CPU if cpu supports AVX512
         from device_smi import Device
         if "avx512_vnni" not in Device("cpu").features:
             raise ValueError("IPEX/CPU requires minimum avx512_vnni support.")

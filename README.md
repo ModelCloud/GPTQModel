@@ -52,12 +52,11 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has currently the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
-* 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted), `Hymba`.
+* 🚀 Extensive model support for: `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX`.
 * ✨ 100% CI coverage for all supported models including quality/ppl regression.
-* 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
-* 🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
+* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (`avx512_vnni`) and Intel/XPU. 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
-* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) support added for 4 bit quantization/inference on CPU.
 * 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
 * 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
 * 🚀`lm_head` module quant inference support for further VRAM reduction. 
@@ -88,14 +87,15 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |
 
 
-## Platform Requirements
+## HW Accelerator Requirements
 
 GPTQModel is validated for Linux x86_64 with the following devices:
-| NV GPU     | ✅   |
-| Intel CPU  | ✅   |
-| Intel GPU  | ✅   |
 
-Windows WSL2 may work but un-tested.
+| Device           |     |                | 
+| ---------------- | --- | -------------- | 
+| Nvidia GPU     | ✅   | Ampere or Higher |
+| Intel/AMD CPU  | ✅   | `avx512_vnni` or `amx` |
+| Intel XPU  | ✅   |   Intel Datacenter Max |
 
 ## Install
 
@@ -171,7 +171,7 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and we highly recommend avoid using PPL and use `lm-eval` to validate post-quantization model quality. 
 
 ```
-# currently gptqmodel is merged into lm-eval main but not yet released on pypi
+# gptqmodel is integrated into lm-eval >= v0.4.6
 pip install lm-eval[gptqmodel]
 ```
 

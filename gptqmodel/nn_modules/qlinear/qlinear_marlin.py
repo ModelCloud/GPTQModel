@@ -1,36 +1,332 @@
-# Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
-# GPTQModel/licences/LICENSE.apache
+# License: GPTQModel/licenses/LICENSE.apache
+# Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
+
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from torch.nn.parameter import Parameter
 
-from ...utils.logger import setup_logger
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 marlin_import_exception = None
 try:
-    import gptqmodel_marlin_cuda
+    import gptqmodel_marlin_kernels
 except ImportError as e:
     marlin_import_exception = e
 
-logger = setup_logger()
+GPTQ_MARLIN_TILE = 16
+GPTQ_MARLIN_MIN_THREAD_N = 64
+GPTQ_MARLIN_MIN_THREAD_K = 128
+GPTQ_MARLIN_MAX_PARALLEL = 16
 
+def set_weight_attrs(
+    weight: torch.Tensor,
+    weight_attrs: Optional[Dict[str, Any]],
+):
+    """Set attributes on a weight tensor.
 
-def mul(A, B, C, s, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
-    """Marlin FP16xINT4 multiply; can be used within `torch.compile`.
-    @A: `torch.half` input matrix of shape `(m, k)` in standard row-major layout
-    @B: `torch.int` weight matrix of original shape `(k, n)` in Marlin format; see `Layer.pack()`
-    @C: `torch.half` out matrix of shape `(m, n)` in standard row-major layout
-    @s: `torch.half` scales of shape `(m / group_size, n)`
-    @workspace: `torch.int` tensor with at least `n / 128 * max_par` entries that are all zero
-    @thread_k: `k` size of a thread_tile in `B` (can usually be left as auto -1)
-    @thread_n: `n` size of a thread_tile in `B` (can usually be left as auto -1)
-    @sms: number of SMs to use for the kernel (can usually be left as auto -1)
-    @max_par: maximum number of batch 64 problems to solve in parallel for large input sizes
+    This method is used to set attributes on a weight tensor. This method
+    will not overwrite existing attributes.
+
+    Args:
+        weight: The weight tensor.
+        weight_attrs: A dictionary of attributes to set on the weight tensor.
     """
-    gptqmodel_marlin_cuda.mul(A, B, C, s, workspace, thread_k, thread_n, sms, max_par)
+    if weight_attrs is None:
+        return
+    for key, value in weight_attrs.items():
+        assert not hasattr(
+            weight, key), (f"Overwriting existing tensor attribute: {key}")
+        setattr(weight, key, value)
 
+def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
+    return (not act_order) or (act_order and not is_row_parallel)
+
+def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
+                                      is_row_parallel: bool) -> bool:
+    # Need to repeat scales on every rank if act_ordering or
+    # channelwise and RowParallelLinear
+    is_channelwise = group_size == -1
+    return act_order or (is_channelwise and is_row_parallel)
+
+def marlin_make_workspace(output_size_per_partition: int,
+                          device: torch.device) -> torch.Tensor:
+    max_workspace_size = (output_size_per_partition //
+                          GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
+
+    return torch.zeros(max_workspace_size,
+                       dtype=torch.int,
+                       device=device,
+                       requires_grad=False)
+
+def marlin_sort_g_idx(
+        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
+    return g_idx[g_idx_sort_indices], g_idx_sort_indices
+
+def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
+    return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
+                              requires_grad=False)
+
+# Newly generated tensors need to replace existing tensors that are
+# already registered as parameters by vLLM (and won't be freed)
+def replace_tensor(layer: torch.nn.Module, name: str,
+                   new_t: torch.Tensor) -> None:
+    # It is important to use resize_() here since it ensures
+    # the same buffer is reused
+    getattr(layer, name).resize_(new_t.shape)
+    getattr(layer, name).copy_(new_t)
+    del new_t
+
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                          group_size: int) -> torch.Tensor:
+
+    scale_perm, scale_perm_single = get_scale_perms()
+    if group_size < size_k and group_size != -1:
+        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
+    else:
+        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    s = s.reshape((-1, size_n)).contiguous()
+
+    return s
+
+def get_scale_perms():
+    scale_perm: List[int] = []
+    for i in range(8):
+        scale_perm.extend([i + 8 * j for j in range(8)])
+    scale_perm_single: List[int] = []
+    for i in range(4):
+        scale_perm_single.extend(
+            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+    return scale_perm, scale_perm_single
+
+def apply_gptq_marlin_linear(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        num_bits: int,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        is_k_full: bool,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    reshaped_x = input.reshape(-1, input.shape[-1])
+    out_shape = input.shape[:-1] + (output_size_per_partition, )
+
+    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
+                                  weight,
+                                  weight_scale,
+                                  weight_zp,
+                                  g_idx,
+                                  g_idx_sort_indices,
+                                  workspace,
+                                  num_bits,
+                                  reshaped_x.shape[0],
+                                  output_size_per_partition,
+                                  input_size_per_partition,
+                                  is_k_full,
+                                  False)
+
+    if bias is not None:
+        output.add_(bias)  # In-place add
+
+    return output.reshape(out_shape)
+
+
+class MarlinQuantLinear(BaseQuantLinear):
+    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
+                 bias: bool, **kwargs):
+        if marlin_import_exception is not None:
+            raise ValueError(
+                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
+            )
+
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+
+        self.original_infeatures = infeatures
+        self.original_outfeatures = outfeatures
+
+        self.pack_factor = 32 // bits  # packed into int32
+
+        if desc_act and group_size == -1:
+            # In this case, act_order == True is the same as act_order == False
+            # (since we have only one group per output channel)
+            desc_act = False
+
+        # Normalize group_size
+        if group_size != -1:
+            group_size = group_size
+        else:
+            group_size = infeatures
+
+        self.bits = bits
+        self.group_size = group_size
+        self.desc_act = desc_act
+
+        # Determine sharding
+        if marlin_repeat_scales_on_all_ranks(desc_act,
+                                             group_size,
+                                             is_row_parallel=False):
+            # By setting scale_dim == None, weight_loader will
+            # repeat the scales on each GPU in TP>1 case.
+            scales_and_zp_input_dim = None
+            scales_and_zp_size = infeatures // group_size
+        else:
+            # By setting scale_dim == 0, weight_loader will
+            # shard the scales in TP>1 case.
+            scales_and_zp_input_dim = 0
+            scales_and_zp_size = infeatures // group_size
+
+        # Quantized weights
+        qweight = Parameter(
+            torch.empty(
+                infeatures // self.pack_factor,
+                outfeatures,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qweight,
+            {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 0,
+                "pack_factor": self.pack_factor,
+            },
+        )
+
+        # Activation order
+        g_idx = Parameter(
+            torch.empty(
+                infeatures,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        # Ignore warning from fused linear layers such as QKVParallelLinear.
+        set_weight_attrs(
+            g_idx,
+            {
+                "input_dim": 0,
+                "ignore_warning": True
+            },
+        )
+
+        # Scales
+        scales = Parameter(
+            torch.empty(
+                scales_and_zp_size,
+                outfeatures,
+                dtype=torch.float16,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            scales,
+            {
+                "input_dim": scales_and_zp_input_dim,
+                "output_dim": 1,
+            },
+        )
+
+        # Quantized zero-points
+        qzeros = Parameter(
+            torch.empty(
+                scales_and_zp_size,
+                outfeatures // self.pack_factor,
+                dtype=torch.int32,
+                # device="meta",
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qzeros,
+            {
+                "input_dim": scales_and_zp_input_dim,
+                "output_dim": 1,
+                "packed_dim": 1,
+                "pack_factor": self.pack_factor,
+            },
+        )
+
+        self.register_parameter("qweight", qweight)
+        self.register_parameter("g_idx", g_idx)
+        self.register_parameter("scales", scales)
+        self.register_parameter("qzeros", qzeros)
+        self.infeatures = infeatures
+        self.outfeatures = outfeatures
+        self.is_k_full = marlin_is_k_full(desc_act, is_row_parallel=False)
+
+        if bias:
+            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
+        else:
+            self.bias = None
+
+    def post_init(self):
+        device = self.qweight.device
+        self.validate_device(device.type)
+
+        # Allocate marlin workspace
+        self.workspace = marlin_make_workspace(
+            self.outfeatures, device)
+
+        # Handle sorting for activation reordering if needed.
+        if self.desc_act:
+            g_idx, g_idx_sort_indices = marlin_sort_g_idx(self.g_idx)
+            self.g_idx_sort_indices = g_idx_sort_indices
+            replace_tensor(self, "g_idx", g_idx)
+        else:
+            self.g_idx = marlin_make_empty_g_idx(device)
+            self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+
+        # No zero-point
+        self.zp = marlin_make_empty_g_idx(device)
+
+        # Repack weights from autogptq format to marlin format.
+        marlin_qweight = gptqmodel_marlin_kernels.gptq_marlin_repack(
+            self.qweight,
+            self.g_idx_sort_indices,
+            self.infeatures,
+            self.outfeatures,
+            self.bits)
+        replace_tensor(self, "qweight", marlin_qweight)
+
+        # Permute scales from autogptq format to marlin format.
+        marlin_scales = marlin_permute_scales(
+            self.scales,
+            size_k=self.infeatures,
+            size_n=self.outfeatures,
+            group_size=self.group_size)
+        replace_tensor(self, "scales", marlin_scales)
+
+    def forward(self, A: torch.Tensor):
+        if A.dtype != torch.float16:
+            A = A.half()
+
+        return apply_gptq_marlin_linear(
+            input=A,
+            weight=self.qweight,
+            weight_scale=self.scales,
+            weight_zp=self.zp,
+            g_idx=self.g_idx,
+            g_idx_sort_indices=self.g_idx_sort_indices,
+            workspace=self.workspace,
+            num_bits=self.bits,
+            output_size_per_partition=self.outfeatures,
+            input_size_per_partition=self.infeatures,
+            is_k_full=self.is_k_full,
+            bias=self.bias)
 
 # Precompute permutations for Marlin weight and scale shuffling
 def _get_perms():
@@ -62,151 +358,29 @@ def _get_perms():
     return perm, scale_perm, scale_perm_single
 
 
-_perm, _scale_perm, _scale_perm_single = _get_perms()
+def unpack_qzeros(qzeros):
+    unpacked_zeros = torch.zeros(
+        (qzeros.shape[0], qzeros.shape[1] * 8),
+        dtype=torch.int8,
+        device=qzeros.device,
+        requires_grad=False,
+    )
+
+    for col in range(unpacked_zeros.shape[1]):
+        i = col % 8
+        unpacked_zeros[:, col] = (qzeros[:, col // 8] >> (4 * i)) & 0xF
+
+    return unpacked_zeros
 
 
-class MarlinQuantLinear(BaseQuantLinear):
-    SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [128, -1]
-    SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SYM = [True]
+def dequantize_qzeros(layer):
+    qzeros = layer.qzeros
+    unpacked_qzeros = unpack_qzeros(qzeros)
+    group_size = layer.group_size
+    unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
-                 bias: bool, **kwargs):
-        if marlin_import_exception is not None:
-            raise ValueError(
-                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
-            )
+    return unpacked_qzeros
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
-        if not torch.cuda.get_device_capability()[0] >= 8:
-            raise ValueError(
-                f'Can not use Marlin int4*fp16 kernel with a device of compute capability {torch.cuda.get_device_capability()}, the minimum compute capability is 8.0 for Marlin kernel. Please do not use `backend=Backend.MARLIN`, or please upgrade your GPU ("The more you buy, the more you save." - Taiwanese proverb).'
-            )
-
-        # if infeatures % 128 != 0 or outfeatures % 256 != 0:
-        #     raise ValueError("`infeatures` must be divisible by 128 and `outfeatures` by 256.")
-        if group_size not in [-1, 128] and group_size != infeatures:
-            raise ValueError("Only group_size -1 and 128 are supported.")
-        # # Marlin groups infeatures according to group_size, so infeatures must be an integer multiple of group_size.
-        # if infeatures % group_size != 0:
-        #     raise ValueError("`infeatures` must be divisible by `group_size`.")
-
-
-        self.original_infeatures = infeatures
-        self.original_outfeatures = outfeatures
-
-        self.infeatures = infeatures + (-infeatures % 128)
-        self.outfeatures = outfeatures + (-outfeatures % 256)
-
-        self.group_size = group_size if group_size != -1 else infeatures
-
-        self.register_buffer(
-            "B",
-            torch.empty((self.infeatures // 16, self.outfeatures * 16 // 8), dtype=torch.int),
-        )
-        self.register_buffer(
-            "s",
-            torch.empty((self.infeatures // self.group_size, self.outfeatures), dtype=torch.half),
-        )
-        # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
-        self.register_buffer(
-            "workspace",
-            torch.zeros(self.outfeatures // 128 * 16, dtype=torch.int),
-            persistent=False,
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
-        else:
-            self.bias = None
-
-
-    def pack(self, linear, scales):
-        """Pack a fake-quantized linear layer into this actual Marlin representation.
-        @linear: fake-quantized `torch.nn.Linear` layer to convert (must be of type `torch.half`)
-        @scales: corresponding quantization scales of shape `(infeatures, groups)`
-        """
-        # 'linear' is a torch.nn.Linear module
-        if linear.weight.dtype != torch.half:
-           #logger.warning(
-           #    f"Only `torch.half` linear.weights are supported. Converting from {linear.weight.dtype} to torch.half")
-           linear.weight.data = linear.weight.data.to(torch.float16)
-
-        tile = 16
-        maxq = 2**4 - 1
-        s = scales.t()
-        w = linear.weight.data.t()
-
-        if self.infeatures != self.original_infeatures or self.outfeatures != self.original_outfeatures:
-            padded_w = torch.zeros((self.infeatures, self.outfeatures), dtype=w.dtype, device=w.device)
-            padded_w[:w.size(0), :w.size(1)] = w
-            w = padded_w
-
-            padded_s = torch.zeros((s.size(0), self.outfeatures), dtype=torch.half, device=s.device)
-            padded_s[:s.size(0), :s.size(1)] = s
-            s = padded_s
-
-        if self.group_size != self.infeatures:
-            w = w.reshape((-1, self.group_size, self.outfeatures))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((self.group_size, -1))
-            s = s.reshape((1, -1))
-        w = torch.round(w / s).int()
-        w += (maxq + 1) // 2
-        w = torch.clamp(w, 0, maxq)
-        if self.group_size != self.infeatures:
-            w = w.reshape((self.group_size, -1, self.outfeatures))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((self.infeatures, self.outfeatures)).contiguous()
-            s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
-        else:
-            s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
-        s = s.reshape((-1, self.outfeatures)).contiguous()
-        w = w.reshape((self.infeatures // tile, tile, self.outfeatures // tile, tile))
-        w = w.permute((0, 2, 1, 3))
-        w = w.reshape((self.infeatures // tile, self.outfeatures * tile))
-        res = w
-        res = res.reshape((-1, _perm.numel()))[:, _perm].reshape(res.shape)
-        q = np.zeros((res.shape[0], res.shape[1] // 8), dtype=np.uint32)
-        res = res.cpu().numpy().astype(np.uint32)
-        for i in range(8):
-            q |= res[:, i::8] << 4 * i
-        q = torch.from_numpy(q.astype(np.int32)).to(w.device)
-
-        self.B[:, :] = q.to(self.B.device)
-        self.s[:, :] = s.to(self.s.device)
-
-        if linear.bias is not None:
-            if self.bias is not None:
-                self.bias[:] = linear.bias.data.to(self.bias.device)
-            else:
-                self.bias = linear.bias.clone()
-
-    def forward(self, A):
-        A = A.half()
-
-        # padding
-        if A.size(-1) != self.infeatures:
-            A = F.pad(A, (0, self.infeatures - self.original_infeatures))
-
-        C = torch.empty(A.shape[:-1] + (self.s.shape[1],), dtype=A.dtype, device=A.device)
-        mul(
-            A.view((-1, A.shape[-1])),
-            self.B,
-            C.view((-1, C.shape[-1])),
-            self.s,
-            self.workspace,
-        )
-        C = C + self.bias if self.bias is not None else C
-
-        # revert padding
-        if self.outfeatures != self.original_outfeatures:
-            return C[:, :, :self.original_outfeatures]
-        else:
-            return C
-
-    def post_init(self):
-        self.validate_device(self.B.device.type)
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
 @torch.no_grad()
@@ -237,21 +411,6 @@ def unpack_4bit_to_32bit_signed(qweight, qzeros):
     return unpacked_weights, unpacked_zeros
 
 
-def unpack_qzeros(qzeros):
-    unpacked_zeros = torch.zeros(
-        (qzeros.shape[0], qzeros.shape[1] * 8),
-        dtype=torch.int8,
-        device=qzeros.device,
-        requires_grad=False,
-    )
-
-    for col in range(unpacked_zeros.shape[1]):
-        i = col % 8
-        unpacked_zeros[:, col] = (qzeros[:, col // 8] >> (4 * i)) & 0xF
-
-    return unpacked_zeros
-
-
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
 @torch.no_grad()
 def dequantize_weight(layer):
@@ -265,14 +424,4 @@ def dequantize_weight(layer):
 
     return unpacked_qweight.T, unpacked_qzeros
 
-
-def dequantize_qzeros(layer):
-    qzeros = layer.qzeros
-    unpacked_qzeros = unpack_qzeros(qzeros)
-    group_size = layer.group_size
-    unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-
-    return unpacked_qzeros
-
-
-__all__ = ["MarlinQuantLinear", "dequantize_weight"]
+__all__ = ["dequantize_weight"]
