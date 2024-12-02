@@ -34,38 +34,63 @@ format_dict = {
 }
 
 
+def hf_select_quant_linear(
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        backend: BACKEND = BACKEND.AUTO,
+        format: FORMAT = FORMAT.GPTQ,
+        pack: bool = False,
+        dynamic=None,
+):
+    return select_quant_linear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        backend=backend,
+        format=format,
+        pack=pack,
+        dynamic=dynamic,
+    )
+
+
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
         bits: int,
         group_size: int,
         desc_act: bool,
         sym: bool,
-        backend: BACKEND,
-        format: FORMAT,
+        backend: BACKEND = BACKEND.AUTO,
+        format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         dynamic=None,
 ):
     # Handle the case where backend is AUTO.
     if backend == BACKEND.AUTO:
-        allow_backends = format_dict[format]
-        err = None
-        for k, values in backend_dict.items():
+        if not torch.cuda.is_available():
+            backend = BACKEND.IPEX
+        else:
+            allow_backends = format_dict[format]
+            err = None
+            for k, values in backend_dict.items():
 
-            for v in values:
-                in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
-                if in_allow_backends and validate:
-                    if pack:
-                        check_pack_func = hasattr(v, "pack")
-                        if check_pack_func:
+                for v in values:
+                    in_allow_backends = k in allow_backends
+                    validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
+                    if in_allow_backends and validate:
+                        if pack:
+                            check_pack_func = hasattr(v, "pack")
+                            if check_pack_func:
+                                logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                                return v
+                        else:
                             logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                             return v
-                    else:
-                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
-                        return v
 
-        if err:
-            raise err
+            if err:
+                raise err
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
