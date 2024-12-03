@@ -30,6 +30,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 
 logger = setup_logger()
@@ -204,6 +205,10 @@ def convert_gptq_v1_to_v2_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: nn.Module,
 ):
+    # skip v1 to v2 conversion for ipex
+    if isinstance(qlinear_kernel, IPEXQuantLinear):
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
@@ -249,6 +254,10 @@ def convert_gptq_v2_to_v1_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: nn.Module,
 ):
+    # skip v2 to v1 conversion for ipex
+    if isinstance(qlinear_kernel, IPEXQuantLinear):
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
