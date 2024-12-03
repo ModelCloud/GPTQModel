@@ -46,6 +46,7 @@ def hf_select_quant_linear(
         pack: bool = False,
         dynamic=None,
 ):
+    # force backend to ipex if cpu/xpu is designated device
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
         if any(dev in devices or torch.device(dev) in devices for dev in ["cpu", "xpu"]):
