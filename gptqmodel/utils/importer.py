@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import torch
+from typing import Optional, Union
 
 from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
@@ -39,7 +40,7 @@ def hf_select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device_map: str = None,
+        device_map: Optional[Union[str, dict]] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
