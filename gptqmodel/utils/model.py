@@ -206,7 +206,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: nn.Module,
 ):
     # skip v1 to v2 conversion for ipex
-    if isinstance(qlinear_kernel, IPEXQuantLinear):
+    if qlinear_kernel == IPEXQuantLinear:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -255,7 +255,7 @@ def convert_gptq_v2_to_v1_format(
     qlinear_kernel: nn.Module,
 ):
     # skip v2 to v1 conversion for ipex
-    if isinstance(qlinear_kernel, IPEXQuantLinear):
+    if qlinear_kernel == IPEXQuantLinear:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression

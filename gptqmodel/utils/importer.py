@@ -1,6 +1,6 @@
 from collections import OrderedDict
-
 import torch
+from typing import Optional, Union
 
 from .backend import BACKEND
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
@@ -40,11 +40,18 @@ def hf_select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
+        device_map: Optional[Union[str, dict]] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         dynamic=None,
 ):
+    # force backend to ipex if cpu/xpu is designated device
+    if device_map is not None:
+        devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
+        if any(dev in devices or torch.device(dev) in devices for dev in ["cpu", "xpu"]):
+            backend = BACKEND.IPEX
+
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
