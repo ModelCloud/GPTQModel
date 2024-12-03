@@ -190,6 +190,15 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
     return QuantLinear
 
 
+def hf_convert_gptq_v1_to_v2_format(
+    model,
+    bits: int,
+    qlinear_kernel: nn.Module,
+):
+    quantize_config = QuantizeConfig(bits=bits)
+    return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel)
+
+
 def convert_gptq_v1_to_v2_format(
     model,
     quantize_config: QuantizeConfig,
@@ -223,6 +232,15 @@ def convert_gptq_v1_to_v2_format(
                     raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
     return model
+
+
+def hf_convert_gptq_v2_to_v1_format(
+    model,
+    bits: int,
+    qlinear_kernel: nn.Module,
+):
+    quantize_config = QuantizeConfig(bits=bits)
+    return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel)
 
 
 def convert_gptq_v2_to_v1_format(
@@ -414,6 +432,11 @@ def simple_dispatch_model(model, device_map):
     model.hf_device_map = device_map
 
     return model
+
+
+def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
+                        max_input_length: Optional[int] = None):
+    return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
 
 
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
