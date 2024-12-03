@@ -205,7 +205,7 @@ def convert_gptq_v1_to_v2_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: nn.Module,
 ):
-    # if use the ipex quant linear, no need to convert
+    # skip v1 to v2 conversion for ipex
     if isinstance(qlinear_kernel, IPEXQuantLinear):
         return model
 
@@ -254,7 +254,7 @@ def convert_gptq_v2_to_v1_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: nn.Module,
 ):
-    # if use the ipex quant linear, no need to convert
+    # skip v2 to v1 conversion for ipex
     if isinstance(qlinear_kernel, IPEXQuantLinear):
         return model
 
