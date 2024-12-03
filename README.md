@@ -57,9 +57,9 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (`avx512_vnni`) and Intel/XPU. 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
-* 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
-* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* 🚀`lm_head` module quant inference support for further VRAM reduction. 
+* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference. 
+* 🚀 Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
+* 🚀`lm_head` module quant inference support for further VRAM reduction (auto-round only). 
 * 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
 * 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
 * 🚀 Model weights sharding support
