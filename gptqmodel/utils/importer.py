@@ -34,6 +34,7 @@ format_dict = {
 }
 
 
+# public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
         bits: int,
         group_size: int,
