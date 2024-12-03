@@ -204,6 +204,10 @@ def convert_gptq_v1_to_v2_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: nn.Module,
 ):
+    # if use the ipex quant linear, no need to convert
+    if qlinear_kernel.__name__ == "IPEXQuantLinear":
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
@@ -249,6 +253,10 @@ def convert_gptq_v2_to_v1_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: nn.Module,
 ):
+    # if use the ipex quant linear, no need to convert
+    if qlinear_kernel.__name__ == "IPEXQuantLinear":
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
