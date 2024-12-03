@@ -1,5 +1,4 @@
 from collections import OrderedDict
-
 import torch
 
 from .backend import BACKEND
@@ -40,11 +39,17 @@ def hf_select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
+        device_map: str = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         dynamic=None,
 ):
+    if device_map is not None:
+        devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
+        if "cpu" in devices or torch.device("cpu") in devices or "xpu" in devices or torch.device("xpu") in devices:
+            backend = BACKEND.IPEX
+
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
