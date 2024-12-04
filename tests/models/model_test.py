@@ -1,6 +1,7 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import contextlib  # noqa: E402
@@ -8,7 +9,8 @@ import gc  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
-
+import numpy# noqa: E402
+import random# noqa: E402
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
@@ -18,6 +20,11 @@ from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+RAND_SEED = 898
+torch.manual_seed(RAND_SEED)
+numpy.random.seed(RAND_SEED)
+random.seed(RAND_SEED)
+torch.cuda.manual_seed_all(RAND_SEED)
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
