@@ -13,6 +13,7 @@ class BACKEND(Enum):
     SGLANG = 8
     CUDA = 9
     TORCH = 10
+    AUTO_CPU = 11
 
 def get_backend(backend: str):
     try:
