@@ -127,8 +127,9 @@ def select_quant_linear(
 
         # Fallback to IPEX/CPU if cpu supports AVX512
         from device_smi import Device
-        if "avx512_vnni" not in Device("cpu").features:
-            raise ValueError("IPEX/CPU requires minimum avx512_vnni support.")
+
+        if Device("cpu").vendor != "intel":
+            logger.warning("you're trying to run ipex whithout a Intel CPU. it's supported but would be slower")
 
         return IPEXQuantLinear
     elif backend == BACKEND.TORCH:
