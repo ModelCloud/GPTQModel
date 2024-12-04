@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import isdir, join
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, List
 
 from packaging import version
 from transformers.utils.hub import cached_file
@@ -185,23 +185,32 @@ class QuantizeConfig():
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_set_versionable(self, key: str, value: str, version: str):
-        self.meta_set(key, f"{value}:{version}")
+        self.meta_set(key, [f"{value}:{version}"])
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_get_versionable(self, key: str) -> Tuple[str, str]:
-        val = self.meta_get(key)
-        if val is None:
-            return None, None
-        parts = val.split(":")
-        return parts[0].lower(), parts[1].lower() if len(parts) >= 2 else None
+    def meta_get_versionable(self, key: str) -> List[Tuple[str, str]]:
+        values = self.meta_get(key)
+        if values is None:
+            return []
+        if not isinstance(values, list):
+            values = [values]
+        result = []
+        for val in values:
+            parts = val.split(":")
+            if len(parts) >= 2:
+                result.append((parts[0].lower(), parts[1].lower()))
+        return result
 
     # is quantized model quantized or packed by gptqmodel version with v2 format code
     def is_quantized_by_v2(self) -> bool:
         # check meta.quantizer
-        producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
+        result = self.meta_get_versionable(META_FIELD_QUANTIZER)
+        if len(result) > 0:
+            for producer, _version in result:
+                if producer == META_QUANTIZER_GPTQMODEL:
+                    return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
 
-        return by_v2
+        return False
 
     def save_pretrained(self, save_dir: str, **kwargs):
         with open(join(save_dir, QUANT_CONFIG_FILENAME), "w", encoding="utf-8") as f:
