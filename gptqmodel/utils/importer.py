@@ -1,8 +1,9 @@
 from collections import OrderedDict
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, Type
 
 import torch
 
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
@@ -58,7 +59,7 @@ def hf_select_quant_linear(
         pack: bool,
         checkpoint_format: str,
         meta: Optional[Dict[str, any]],
-):
+) -> Type[BaseQuantLinear]:
     # force backend to ipex if cpu/xpu is designated device
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
@@ -91,7 +92,7 @@ def select_quant_linear(
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         dynamic=None,
-):
+) -> Type[BaseQuantLinear]:
     if not torch.cuda.is_available():
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             backend = BACKEND.IPEX
