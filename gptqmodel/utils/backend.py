@@ -3,7 +3,7 @@ from enum import Enum
 
 class BACKEND(Enum):
     AUTO = 0  # choose the fastest one based on quant model compatibility
-    AUTO_CPU = 1
+    AUTO_CPU = 1 # choose the fastet cpu-only compatible kernel; for transformer/optimum compat
     CUDA = 2
     TORCH = 3
     TRITON = 4
