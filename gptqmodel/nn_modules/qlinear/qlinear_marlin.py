@@ -145,6 +145,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_SYM = [True]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    QUANT_TYPE = "marlin"
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):

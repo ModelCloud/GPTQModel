@@ -15,6 +15,7 @@ logger = setup_logger()
 class TorchQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU, DEVICE.CUDA]
+    QUANT_TYPE = "torch"
 
     def __init__(
         self,

@@ -23,6 +23,7 @@ except ImportError as e:
 class CudaQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    QUANT_TYPE = "cuda"
 
     def __init__(
             self,
