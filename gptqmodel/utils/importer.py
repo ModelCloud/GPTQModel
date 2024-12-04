@@ -56,7 +56,6 @@ def hf_select_quant_linear(
         desc_act: bool,
         sym: bool,
         device_map: Optional[Union[str, dict]],
-        pack: bool,
         checkpoint_format: str,
         meta: Optional[Dict[str, any]],
 ) -> Type[BaseQuantLinear]:
@@ -77,7 +76,7 @@ def hf_select_quant_linear(
         sym=sym,
         backend=backend,
         format=FORMAT.GPTQ,
-        pack=pack,
+        pack=True,
         dynamic=None,
     )
 
