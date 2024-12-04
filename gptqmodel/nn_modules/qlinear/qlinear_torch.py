@@ -4,10 +4,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
+
 from ...models._const import DEVICE
 
 logger = setup_logger()

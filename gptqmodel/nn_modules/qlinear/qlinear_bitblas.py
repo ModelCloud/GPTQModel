@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...utils.logger import setup_logger
 from ...models._const import DEVICE
+from ...utils.logger import setup_logger
 
 logger = setup_logger()
 

@@ -1,18 +1,19 @@
 from collections import OrderedDict
-import torch
 from typing import Optional, Union
 
-from .backend import BACKEND
+import torch
+
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..nn_modules.qlinear.qlinear_torch import TorchQuantLinear
+from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
+from .backend import BACKEND
 
 logger = setup_logger()
 
