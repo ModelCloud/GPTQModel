@@ -33,12 +33,12 @@ class CudaQuantLinear(TorchQuantLinear):
             infeatures: int,
             outfeatures: int,
             bias: bool,
-            kernel_switch_threshold=128,
             weight_dtype=torch.float16,
+            kernel_switch_threshold=128,
             **kwargs,
     ):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,
-                         outfeatures=outfeatures, **kwargs)
+                         outfeatures=outfeatures, bias=bias, weight_dtype=weight_dtype, **kwargs)
 
         self.kernel_switch_threshold = kernel_switch_threshold
         self.gptqmodel_cuda_available = _gptqmodel_cuda_available
