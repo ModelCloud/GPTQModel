@@ -2,6 +2,7 @@ import torch
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.nn_modules.qlinear.qlinear_torch import TorchQuantLinear
+from ...models._const import DEVICE
 
 logger = setup_logger()
 
@@ -21,6 +22,7 @@ except ImportError as e:
 
 class CudaQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
 
     def __init__(
             self,

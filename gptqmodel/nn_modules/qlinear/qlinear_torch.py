@@ -8,12 +8,13 @@ import transformers
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
+from ...models._const import DEVICE
 
 logger = setup_logger()
 
 class TorchQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
-    SUPPORTS_DEVICES = [] # empty means all devices are supported.
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU, DEVICE.CUDA]
 
     def __init__(
         self,

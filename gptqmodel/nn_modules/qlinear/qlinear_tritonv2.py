@@ -9,6 +9,7 @@ from packaging import version
 from ...utils.logger import setup_logger
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
+from ...models._const import DEVICE
 
 try:
     from triton import __version__ as triton_version
@@ -29,6 +30,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
 
     """
     Triton v2 quantized linear layer.

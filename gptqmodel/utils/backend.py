@@ -12,6 +12,7 @@ class BACKEND(Enum):
     VLLM = 7
     SGLANG = 8
     CUDA = 9
+    TORCH = 10
 
 def get_backend(backend: str):
     try:

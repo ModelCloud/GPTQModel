@@ -12,6 +12,7 @@ import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...utils.logger import setup_logger
+from ...models._const import DEVICE
 
 logger = setup_logger()
 
@@ -78,6 +79,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [16]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"

@@ -12,7 +12,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS: bool = True
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_DEVICES = [] # Empty or None means no device is supported.
     # empty which means all
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = []
     # empty which means all
@@ -101,7 +101,9 @@ class BaseQuantLinear(nn.Module):
     @classmethod
     def validate_device(cls, device_type: str):
         device = get_device_by_type(device_type)
-        if cls.SUPPORTS_DEVICES and device not in cls.SUPPORTS_DEVICES:
+        if cls.SUPPORTS_DEVICES is None or len(cls.SUPPORTS_DEVICES) == 0:
+            raise NotImplementedError(f"{cls} does not support any devices, SUPPORTS_DEVICES is `{cls.SUPPORTS_DEVICES}`.")
+        if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}` bits: actual device = `{device}`")
 
     # override me

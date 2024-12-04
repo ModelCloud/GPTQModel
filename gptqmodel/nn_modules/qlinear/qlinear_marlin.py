@@ -8,6 +8,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from ...models._const import DEVICE
 
 marlin_import_exception = None
 try:
@@ -143,6 +144,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
                  bias: bool, **kwargs):
