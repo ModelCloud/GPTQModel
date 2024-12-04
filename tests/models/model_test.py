@@ -35,7 +35,9 @@ class ModelTest(unittest.TestCase):
     DELETE_QUANTIZED_MODEL = True
 
     # quant config
+    QUANT_FORMAT = FORMAT.GPTQ
     DESC_ACT = True
+    SYM = True
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -83,8 +85,9 @@ class ModelTest(unittest.TestCase):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
-            format=FORMAT.GPTQ,
+            format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
+            sym=self.SYM,
         )
         model = GPTQModel.load(
             model_id_or_path,
