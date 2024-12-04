@@ -1,3 +1,5 @@
+# License: GPTQModel/licenses/LICENSE.apache
+
 import torch
 from gptqmodel.nn_modules.qlinear.qlinear_torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
