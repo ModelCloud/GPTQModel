@@ -8,7 +8,6 @@ import gc  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
-
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
@@ -18,6 +17,7 @@ from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+RAND_SEED = 898
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
@@ -156,6 +156,11 @@ class ModelTest(unittest.TestCase):
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
+                    gen_kwargs="temperature=0.0,top_k=50",
+                    random_seed = RAND_SEED,
+                    numpy_random_seed = RAND_SEED,
+                    torch_random_seed = RAND_SEED,
+                    fewshot_random_seed = RAND_SEED,
                 )
 
                 print('--------Eval Result---------')
