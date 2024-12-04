@@ -1,3 +1,4 @@
+# License: GPTQModel/licenses/LICENSE.apache
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
 import math

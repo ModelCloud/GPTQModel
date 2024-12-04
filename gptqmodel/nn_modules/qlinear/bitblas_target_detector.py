@@ -1,3 +1,5 @@
+# TODO replace with device-smi checks
+
 # Copyright (c) Microsoft Corporation.
 # License: GPTQModel/licenses/LICENSE.mit
 import os

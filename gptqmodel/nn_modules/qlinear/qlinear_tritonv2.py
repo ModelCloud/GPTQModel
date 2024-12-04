@@ -1,3 +1,5 @@
+# License: GPTQModel/licenses/LICENSE.apache
+
 import math
 
 import numpy as np
