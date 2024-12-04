@@ -1,6 +1,7 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
+from typing import Tuple, Optional
 
 import numpy as np
 import torch
@@ -121,6 +122,13 @@ class IPEXQuantLinear(BaseQuantLinear):
 
         # for training forward
         self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
+
+    @classmethod
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> Tuple[
+        bool, Optional[Exception]]:
+        if not IPEX_AVAILABLE:
+            return False, IPEX_ERROR_LOG
+        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic)
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)

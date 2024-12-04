@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import transformers
 from packaging import version
-
+from typing import Tuple, Optional
 from ...models._const import DEVICE
 from ...utils.logger import setup_logger
 from ..triton_utils.mixin import TritonModuleMixin
@@ -81,6 +81,13 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
         else:
             self.bias = None
+
+    @classmethod
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> Tuple[
+        bool, Optional[Exception]]:
+        if not TRITON_AVAILABLE:
+            return False, ValueError(TRITON_INSTALL_HINT)
+        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic)
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)
