@@ -6,8 +6,8 @@ import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...utils.logger import setup_logger
 from ...models._const import DEVICE
+from ...utils.logger import setup_logger
 
 exllama_v2_import_exception = None
 try:
@@ -107,6 +107,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "exllamav2"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 

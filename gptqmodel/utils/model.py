@@ -20,18 +20,17 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from .backend import BACKEND
-from .exllama import exllama_set_max_input_length
-from .importer import select_quant_linear
-from .logger import setup_logger
-from .progress import ProgressBar
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
+from .backend import BACKEND
+from .importer import select_quant_linear
+from .logger import setup_logger
+from .progress import ProgressBar
 
 logger = setup_logger()
 

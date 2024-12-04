@@ -1,12 +1,9 @@
 # -- do not touch
-import contextlib
 import os
-
-from gptqmodel.utils.lm_eval import lm_eval
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-
+import contextlib  # noqa: E402
 import gc  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
@@ -17,6 +14,7 @@ from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -94,7 +92,7 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
-            device_map={"":"cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -134,7 +132,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
-            device_map={"":"cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         return model, tokenizer

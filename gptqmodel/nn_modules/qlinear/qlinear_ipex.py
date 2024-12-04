@@ -51,6 +51,8 @@ def convert_dtype_torch2str(dtype):
 class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "ipex"
 
     def __init__(
         self,
