@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
@@ -240,18 +240,25 @@ def convert_gptq_v1_to_v2_format(
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v2_to_v1_format(
-    model,
+    model: nn.Module,
+    sym: bool,
     bits: int,
-    qlinear_kernel: nn.Module,
-):
-    quantize_config = QuantizeConfig(bits=bits)
-    return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel)
+    qlinear_kernel: Type[BaseQuantLinear],
+    checkpoint_format: str,
+    meta: Optional[Dict[str, any]],
+) -> Tuple[nn.Module, bool]:
+    # note: sym=False is valid for gptq_v2 for all gptqmodel and gptq(v1) for gptqmodel >= `0.9.0`
+    if sym and checkpoint_format == "gptq_v2":
+        quantize_config = QuantizeConfig(bits=bits)
+        return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel), True
+    else:
+        return model, False
 
 
 def convert_gptq_v2_to_v1_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+    qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for ipex
     if qlinear_kernel == IPEXQuantLinear:
