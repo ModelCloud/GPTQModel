@@ -3,17 +3,17 @@ from enum import Enum
 
 class BACKEND(Enum):
     AUTO = 0  # choose the fastest one based on quant model compatibility
-    TRITON = 1
-    EXLLAMA_V1 = 2
-    EXLLAMA_V2 = 3
-    MARLIN = 4
-    BITBLAS = 5
-    IPEX = 6
-    VLLM = 7
-    SGLANG = 8
-    CUDA = 9
-    TORCH = 10
-    AUTO_CPU = 11
+    AUTO_CPU = 1
+    TRITON = 2
+    EXLLAMA_V1 = 3
+    EXLLAMA_V2 = 4
+    MARLIN = 5
+    BITBLAS = 6
+    IPEX = 7
+    VLLM = 8
+    SGLANG = 9
+    CUDA = 10
+    TORCH = 11
 
 def get_backend(backend: str):
     try:
