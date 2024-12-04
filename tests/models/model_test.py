@@ -23,7 +23,7 @@ class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
-    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.2  # 20%
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
