@@ -1,18 +1,19 @@
 from collections import OrderedDict
-import torch
 from typing import Optional, Union
 
-from .backend import BACKEND
+import torch
+
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..nn_modules.qlinear.qlinear_torch import TorchQuantLinear
+from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
+from .backend import BACKEND
 
 logger = setup_logger()
 
@@ -125,10 +126,12 @@ def select_quant_linear(
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return IPEXQuantLinear
 
-        # Fallback to IPEX/CPU if cpu supports AVX512
+        # Fallback to IPEX/CPU
         from device_smi import Device
-        if "avx512_vnni" not in Device("cpu").features:
-            raise ValueError("IPEX/CPU requires minimum avx512_vnni support.")
+
+        cpu_vendor = Device("cpu").vendor
+        if cpu_vendor != "intel":
+            logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Running on non-Intel cpu is not guaranteed. Current cpu vendor: `{cpu_vendor}`.")
 
         return IPEXQuantLinear
     elif backend == BACKEND.TORCH:

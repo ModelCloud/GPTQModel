@@ -6,8 +6,8 @@ import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...utils.logger import setup_logger
 from ...models._const import DEVICE
+from ...utils.logger import setup_logger
 
 exllama_v2_import_exception = None
 try:

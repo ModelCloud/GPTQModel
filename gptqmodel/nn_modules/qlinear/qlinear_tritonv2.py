@@ -6,10 +6,10 @@ import torch.nn as nn
 import transformers
 from packaging import version
 
+from ...models._const import DEVICE
 from ...utils.logger import setup_logger
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
-from ...models._const import DEVICE
 
 try:
     from triton import __version__ as triton_version
