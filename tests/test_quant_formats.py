@@ -82,10 +82,13 @@ class TestQuantization(unittest.TestCase):
             )
 
             logging.info(f"Loaded config: {model.quantize_config}")
-            assert model.quantize_config.meta_get_versionable(META_FIELD_QUANTIZER) == (
-                META_QUANTIZER_GPTQMODEL,
-                __version__,
-            )
+
+            versionable = model.quantize_config.meta_get_versionable(META_FIELD_QUANTIZER)
+            assert META_QUANTIZER_GPTQMODEL in [v[0] for v in versionable]
+            for producer, _version in versionable:
+                if producer == META_QUANTIZER_GPTQMODEL:
+                    assert _version == __version__
+
             del model
             torch.cuda.empty_cache()
 
