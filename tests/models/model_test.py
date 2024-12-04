@@ -65,10 +65,12 @@ class ModelTest(unittest.TestCase):
         print(f"Result is: \n{output}")
         return output
 
+    @classmethod
     def load_tokenizer(self, model_id_or_path, trust_remote_code=False):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 
+    @classmethod
     def load_dataset(self, tokenizer):
         traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz", split="train")
         datas = []
