@@ -41,8 +41,8 @@ format_dict = {
 }
 
 format_dict_cpu = {
-    FORMAT.GPTQ: [IPEXQuantLinear, TorchQuantLinear],
-    FORMAT.GPTQ_V2: [IPEXQuantLinear, TorchQuantLinear],
+    FORMAT.GPTQ: [BACKEND.IPEX, BACKEND.TORCH],
+    FORMAT.GPTQ_V2: [BACKEND.TORCH],
     FORMAT.IPEX: [BACKEND.IPEX],
 }
 
