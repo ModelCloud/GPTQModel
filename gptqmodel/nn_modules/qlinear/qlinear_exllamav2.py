@@ -107,6 +107,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "exllamav2"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
