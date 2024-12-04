@@ -188,10 +188,10 @@ class QuantizeConfig():
         self.meta_set(key, [f"{value}:{version}"])
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_get_versionable(self, key: str) -> Optional[List[Tuple[str, str]]]:
+    def meta_get_versionable(self, key: str) -> List[Tuple[str, str]]:
         values = self.meta_get(key)
         if values is None:
-            return None
+            return []
         if not isinstance(values, list):
             values = [values]
         result = []
@@ -205,7 +205,7 @@ class QuantizeConfig():
     def is_quantized_by_v2(self) -> bool:
         # check meta.quantizer
         result = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        if result:
+        if len(result) > 0:
             for producer, _version in result:
                 by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
                 return by_v2
