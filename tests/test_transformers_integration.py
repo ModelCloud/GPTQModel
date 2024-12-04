@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
