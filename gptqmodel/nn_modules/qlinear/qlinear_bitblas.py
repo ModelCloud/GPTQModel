@@ -92,6 +92,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         torch.half: "float16",
         torch.int8: "int8",
     }
+    # for transformers/optimum tests compat
     QUANT_TYPE = "bitblas"
 
     def __init__(
