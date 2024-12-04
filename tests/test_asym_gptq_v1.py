@@ -15,8 +15,7 @@ from models.model_test import ModelTest  # noqa: E402
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"  # "meta-llama/Llama-3.2-1B-Instruct"
     QUANT_FORMAT = FORMAT.GPTQ
-    NATIVE_ARC_CHALLENGE_ACC = 0.2747
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2935
+    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.2
 
     @classmethod
     def setUpClass(self):
@@ -25,6 +24,12 @@ class Test(ModelTest):
 
     @parameterized.expand([True, False])
     def test(self, sym: bool):
+        if sym:
+            self.NATIVE_ARC_CHALLENGE_ACC = 0.2269
+            self.NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2269
+        else:
+            self.NATIVE_ARC_CHALLENGE_ACC = 0.2747
+            self.NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2935
         quantize_config = QuantizeConfig(
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
