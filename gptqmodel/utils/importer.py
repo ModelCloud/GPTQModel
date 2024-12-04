@@ -130,7 +130,7 @@ def select_quant_linear(
 
         cpu_vendor = Device("cpu").vendor
         if cpu_vendor != "intel":
-            logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Running on non-Intel cpus is not guaranteed. Current cpu vendor: `{cpu_vendor}`.")
+            logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Running on non-Intel cpu is not guaranteed. Current cpu vendor: `{cpu_vendor}`.")
 
         return IPEXQuantLinear
     elif backend == BACKEND.TORCH:
