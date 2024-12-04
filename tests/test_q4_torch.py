@@ -18,7 +18,7 @@ class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
             (torch.bfloat16, "cpu"),
-            (torch.float16, "cpu"),
+            (torch.float32, "cpu"),
         ]
     )
     def test_generation_desc_act_true(self, torch_dtype, device):
@@ -60,7 +60,7 @@ class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
             (torch.bfloat16, "cpu"),
-            (torch.float16, "cpu"),
+            (torch.float32, "cpu"),
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
