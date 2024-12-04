@@ -125,11 +125,12 @@ def select_quant_linear(
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             return IPEXQuantLinear
 
-        # Fallback to IPEX/CPU if cpu supports AVX512
+        # Fallback to IPEX/CPU
         from device_smi import Device
 
-        if Device("cpu").vendor != "intel":
-            logger.warning("you're trying to run ipex whithout a Intel CPU. it's supported but would be slower")
+        cpu_vendor = Device("cpu").vendor
+        if cpu_vendor != "intel":
+            logger.warning(f"Intel/IPEX cpu kernel is validated on Intel cpu only. It may not run on non-Intel cpus or run non-optimally. Current cpu vendor: `{cpu_vendor}`.")
 
         return IPEXQuantLinear
     elif backend == BACKEND.TORCH:
