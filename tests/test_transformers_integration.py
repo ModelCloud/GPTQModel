@@ -35,19 +35,22 @@ class TestTransformersIntegration(unittest.TestCase):
         gptq_config = GPTQConfig(bits=4, dataset=dataset, tokenizer=tokenizer)
         quantized_model = AutoModelForCausalLM.from_pretrained(model_id, device_map=device_map,
                                                                quantization_config=gptq_config)
-        quantized_model.save_pretrained("./opt-125m-gptq")
-        tokenizer.save_pretrained("./opt-125m-gptq")
 
-        model = AutoModelForCausalLM.from_pretrained("./opt-125m-gptq", device_map=device_map)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            quantized_model.save_pretrained(tmp_dir)
+            tokenizer.save_pretrained(tmp_dir)
+            del quantized_model
 
-        generate_str = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
+            model = AutoModelForCausalLM.from_pretrained(tmp_dir, device_map=device_map)
 
-        expect_str = "</s>gptqmodel is a good way to get a good way for a good way for a good way."
+            generate_str = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
 
-        print('generate_str',generate_str)
-        print('expect_str',expect_str)
+            expect_str = "</s>gptqmodel is a good way to get a good way for a good way for a good way."
 
-        self.assertEqual(generate_str[:40], expect_str[:40])
+            print('generate_str',generate_str)
+            print('expect_str',expect_str)
+
+            self.assertEqual(generate_str[:40], expect_str[:40])
 
     def test_load_quantized_model_gptq_v1_ipex(self):
         self._test_load_quantized_model_gptq_v1(device_map="cpu")

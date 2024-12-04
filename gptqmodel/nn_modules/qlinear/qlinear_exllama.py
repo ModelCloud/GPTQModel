@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from ...models._const import DEVICE
 
 exllama_import_exception = None
 try:
@@ -43,6 +44,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 

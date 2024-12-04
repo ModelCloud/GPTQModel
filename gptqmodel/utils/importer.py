@@ -10,6 +10,7 @@ from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
+from ..nn_modules.qlinear.qlinear_torch import TorchQuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 
@@ -23,6 +24,7 @@ backend_dict = OrderedDict({
     BACKEND.CUDA: [CudaQuantLinear],
     BACKEND.BITBLAS: [BitBLASQuantLinear],
     BACKEND.IPEX: [IPEXQuantLinear],
+    BACKEND.TORCH: [TorchQuantLinear],
 })
 
 format_dict = {
@@ -129,5 +131,7 @@ def select_quant_linear(
             raise ValueError("IPEX/CPU requires minimum avx512_vnni support.")
 
         return IPEXQuantLinear
+    elif backend == BACKEND.TORCH:
+        return TorchQuantLinear
     else:
-        return CudaQuantLinear
+        return TorchQuantLinear
