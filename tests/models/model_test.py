@@ -22,7 +22,7 @@ RAND_SEED = 898
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.15  # -15%
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
     QUANT_ARC_MAX_POSITIVE_DELTA = 0.2  # 20%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
@@ -221,7 +221,7 @@ class ModelTest(unittest.TestCase):
     def check_results(self, task_results):
         for filter, value in task_results.items():
             diff_pct = self.calculatorPer(filter=filter, value=value)
-            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct,
                             f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
