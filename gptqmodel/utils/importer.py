@@ -54,11 +54,11 @@ def hf_select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device_map: Optional[Union[str, dict]] = None,
-        pack: bool = False,
-        meta: Optional[Dict[str, any]] = None,
+        device_map: Optional[Union[str, dict]],
+        pack: bool,
+        checkpoint_format: str,
+        meta: Optional[Dict[str, any]],
 ):
-    backend: BACKEND = BACKEND.AUTO
     # force backend to ipex if cpu/xpu is designated device
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
