@@ -17,7 +17,8 @@ GENERATE_EVAL_SIZE = 100
 class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
-            (torch.float32, "cpu"),
+            (torch.float16, "cpu"),
+            (torch.bfloat16, "cpu"),
         ]
     )
     def test_generation_desc_act_true(self, torch_dtype, device):
@@ -58,7 +59,8 @@ class TestsQ4Torch(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (torch.float32, "cpu"),
+            (torch.bfloat16, "cpu"),
+            (torch.float16, "cpu"),
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
