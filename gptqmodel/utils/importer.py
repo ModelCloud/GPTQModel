@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 
 import torch
 
@@ -44,11 +44,10 @@ def hf_select_quant_linear(
         desc_act: bool,
         sym: bool,
         device_map: Optional[Union[str, dict]] = None,
-        backend: BACKEND = BACKEND.AUTO,
-        format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
-        dynamic=None,
+        meta: Optional[Dict[str, any]] = None,
 ):
+    backend: BACKEND = BACKEND.AUTO
     # force backend to ipex if cpu/xpu is designated device
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
@@ -61,9 +60,9 @@ def hf_select_quant_linear(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
-        format=format,
+        format=FORMAT.GPTQ,
         pack=pack,
-        dynamic=dynamic,
+        dynamic=None,
     )
 
 
