@@ -191,18 +191,23 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
-    model,
+    model: nn.Module,
     bits: int,
-    qlinear_kernel: nn.Module,
-):
-    quantize_config = QuantizeConfig(bits=bits)
-    return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel)
+    qlinear_kernel: Type[BaseQuantLinear],
+    checkpoint_format: str,
+    meta: Optional[Dict[str, any]],
+) -> Tuple[nn.Module, bool]:
+    if checkpoint_format == "gptq":
+        quantize_config = QuantizeConfig(bits=bits)
+        return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel), True
+    else:
+        return model, False
 
 
 def convert_gptq_v1_to_v2_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+    qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v1 to v2 conversion for ipex
     if qlinear_kernel == IPEXQuantLinear:
