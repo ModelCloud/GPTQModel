@@ -207,8 +207,8 @@ class QuantizeConfig():
         result = self.meta_get_versionable(META_FIELD_QUANTIZER)
         if len(result) > 0:
             for producer, _version in result:
-                by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
-                return by_v2
+                if producer == META_QUANTIZER_GPTQMODEL:
+                    return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
 
         return False
 
