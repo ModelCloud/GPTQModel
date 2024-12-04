@@ -61,6 +61,8 @@ class TestsQ4Torch(unittest.TestCase):
         [
             (torch.bfloat16, "cpu"),
             (torch.float16, "cuda"),
+            # TODO: pending pytorch fix https://github.com/pytorch/pytorch/issues/100932
+            # (torch.float16, "cpu"),
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
