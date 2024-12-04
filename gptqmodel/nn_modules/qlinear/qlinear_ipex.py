@@ -134,7 +134,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.validate_device(self.qweight.device.type)
         assert self.qweight.device.type in ("cpu", "xpu")
 
-    def init_ipex_linear(self, x):
+    def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and IPEX_AVAILABLE and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros, \
                                                                     self.infeatures, self.outfeatures, None, self.bias, \
