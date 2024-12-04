@@ -134,8 +134,8 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.validate_device(self.qweight.device.type)
         assert self.qweight.device.type in ("cpu", "xpu")
 
-    def init_ipex_linear(self):
-        if not self.training and IPEX_AVAILABLE:
+    def init_ipex_linear(self, x):
+        if not self.training and IPEX_AVAILABLE and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros, \
                                                                     self.infeatures, self.outfeatures, None, self.bias, \
                                                                     self.group_size, self.g_idx, quant_method=0, dtype=0)
@@ -199,7 +199,7 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     def forward(self, x: torch.Tensor):
         if not self.init_ipex:
-            self.init_ipex_linear()
+            self.init_ipex_linear(x)
             self.init_ipex = True
 
         if hasattr(self, "ipex_linear"):

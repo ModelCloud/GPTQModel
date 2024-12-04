@@ -63,6 +63,8 @@ def hf_select_quant_linear(
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
         if any(dev in devices or torch.device(dev) in devices for dev in ["cpu", "xpu"]):
             backend = BACKEND.IPEX
+        else:
+            backend = BACKEND.AUTO
     else:
         backend = BACKEND.AUTO_CPU
 
