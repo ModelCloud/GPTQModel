@@ -2,8 +2,8 @@ from enum import Enum
 
 
 class BACKEND(Enum):
-    AUTO = 0  # choose the fastest one based on quant model compatibility
-    AUTO_CPU = 1
+    AUTO = 0  # choose the fastest compatible kernel cpu/gpu/xpu
+    AUTO_CPU = 1 # choose the fastet cpu-only compatible kernel; for transformer/optimum compat
     TRITON = 2
     EXLLAMA_V1 = 3
     EXLLAMA_V2 = 4
