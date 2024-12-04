@@ -2,17 +2,18 @@ from enum import Enum
 
 
 class BACKEND(Enum):
-    AUTO = 0  # choose the fastest one based on quant model compatibility
-    TRITON = 1
-    EXLLAMA_V1 = 2
-    EXLLAMA_V2 = 3
-    MARLIN = 4
-    BITBLAS = 5
-    IPEX = 6
-    VLLM = 7
-    SGLANG = 8
-    CUDA = 9
-    TORCH = 10
+    AUTO = 0  # choose the optimal local kernel based on quant_config compatibility
+    AUTO_CPU = 1 # choose the optimal cpu-only local kernel; for transformer/optimum compat
+    CUDA = 2
+    TORCH = 3
+    TRITON = 4
+    EXLLAMA_V1 = 5
+    EXLLAMA_V2 = 6
+    MARLIN = 7
+    BITBLAS = 8
+    IPEX = 9
+    VLLM = 10 # external inference engine
+    SGLANG = 11 # external inference engine
 
 def get_backend(backend: str):
     try:

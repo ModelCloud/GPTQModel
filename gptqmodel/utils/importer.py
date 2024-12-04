@@ -28,11 +28,22 @@ backend_dict = OrderedDict({
     BACKEND.TORCH: [TorchQuantLinear],
 })
 
+backend_dict_cpu = OrderedDict({
+    BACKEND.IPEX: [IPEXQuantLinear],
+    BACKEND.TORCH: [TorchQuantLinear],
+})
+
 format_dict = {
     FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA],
     FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
+    FORMAT.IPEX: [BACKEND.IPEX],
+}
+
+format_dict_cpu = {
+    FORMAT.GPTQ: [BACKEND.IPEX, BACKEND.TORCH],
+    FORMAT.GPTQ_V2: [BACKEND.TORCH],
     FORMAT.IPEX: [BACKEND.IPEX],
 }
 
@@ -44,8 +55,6 @@ def hf_select_quant_linear(
         desc_act: bool,
         sym: bool,
         device_map: Optional[Union[str, dict]] = None,
-        backend: BACKEND = BACKEND.AUTO,
-        format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         dynamic=None,
 ):
@@ -54,6 +63,8 @@ def hf_select_quant_linear(
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
         if any(dev in devices or torch.device(dev) in devices for dev in ["cpu", "xpu"]):
             backend = BACKEND.IPEX
+    else:
+        backend = BACKEND.AUTO_CPU
 
     return select_quant_linear(
         bits=bits,
@@ -61,7 +72,7 @@ def hf_select_quant_linear(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
-        format=format,
+        format=FORMAT.GPTQ,
         pack=pack,
         dynamic=dynamic,
     )
@@ -78,30 +89,33 @@ def select_quant_linear(
         pack: bool = False,
         dynamic=None,
 ):
-    # Handle the case where backend is AUTO.
-    if backend == BACKEND.AUTO:
-        if not torch.cuda.is_available():
+    if not torch.cuda.is_available():
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
             backend = BACKEND.IPEX
         else:
-            allow_backends = format_dict[format]
-            err = None
-            for k, values in backend_dict.items():
+            backend = BACKEND.AUTO_CPU
 
-                for v in values:
-                    in_allow_backends = k in allow_backends
-                    validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
-                    if in_allow_backends and validate:
-                        if pack:
-                            check_pack_func = hasattr(v, "pack")
-                            if check_pack_func:
-                                logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
-                                return v
-                        else:
+    # Handle the case where backend is AUTO.
+    if backend == BACKEND.AUTO or backend == BACKEND.AUTO_CPU:
+        allow_backends = format_dict[format] if backend == BACKEND.AUTO else format_dict_cpu[format]
+        allow_quant_linears = backend_dict if backend == BACKEND.AUTO else backend_dict_cpu
+        err = None
+        for k, values in allow_quant_linears.items():
+            for v in values:
+                in_allow_backends = k in allow_backends
+                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
+                if in_allow_backends and validate:
+                    if pack:
+                        check_pack_func = hasattr(v, "pack")
+                        if check_pack_func:
                             logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                             return v
+                    else:
+                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        return v
 
-            if err:
-                raise err
+        if err:
+            raise err
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
@@ -123,10 +137,6 @@ def select_quant_linear(
         if not IPEX_AVAILABLE:
             raise ValueError("IPEX is not available.")
 
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            return IPEXQuantLinear
-
-        # Fallback to IPEX/CPU
         from device_smi import Device
 
         cpu_vendor = Device("cpu").vendor

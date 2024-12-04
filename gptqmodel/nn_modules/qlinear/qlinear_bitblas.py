@@ -4,7 +4,7 @@ import ctypes
 import operator
 import os
 from functools import reduce
-from typing import List, Union
+from typing import List, Union, Tuple, Optional
 
 import numpy as np
 import torch
@@ -128,6 +128,13 @@ class BitBLASQuantLinear(BaseQuantLinear):
         )
         self._initialize_buffers(infeatures, outfeatures, bias)
         self.reset_parameters()
+
+    @classmethod
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> Tuple[
+        bool, Optional[Exception]]:
+        if not BITBLAS_AVAILABLE:
+            return False, ValueError(BITBLAS_INSTALL_HINT)
+        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic)
 
     def _validate_parameters(
         self, group_size: int, infeatures: int, outfeatures: int
