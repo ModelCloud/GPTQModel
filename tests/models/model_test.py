@@ -163,6 +163,7 @@ class ModelTest(unittest.TestCase):
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
+                    gen_kwargs="temperature=0.0,top_k=50",
                 )
 
                 print('--------Eval Result---------')
