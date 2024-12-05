@@ -227,6 +227,12 @@ class GPTQModel:
             batch: int = 1,
             trust_remote_code: bool = False,
     ):
+        if backend is None:
+            raise ValueError("eval parameter: `backend` cannot be set to none")
+
+        if not isinstance(tasks, list):
+            raise ValueError("eval parameter: `tasks` must be of List type")
+
         if backend == EVAL.LM_EVAL:
             for task in tasks:
                 if task not in LM_EVAL_TASK.get_task_enums():
