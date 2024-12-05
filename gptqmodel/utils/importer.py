@@ -57,9 +57,9 @@ def hf_select_quant_linear(
         desc_act: bool,
         sym: bool,
         checkpoint_format: str,
-        backend: Optional[Union[str, BACKEND]] = None,
         meta: Optional[Dict[str, any]] = None,
         device_map: Optional[Union[str, dict]] = None,
+        backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
     if isinstance(backend, str):
