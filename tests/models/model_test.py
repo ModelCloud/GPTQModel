@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import contextlib  # noqa: E402
@@ -20,6 +22,8 @@ from transformers import AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
 
+
+
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
@@ -34,6 +38,9 @@ class ModelTest(unittest.TestCase):
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
+
+    KERNEL_QUANT = {} # kernel sets
+    KERNEL_INFERENCE = {} # kernel sets
 
     # quant config
     QUANT_FORMAT = FORMAT.GPTQ
@@ -82,6 +89,12 @@ class ModelTest(unittest.TestCase):
 
         return datas
 
+    def check_kernel(self, model, expected_kernels):
+        modules = {module.__class__ for _, module in model.named_modules() if isinstance(module, BaseQuantLinear)}
+        print(f"modules in model: {modules}")
+        if expected_kernels:
+            assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
+
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         quantize_config = QuantizeConfig(
             bits=4,
@@ -112,6 +125,8 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
         if not is_quantized:
             model.quantize(calibration_dataset)
+
+            self.check_kernel(model, self.KERNEL_QUANT)
 
             with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
                 model.save(tmpdirname)
@@ -210,8 +225,9 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                                     torch_dtype=self.TORCH_DTYPE)
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+
+        self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         task_results = self.lm_eval(model=self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
@@ -224,5 +240,4 @@ class ModelTest(unittest.TestCase):
             diff_pct = self.calculatorPer(filter=filter, value=value)
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
