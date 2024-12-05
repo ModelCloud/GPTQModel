@@ -29,21 +29,22 @@ class BaseQuantLinear(nn.Module):
             check_cuda()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None, device=None, training=False) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, training:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, training=training)
         return validate, err
 
     @classmethod
-    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None, infeatures=None,
-                  outfeatures=None, device=None, training=False) -> Tuple[bool, Optional[Exception]]:
+    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, infeatures:int=None,
+                  outfeatures:int=None, device:Optional[DEVICE]=None, training:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
 
-        if device:
+        if device is not None:
             cls.validate_device(device)
 
-        if training and not cls.SUPPORTS_TRAINING:
+        if training is not None and training and not cls.SUPPORTS_TRAINING:
             err = f"{cls} does not support training."
             return False, NotImplementedError(err)
+
         if cls.SUPPORTS_BITS and bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)
@@ -107,8 +108,8 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device_type: str):
-        device = get_device_by_type(device_type)
+    def validate_device(cls, device_type: DEVICE):
+        device = get_device_by_type(device_type.value)
         if cls.SUPPORTS_DEVICES is None or len(cls.SUPPORTS_DEVICES) == 0:
             raise NotImplementedError(f"{cls} does not support any devices, SUPPORTS_DEVICES is `{cls.SUPPORTS_DEVICES}`.")
         if device not in cls.SUPPORTS_DEVICES:
