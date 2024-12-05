@@ -1,4 +1,4 @@
-# License: GPTQModel/licenses/LICENSE.mit
+# License: GPTQModel/licenses/LICENSE.apache
 from typing import List
 
 from device_smi import Device
