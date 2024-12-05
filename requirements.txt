@@ -7,4 +7,4 @@ transformers>=4.46.3
 threadpoolctl>=3.5.0
 packaging>=24.2
 setuptools>=75.5.0
-device-smi==0.3.1
+device-smi==0.3.2
