@@ -73,8 +73,6 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.sym = False
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
-        if bits not in [4]:
-            raise NotImplementedError("Only 4-bits is supported for IPEX.")
         if weight_dtype is None:
             weight_dtype = torch.float16 if is_torch_support_xpu() else torch.bfloat16
 
@@ -170,13 +168,10 @@ class IPEXQuantLinear(BaseQuantLinear):
         row = 0
         qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
         while row < qweight.shape[0]:
-            if self.bits in [4]:
-                for j in range(i, i + (32 // self.bits)):
-                    qweight[row] |= intweight[j] << (self.bits * (j - i))
-                i += 32 // self.bits
-                row += 1
-            else:
-                raise NotImplementedError("Only 4 bits are supported.")
+            for j in range(i, i + (32 // self.bits)):
+                qweight[row] |= intweight[j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            row += 1
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -187,13 +182,10 @@ class IPEXQuantLinear(BaseQuantLinear):
         i = 0
         col = 0
         while col < qzeros.shape[1]:
-            if self.bits in [4]:
-                for j in range(i, i + (32 // self.bits)):
-                    qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-                i += 32 // self.bits
-                col += 1
-            else:
-                raise NotImplementedError("Only 4 bits are supported.")
+            for j in range(i, i + (32 // self.bits)):
+                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
+            i += 32 // self.bits
+            col += 1
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -208,6 +200,8 @@ class IPEXQuantLinear(BaseQuantLinear):
                 outputs = self.ipex_linear(x)
             return outputs
 
+        if self.wf.device != x.device:
+            self.wf = self.wf.to(x.device)
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
