@@ -65,7 +65,7 @@ def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
 
     # compat: Nvidia makes several oem (non-public) versions of A100 and perhaps other models that
     # do not have clearly defined TVM matching target so we need to manually map them to the correct one.
-    if "pg506-230" in gpu_model or "pg506-232" in gpu_model.lower():
+    if gpu_model in ["pg506-230", "pg506-232"]:
         gpu_model = "NVIDIA A100"
 
     # print("GPU_model",gpu_model)
