@@ -5,6 +5,7 @@ import unittest
 
 from gptqmodel.utils.eval import evalplus
 
+
 class TestEvalplus(unittest.TestCase):
     @classmethod
     def setUpClass(self):

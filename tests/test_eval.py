@@ -3,10 +3,10 @@ from typing import Union
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest
-from parameterized import parameterized
 
-from gptqmodel.utils import EVAL, LM_EVAL_TASK, EVALPLUS_TASK
 from gptqmodel import GPTQModel
+from gptqmodel.utils import EVAL, EVALPLUS_TASK, LM_EVAL_TASK
+from parameterized import parameterized
 
 
 class TestEval(unittest.TestCase):
@@ -26,8 +26,8 @@ class TestEval(unittest.TestCase):
             acc_score = results['results'].get(task.value, {}).get('acc,none')
             acc_norm_score = results['results'].get(task.value, {}).get('acc_norm,none')
 
-            self.assertGreaterEqual(acc_score, 0.31, f"acc score does not match expected result")
-            self.assertGreaterEqual(acc_norm_score, 0.35, f"acc_norm score does not match expected result")
+            self.assertGreaterEqual(acc_score, 0.31, "acc score does not match expected result")
+            self.assertGreaterEqual(acc_norm_score, 0.35, "acc_norm score does not match expected result")
         elif eval_backend == EVAL.EVALPLUS:
             result = results.get(task.value)
             base_formatted, plus_formatted, _ = float(result.get("base tests")), float(result.get("base + extra tests")), result.get("results_path")

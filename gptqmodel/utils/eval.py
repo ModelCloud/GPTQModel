@@ -1,6 +1,6 @@
-from enum import Enum
 import json
 import os
+from enum import Enum
 from typing import List, Optional, Union
 
 
@@ -76,7 +76,7 @@ def evalplus(
     evaluate(dataset=dataset, model=model, backend="gptqmodel", bs=batch, trust_remote_code=trust_remote_code,
              greedy=True)
 
-    result_path = model.strip("./").replace("/", "--") + f"_gptqmodel_temp_0.0_eval_results.json"
+    result_path = model.strip("./").replace("/", "--") + "_gptqmodel_temp_0.0_eval_results.json"
     result_path = os.path.join("evalplus_results", dataset, result_path)
 
     if not os.path.exists(result_path):

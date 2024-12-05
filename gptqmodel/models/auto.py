@@ -9,7 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND, EVAL, LM_EVAL_TASK, EVALPLUS_TASK
+from ..utils import BACKEND, EVAL, EVALPLUS_TASK, LM_EVAL_TASK
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -238,10 +238,11 @@ class GPTQModel:
                 if task not in LM_EVAL_TASK.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
 
+            from pathlib import Path
+
             from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
-            from pathlib import Path
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
