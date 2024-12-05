@@ -1,5 +1,5 @@
 from enum import Enum
-
+from typing import Union
 import torch
 from torch import device
 
@@ -21,11 +21,12 @@ def is_torch_support_xpu():
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
-def get_device_by_type(type_value: str):
+def get_device_by_type(device: Union[str, DEVICE]):
+    device_type = device if isinstance(device, str) else device.value
     for enum_constant in DEVICE:
-        if enum_constant.value == type_value:
+        if enum_constant.value == device_type:
             return enum_constant
-    raise ValueError(f"Invalid type_value str: {type_value}")
+    raise ValueError(f"Invalid type_value str: {device_type}")
 
 
 def get_best_device(beckend=BACKEND.AUTO):
