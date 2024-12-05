@@ -17,6 +17,8 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     def __init__(
             self,
@@ -35,21 +37,19 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
                          outfeatures=outfeatures, bias=bias, weight_dtype=weight_dtype, **kwargs)
 
         self.kernel_switch_threshold = kernel_switch_threshold
-        self.gptqmodel_cuda_available = True
 
         self.gptqmodel_cuda = gptqmodel_cuda_256
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
-        if infeatures % 64 != 0 or outfeatures % 64 != 0:
-            self.gptqmodel_cuda_available = False
+        assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
 
-        assert x.device.type == "cuda" 
-        
+        assert x.device.type == "cuda"
+
         if x.shape[0] >= self.kernel_switch_threshold:
             logger.warning_once(
                 "Does not meet the cuda kernel conditions, will use the non-optimized forward() with torch.")
