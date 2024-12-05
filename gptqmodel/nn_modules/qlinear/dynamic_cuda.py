@@ -8,8 +8,8 @@ from ...models._const import DEVICE
 
 logger = setup_logger()
 
-import gptqmodel_cuda_64
-import gptqmodel_cuda_256
+import gptqmodel_cuda_64  # noqa: E402
+import gptqmodel_cuda_256  # noqa: E402
 
 
 class DynamicCudaQuantLinear(TorchQuantLinear):
