@@ -12,14 +12,14 @@ def evalplus(
     model: str,
     dataset: str,
     backend: str = "gptqmodel",
-    temperature: float = 0.0,
-    parallel: Optional[int] = None,
+    bs: Optional[int] = None,
+    trust_remote_code: bool = False,
 ):
     assert dataset in ["humaneval", "mbpp"], f"Invalid dataset {dataset}"
 
-    evaluate(dataset=dataset, parallel=parallel, model=model, temperature=temperature, backend=backend)
+    evaluate(dataset=dataset, model=model, backend=backend, bs=bs, trust_remote_code=trust_remote_code, greedy=True)
 
-    result_path = model.strip("./").replace("/", "--") + f"_{backend}_temp_{temperature}_eval_results.json"
+    result_path = model.strip("./").replace("/", "--") + f"_{backend}_temp_0.0_eval_results.json"
     result_path = os.path.join("evalplus_results", dataset, result_path)
 
     if not os.path.exists(result_path):

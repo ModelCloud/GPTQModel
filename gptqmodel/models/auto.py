@@ -224,7 +224,9 @@ class GPTQModel:
             model_id_or_path: str,
             backend: EVAL,
             tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
-            model_backend: str = "vllm",
+            model_backend: str = "gptqmodel",
+            batch_size: Optional[int] = None,
+            trust_remote_code: bool = False,
     ):
         if backend == EVAL.LM_EVAL:
             for task in tasks:
@@ -233,11 +235,18 @@ class GPTQModel:
 
             from gptqmodel.utils.lm_eval import lm_eval
             from lm_eval.utils import make_table
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
             results = lm_eval(
                 model_id_or_path,
                 model_name=model_backend,
                 model_args=f"pretrained={model_id_or_path}",
                 tasks=[task.value for task in tasks],
+                trust_remote_code=trust_remote_code,
+                batch_size=batch_size,
+                apply_chat_template=True if tokenizer.chat_template is not None else False
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -256,7 +265,10 @@ class GPTQModel:
                 base_formatted, plus_formatted, result_path = evalplus(
                     model=model_id_or_path,
                     dataset=task.value,
-                    backend=model_backend)
+                    backend=model_backend,
+                    bs=batch_size,
+                    trust_remote_code=trust_remote_code,
+                )
                 results[task] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
             return results
         else:

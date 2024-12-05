@@ -40,7 +40,7 @@ class LM_EVAL_TASK(Enum):
 
 
 class EVALPLUS_TASK(Enum):
-    HUMANEVAL = "humaneval"
+    HUMAN = "humaneval"
     MBPP = "mbpp"
 
     @classmethod
