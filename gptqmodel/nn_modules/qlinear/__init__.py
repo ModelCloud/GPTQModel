@@ -29,12 +29,14 @@ class BaseQuantLinear(nn.Module):
             check_cuda()
 
     @classmethod
+    # custom quant linear class can override this and add custom checks
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
         return validate, err
 
     @classmethod
+    # internal method and should not be overriden
     def verify_supports_params(cls):
         """
         Validate that SUPPORTS parameters are not None or empty lists, raising an exception if the validation fails.

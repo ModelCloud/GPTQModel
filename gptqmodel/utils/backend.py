@@ -17,6 +17,7 @@ class BACKEND(Enum):
 
 def get_backend(backend: str):
     try:
+        backend = backend.upper()
         return BACKEND[backend]
     except KeyError:
         raise ValueError(f"Invalid Backend str: {backend}")
