@@ -1,9 +1,9 @@
 import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest
 
 from gptqmodel.utils.eval import evalplus
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
 class TestEvalplus(unittest.TestCase):

@@ -10,7 +10,7 @@ class EVAL(Enum):
 
     @classmethod
     def get_task_enums(cls):
-        return [member for member in cls]
+        return list(cls)
 
     @classmethod
     def get_full_name(cls, member):
@@ -30,7 +30,7 @@ class LM_EVAL_TASK(Enum):
 
     @classmethod
     def get_task_enums(cls):
-        return [member for member in cls]
+        return list(cls)
 
     @classmethod
     def get_full_name(cls, member):
@@ -48,7 +48,7 @@ class EVALPLUS_TASK(Enum):
 
     @classmethod
     def get_task_enums(cls):
-        return [member for member in cls]
+        return list(cls)
 
     @classmethod
     def get_full_name(cls, member):
