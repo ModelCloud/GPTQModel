@@ -8,7 +8,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 

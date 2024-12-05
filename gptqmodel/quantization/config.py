@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import isdir, join
-from typing import Any, Dict, Optional, Tuple, Union, List
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from packaging import version
 from transformers.utils.hub import cached_file

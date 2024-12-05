@@ -1,13 +1,14 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import transformers
 from packaging import version
-from typing import Tuple, Optional
+
 from ...models._const import DEVICE
 from ...utils.logger import setup_logger
 from ..triton_utils.mixin import TritonModuleMixin

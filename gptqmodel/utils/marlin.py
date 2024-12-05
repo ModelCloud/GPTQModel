@@ -4,7 +4,7 @@ import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import recurse_getattr, recurse_setattr

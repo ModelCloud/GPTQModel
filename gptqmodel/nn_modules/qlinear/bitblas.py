@@ -4,7 +4,7 @@ import ctypes
 import operator
 import os
 from functools import reduce
-from typing import List, Union, Tuple, Optional
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch

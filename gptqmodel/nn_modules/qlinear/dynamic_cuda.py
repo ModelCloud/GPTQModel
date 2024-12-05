@@ -1,15 +1,15 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import torch
-from gptqmodel.nn_modules.qlinear.qlinear_torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE
 
 logger = setup_logger()
 
-import gptqmodel_cuda_64
-import gptqmodel_cuda_256
+import gptqmodel_cuda_64  # noqa: E402
+import gptqmodel_cuda_256  # noqa: E402
 
 
 class DynamicCudaQuantLinear(TorchQuantLinear):
@@ -44,7 +44,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         # fall back to cuda_64
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
-            
+
         assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
     def forward(self, x: torch.Tensor):
