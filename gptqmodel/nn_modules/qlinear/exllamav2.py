@@ -105,9 +105,16 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
 
 class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
+
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
 
