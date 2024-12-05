@@ -23,7 +23,7 @@ from transformers import AutoTokenizer  # noqa: E402
 RAND_SEED = 898
 
 class ModelTest(unittest.TestCase):
-    TASK_NAME = "arc_challenge"
+    TASK_NAME = ["arc_challenge"]
     # sub test can modify
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
@@ -37,8 +37,8 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
 
-    KERNEL_QUANT = [] # kernel sets
-    KERNEL_INFERENCE = [] # kernel sets
+    KERNEL_QUANT = {} # kernel sets
+    KERNEL_INFERENCE = {} # kernel sets
 
     # quant config
     QUANT_FORMAT = FORMAT.GPTQ
