@@ -91,6 +91,7 @@ class ModelTest(unittest.TestCase):
 
     def check_kernel(self, model, kernels):
         modules = set([type(module).__name__ for _, module in model.named_modules()])
+        print(f"modules in model: {", ".join(modules)}")
         assert modules == kernels, f"kernels are different with expected: {", ".join(kernel)}"
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
