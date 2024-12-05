@@ -15,6 +15,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -34,6 +35,9 @@ class ModelTest(unittest.TestCase):
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
+
+    KERNEL_QUANT = None
+    KERNEL_INFERENCE = None
 
     # quant config
     QUANT_FORMAT = FORMAT.GPTQ
@@ -81,6 +85,14 @@ class ModelTest(unittest.TestCase):
                     break
 
         return datas
+
+    def check_kernel(self, model, kernel):
+        has_kernel = False
+        for name, module in model.named_modules():
+            if isinstance(module, kernel):
+                has_kernel = True
+                break
+        assert has_kernel, f"no kernel: {kernel} was found in model"
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         quantize_config = QuantizeConfig(
@@ -210,8 +222,9 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                                     torch_dtype=self.TORCH_DTYPE)
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+
+        self.check_kernel(self.model, self.KERNEL_QUANT)
 
         task_results = self.lm_eval(model=self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
@@ -224,5 +237,4 @@ class ModelTest(unittest.TestCase):
             diff_pct = self.calculatorPer(filter=filter, value=value)
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
