@@ -224,8 +224,8 @@ class GPTQModel:
             model_id_or_path: str,
             backend: EVAL,
             tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
-            model_backend: str = "gptqmodel",
-            batch_size: Optional[int] = None,
+            model_backend: str = "hf",
+            batch_size: int = 32,
             trust_remote_code: bool = False,
     ):
         if backend == EVAL.LM_EVAL:
@@ -236,8 +236,12 @@ class GPTQModel:
             from gptqmodel.utils.lm_eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
+            from pathlib import Path
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
+            result_path = Path("lm_eval_results")
+            result_path.mkdir(parents=True, exist_ok=True)
 
             results = lm_eval(
                 model_id_or_path,
@@ -246,7 +250,8 @@ class GPTQModel:
                 tasks=[task.value for task in tasks],
                 trust_remote_code=trust_remote_code,
                 batch_size=batch_size,
-                apply_chat_template=True if tokenizer.chat_template is not None else False
+                apply_chat_template=True if tokenizer.chat_template is not None else False,
+                output_path=str(result_path)
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))

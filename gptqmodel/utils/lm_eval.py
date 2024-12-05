@@ -45,6 +45,7 @@ def lm_eval(
         wandb_name: Optional[str] = None,
         show_config: bool = False,
         trust_remote_code: bool = False,
+        device: Optional[str] = None,
 ):
     if model_name == "hf":
         model_name = HFLM(
@@ -60,7 +61,7 @@ def lm_eval(
         model=model_name,
         model_args=model_args,
         tasks=tasks,
-        device=str(model.device),
+        device=device,
         num_fewshot=num_fewshot,
         batch_size=batch_size,
         max_batch_size=max_batch_size,
