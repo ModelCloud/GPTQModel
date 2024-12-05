@@ -39,8 +39,8 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
 
-    KERNEL_QUANT = ExllamaV2QuantLinear
-    KERNEL_INFERENCE = MarlinQuantLinear
+    KERNEL_QUANT = [] # kernel sets
+    KERNEL_INFERENCE = [] # kernel sets
 
     # quant config
     QUANT_FORMAT = FORMAT.GPTQ
