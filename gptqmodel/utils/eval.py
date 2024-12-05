@@ -184,7 +184,6 @@ def lm_eval(
         apply_chat_template=apply_chat_template,
         fewshot_as_multiturn=fewshot_as_multiturn,
         gen_kwargs=gen_kwargs,
-        task_manager=task_manager,
         verbosity=verbosity,
         predict_only=predict_only,
         random_seed=random_seed,
