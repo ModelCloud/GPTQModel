@@ -18,6 +18,7 @@ from gptqmodel.utils.lm_eval import lm_eval  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from ..utils.importer import select_quant_linear  # noqa: E402
 
 RAND_SEED = 898
 
@@ -123,6 +124,20 @@ class ModelTest(unittest.TestCase):
 
         is_quantized = model.quantized
         if not is_quantized:
+            if self.KERNEL_QUANT is not None:
+                quant_kernel = select_quant_linear(
+                    bits=model.quantize_config.bits,
+                    dynamic=model.quantize_config.dynamic,
+                    group_size=model.quantize_config.group_size,
+                    desc_act=model.quantize_config.desc_act,
+                    sym=model.quantize_config.sym,
+                    backend=BACKEND.AUTO,
+                    pack=True,
+                    format=self.quantize_config.format,
+                )
+
+                assert quant_kernel == self.KERNEL_QUANT
+
             model.quantize(calibration_dataset)
 
             with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
@@ -224,7 +239,7 @@ class ModelTest(unittest.TestCase):
     def quant_lm_eval(self):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-        if self.KERNEL_INFERENCE:
+        if self.KERNEL_INFERENCE is not None:
             self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         task_results = self.lm_eval(model=self.model,
