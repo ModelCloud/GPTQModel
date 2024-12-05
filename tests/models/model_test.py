@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import contextlib  # noqa: E402
@@ -37,7 +39,7 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
 
-    KERNEL_QUANT = None
+    KERNEL_QUANT = ExllamaV2QuantLinear
     KERNEL_INFERENCE = MarlinQuantLinear
 
     # quant config
@@ -136,7 +138,7 @@ class ModelTest(unittest.TestCase):
                     format=self.quantize_config.format,
                 )
 
-                assert quant_kernel == self.KERNEL_QUANT
+                assert isinstance(quant_kernel, self.KERNEL_QUANT), f"wrong quant kernel was found. expect: {self.KERNEL_QUANT}, found: {quant_kernel}"
 
             model.quantize(calibration_dataset)
 
