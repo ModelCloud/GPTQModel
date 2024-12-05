@@ -19,6 +19,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     QUANT_TYPE = "cuda"
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_TRAINING = True
 
     def __init__(
             self,

@@ -12,6 +12,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS: bool = True
+    SUPPORTS_TRAINING: bool = False
     SUPPORTS_DEVICES = [] # Empty or None means no device is supported.
     # empty which means all
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = []
