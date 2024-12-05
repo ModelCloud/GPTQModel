@@ -1,11 +1,7 @@
-# TODO replace with device-smi checks
-
-# Copyright (c) Microsoft Corporation.
-# License: GPTQModel/licenses/LICENSE.mit
-import os
-import subprocess
+# License: GPTQModel/licenses/LICENSE.apache
 from typing import List
 
+from device_smi import Device
 from thefuzz import process
 from tvm.target import Target
 from tvm.target.tag import list_tags
@@ -18,38 +14,6 @@ TARGET_MISSING_ERROR = (
     "TVM target not found. Please set the TVM target environment variable using `export TVM_TARGET=<target>`, "
     "where <target> is one of the available targets can be found in the output of `tools/get_available_targets.py`."
 )
-
-
-def get_gpu_model_from_nvidia_smi(gpu_id: int = 0):
-    """
-    Executes the 'nvidia-smi' command to fetch the name of the first available NVIDIA GPU.
-
-    Returns:
-        str: The name of the GPU, or None if 'nvidia-smi' command fails.
-    """
-    try:
-        # Execute nvidia-smi command to get the GPU name
-        output = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
-            encoding="utf-8",
-        ).strip()
-    except subprocess.CalledProcessError as e:
-        # print(f"nvidia-smi error: {e}")
-        logger.info("nvidia-smi failed with error: %s", e)
-        return None
-
-    gpus = output.split("\n")
-
-    # for multiple cpus, CUDA_DEVICE_ORDER=PCI_BUS_ID must be set to match nvidia-smi or else gpu_id is
-    # most likely incorrect and the wrong gpu
-    if len(gpus) > 1 and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
-        raise EnvironmentError("Multi-gpu environment must set `CUDA_DEVICE_ORDER=PCI_BUS_ID`.")
-
-    if gpu_id >= len(gpus) or gpu_id < 0:
-        raise ValueError(f"Passed gpu_id:{gpu_id} but there are {len(gpus)} detected Nvidia gpus.")
-
-    return gpus[gpu_id]
-
 
 def find_best_match(tags, query):
     """
@@ -96,12 +60,12 @@ def patched_auto_detect_nvidia_target(gpu_id: int = 0) -> str:
     nvidia_tags = [tag for tag in all_tags if "nvidia" in tag]
 
     # Get the current GPU model and find the best matching target
-    gpu_model = get_gpu_model_from_nvidia_smi(gpu_id=gpu_id)
+    gpu_model = Device(f"cuda:{gpu_id}").model
     # print(f"gpu_model: {gpu_model}")
 
     # compat: Nvidia makes several oem (non-public) versions of A100 and perhaps other models that
     # do not have clearly defined TVM matching target so we need to manually map them to the correct one.
-    if gpu_model in ["NVIDIA PG506-230", "NVIDIA PG506-232"]:
+    if gpu_model in ["pg506-230", "pg506-232"]:
         gpu_model = "NVIDIA A100"
 
     # print("GPU_model",gpu_model)
