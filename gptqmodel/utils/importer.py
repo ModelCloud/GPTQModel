@@ -56,8 +56,8 @@ def hf_select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        backend: Optional[BACKEND] = None,
         checkpoint_format: str,
+        backend: Optional[BACKEND] = None,
         meta: Optional[Dict[str, any]] = None,
         device_map: Optional[Union[str, dict]] = None,
 ) -> Type[BaseQuantLinear]:

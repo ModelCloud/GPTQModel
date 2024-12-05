@@ -9,7 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND
+from ..utils import BACKEND, EVAL, EVALPLUS_TASK, LM_EVAL_TASK
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -217,3 +217,72 @@ class GPTQModel:
             verify_hash=verify_hash,
             **kwargs,
         )
+
+    @classmethod
+    def eval(
+            cls,
+            model_id_or_path: str,
+            framework: EVAL,
+            tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
+            batch: int = 1,
+            trust_remote_code: bool = False,
+    ):
+        if framework is None:
+            raise ValueError("eval parameter: `framework` cannot be set to None")
+
+        if not isinstance(tasks, list):
+            raise ValueError("eval parameter: `tasks` must be of List type")
+
+        if framework == EVAL.LM_EVAL:
+            for task in tasks:
+                if task not in LM_EVAL_TASK.get_task_enums():
+                    raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
+
+            from pathlib import Path
+
+            from gptqmodel.utils.eval import lm_eval
+            from lm_eval.utils import make_table
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
+            result_path = Path("lm_eval_results")
+            result_path.mkdir(parents=True, exist_ok=True)
+
+            results = lm_eval(
+                model_id_or_path,
+                model_name="hf",
+                model_args=f"pretrained={model_id_or_path},gptqmodel=True",
+                tasks=[task.value for task in tasks],
+                trust_remote_code=trust_remote_code,
+                batch_size=batch,
+                apply_chat_template=True if tokenizer.chat_template is not None else False,
+                output_path=str(result_path)
+            )
+            print('--------lm_eval Eval Result---------')
+            print(make_table(results))
+            if "groups" in results:
+                print(make_table(results, "groups"))
+            print('--------lm_eval Result End---------')
+            return results
+        elif framework == EVAL.EVALPLUS:
+            for task in tasks:
+                if task not in EVALPLUS_TASK.get_task_enums():
+                    raise ValueError(f"evalplus support tasks: {EVALPLUS_TASK.get_all_tasks_string()}")
+            from gptqmodel.utils.eval import evalplus, evalplus_make_table
+
+            results = {}
+            for task in tasks:
+                base_formatted, plus_formatted, result_path = evalplus(
+                    model=model_id_or_path,
+                    dataset=task.value,
+                    batch=batch,
+                    trust_remote_code=trust_remote_code,
+                )
+                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+            print('--------evalplus Eval Result---------')
+            evalplus_make_table(results)
+            print('--------evalplus Result End---------')
+            return results
+        else:
+            raise ValueError(f"Eval backend support: {EVAL.get_all_eval_backend_string()}")
