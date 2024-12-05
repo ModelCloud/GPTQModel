@@ -90,7 +90,7 @@ class ModelTest(unittest.TestCase):
         return datas
 
     def check_kernel(self, model, expected_kernels):
-        modules = set([module.__class__  for _, module in model.named_modules() if isinstance(module, BaseQuantLinear) ])
+        modules = { [module.__class__  for _, module in model.named_modules() if isinstance(module, BaseQuantLinear) ] }
         print(f"modules in model: {modules}")
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
