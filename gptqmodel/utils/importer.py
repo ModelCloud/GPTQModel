@@ -20,14 +20,14 @@ from .backend import BACKEND, get_backend
 logger = setup_logger()
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: [MarlinQuantLinear],
-    BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
-    BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
-    BACKEND.TRITON: [TritonV2QuantLinear],
-    BACKEND.CUDA: [DynamicCudaQuantLinear],
-    BACKEND.BITBLAS: [BitBLASQuantLinear],
-    BACKEND.IPEX: [IPEXQuantLinear],
-    BACKEND.TORCH: [TorchQuantLinear],
+    BACKEND.MARLIN: MarlinQuantLinear,
+    BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
+    BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+    BACKEND.TRITON: TritonV2QuantLinear,
+    BACKEND.CUDA: DynamicCudaQuantLinear,
+    BACKEND.BITBLAS: BitBLASQuantLinear,
+    BACKEND.IPEX: IPEXQuantLinear,
+    BACKEND.TORCH: TorchQuantLinear,
 })
 
 format_dict = {
@@ -102,19 +102,18 @@ def select_quant_linear(
         allow_backends = format_dict[format]
         allow_quant_linears = backend_dict
         err = None
-        for k, values in allow_quant_linears.items():
-            for v in values:
-                in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
-                if in_allow_backends and validate:
-                    if pack:
-                        check_pack_func = hasattr(v, "pack")
-                        if check_pack_func:
-                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
-                            return v
-                    else:
+        for k, v in allow_quant_linears.items():
+            in_allow_backends = k in allow_backends
+            validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
+            if in_allow_backends and validate:
+                if pack:
+                    check_pack_func = hasattr(v, "pack")
+                    if check_pack_func:
                         logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                         return v
+                else:
+                    logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                    return v
 
         if err:
             raise err
