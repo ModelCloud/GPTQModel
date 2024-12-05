@@ -5,7 +5,7 @@ import torch
 
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
-from ..nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+from ..nn_modules.qlinear.qlinear_dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
@@ -23,7 +23,7 @@ backend_dict = OrderedDict({
     BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
     BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
     BACKEND.TRITON: [TritonV2QuantLinear],
-    BACKEND.CUDA: [CudaQuantLinear],
+    BACKEND.CUDA: [DynamicCudaQuantLinear],
     BACKEND.BITBLAS: [BitBLASQuantLinear],
     BACKEND.IPEX: [IPEXQuantLinear],
     BACKEND.TORCH: [TorchQuantLinear],
@@ -134,7 +134,7 @@ def select_quant_linear(
     elif backend == BACKEND.EXLLAMA_V1:
         return ExllamaQuantLinear
     elif backend == BACKEND.CUDA:
-        return CudaQuantLinear
+        return DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.qlinear_ipex import IPEX_AVAILABLE
         if not IPEX_AVAILABLE:

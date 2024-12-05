@@ -121,14 +121,14 @@ def ModelWriter(cls):
                 # no need to set it back, no calculation below
                 if quantize_config.bits != 4:
                     cuda_name_modules = {}
-                    from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+                    from gptqmodel.nn_modules.qlinear.qlinear_dynamic_cuda import DynamicCudaQuantLinear
                     for name, module in model.named_modules():
-                        if isinstance(module, CudaQuantLinear):
+                        if isinstance(module, DynamicCudaQuantLinear):
                             cuda_name_modules[name] = module.gptqmodel_cuda
                             module.gptqmodel_cuda = None
 
                     for name, module in model.named_modules():
-                        if isinstance(module, CudaQuantLinear) and name in cuda_name_modules:
+                        if isinstance(module, DynamicCudaQuantLinear) and name in cuda_name_modules:
                             module.gptqmodel_cuda = cuda_name_modules[name]
 
                     del cuda_name_modules

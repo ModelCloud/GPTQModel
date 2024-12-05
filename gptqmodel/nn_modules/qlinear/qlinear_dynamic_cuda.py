@@ -22,7 +22,7 @@ except ImportError as e:
     _gptqmodel_cuda_available = False
 
 
-class CudaQuantLinear(TorchQuantLinear):
+class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     # for transformers/optimum tests compat
@@ -114,4 +114,4 @@ class CudaQuantLinear(TorchQuantLinear):
         return out
 
 
-__all__ = ["CudaQuantLinear"]
+__all__ = ["DynamicCudaQuantLinear"]
