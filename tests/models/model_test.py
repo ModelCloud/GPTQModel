@@ -189,7 +189,7 @@ class ModelTest(unittest.TestCase):
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
-                if delete_quantized_model and os.path.exists(model.model_id_or_path):
+                if delete_quantized_model and model.model_id_or_path.startswith("/tmp") and os.path.exists(model.model_id_or_path):
                     shutil.rmtree(model.model_id_or_path)
                 return task_results
         except BaseException as e:
