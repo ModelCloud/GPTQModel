@@ -38,9 +38,13 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
+        # use faster cuda_256 by default
         self.gptqmodel_cuda = gptqmodel_cuda_256
+
+        # fall back to cuda_64
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
+            
         assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
     def forward(self, x: torch.Tensor):
@@ -52,7 +56,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
         if x.shape[0] >= self.kernel_switch_threshold:
             logger.warning_once(
-                "Does not meet the cuda kernel conditions, will use the non-optimized forward() with torch.")
+               f"Cannot run on cuda kernel. Using torch forward() that may be slower. Shape: `{x.shape[0]}` >= `{self.kernel_switch_threshold}`")
             return super().forward(x)
 
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
