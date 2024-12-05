@@ -95,6 +95,8 @@ def select_quant_linear(
         else:
             device = DEVICE.CPU
 
+    backend = BACKEND.AUTO if backend is None else backend
+
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
         trainable = backend == BACKEND.AUTO_TRAINABLE
