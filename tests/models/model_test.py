@@ -224,7 +224,8 @@ class ModelTest(unittest.TestCase):
     def quant_lm_eval(self):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-        self.check_kernel(self.model, self.KERNEL_QUANT)
+        if self.KERNEL_QUANT:
+            self.check_kernel(self.model, self.KERNEL_QUANT)
 
         task_results = self.lm_eval(model=self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
