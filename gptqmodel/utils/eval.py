@@ -150,7 +150,6 @@ def lm_eval(
         from lm_eval import simple_evaluate
         from lm_eval.loggers import EvaluationTracker, WandbLogger
         from lm_eval.models.huggingface import HFLM
-        from lm_eval.tasks import TaskManager
         from lm_eval.utils import handle_non_serializable
     except BaseException:
         raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
