@@ -8,25 +8,17 @@ from ...models._const import DEVICE
 
 logger = setup_logger()
 
-cuda_import_exception = None
-try:
-    import gptqmodel_cuda_64
-    import gptqmodel_cuda_256
-
-    _gptqmodel_cuda_available = True
-except ImportError as e:
-    cuda_import_exception = e
-    logger.warning("CUDA extension not installed.")
-    gptqmodel_cuda_256 = None
-    gptqmodel_cuda_64 = None
-    _gptqmodel_cuda_available = False
+import gptqmodel_cuda_64
+import gptqmodel_cuda_256
 
 
-class CudaQuantLinear(TorchQuantLinear):
+class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     def __init__(
             self,
@@ -45,31 +37,27 @@ class CudaQuantLinear(TorchQuantLinear):
                          outfeatures=outfeatures, bias=bias, weight_dtype=weight_dtype, **kwargs)
 
         self.kernel_switch_threshold = kernel_switch_threshold
-        self.gptqmodel_cuda_available = _gptqmodel_cuda_available
 
+        # use faster cuda_256 by default
         self.gptqmodel_cuda = gptqmodel_cuda_256
+
+        # fall back to cuda_64
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
-        if infeatures % 64 != 0 or outfeatures % 64 != 0:
-            self.gptqmodel_cuda_available = False
+            
+        assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
 
-        if x.device.type != "cuda":
-            raise NotImplementedError(f"Unable to use cuda kernel. x.device.type is {x.device.type}")
+        assert x.device.type == "cuda"
 
-        if not self.gptqmodel_cuda_available:
-            raise ValueError(
-                f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {cuda_import_exception}"
-            )
-
-        if self.kernel_switch_threshold != 0 and x.shape[0] >= self.kernel_switch_threshold:
-            raise ValueError(
-                f"Trying to use the cuda backend, x.shape[0] is {x.shape[0]}, x.shape[0] cannot be >= kernel_switch_threshold{self.kernel_switch_threshold}"
-            )
+        if x.shape[0] >= self.kernel_switch_threshold:
+            logger.warning_once(
+               f"Cannot run on cuda kernel. Using torch forward() that may be slower. Shape: `{x.shape[0]}` >= `{self.kernel_switch_threshold}`")
+            return super().forward(x)
 
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
         if self.bits == 2:
@@ -114,4 +102,4 @@ class CudaQuantLinear(TorchQuantLinear):
         return out
 
 
-__all__ = ["CudaQuantLinear"]
+__all__ = ["DynamicCudaQuantLinear"]
