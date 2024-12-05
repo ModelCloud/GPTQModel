@@ -44,7 +44,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         # fall back to cuda_64
         if infeatures % 256 != 0 or outfeatures % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
-            
+
         assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
     def forward(self, x: torch.Tensor):

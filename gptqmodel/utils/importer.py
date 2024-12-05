@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional, Union, Dict, Type
+from typing import Dict, Optional, Type, Union
 
 import torch
 

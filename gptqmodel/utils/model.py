@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Dict, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
