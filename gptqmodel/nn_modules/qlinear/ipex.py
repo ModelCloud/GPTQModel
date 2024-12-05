@@ -298,7 +298,7 @@ def unpack_to_8bit_signed(qweight, qzeros, bits, g_idx=None):
     return weight, zeros
 
 
-# Copied from qlinear_marlin.py
+# Copied from marlin.py
 @torch.no_grad()
 def dequantize_weight(qweight, qzeros, scales, bits):
     unpacked_qweight, unpacked_qzeros = unpack_to_8bit_signed(qweight, qzeros, bits)
