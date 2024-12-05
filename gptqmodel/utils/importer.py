@@ -30,11 +30,6 @@ backend_dict = OrderedDict({
     BACKEND.TORCH: TorchQuantLinear,
 })
 
-backend_dict_cpu = OrderedDict({
-    BACKEND.IPEX: [IPEXQuantLinear],
-    BACKEND.TORCH: [TorchQuantLinear],
-})
-
 format_dict = {
     FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
     FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
@@ -43,13 +38,6 @@ format_dict = {
     FORMAT.IPEX: [BACKEND.IPEX],
 }
 
-format_dict_cpu = {
-    FORMAT.GPTQ: [BACKEND.IPEX, BACKEND.TORCH],
-    FORMAT.GPTQ_V2: [BACKEND.TORCH],
-    FORMAT.IPEX: [BACKEND.IPEX],
-}
-
-
 # public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
         bits: int,
@@ -57,9 +45,9 @@ def hf_select_quant_linear(
         desc_act: bool,
         sym: bool,
         checkpoint_format: str,
-        backend: Optional[Union[str, BACKEND]] = None,
         meta: Optional[Dict[str, any]] = None,
         device_map: Optional[Union[str, dict]] = None,
+        backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
     if isinstance(backend, str):
