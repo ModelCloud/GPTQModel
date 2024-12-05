@@ -29,7 +29,7 @@ class TestEval(unittest.TestCase):
             self.assertGreaterEqual(acc_score, 0.31, f"acc score does not match expected result")
             self.assertGreaterEqual(acc_norm_score, 0.35, f"acc_norm score does not match expected result")
         elif eval_backend == EVAL.EVALPLUS:
-            result = results.get(task)
+            result = results.get(task.value)
             base_formatted, plus_formatted, _ = float(result.get("base tests")), float(result.get("base + extra tests")), result.get("results_path")
             self.assertGreaterEqual(base_formatted, 0.31, "Base score does not match expected result")
             self.assertGreaterEqual(plus_formatted, 0.29, "Plus score does not match expected result")

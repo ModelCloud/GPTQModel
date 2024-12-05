@@ -103,6 +103,12 @@ def evalplus(
     return base_formatted, plus_formatted, result_path
 
 
+def evalplus_make_table(results):
+    print("|    Tasks    | base tests | base + extra tests |")
+    print("|-------------|------------|--------------------|")
+    for task, metrics in results.items():
+        print(f"| {task} | {metrics['base tests']} | {metrics['base + extra tests']} |")
+
 
 try:
     from lm_eval import simple_evaluate

@@ -268,7 +268,7 @@ class GPTQModel:
             for task in tasks:
                 if task not in EVALPLUS_TASK.get_task_enums():
                     raise ValueError(f"evalplus support tasks: {EVALPLUS_TASK.get_all_tasks_string()}")
-            from gptqmodel.utils.eval import evalplus
+            from gptqmodel.utils.eval import evalplus, evalplus_make_table
 
             results = {}
             for task in tasks:
@@ -278,7 +278,10 @@ class GPTQModel:
                     batch=batch,
                     trust_remote_code=trust_remote_code,
                 )
-                results[task] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+            print('--------evalplus Eval Result---------')
+            evalplus_make_table(results)
+            print('--------evalplus Result End---------')
             return results
         else:
             raise ValueError(f"Eval backend support: {EVAL.get_all_eval_backend_string()}")
