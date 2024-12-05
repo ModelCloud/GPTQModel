@@ -110,15 +110,6 @@ def evalplus_make_table(results):
         print(f"| {task} | {metrics['base tests']} | {metrics['base + extra tests']} |")
 
 
-try:
-    from lm_eval import simple_evaluate
-    from lm_eval.loggers import EvaluationTracker, WandbLogger
-    from lm_eval.models.huggingface import HFLM
-    from lm_eval.tasks import TaskManager
-    from lm_eval.utils import handle_non_serializable
-except BaseException:
-    raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
-
 def lm_eval(
         model,
         model_args: str = "",
@@ -136,12 +127,12 @@ def lm_eval(
         check_integrity: bool = False,
         write_out: bool = False,
         log_samples: bool = True,
-        evaluation_tracker: Optional[EvaluationTracker] = None,
+        evaluation_tracker = None,
         system_instruction: Optional[str] = None,
         apply_chat_template: bool = False,
         fewshot_as_multiturn: bool = False,
         gen_kwargs: Optional[str] = None,
-        task_manager: Optional[TaskManager] = None,
+        task_manager = None,
         verbosity: str = "INFO",
         predict_only: bool = False,
         random_seed: int = 0,
@@ -155,6 +146,15 @@ def lm_eval(
         trust_remote_code: bool = False,
         device: Optional[str] = None,
 ):
+    try:
+        from lm_eval import simple_evaluate
+        from lm_eval.loggers import EvaluationTracker, WandbLogger
+        from lm_eval.models.huggingface import HFLM
+        from lm_eval.tasks import TaskManager
+        from lm_eval.utils import handle_non_serializable
+    except BaseException:
+        raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
+
     if model_name == "hf":
         model_name = HFLM(
             pretrained=model,
