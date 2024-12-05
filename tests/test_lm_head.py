@@ -35,7 +35,7 @@ class TestLmHead(unittest.TestCase):
         model = GPTQModel.load(self.MODEL_ID, device=self.DEVICE)
 
        # validate lm_head is loaded as quantized layer
-        assert model.model.lm_head.__class__.__name__ == "ExllamaV2QuantLinear"
+        assert model.model.lm_head.__class__.__name__ == "MarlinQuantLinear"
 
         res = model.model.generate(
             **inputs, num_beams=1, min_new_tokens=1, max_new_tokens=128, repetition_penalty=1.25
