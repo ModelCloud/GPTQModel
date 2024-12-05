@@ -4,7 +4,7 @@ from enum import Enum
 class BACKEND(Enum):
     AUTO = 0  # choose the optimal local kernel based on quant_config compatibility
     AUTO_CPU = 1 # choose the optimal cpu-only local kernel; for transformer/optimum compat
-    AUTO_TRAINABLE = 2 # choose the optimal trainable local kernel; for transformer/optimum compat
+    AUTO_TRAINABLE = 2 # choose the optimal trainable local kernel for post-quant training
     CUDA = 3
     TORCH = 4
     TRITON = 5
