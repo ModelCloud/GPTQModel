@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # License: GPTQModel/licenses/LICENSE.mit
 from typing import List
 
