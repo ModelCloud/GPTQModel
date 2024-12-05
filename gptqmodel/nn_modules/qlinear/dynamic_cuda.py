@@ -14,12 +14,18 @@ import gptqmodel_cuda_256  # noqa: E402
 
 class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
-    # for transformers/optimum tests compat
-    QUANT_TYPE = "cuda"
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
-    SUPPORTS_TRAINING = True
+
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "cuda"
 
     def __init__(
             self,
