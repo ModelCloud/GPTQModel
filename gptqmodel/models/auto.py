@@ -224,8 +224,7 @@ class GPTQModel:
             model_id_or_path: str,
             backend: EVAL,
             tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
-            model_backend: str = "hf",
-            batch_size: int = 32,
+            batch: int = 1,
             trust_remote_code: bool = False,
     ):
         if backend == EVAL.LM_EVAL:
@@ -245,11 +244,11 @@ class GPTQModel:
 
             results = lm_eval(
                 model_id_or_path,
-                model_name=model_backend,
-                model_args=f"pretrained={model_id_or_path}",
+                model_name="hf",
+                model_args=f"pretrained={model_id_or_path},gptqmodel=True",
                 tasks=[task.value for task in tasks],
                 trust_remote_code=trust_remote_code,
-                batch_size=batch_size,
+                batch_size=batch,
                 apply_chat_template=True if tokenizer.chat_template is not None else False,
                 output_path=str(result_path)
             )
@@ -270,8 +269,7 @@ class GPTQModel:
                 base_formatted, plus_formatted, result_path = evalplus(
                     model=model_id_or_path,
                     dataset=task.value,
-                    backend=model_backend,
-                    bs=batch_size,
+                    batch=batch,
                     trust_remote_code=trust_remote_code,
                 )
                 results[task] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}

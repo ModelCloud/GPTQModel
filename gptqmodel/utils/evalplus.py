@@ -11,15 +11,14 @@ except BaseException:
 def evalplus(
     model: str,
     dataset: str,
-    backend: str = "gptqmodel",
-    bs: Optional[int] = None,
+    batch: int = 1,
     trust_remote_code: bool = False,
 ):
     assert dataset in ["humaneval", "mbpp"], f"Invalid dataset {dataset}"
 
-    evaluate(dataset=dataset, model=model, backend=backend, bs=bs, trust_remote_code=trust_remote_code, greedy=True)
+    evaluate(dataset=dataset, model=model, backend="gptqmodel", bs=batch, trust_remote_code=trust_remote_code, greedy=True)
 
-    result_path = model.strip("./").replace("/", "--") + f"_{backend}_temp_0.0_eval_results.json"
+    result_path = model.strip("./").replace("/", "--") + f"_gptqmodel_temp_0.0_eval_results.json"
     result_path = os.path.join("evalplus_results", dataset, result_path)
 
     if not os.path.exists(result_path):
