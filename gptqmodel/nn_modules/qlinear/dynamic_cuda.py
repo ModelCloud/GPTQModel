@@ -61,7 +61,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
         assert x.device.type == "cuda"
 
-        if x.shape[0] >= self.kernel_switch_threshold:
+        if x.shape[0] >= self.kernel_switch_threshold or x.requires_grad:
             logger.warning_once(
                f"Cannot run on cuda kernel. Using torch forward() that may be slower. Shape: `{x.shape[0]}` >= `{self.kernel_switch_threshold}`")
             return super().forward(x)
