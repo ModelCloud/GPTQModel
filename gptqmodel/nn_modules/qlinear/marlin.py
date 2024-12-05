@@ -143,8 +143,13 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
