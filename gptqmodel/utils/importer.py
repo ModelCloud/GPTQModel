@@ -64,13 +64,13 @@ def hf_select_quant_linear(
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
         if "cpu" in devices or torch.device("cpu") in devices:
-            device_type = DEVICE.CPU
+            device = DEVICE.CPU
         elif "xpu" in devices or torch.device("xpu") in devices:
-            device_type = DEVICE.XPU
+            device = DEVICE.XPU
         else:
-            device_type = DEVICE.CUDA
+            device = DEVICE.CUDA
     else:
-        device_type = DEVICE.CPU
+        device = DEVICE.CPU
 
     return select_quant_linear(
         bits=bits,
@@ -78,7 +78,7 @@ def hf_select_quant_linear(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
-        device_type=device_type,
+        device=device,
         format=FORMAT.GPTQ,
         pack=True,
         dynamic=None,
@@ -91,7 +91,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device_type: Optional[DEVICE] = DEVICE.CUDA,
+        device: Optional[DEVICE] = DEVICE.CUDA,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
@@ -99,9 +99,9 @@ def select_quant_linear(
 ) -> Type[BaseQuantLinear]:
     if not torch.cuda.is_available():
         if hasattr(torch, "xpu") and torch.xpu.is_available():
-            device_type = DEVICE.XPU
+            device = DEVICE.XPU
         else:
-            device_type = DEVICE.CPU
+            device = DEVICE.CPU
 
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
@@ -113,7 +113,7 @@ def select_quant_linear(
         for k, values in allow_quant_linears.items():
             for v in values:
                 in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device_type=device_type, training=training)
+                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, training=training)
                 if in_allow_backends and validate:
                     if pack:
                         check_pack_func = hasattr(v, "pack")
