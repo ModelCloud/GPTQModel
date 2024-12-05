@@ -126,21 +126,10 @@ class ModelTest(unittest.TestCase):
 
         is_quantized = model.quantized
         if not is_quantized:
-            if self.KERNEL_QUANT is not None:
-                quant_kernel = select_quant_linear(
-                    bits=model.quantize_config.bits,
-                    dynamic=model.quantize_config.dynamic,
-                    group_size=model.quantize_config.group_size,
-                    desc_act=model.quantize_config.desc_act,
-                    sym=model.quantize_config.sym,
-                    backend=BACKEND.AUTO,
-                    pack=True,
-                    format=self.quantize_config.format,
-                )
-
-                assert isinstance(quant_kernel, self.KERNEL_QUANT), f"wrong quant kernel was found. expect: {self.KERNEL_QUANT}, found: {quant_kernel}"
-
             model.quantize(calibration_dataset)
+
+            if self.KERNEL_QUANT is not None:
+                self.check_kernel(model, self.KERNEL_QUANT)
 
             with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
                 model.save(tmpdirname)
