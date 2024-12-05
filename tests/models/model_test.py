@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import contextlib  # noqa: E402
@@ -87,10 +89,10 @@ class ModelTest(unittest.TestCase):
 
         return datas
 
-    def check_kernel(self, model, kernels):
-        modules = set([type(module).__name__ for _, module in model.named_modules()])
-        print(f"modules in model: {", ".join(modules)}")
-        assert modules == kernels, f"kernels are different with expected: {", ".join(kernel)}"
+    def check_kernel(self, model, expected_kernels):
+        modules = set([type(module).__name__  for _, module in model.named_modules() if isinstance(module, BaseQuantLinear) ])
+        print(f"modules in model: {modules}")
+        assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         quantize_config = QuantizeConfig(

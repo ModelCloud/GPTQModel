@@ -6,8 +6,8 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.1894
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
 
-    KERNEL_QUANT = {'Embedding', 'ExllamaQuantLinear', 'LayerNorm', 'Linear', 'ModuleList', 'OPTDecoder', 'OPTDecoderLayer', 'OPTForCausalLM', 'OPTGPTQ', 'OPTLearnedPositionalEmbedding', 'OPTModel', 'OPTSdpaAttention', 'ReLU'}
-    KERNEL_INFERENCE = {'Embedding', 'LayerNorm', 'Linear', 'MarlinQuantLinear', 'ModuleList', 'OPTAttention', 'OPTDecoder', 'OPTDecoderLayer', 'OPTForCausalLM', 'OPTGPTQ', 'OPTLearnedPositionalEmbedding', 'OPTModel', 'ReLU'}
+    KERNEL_QUANT = {'ExllamaQuantLinear'}
+    KERNEL_INFERENCE = {'MarlinQuantLinear'}
 
     def test_opt(self):
         self.quant_lm_eval()
