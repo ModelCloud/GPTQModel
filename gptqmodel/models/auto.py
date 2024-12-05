@@ -222,23 +222,23 @@ class GPTQModel:
     def eval(
             cls,
             model_id_or_path: str,
-            backend: EVAL,
+            framework: EVAL,
             tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
             batch: int = 1,
             trust_remote_code: bool = False,
     ):
-        if backend is None:
-            raise ValueError("eval parameter: `backend` cannot be set to none")
+        if framework is None:
+            raise ValueError("eval parameter: `framework` cannot be set to None")
 
         if not isinstance(tasks, list):
             raise ValueError("eval parameter: `tasks` must be of List type")
 
-        if backend == EVAL.LM_EVAL:
+        if framework == EVAL.LM_EVAL:
             for task in tasks:
                 if task not in LM_EVAL_TASK.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
 
-            from gptqmodel.utils.lm_eval import lm_eval
+            from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
             from pathlib import Path
@@ -264,11 +264,11 @@ class GPTQModel:
                 print(make_table(results, "groups"))
             print('--------lm_eval Result End---------')
             return results
-        elif backend == EVAL.EVALPLUS:
+        elif framework == EVAL.EVALPLUS:
             for task in tasks:
                 if task not in EVALPLUS_TASK.get_task_enums():
                     raise ValueError(f"evalplus support tasks: {EVALPLUS_TASK.get_all_tasks_string()}")
-            from gptqmodel.utils.evalplus import evalplus
+            from gptqmodel.utils.eval import evalplus
 
             results = {}
             for task in tasks:

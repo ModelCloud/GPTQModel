@@ -1,5 +1,108 @@
+from enum import Enum
 import json
+import os
 from typing import List, Optional, Union
+
+
+class EVAL(Enum):
+    LM_EVAL = 0
+    EVALPLUS = 1
+
+    @classmethod
+    def get_task_enums(cls):
+        return [member for member in cls]
+
+    @classmethod
+    def get_full_name(cls, member):
+        return f"{cls.__name__}.{member.name}"
+
+    @classmethod
+    def get_all_eval_backend_string(cls):
+        full_names = [cls.get_full_name(member) for member in cls]
+        return ', '.join(full_names)
+
+
+class LM_EVAL_TASK(Enum):
+    ARC_CHALLENGE = "arc_challenge"
+    MMLU = "mmlu"
+    HELLASWAG = "hellaswag"
+    GSM8K_COT = "gsm8k_cot"
+
+    @classmethod
+    def get_task_enums(cls):
+        return [member for member in cls]
+
+    @classmethod
+    def get_full_name(cls, member):
+        return f"{cls.__name__}.{member.name}"
+
+    @classmethod
+    def get_all_tasks_string(cls):
+        full_names = [cls.get_full_name(member) for member in cls]
+        return ', '.join(full_names)
+
+
+class EVALPLUS_TASK(Enum):
+    HUMAN = "humaneval"
+    MBPP = "mbpp"
+
+    @classmethod
+    def get_task_enums(cls):
+        return [member for member in cls]
+
+    @classmethod
+    def get_full_name(cls, member):
+        return f"{cls.__name__}.{member.name}"
+
+    @classmethod
+    def get_all_tasks_string(cls):
+        full_names = [cls.get_full_name(member) for member in cls]
+        return ', '.join(full_names)
+
+
+def evalplus(
+        model: str,
+        dataset: str,
+        batch: int = 1,
+        trust_remote_code: bool = False,
+):
+    try:
+        from evalplus.evaluate import evaluate
+    except BaseException:
+        raise ValueError("evalplus is not installed. Please install via `pip install gptqmodel[evalplus]`.")
+
+    assert dataset in ["humaneval", "mbpp"], f"Invalid dataset {dataset}"
+
+    evaluate(dataset=dataset, model=model, backend="gptqmodel", bs=batch, trust_remote_code=trust_remote_code,
+             greedy=True)
+
+    result_path = model.strip("./").replace("/", "--") + f"_gptqmodel_temp_0.0_eval_results.json"
+    result_path = os.path.join("evalplus_results", dataset, result_path)
+
+    if not os.path.exists(result_path):
+        raise FileNotFoundError(f"No such file: {result_path}")
+
+    try:
+        with open(result_path, 'r') as file:
+            data = json.load(file)
+    except json.JSONDecodeError:
+        raise ValueError(f"Failed to decode JSON: {result_path}")
+
+    try:
+        pass_at_k = data["pass_at_k"]
+        base = float(pass_at_k["base"]["pass@1"])
+        plus = float(pass_at_k["plus"]["pass@1"])
+
+        base_formatted = format(base, ".3f")
+        plus_formatted = format(plus, ".3f")
+    except KeyError as e:
+        raise ValueError(f"Required key not found in JSON: {str(e)}")
+    except ValueError as e:
+        raise ValueError(f"Data format error: {str(e)}")
+
+    return base_formatted, plus_formatted, result_path
+
+
 
 try:
     from lm_eval import simple_evaluate
@@ -9,7 +112,6 @@ try:
     from lm_eval.utils import handle_non_serializable
 except BaseException:
     raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
-
 
 def lm_eval(
         model,
@@ -124,3 +226,6 @@ def lm_eval(
         return results
     else:
         raise ValueError('lm_eval run fail, check your code!!!')
+
+
+

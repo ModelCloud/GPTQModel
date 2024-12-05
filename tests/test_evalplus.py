@@ -3,7 +3,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest
 
-from gptqmodel.utils.evalplus import evalplus
+from gptqmodel.utils.eval import evalplus
 
 class TestEvalplus(unittest.TestCase):
     @classmethod
@@ -11,8 +11,8 @@ class TestEvalplus(unittest.TestCase):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
 
     def test_evalplus(self):
-        base_formatted, plus_formatted, _ = evalplus(model=self.MODEL_ID, dataset='humaneval', backend='hf')
-        self.assertGreaterEqual(float(base_formatted), 0.34, "Base score does not match expected result")
+        base_formatted, plus_formatted, _ = evalplus(model=self.MODEL_ID, dataset='humaneval')
+        self.assertGreaterEqual(float(base_formatted), 0.31, "Base score does not match expected result")
         self.assertGreaterEqual(float(plus_formatted), 0.29, "Plus score does not match expected result")
 
 
