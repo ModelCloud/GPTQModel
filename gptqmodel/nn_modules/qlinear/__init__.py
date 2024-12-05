@@ -29,14 +29,21 @@ class BaseQuantLinear(nn.Module):
             check_cuda()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None, device_type=None, training=False) -> Tuple[
         bool, Optional[Exception]]:
-        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic)
+        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device_type=device_type, training=training)
         return validate, err
 
     @classmethod
     def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic=None, infeatures=None,
-                  outfeatures=None) -> Tuple[bool, Optional[Exception]]:
+                  outfeatures=None, device_type=None, training=False) -> Tuple[bool, Optional[Exception]]:
+
+        if device_type:
+            cls.validate_device(device_type)
+
+        if training and not cls.SUPPORTS_TRAINING:
+            err = f"{cls} does not support training."
+            return False, NotImplementedError(err)
         if cls.SUPPORTS_BITS and bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)

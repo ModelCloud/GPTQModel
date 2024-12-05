@@ -15,6 +15,7 @@ from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT,
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from .backend import BACKEND
+from ..models._const import DEVICE
 
 logger = setup_logger()
 
@@ -55,19 +56,21 @@ def hf_select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device_map: Optional[Union[str, dict]],
+        backend: Optional[BACKEND] = None,
         checkpoint_format: str,
-        meta: Optional[Dict[str, any]],
+        meta: Optional[Dict[str, any]] = None,
+        device_map: Optional[Union[str, dict]] = None,
 ) -> Type[BaseQuantLinear]:
-    # force backend to ipex if cpu/xpu is designated device
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
-        if any(dev in devices or torch.device(dev) in devices for dev in ["cpu", "xpu"]):
-            backend = BACKEND.IPEX
+        if "cpu" in devices or torch.device("cpu") in devices:
+            device_type = DEVICE.CPU
+        elif "xpu" in devices or torch.device("xpu") in devices:
+            device_type = DEVICE.XPU
         else:
-            backend = BACKEND.AUTO
+            device_type = DEVICE.CUDA
     else:
-        backend = BACKEND.AUTO_CPU
+        device_type = DEVICE.CPU
 
     return select_quant_linear(
         bits=bits,
@@ -75,6 +78,7 @@ def hf_select_quant_linear(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
+        device_type=device_type,
         format=FORMAT.GPTQ,
         pack=True,
         dynamic=None,
@@ -87,6 +91,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
+        device_type: Optional[DEVICE] = DEVICE.CUDA,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
@@ -99,14 +104,16 @@ def select_quant_linear(
             backend = BACKEND.AUTO_CPU
 
     # Handle the case where backend is AUTO.
-    if backend == BACKEND.AUTO or backend == BACKEND.AUTO_CPU:
-        allow_backends = format_dict[format] if backend == BACKEND.AUTO else format_dict_cpu[format]
-        allow_quant_linears = backend_dict if backend == BACKEND.AUTO else backend_dict_cpu
+    if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
+        training = backend == BACKEND.AUTO_TRAINABLE
+
+        allow_backends = format_dict[format]
+        allow_quant_linears = backend_dict
         err = None
         for k, values in allow_quant_linears.items():
             for v in values:
                 in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic)
+                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device_type=device_type, training=training)
                 if in_allow_backends and validate:
                     if pack:
                         check_pack_func = hasattr(v, "pack")
