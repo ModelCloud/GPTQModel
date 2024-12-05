@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch.nn as nn
 
@@ -7,19 +7,19 @@ from ...utils.device import check_cuda
 
 
 class BaseQuantLinear(nn.Module):
-    SUPPORTS_BITS = []
-    SUPPORTS_GROUP_SIZE = []
-    SUPPORTS_DESC_ACT = [True, False]
-    SUPPORTS_SYM = [True, False]
-    SUPPORTS_SHARDS: bool = True
-    SUPPORTS_TRAINING: bool = False
-    SUPPORTS_DEVICES = [] # Empty or None means no device is supported.
-    # empty which means all
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = []
-    # empty which means all
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = []
+    SUPPORTS_BITS: List[int] = None
+    SUPPORTS_GROUP_SIZE: List[int] = None
+    SUPPORTS_DESC_ACT: List[bool] = None
+    SUPPORTS_SYM: List[bool] = None
+    SUPPORTS_SHARDS: bool = None
+    SUPPORTS_TRAINING: bool = None
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, *args, **kwargs):
+    SUPPORTS_DEVICES: List[DEVICE] = None
+
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, *args,
+                 **kwargs):
         super().__init__()
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures)
         if err:
@@ -35,8 +35,41 @@ class BaseQuantLinear(nn.Module):
         return validate, err
 
     @classmethod
+    def verify_supports_params(cls):
+        """
+        Validate that SUPPORTS parameters are not None or empty lists, raising an exception if the validation fails.
+        """
+        base_supports_variables = [
+            (name, value) for name, value in BaseQuantLinear.__dict__.items()
+            if name.startswith("SUPPORTS") and not callable(value)
+        ]
+        child_supports_variables = [
+            (name, value) for name, value in cls.__dict__.items()
+            if name.startswith("SUPPORTS") and not callable(value)
+        ]
+
+        base_supports_variables.sort(key=lambda x: x[0])
+        child_supports_variables.sort(key=lambda x: x[0])
+
+        base_variable_names = {name for name, value in base_supports_variables}
+        child_variable_names = {name for name, value in child_supports_variables}
+
+        missing_variables = base_variable_names - child_variable_names
+
+        if missing_variables:
+            raise ValueError(
+                f"{cls.__name__} these SUPPORTS variables are not overridden: {', '.join(sorted(missing_variables))}")
+
+        for name, value in child_supports_variables:
+            if not name.startswith("SUPPORTS") or callable(value):
+                continue
+            if value is None or (isinstance(value, list) and not value):
+                raise ValueError(f"{cls.__name__}.{name} cannot be None or an empty list.")
+
+    @classmethod
     def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, infeatures:int=None,
                   outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
+        cls.verify_supports_params()
 
         if device is not None:
             cls.validate_device(device)
@@ -45,55 +78,55 @@ class BaseQuantLinear(nn.Module):
             err = f"{cls} does not support training."
             return False, NotImplementedError(err)
 
-        if cls.SUPPORTS_BITS and bits not in cls.SUPPORTS_BITS:
+        if bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)
-        if cls.SUPPORTS_GROUP_SIZE and group_size not in cls.SUPPORTS_GROUP_SIZE:
+        if group_size not in cls.SUPPORTS_GROUP_SIZE:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
-        if cls.SUPPORTS_SYM and sym not in cls.SUPPORTS_SYM:
+        if sym not in cls.SUPPORTS_SYM:
             err = f"{cls} only supports `{cls.SUPPORTS_SYM}` bits: actual sym = `{sym}`"
             return False, NotImplementedError(err)
-        if cls.SUPPORTS_DESC_ACT and desc_act not in cls.SUPPORTS_DESC_ACT:
+        if desc_act not in cls.SUPPORTS_DESC_ACT:
             err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
             return False, NotImplementedError(err)
         if dynamic is not None:
-            if cls.SUPPORTS_BITS:
-                dynamic_bits = {}
-                for pattern, pattern_dict in dynamic.items():
-                    dynamic_bits[pattern] = pattern_dict.get("bits", bits)
-                if len(cls.SUPPORTS_BITS) == 1:
-                    err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTS_BITS}` bits"
+            dynamic_bits = {}
+            for pattern, pattern_dict in dynamic.items():
+                dynamic_bits[pattern] = pattern_dict.get("bits", bits)
+            if len(cls.SUPPORTS_BITS) == 1:
+                err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTS_BITS}` bits"
+                return False, NotImplementedError(err)
+            else:
+                for layer, bits in dynamic_bits.items():
+                    if bits not in cls.SUPPORTS_BITS:
+                        err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
+                        return False, NotImplementedError(err)
+
+            dynamic_group_size = {}
+            for pattern, pattern_dict in dynamic.items():
+                dynamic_group_size[pattern] = pattern_dict.get("group_size", group_size)
+            for layer, group_size in dynamic_group_size.items():
+                if group_size not in cls.SUPPORTS_GROUP_SIZE:
+                    err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}` for layer `{layer}`"
                     return False, NotImplementedError(err)
-                else:
-                    for layer, bits in dynamic_bits.items():
-                        if bits not in cls.SUPPORTS_BITS:
-                            err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual dynamic_bits = `{bits}` for layer `{layer}`"
-                            return False, NotImplementedError(err)
-            if cls.SUPPORTS_GROUP_SIZE:
-                dynamic_group_size = {}
-                for pattern, pattern_dict in dynamic.items():
-                    dynamic_group_size[pattern] = pattern_dict.get("group_size", group_size)
-                for layer, group_size in dynamic_group_size.items():
-                    if group_size not in cls.SUPPORTS_GROUP_SIZE:
-                        err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}` for layer `{layer}`"
-                        return False, NotImplementedError(err)
-            if cls.SUPPORTS_SYM:
-                dynamic_sym = {}
-                for pattern, pattern_dict in dynamic.items():
-                    dynamic_sym[pattern] = pattern_dict.get("sym", sym)
-                for layer, sym in dynamic_sym.items():
-                    if sym not in cls.SUPPORTS_SYM:
-                        err = f"{cls} only supports `{cls.SUPPORTS_SYM}` bits: actual sym = `{sym}` for layer `{layer}`"
-                        return False, NotImplementedError(err)
-            if cls.SUPPORTS_DESC_ACT:
-                dynamic_desc_act = {}
-                for pattern, pattern_dict in dynamic.items():
-                    dynamic_desc_act[pattern] = pattern_dict.get("desc_act", desc_act)
-                for layer, desc_act in dynamic_desc_act.items():
-                    if desc_act not in cls.SUPPORTS_DESC_ACT:
-                        err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{desc_act}` for layer `{layer}`"
-                        return False, NotImplementedError(err)
+
+            dynamic_sym = {}
+            for pattern, pattern_dict in dynamic.items():
+                dynamic_sym[pattern] = pattern_dict.get("sym", sym)
+            for layer, sym in dynamic_sym.items():
+                if sym not in cls.SUPPORTS_SYM:
+                    err = f"{cls} only supports `{cls.SUPPORTS_SYM}` bits: actual sym = `{sym}` for layer `{layer}`"
+                    return False, NotImplementedError(err)
+
+            dynamic_desc_act = {}
+            for pattern, pattern_dict in dynamic.items():
+                dynamic_desc_act[pattern] = pattern_dict.get("desc_act", desc_act)
+            for layer, desc_act in dynamic_desc_act.items():
+                if desc_act not in cls.SUPPORTS_DESC_ACT:
+                    err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{desc_act}` for layer `{layer}`"
+                    return False, NotImplementedError(err)
+
         if infeatures is not None:
             validate = all(infeatures % in_fea == 0 for in_fea in cls.SUPPORTS_IN_FEATURES_DIVISIBLE_BY)
             if not validate:
@@ -110,8 +143,7 @@ class BaseQuantLinear(nn.Module):
     @classmethod
     def validate_device(cls, device_type: DEVICE):
         device = get_device_by_type(device_type.value)
-        if cls.SUPPORTS_DEVICES is None or len(cls.SUPPORTS_DEVICES) == 0:
-            raise NotImplementedError(f"{cls} does not support any devices, SUPPORTS_DEVICES is `{cls.SUPPORTS_DEVICES}`.")
+
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}` bits: actual device = `{device}`")
 
