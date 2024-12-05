@@ -38,7 +38,6 @@ def evalplus(
 
         base_formatted = format(base, ".3f")
         plus_formatted = format(plus, ".3f")
-        print(f"Base pass@1: {base_formatted}, Plus pass@1: {plus_formatted}")
     except KeyError as e:
         raise ValueError(f"Required key not found in JSON: {str(e)}")
     except ValueError as e:

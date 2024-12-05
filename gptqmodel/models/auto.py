@@ -9,7 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND
+from ..utils import BACKEND, EVAL, LM_EVAL_TASK, EVALPLUS_TASK
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -217,3 +217,47 @@ class GPTQModel:
             verify_hash=verify_hash,
             **kwargs,
         )
+
+    @classmethod
+    def eval(
+            cls,
+            model_id_or_path: str,
+            backend: EVAL,
+            tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
+            model_backend: str = "vllm",
+    ):
+        if backend == EVAL.LM_EVAL:
+            for task in tasks:
+                if task not in LM_EVAL_TASK.get_task_enums():
+                    raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
+
+            from gptqmodel.utils.lm_eval import lm_eval
+            from lm_eval.utils import make_table
+            results = lm_eval(
+                model_id_or_path,
+                model_name=model_backend,
+                model_args=f"pretrained={model_id_or_path}",
+                tasks=[task.value for task in tasks],
+            )
+            print('--------lm_eval Eval Result---------')
+            print(make_table(results))
+            if "groups" in results:
+                print(make_table(results, "groups"))
+            print('--------lm_eval Result End---------')
+            return results
+        elif backend == EVAL.EVALPLUS:
+            for task in tasks:
+                if task not in EVALPLUS_TASK.get_task_enums():
+                    raise ValueError(f"evalplus support tasks: {EVALPLUS_TASK.get_all_tasks_string()}")
+            from gptqmodel.utils.evalplus import evalplus
+
+            results = {}
+            for task in tasks:
+                base_formatted, plus_formatted, result_path = evalplus(
+                    model=model_id_or_path,
+                    dataset=task.value,
+                    backend=model_backend)
+                results[task] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+            return results
+        else:
+            raise ValueError(f"Eval backend support: {EVAL.get_all_eval_backend_string()}")
