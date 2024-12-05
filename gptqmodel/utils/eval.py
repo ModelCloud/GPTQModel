@@ -159,7 +159,7 @@ def lm_eval(
             max_batch_size=max_batch_size,
             trust_remote_code=trust_remote_code,
         )
-    # evaluation_tracker need model_args cannot be None
+    evaluation_tracker = None
     if output_path is not None:
         evaluation_tracker = EvaluationTracker(output_path=output_path)
     results = simple_evaluate(
