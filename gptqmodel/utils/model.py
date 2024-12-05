@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Dict, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
@@ -22,10 +22,10 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
@@ -563,7 +563,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
 
     if model_uses_exllamav2:
-        from ..nn_modules.qlinear.qlinear_exllamav2 import ExLlamaV2DeviceTensors
+        from ..nn_modules.qlinear.exllamav2 import ExLlamaV2DeviceTensors
 
         device_tensors = {}
         for device, scratch_bytes in fixed_bytes.items():

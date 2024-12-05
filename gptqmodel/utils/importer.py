@@ -1,17 +1,17 @@
 from collections import OrderedDict
-from typing import Optional, Union, Dict, Type
+from typing import Dict, Optional, Type, Union
 
 import torch
 
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear
-from ..nn_modules.qlinear.qlinear_dynamic_cuda import DynamicCudaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_torch import TorchQuantLinear
-from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
+from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
+from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
+from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from .backend import BACKEND
@@ -136,7 +136,7 @@ def select_quant_linear(
     elif backend == BACKEND.CUDA:
         return DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
-        from ..nn_modules.qlinear.qlinear_ipex import IPEX_AVAILABLE
+        from ..nn_modules.qlinear.ipex import IPEX_AVAILABLE
         if not IPEX_AVAILABLE:
             raise ValueError("IPEX is not available.")
 

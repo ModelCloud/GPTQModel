@@ -10,9 +10,9 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
-from gptqmodel.nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin import dequantize_weight  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import dequantize_weight  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 
 
 def gen_quant4(k, n, groupsize=-1):

@@ -1,7 +1,7 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -298,7 +298,7 @@ def unpack_to_8bit_signed(qweight, qzeros, bits, g_idx=None):
     return weight, zeros
 
 
-# Copied from qlinear_marlin.py
+# Copied from marlin.py
 @torch.no_grad()
 def dequantize_weight(qweight, qzeros, scales, bits):
     unpacked_qweight, unpacked_qzeros = unpack_to_8bit_signed(qweight, qzeros, bits)

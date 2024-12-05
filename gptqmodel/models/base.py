@@ -247,7 +247,7 @@ class BaseGPTQModel(nn.Module):
                            f"Current size: {len(calibration_dataset)}.")
 
         if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
