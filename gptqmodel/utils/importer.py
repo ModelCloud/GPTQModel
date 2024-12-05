@@ -15,19 +15,19 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
-from .backend import BACKEND, get_backend
+from .backend import BACKEND
 
 logger = setup_logger()
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: [MarlinQuantLinear],
-    BACKEND.EXLLAMA_V2: [ExllamaV2QuantLinear],
-    BACKEND.EXLLAMA_V1: [ExllamaQuantLinear],
-    BACKEND.TRITON: [TritonV2QuantLinear],
-    BACKEND.CUDA: [DynamicCudaQuantLinear],
-    BACKEND.BITBLAS: [BitBLASQuantLinear],
-    BACKEND.IPEX: [IPEXQuantLinear],
-    BACKEND.TORCH: [TorchQuantLinear],
+    BACKEND.MARLIN: MarlinQuantLinear,
+    BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
+    BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+    BACKEND.TRITON: TritonV2QuantLinear,
+    BACKEND.CUDA: DynamicCudaQuantLinear,
+    BACKEND.BITBLAS: BitBLASQuantLinear,
+    BACKEND.IPEX: IPEXQuantLinear,
+    BACKEND.TORCH: TorchQuantLinear,
 })
 
 backend_dict_cpu = OrderedDict({
@@ -52,19 +52,15 @@ format_dict_cpu = {
 
 # public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
-        bits: int,
-        group_size: int,
-        desc_act: bool,
-        sym: bool,
-        checkpoint_format: str,
-        backend: Optional[Union[str, BACKEND]] = None,
-        meta: Optional[Dict[str, any]] = None,
-        device_map: Optional[Union[str, dict]] = None,
+    bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    checkpoint_format: str,
+    backend: Optional[BACKEND] = None,
+    meta: Optional[Dict[str, any]] = None,
+    device_map: Optional[Union[str, dict]] = None,
 ) -> Type[BaseQuantLinear]:
-    # convert hf string backend to backend.enum
-    if isinstance(backend, str):
-        backend = get_backend(backend)
-
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
         if "cpu" in devices or torch.device("cpu") in devices:
@@ -91,15 +87,15 @@ def hf_select_quant_linear(
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-        bits: int,
-        group_size: int,
-        desc_act: bool,
-        sym: bool,
-        device: Optional[DEVICE] = DEVICE.CUDA,
-        backend: BACKEND = BACKEND.AUTO,
-        format: FORMAT = FORMAT.GPTQ,
-        pack: bool = False,
-        dynamic=None,
+    bits: int,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    device: Optional[DEVICE] = DEVICE.CUDA,
+    backend: BACKEND = BACKEND.AUTO,
+    format: FORMAT = FORMAT.GPTQ,
+    pack: bool = False,
+    dynamic=None,
 ) -> Type[BaseQuantLinear]:
     if not torch.cuda.is_available():
         if hasattr(torch, "xpu") and torch.xpu.is_available():
@@ -114,19 +110,18 @@ def select_quant_linear(
         allow_backends = format_dict[format]
         allow_quant_linears = backend_dict
         err = None
-        for k, values in allow_quant_linears.items():
-            for v in values:
-                in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
-                if in_allow_backends and validate:
-                    if pack:
-                        check_pack_func = hasattr(v, "pack")
-                        if check_pack_func:
-                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
-                            return v
-                    else:
+        for k, v in allow_quant_linears.items():
+            in_allow_backends = k in allow_backends
+            validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
+            if in_allow_backends and validate:
+                if pack:
+                    check_pack_func = hasattr(v, "pack")
+                    if check_pack_func:
                         logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
                         return v
+                else:
+                    logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                    return v
 
         if err:
             raise err
