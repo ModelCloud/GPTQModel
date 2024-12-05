@@ -17,12 +17,12 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
+
+
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
@@ -90,7 +90,7 @@ class ModelTest(unittest.TestCase):
         return datas
 
     def check_kernel(self, model, expected_kernels):
-        modules = set([type(module).__name__  for _, module in model.named_modules() if isinstance(module, BaseQuantLinear) ])
+        modules = set([module.__class__  for _, module in model.named_modules() if isinstance(module, BaseQuantLinear) ])
         print(f"modules in model: {modules}")
         assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 

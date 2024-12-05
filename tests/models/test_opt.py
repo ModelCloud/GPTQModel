@@ -1,3 +1,5 @@
+from gptqmodel import BACKEND
+from gptqmodel.utils.importer import backend_dict
 from model_test import ModelTest
 
 
@@ -6,8 +8,8 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.1894
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
 
-    KERNEL_QUANT = {'ExllamaQuantLinear'}
-    KERNEL_INFERENCE = {'MarlinQuantLinear'}
+    KERNEL_QUANT = set(backend_dict[BACKEND.EXLLAMA_V1])
+    KERNEL_INFERENCE = set(backend_dict[BACKEND.MARLIN])
 
     def test_opt(self):
         self.quant_lm_eval()
