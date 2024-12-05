@@ -3,6 +3,7 @@ from typing import Dict, Optional, Type, Union
 
 import torch
 
+from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
@@ -15,7 +16,6 @@ from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT,
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from .backend import BACKEND
-from ..models._const import DEVICE
 
 logger = setup_logger()
 
