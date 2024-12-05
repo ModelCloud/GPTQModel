@@ -6,5 +6,8 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.1894
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
 
+    KERNEL_QUANT = set(["OPTDecoder", "ReLU", "MarlinQuantLinear", "Linear", "OPTAttention", "ModuleList", "OPTForCausalLM", "OPTDecoderLayer", "OPTModel", "OPTLearnedPositionalEmbedding", "Embedding", "OPTGPTQ", "LayerNorm"])
+    KERNEL_INFERENCE = KERNEL_QUANT
+
     def test_opt(self):
         self.quant_lm_eval()
