@@ -105,7 +105,7 @@ def select_quant_linear(
 
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        training = backend == BACKEND.AUTO_TRAINABLE
+        trainable = backend == BACKEND.AUTO_TRAINABLE
 
         allow_backends = format_dict[format]
         allow_quant_linears = backend_dict
@@ -113,7 +113,7 @@ def select_quant_linear(
         for k, values in allow_quant_linears.items():
             for v in values:
                 in_allow_backends = k in allow_backends
-                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, training=training)
+                validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
                 if in_allow_backends and validate:
                     if pack:
                         check_pack_func = hasattr(v, "pack")

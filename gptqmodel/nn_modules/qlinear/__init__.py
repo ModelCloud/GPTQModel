@@ -29,19 +29,19 @@ class BaseQuantLinear(nn.Module):
             check_cuda()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, training:Optional[bool]=None) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
-        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, training=training)
+        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
         return validate, err
 
     @classmethod
     def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, infeatures:int=None,
-                  outfeatures:int=None, device:Optional[DEVICE]=None, training:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
+                  outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
 
         if device is not None:
             cls.validate_device(device)
 
-        if training is not None and training and not cls.SUPPORTS_TRAINING:
+        if trainable == True and not cls.SUPPORTS_TRAINING:
             err = f"{cls} does not support training."
             return False, NotImplementedError(err)
 
