@@ -58,60 +58,54 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
 
-        if x.device.type != "cuda":
-            raise NotImplementedError(f"Unable to use cuda kernel. x.device.type is {x.device.type}")
-
-        if not self.gptqmodel_cuda_available:
-            raise ValueError(
-                f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {cuda_import_exception}"
-            )
-
-        if self.kernel_switch_threshold != 0 and x.shape[0] >= self.kernel_switch_threshold:
-            raise ValueError(
-                f"Trying to use the cuda backend, x.shape[0] is {x.shape[0]}, x.shape[0] cannot be >= kernel_switch_threshold{self.kernel_switch_threshold}"
-            )
-
-        out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
-        if self.bits == 2:
-            self.gptqmodel_cuda.vecquant2matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        elif self.bits == 3:
-            self.gptqmodel_cuda.vecquant3matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        elif self.bits == 4:
-            self.gptqmodel_cuda.vecquant4matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        elif self.bits == 8:
-            self.gptqmodel_cuda.vecquant8matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        out = out.to(x_dtype)
-        out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
-        return out
+        if (x.device.type == "cuda"
+                and self.gptqmodel_cuda_available
+                and (self.kernel_switch_threshold == 0 or x.shape[0] < self.kernel_switch_threshold)
+        ):
+            out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
+            if self.bits == 2:
+                self.gptqmodel_cuda.vecquant2matmul(
+                    x.float(),
+                    self.qweight,
+                    out,
+                    self.scales.float(),
+                    self.qzeros,
+                    self.g_idx,
+                )
+            elif self.bits == 3:
+                self.gptqmodel_cuda.vecquant3matmul(
+                    x.float(),
+                    self.qweight,
+                    out,
+                    self.scales.float(),
+                    self.qzeros,
+                    self.g_idx,
+                )
+            elif self.bits == 4:
+                self.gptqmodel_cuda.vecquant4matmul(
+                    x.float(),
+                    self.qweight,
+                    out,
+                    self.scales.float(),
+                    self.qzeros,
+                    self.g_idx,
+                )
+            elif self.bits == 8:
+                self.gptqmodel_cuda.vecquant8matmul(
+                    x.float(),
+                    self.qweight,
+                    out,
+                    self.scales.float(),
+                    self.qzeros,
+                    self.g_idx,
+                )
+            out = out.to(x_dtype)
+            out = out.reshape(out_shape)
+            out = out + self.bias if self.bias is not None else out
+            return out
+        else:
+            logger.warning_once("Does not meet the cuda kernel conditions, will use the non-optimized forward() with torch.")
+            return super().forward(x)
 
 
 __all__ = ["DynamicCudaQuantLinear"]
