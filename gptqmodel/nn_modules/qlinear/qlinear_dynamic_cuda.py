@@ -48,8 +48,9 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
 
-        if (x.device.type != "cuda" or not self.gptqmodel_cuda_available or
-                (self.kernel_switch_threshold != 0 and x.shape[0] >= self.kernel_switch_threshold)):
+        assert x.device.type == "cuda" 
+        
+        if x.shape[0] >= self.kernel_switch_threshold:
             logger.warning_once(
                 "Does not meet the cuda kernel conditions, will use the non-optimized forward() with torch.")
             return super().forward(x)
