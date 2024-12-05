@@ -124,7 +124,7 @@ class ModelTest(unittest.TestCase):
         if not is_quantized:
             model.quantize(calibration_dataset)
 
-            if self.KERNEL_QUANT is not None:
+            if self.KERNEL_QUANT:
                 self.check_kernel(model, self.KERNEL_QUANT)
 
             with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
@@ -226,7 +226,7 @@ class ModelTest(unittest.TestCase):
     def quant_lm_eval(self):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-        if self.KERNEL_INFERENCE is not None:
+        if self.KERNEL_INFERENCE:
             self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         task_results = self.lm_eval(model=self.model,
