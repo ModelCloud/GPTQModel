@@ -41,7 +41,7 @@ class BaseQuantLinear(nn.Module):
         if device is not None:
             cls.validate_device(device)
 
-        if trainable == True and not cls.SUPPORTS_TRAINING:
+        if trainable and not cls.SUPPORTS_TRAINING:
             err = f"{cls} does not support training."
             return False, NotImplementedError(err)
 
