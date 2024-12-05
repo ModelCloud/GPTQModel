@@ -92,7 +92,8 @@ class ModelTest(unittest.TestCase):
     def check_kernel(self, model, expected_kernels):
         modules = set([module.__class__  for _, module in model.named_modules() if isinstance(module, BaseQuantLinear) ])
         print(f"modules in model: {modules}")
-        assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
+        if expected_kernels:
+            assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         quantize_config = QuantizeConfig(
@@ -125,8 +126,7 @@ class ModelTest(unittest.TestCase):
         if not is_quantized:
             model.quantize(calibration_dataset)
 
-            if self.KERNEL_QUANT:
-                self.check_kernel(model, self.KERNEL_QUANT)
+            self.check_kernel(model, self.KERNEL_QUANT)
 
             with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
                 model.save(tmpdirname)
@@ -227,8 +227,7 @@ class ModelTest(unittest.TestCase):
     def quant_lm_eval(self):
         self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-        if self.KERNEL_INFERENCE:
-            self.check_kernel(self.model, self.KERNEL_INFERENCE)
+        self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         task_results = self.lm_eval(model=self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
