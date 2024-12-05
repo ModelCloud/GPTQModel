@@ -99,9 +99,9 @@ def select_quant_linear(
 ) -> Type[BaseQuantLinear]:
     if not torch.cuda.is_available():
         if hasattr(torch, "xpu") and torch.xpu.is_available():
-            backend = BACKEND.IPEX
+            device_type = DEVICE.XPU
         else:
-            backend = BACKEND.AUTO_CPU
+            device_type = DEVICE.CPU
 
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
