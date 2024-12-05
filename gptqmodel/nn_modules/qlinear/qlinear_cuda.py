@@ -66,9 +66,9 @@ class CudaQuantLinear(TorchQuantLinear):
                 f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {cuda_import_exception}"
             )
 
-        if self.kernel_switch_threshold != 0 and x.shape[0] > self.kernel_switch_threshold:
+        if self.kernel_switch_threshold != 0 and x.shape[0] >= self.kernel_switch_threshold:
             raise ValueError(
-                f"Trying to use the cuda backend, x.shape[0] is {x.shape[0]}, x.shape[0] cannot be greater than kernel_switch_threshold{self.kernel_switch_threshold}"
+                f"Trying to use the cuda backend, x.shape[0] is {x.shape[0]}, x.shape[0] cannot be >= kernel_switch_threshold{self.kernel_switch_threshold}"
             )
 
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
