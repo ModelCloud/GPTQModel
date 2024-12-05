@@ -37,7 +37,7 @@ class ModelTest(unittest.TestCase):
     DELETE_QUANTIZED_MODEL = True
 
     KERNEL_QUANT = None
-    KERNEL_INFERENCE = None
+    KERNEL_INFERENCE = MarlinQuantLinear
 
     # quant config
     QUANT_FORMAT = FORMAT.GPTQ
