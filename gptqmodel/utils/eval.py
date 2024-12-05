@@ -160,7 +160,7 @@ def lm_eval(
             trust_remote_code=trust_remote_code,
         )
     # evaluation_tracker need model_args cannot be None
-    if evaluation_tracker is None and output_path is not None:
+    if output_path is not None:
         evaluation_tracker = EvaluationTracker(output_path=output_path)
     results = simple_evaluate(
         model=model_name,
