@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
@@ -22,10 +22,10 @@ from transformers.utils.hub import cached_file
 
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
@@ -191,18 +191,23 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
-    model,
+    model: nn.Module,
     bits: int,
-    qlinear_kernel: nn.Module,
-):
-    quantize_config = QuantizeConfig(bits=bits)
-    return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel)
+    qlinear_kernel: Type[BaseQuantLinear],
+    checkpoint_format: str,
+    meta: Optional[Dict[str, any]],
+) -> Tuple[nn.Module, bool]:
+    if checkpoint_format == "gptq":
+        quantize_config = QuantizeConfig(bits=bits)
+        return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel), True
+    else:
+        return model, False
 
 
 def convert_gptq_v1_to_v2_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+    qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v1 to v2 conversion for ipex
     if qlinear_kernel == IPEXQuantLinear:
@@ -240,18 +245,25 @@ def convert_gptq_v1_to_v2_format(
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v2_to_v1_format(
-    model,
+    model: nn.Module,
+    sym: bool,
     bits: int,
-    qlinear_kernel: nn.Module,
-):
-    quantize_config = QuantizeConfig(bits=bits)
-    return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel)
+    qlinear_kernel: Type[BaseQuantLinear],
+    checkpoint_format: str,
+    meta: Optional[Dict[str, any]],
+) -> Tuple[nn.Module, bool]:
+    # note: sym=False is valid for gptq_v2 for all gptqmodel and gptq(v1) for gptqmodel >= `0.9.0`
+    if sym and checkpoint_format == "gptq_v2":
+        quantize_config = QuantizeConfig(bits=bits)
+        return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel), True
+    else:
+        return model, False
 
 
 def convert_gptq_v2_to_v1_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+    qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for ipex
     if qlinear_kernel == IPEXQuantLinear:
@@ -551,7 +563,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
 
     if model_uses_exllamav2:
-        from ..nn_modules.qlinear.qlinear_exllamav2 import ExLlamaV2DeviceTensors
+        from ..nn_modules.qlinear.exllamav2 import ExLlamaV2DeviceTensors
 
         device_tensors = {}
         for device, scratch_bytes in fixed_bytes.items():

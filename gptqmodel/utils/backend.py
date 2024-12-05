@@ -3,7 +3,7 @@ from enum import Enum
 
 class BACKEND(Enum):
     AUTO = 0  # choose the optimal local kernel based on quant_config compatibility
-    AUTO_CPU = 1 # choose the optimal cpu-only local kernel; for transformer/optimum compat
+    AUTO_TRAINABLE = 1 # choose the optimal trainable local kernel for post-quant training
     CUDA = 2
     TORCH = 3
     TRITON = 4

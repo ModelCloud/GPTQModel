@@ -3,7 +3,7 @@ from model_test import ModelTest
 
 class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.2
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     NATIVE_ARC_CHALLENGE_ACC = 0.2739
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
     TRUST_REMOTE_CODE = False

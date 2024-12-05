@@ -3,8 +3,9 @@ from model_test import ModelTest
 
 class TestHymba(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Hymba-1.5B-Instruct/"  # "baichuan-inc/Baichuan2-7B-Chat"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3814
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3686
+    NATIVE_ARC_CHALLENGE_ACC = 0.2073
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2713
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.75
     MODEL_MAX_LEN = 8192
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True

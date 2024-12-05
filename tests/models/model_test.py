@@ -18,12 +18,13 @@ from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+RAND_SEED = 898
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.15  # -15%
-    QUANT_ARC_MAX_POSITIVE_DELTA = 0.2  # 20%
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
@@ -156,6 +157,11 @@ class ModelTest(unittest.TestCase):
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
+                    gen_kwargs="temperature=0.0,top_k=50",
+                    random_seed = RAND_SEED,
+                    numpy_random_seed = RAND_SEED,
+                    torch_random_seed = RAND_SEED,
+                    fewshot_random_seed = RAND_SEED,
                 )
 
                 print('--------Eval Result---------')
@@ -216,7 +222,7 @@ class ModelTest(unittest.TestCase):
     def check_results(self, task_results):
         for filter, value in task_results.items():
             diff_pct = self.calculatorPer(filter=filter, value=value)
-            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
-            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
+            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct,
                             f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")

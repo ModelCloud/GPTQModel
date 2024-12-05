@@ -12,8 +12,8 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear, ipex_dtype
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear, ipex_dtype
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
@@ -191,7 +191,7 @@ def ModelLoader(cls):
                 "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu and xpu quantization and inference.")
 
         if backend == BACKEND.TRITON:
-            from ..nn_modules.qlinear.qlinear_tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
+            from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
             if not TRITON_AVAILABLE:
                 raise ValueError(TRITON_INSTALL_HINT)
 
@@ -299,7 +299,7 @@ def ModelLoader(cls):
             backend = BACKEND.BITBLAS
 
         if backend == BACKEND.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
