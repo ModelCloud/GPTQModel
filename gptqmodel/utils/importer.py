@@ -57,7 +57,7 @@ def hf_select_quant_linear(
         desc_act: bool,
         sym: bool,
         checkpoint_format: str,
-        backend: Optional[BACKEND] = None,
+        backend: Optional[Union[str, BACKEND]] = None,
         meta: Optional[Dict[str, any]] = None,
         device_map: Optional[Union[str, dict]] = None,
 ) -> Type[BaseQuantLinear]:
@@ -71,6 +71,10 @@ def hf_select_quant_linear(
             device = DEVICE.CUDA
     else:
         device = DEVICE.CPU
+
+    # Handle the case where backend is a string.
+    if isinstance(backend, str):
+        backend = BACKEND[backend]
 
     return select_quant_linear(
         bits=bits,
