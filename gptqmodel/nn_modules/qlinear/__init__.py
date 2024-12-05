@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, Union, List
 
 import torch.nn as nn
 
@@ -141,8 +141,8 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device_type: DEVICE):
-        device = get_device_by_type(device_type.value)
+    def validate_device(cls, device: Union[DEVICE, str]):
+        device = get_device_by_type(device) if isinstance(device, str) else device
 
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}` bits: actual device = `{device}`")
