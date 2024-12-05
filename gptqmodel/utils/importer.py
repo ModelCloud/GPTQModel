@@ -15,7 +15,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
-from .backend import BACKEND
+from .backend import BACKEND, get_backend
 
 logger = setup_logger()
 
@@ -52,15 +52,19 @@ format_dict_cpu = {
 
 # public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
-    bits: int,
-    group_size: int,
-    desc_act: bool,
-    sym: bool,
-    checkpoint_format: str,
-    backend: Optional[BACKEND] = None,
-    meta: Optional[Dict[str, any]] = None,
-    device_map: Optional[Union[str, dict]] = None,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        checkpoint_format: str,
+        backend: Optional[Union[str, BACKEND]] = None,
+        meta: Optional[Dict[str, any]] = None,
+        device_map: Optional[Union[str, dict]] = None,
 ) -> Type[BaseQuantLinear]:
+    # convert hf string backend to backend.enum
+    if isinstance(backend, str):
+        backend = get_backend(backend)
+
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
         if "cpu" in devices or torch.device("cpu") in devices:
@@ -87,15 +91,15 @@ def hf_select_quant_linear(
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-    bits: int,
-    group_size: int,
-    desc_act: bool,
-    sym: bool,
-    device: Optional[DEVICE] = DEVICE.CUDA,
-    backend: BACKEND = BACKEND.AUTO,
-    format: FORMAT = FORMAT.GPTQ,
-    pack: bool = False,
-    dynamic=None,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        device: Optional[DEVICE] = DEVICE.CUDA,
+        backend: BACKEND = BACKEND.AUTO,
+        format: FORMAT = FORMAT.GPTQ,
+        pack: bool = False,
+        dynamic=None,
 ) -> Type[BaseQuantLinear]:
     if not torch.cuda.is_available():
         if hasattr(torch, "xpu") and torch.xpu.is_available():
