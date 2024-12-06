@@ -32,26 +32,6 @@ logger = logging.getLogger(__name__)
 RAND_SEED = 42
 TASK_NAME = "arc_challenge"
 
-
-def get_all_qlinear():
-    qlinear_classes = []
-    package_name = "gptqmodel.nn_modules.qlinear"
-    package = importlib.import_module(package_name)
-    for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
-        if not ispkg:
-            try:
-                module = importlib.import_module(name)
-
-                for class_name, class_obj in module.__dict__.items():
-                    if isinstance(class_obj, type):
-                        if issubclass(class_obj, BaseQuantLinear) and class_obj is not BaseQuantLinear:
-                            logger.info(f"Found class {class_name} in {name} that inherits from BaseClass")
-                            qlinear_classes.append(class_obj)
-            except Exception:
-                continue
-    return qlinear_classes
-
-
 class TestGroupSize(unittest.TestCase):
     QLINEAR_DICT = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
@@ -65,7 +45,6 @@ class TestGroupSize(unittest.TestCase):
     }
 
 
-    @classmethod
     @classmethod
     def setUpClass(cls):
         cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH, BACKEND.BITBLAS,
