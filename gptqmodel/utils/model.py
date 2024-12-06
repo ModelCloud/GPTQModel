@@ -118,7 +118,6 @@ def make_quant(
     pack: bool = False,
     dynamic=None,
 ) -> BaseQuantLinear:
-
     QuantLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -131,7 +130,7 @@ def make_quant(
     )
 
     # TODO, we need fix here. if select other linears
-    for linear in [QuantLinear, TorchQuantLinear]:
+    for linear in {QuantLinear, TorchQuantLinear}:
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
