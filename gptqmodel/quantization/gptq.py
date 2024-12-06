@@ -228,6 +228,8 @@ class GPTQ:
         self.Losses = None
         self.Trace = None
         torch.cuda.empty_cache()
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
 
 
 __all__ = ["GPTQ"]
