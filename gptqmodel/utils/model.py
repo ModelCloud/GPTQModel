@@ -130,7 +130,7 @@ def make_quant(
     )
 
     # TODO, we need fix here. if select other linears
-    for linear in {QuantLinear, TorchQuantLinear}:
+    for linear in list(dict.fromkeys([QuantLinear, TorchQuantLinear])):
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
