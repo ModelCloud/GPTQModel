@@ -31,7 +31,7 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '10'
+        default: '12'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -82,7 +82,7 @@ jobs:
           echo "artifact_id=$run_id"
 
           max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-10}}"
+          max_p="{\"size\": ${max_p:-12}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
@@ -224,7 +224,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 12 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
@@ -352,7 +352,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 12 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.transformers-files) }}
     steps:
@@ -456,7 +456,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 12 }}
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
     steps:
