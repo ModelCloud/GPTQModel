@@ -550,7 +550,7 @@ jobs:
         run: |
           script="
           import subprocess
-          result = subprocess.run(["pytest", "--collect-only", "-qqq", f"tests/${TEST_FILE}.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+          result = subprocess.run(["pytest", "--collect-only", "-qqq", f"tests/${{ matrix.test_script }}.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
           r = [int(line.split()[-1]) for line in result.stdout.strip().splitlines() if t.removeprefix("models/") in line]
           print(min(r[0], 3))
           "
