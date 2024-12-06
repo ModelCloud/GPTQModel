@@ -29,9 +29,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 
 logger = setup_logger()
@@ -137,7 +135,7 @@ def make_quant(
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
-        except NotImplementedError as e:
+        except NotImplementedError:
             continue
 
     raise ValueError("no support quant linear was found for this module.")
