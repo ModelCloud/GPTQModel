@@ -8,8 +8,13 @@ from ...models._const import DEVICE
 
 logger = setup_logger()
 
-import gptqmodel_cuda_64  # noqa: E402
-import gptqmodel_cuda_256  # noqa: E402
+
+gptqmodel_cuda_import_exception = None
+try:
+    import gptqmodel_cuda_64  # noqa: E402
+    import gptqmodel_cuda_256  # noqa: E402
+except ImportError as e:
+    gptqmodel_cuda_import_exception = e
 
 
 class DynamicCudaQuantLinear(TorchQuantLinear):
@@ -40,6 +45,10 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             kernel_switch_threshold=128,
             **kwargs,
     ):
+        if gptqmodel_cuda_import_exception is not None:
+            raise ValueError(
+                f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {gptqmodel_cuda_import_exception}"
+            )
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,
                          outfeatures=outfeatures, bias=bias, weight_dtype=weight_dtype, **kwargs)
 
