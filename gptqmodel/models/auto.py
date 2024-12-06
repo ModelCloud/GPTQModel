@@ -226,6 +226,7 @@ class GPTQModel:
             tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
             batch: int = 1,
             trust_remote_code: bool = False,
+            output_file: Optional[str] = None,
     ):
         if framework is None:
             raise ValueError("eval parameter: `framework` cannot be set to None")
@@ -238,16 +239,11 @@ class GPTQModel:
                 if task not in LM_EVAL_TASK.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
 
-            from pathlib import Path
-
             from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-
-            result_path = Path("lm_eval_results")
-            result_path.mkdir(parents=True, exist_ok=True)
 
             results = lm_eval(
                 model_id_or_path,
@@ -257,7 +253,7 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 batch_size=batch,
                 apply_chat_template=True if tokenizer.chat_template is not None else False,
-                output_path=str(result_path)
+                output_path=output_file
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -278,6 +274,7 @@ class GPTQModel:
                     dataset=task.value,
                     batch=batch,
                     trust_remote_code=trust_remote_code,
+                    output_file=output_file
                 )
                 results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
             print('--------evalplus Eval Result---------')
