@@ -129,8 +129,13 @@ def make_quant(
         dynamic=dynamic,
     )
 
+    if pack:
+        reserve_quant_linear = ExllamaQuantLinear
+    else:
+        reserve_quant_linear = ExllamaV2QuantLinear
+
     # TODO, we need fix here. if select other linears
-    for linear in list(dict.fromkeys([QuantLinear, TorchQuantLinear])):
+    for linear in list(dict.fromkeys([QuantLinear, reserve_quant_linear, TorchQuantLinear])):
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
@@ -138,7 +143,6 @@ def make_quant(
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
-            continue
 
     raise ValueError("no support quant linear was found for this module.")
 
@@ -161,6 +165,12 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 out_features = submodule.weight.shape[1]
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
+
+            # check in_features and out_features validate
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
+                                          infeatures=in_features, outfeatures=out_features)
+            if err is not None:
+                raise err
 
             bias = submodule.bias is not None
 
