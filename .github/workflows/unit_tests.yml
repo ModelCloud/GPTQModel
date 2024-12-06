@@ -511,7 +511,6 @@ jobs:
       - name: Install wheel
         run: |
           bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.5.1 3.11
-          pip install -U -i https://pypi.org/simple
           pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
 
