@@ -130,7 +130,8 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
+                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         if not IPEX_AVAILABLE:
             return False, IPEX_ERROR_LOG
