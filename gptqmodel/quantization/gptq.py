@@ -183,8 +183,12 @@ class GPTQ:
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        if torch.cuda.is_available():
+        if self.dev.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize()
+
+        if self.dev.type == "xpu" and hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
+
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
