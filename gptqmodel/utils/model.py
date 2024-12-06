@@ -20,17 +20,17 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
+from .backend import BACKEND
+from .importer import select_quant_linear
+from .logger import setup_logger
+from .progress import ProgressBar
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .backend import BACKEND
-from .importer import select_quant_linear
-from .logger import setup_logger
-from .progress import ProgressBar
 
 logger = setup_logger()
 
@@ -130,17 +130,15 @@ def make_quant(
         dynamic=dynamic,
     )
 
-    try:
-        result = create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-    except NotImplementedError as e:
-        if QuantLinear == MarlinQuantLinear:
-            # If create MarlinQuantLinear fails, we try to convert to MarlinQuantLinear.
-            # First use ExllamaV2QuantLinear to preload, then call convert_to_marlin().
-            result = create_quant_layer(ExllamaV2QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-        else:
-            raise e
+    # TODO, we need fix here. if select other linears
+    for linear in [QuantLinear, TorchQuantLinear]:
+        try:
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
+            return result
+        except NotImplementedError:
+            continue
 
-    return result
+    raise ValueError("no support quant linear was found for this module.")
 
 
 def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym) -> BaseQuantLinear:

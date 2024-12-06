@@ -76,7 +76,7 @@ class BaseQuantLinear(nn.Module):
         if device is not None:
             try:
                 cls.validate_device(device)
-            except NotImplementedError as e:
+            except NotImplementedError:
                 e = f"{cls} does not support device: {device}"
                 return False, NotImplementedError(e)
 

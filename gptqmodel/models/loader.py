@@ -12,6 +12,7 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
+from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, is_torch_support_xpu
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear, ipex_dtype
 from ..quantization import QuantizeConfig
@@ -24,7 +25,6 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
                            get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, is_torch_support_xpu
 
 logger = setup_logger()
 
@@ -382,8 +382,7 @@ def ModelLoader(cls):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend.AUTO if (
-                                                backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
