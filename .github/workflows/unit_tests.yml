@@ -547,7 +547,17 @@ jobs:
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+        run: |
+          script="
+          import subprocess
+          result = subprocess.run(["pytest", "--collect-only", "-qqq", f"tests/${TEST_FILE}.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+          r = [int(line.split()[-1]) for line in result.stdout.strip().splitlines() if t.removeprefix("models/") in line]
+          print(min(r[0], 3))
+          "
+          count=$(python3 -c "$script")
+
+          pytest --durations=0 -n $count tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+
 
       - name: Release GPU
         if: always()
