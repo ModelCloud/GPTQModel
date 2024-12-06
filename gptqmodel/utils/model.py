@@ -132,7 +132,8 @@ def make_quant(
         dynamic=dynamic,
     )
 
-    for linear in [QuantLinear, ExllamaV2QuantLinear, TorchQuantLinear, TritonV2QuantLinear]:
+    # TODO, we need fix here. if select other linears
+    for linear in [QuantLinear, TorchQuantLinear]:
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
