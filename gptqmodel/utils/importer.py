@@ -104,6 +104,8 @@ def select_quant_linear(
         allow_backends = format_dict[format]
         allow_quant_linears = backend_dict
         err = None
+        # Suppose all quant linears in the model should have the same backend.
+        has_logged = False
         for k, v in allow_quant_linears.items():
             in_allow_backends = k in allow_backends
             validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
@@ -111,10 +113,14 @@ def select_quant_linear(
                 if pack:
                     check_pack_func = hasattr(v, "pack")
                     if check_pack_func:
-                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        if not has_logged:
+                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                            has_logged = True
                         return v
                 else:
-                    logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                    if not has_logged:
+                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        has_logged = True
                     return v
 
         if err:
