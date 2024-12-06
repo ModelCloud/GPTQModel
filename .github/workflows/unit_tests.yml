@@ -86,6 +86,9 @@ jobs:
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
+          encoded_repo=$(echo "$repo" | sed 's/\//%2F/g')
+          curl http://$ip/gpu/update_project?repo=$encoded_repo
+
   list-test-files:
     runs-on: ubuntu-latest
     outputs:
