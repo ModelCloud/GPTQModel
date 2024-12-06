@@ -134,7 +134,9 @@ def make_quant(
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
-        except NotImplementedError:
+        except NotImplementedError as e:
+            if backend != BACKEND.AUTO or backend != BACKEND.AUTO_TRAINABLE:
+                raise e
             continue
 
     raise ValueError("no support quant linear was found for this module.")
