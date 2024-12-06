@@ -152,12 +152,6 @@ class BaseQuantLinear(nn.Module):
             if not validate:
                 err = f"{cls}: `outfeatures` must be divisible by {cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY}."
                 return False, NotImplementedError(err)
-
-            validate = outfeatures % group_size == 0 or cls.SUPPORTS_AUTO_PADDING
-            if not validate:
-                err = f"{cls}: `outfeatures` must be divisible by `group_size: {group_size}`."
-                return False, NotImplementedError(err)
-
         return True, None
 
     @classmethod
