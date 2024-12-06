@@ -559,7 +559,7 @@ jobs:
 
           echo "test count: ${count}"
 
-          count=$((count<3 ? count : 3))
+          count=$((count<2 ? count : 2))
 
           echo "use count: ${count}"
 
