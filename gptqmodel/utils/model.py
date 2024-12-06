@@ -135,7 +135,8 @@ def make_quant(
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
         except NotImplementedError as e:
-            if backend != BACKEND.AUTO or backend != BACKEND.AUTO_TRAINABLE:
+            # only select other linears when backend is auto.
+            if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
             continue
 
