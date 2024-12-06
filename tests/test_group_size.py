@@ -15,6 +15,16 @@ import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel, QuantizeConfig, BACKEND  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
+
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+
 from lm_eval.utils import make_table  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -43,6 +53,17 @@ def get_all_qlinear():
 
 
 class TestGroupSize(unittest.TestCase):
+    QLINEAR_DICT = {
+        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
+        BACKEND.TRITON: TritonV2QuantLinear,
+        BACKEND.CUDA: DynamicCudaQuantLinear,
+        BACKEND.TORCH: TorchQuantLinear,
+        BACKEND.BITBLAS: BitBLASQuantLinear,
+        BACKEND.IPEX: IPEXQuantLinear,
+        BACKEND.MARLIN: MarlinQuantLinear,
+    }
+
 
     @classmethod
     @classmethod
@@ -55,9 +76,9 @@ class TestGroupSize(unittest.TestCase):
     def test_group_size(self):
         # quantize
         group_sizes = [-1, 16, 32, 64, 128]
-        # TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
-        TINYLLAMA_MODEL_ID = "/monster/data/model/opt-125m"
-        model_id = TINYLLAMA_MODEL_ID
+        TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
+        OPT_MODEL_ID = "/monster/data/model/opt-125m"
+        model_id = OPT_MODEL_ID
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         dataset = [
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
@@ -71,7 +92,7 @@ class TestGroupSize(unittest.TestCase):
                     self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
                 except Exception:
                     print(f"{quantize_config.group_size}, quant_backend: {quant_backend} An error occurred")
-                    traceback.print_stack()
+                    traceback.print_exc()
                     continue
 
     def quant_and_eval(self, calibration_dataset, model_id, quant_backend, quantize_config, tokenizer):
@@ -89,10 +110,14 @@ class TestGroupSize(unittest.TestCase):
             del model
 
             for inference_backend in self.backends:
+                if quantize_config.group_size not in self.QLINEAR_DICT[inference_backend].SUPPORTS_GROUP_SIZE:
+                    # Skip inference_backend that does not support the current group_size
+                    continue
+
                 try:
                     self.eval(inference_backend, quant_backend, quantize_config, tmp_dir)
                 except Exception:
-                    traceback.print_stack()
+                    traceback.print_exc()
                     continue
 
     def eval(self, inference_backend, quant_backend, quantize_config, tmp_dir):
