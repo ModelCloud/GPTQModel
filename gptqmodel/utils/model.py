@@ -137,11 +137,12 @@ def make_quant(
     # TODO, we need fix here. if select other linears
     for linear in list(dict.fromkeys([QuantLinear, reserve_quant_linear, TorchQuantLinear])):
         try:
+            if linear is not QuantLinear:
+                logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
+
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
         except NotImplementedError as e:
-            logger.info(f"Error: Creating {linear} failed: {e}, will try next.")
-
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
