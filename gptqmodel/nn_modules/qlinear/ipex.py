@@ -51,7 +51,7 @@ def convert_dtype_torch2str(dtype):
 
 class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
@@ -78,7 +78,6 @@ class IPEXQuantLinear(BaseQuantLinear):
         weight_dtype=None,
         **kwargs,
     ):
-        self.sym = False
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
         if weight_dtype is None:
@@ -87,10 +86,9 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.infeatures = infeatures
         self.outfeatures = outfeatures
         self.bits = bits
-        self.group_size = group_size if group_size != -1 else infeatures
+        self.group_size = group_size
         self.maxq = 2**self.bits - 1
         self.weight_dtype = weight_dtype
-        self.asym = True
         self.init_ipex = False
 
         self.register_buffer(
