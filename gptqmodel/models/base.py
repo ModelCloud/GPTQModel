@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -35,6 +37,39 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
 logger = setup_logger()
+
+from lm_eval.utils import make_table  # noqa: E402
+from gptqmodel.utils.eval import lm_eval  # noqa: E402
+def arc_lm_eval(model):
+    RAND_SEED = 42
+    TASK_NAME = "arc_challenge"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        results = lm_eval(
+            model,
+            model_name="hf",
+            output_path=tmp_dir,
+            tasks=TASK_NAME,
+            apply_chat_template=False,
+            trust_remote_code=False,
+            batch_size=32,
+            gen_kwargs="temperature=0.0,top_k=50",
+            random_seed=42,
+            numpy_random_seed=RAND_SEED,
+            torch_random_seed=RAND_SEED,
+            fewshot_random_seed=RAND_SEED,
+        )
+        print('--------Eval Result---------')
+        print(make_table(results))
+        if "groups" in results:
+            print(make_table(results, "groups"))
+        print('--------Eval Result End---------')
+        task_results = {
+            metric.removesuffix(",none"): value for metric, value in results['results'].get(TASK_NAME, {}).items()
+            if metric != 'alias' and 'stderr' not in metric
+        }
+        print(f"task_results: {task_results}")
+        return task_results
+
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -175,6 +210,34 @@ class BaseGPTQModel(nn.Module):
             del new_example["labels"]
 
         return new_calibration_dataset_batched
+
+    def quantize_forloop(
+        self,
+        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        batch_size: int = 1,
+        calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+    ):
+        from .get_dataset import get_all_combinations, get_data_set
+        all_combinations = get_all_combinations()
+        json_result = {}
+
+        # backup first layer weight
+        backup_weights = copy.deepcopy(self.model.model.layers[0].state_dict())
+
+        for i, combinations in enumerate(all_combinations):
+            print(f"dataset combination {i} / {len(all_combinations)-1}")
+            calib_dataset = get_data_set(combinations[0], combinations[1], combinations[2])
+
+            self.model.model.layers[0].load_state_dict(backup_weights)
+
+            results =self.quantize(calib_dataset, batch_size, calibration_enable_gpu_cache, tokenizer, logger_board, backend)
+            json_result[f"native_{combinations[0]} + code_{combinations[1]} + nm_{combinations[2]}"] = results
+
+            with open("./lm_eval_test.jsonl", "a") as f:
+                f.write(json.dumps(json_result))
 
     def quantize(
         self,
@@ -637,6 +700,11 @@ class BaseGPTQModel(nn.Module):
                 torch.cuda.empty_cache()
 
             layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+
+            print(f"--------layer {i} quant end--------")
+            lm_eval_result = arc_lm_eval(self.model.to("cuda:0"))
+            self.model.to("cpu")
+
             del layer
             del gptq
             del layer_inputs
@@ -644,7 +712,11 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
+            del layer_inputs
+            del layer_outputs
             torch.cuda.empty_cache()
+
+            return lm_eval_result
 
         logger.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
