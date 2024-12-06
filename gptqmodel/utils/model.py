@@ -140,6 +140,8 @@ def make_quant(
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
         except NotImplementedError as e:
+            logger.info(f"Error: Creating {linear} failed: {e}, will try next.")
+
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
@@ -163,6 +165,10 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
             elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
                 in_features = submodule.weight.shape[0]
                 out_features = submodule.weight.shape[1]
+            elif isinstance(submodule, BaseQuantLinear):
+                # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
+                in_features = submodule.infeatures
+                out_features = submodule.outfeatures
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
@@ -193,7 +199,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 infeatures=in_features,
                 outfeatures=out_features,
                 bias=bias,
-                weight_dtype=submodule.weight.dtype,
+                weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.qweight.dtype,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
