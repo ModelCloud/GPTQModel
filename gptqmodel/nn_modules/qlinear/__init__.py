@@ -13,6 +13,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_SYM: List[bool] = None
     SUPPORTS_SHARDS: bool = None
     SUPPORTS_TRAINING: bool = None
+    SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
@@ -30,9 +31,12 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     # custom quant linear class can override this and add custom checks
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
+                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
-        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+        validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
+                                      infeatures=infeatures, outfeatures=outfeatures, dynamic=dynamic,
+                                      device=device, trainable=trainable)
         return validate, err
 
     @classmethod
@@ -138,10 +142,20 @@ class BaseQuantLinear(nn.Module):
             if not validate:
                 err = f"{cls}: `infeatures` must be divisible by {cls.SUPPORTS_IN_FEATURES_DIVISIBLE_BY}."
                 return False, NotImplementedError(err)
+
+            validate = infeatures % group_size == 0 or cls.SUPPORTS_AUTO_PADDING
+            if not validate:
+                err = f"{cls}: `infeatures` must be divisible by `group_size: {group_size}`."
+                return False, NotImplementedError(err)
         if outfeatures is not None:
             validate = all(outfeatures % out_fea == 0 for out_fea in cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY)
             if not validate:
                 err = f"{cls}: `outfeatures` must be divisible by {cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY}."
+                return False, NotImplementedError(err)
+
+            validate = outfeatures % group_size == 0 or cls.SUPPORTS_AUTO_PADDING
+            if not validate:
+                err = f"{cls}: `outfeatures` must be divisible by `group_size: {group_size}`."
                 return False, NotImplementedError(err)
 
         return True, None
