@@ -199,7 +199,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 infeatures=in_features,
                 outfeatures=out_features,
                 bias=bias,
-                weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.qweight.dtype,
+                weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
