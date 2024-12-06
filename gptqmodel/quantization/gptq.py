@@ -185,6 +185,8 @@ class GPTQ:
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.cuda.synchronize()
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
@@ -224,6 +226,8 @@ class GPTQ:
         self.Losses = None
         self.Trace = None
         torch.cuda.empty_cache()
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
 
 
 __all__ = ["GPTQ"]
