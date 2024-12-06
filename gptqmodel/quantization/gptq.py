@@ -186,7 +186,7 @@ class GPTQ:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         if hasattr(torch, "xpu") and torch.xpu.is_available():
-            torch.cuda.synchronize()
+            torch.xpu.synchronize()
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
