@@ -30,6 +30,8 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 
 logger = setup_logger()
@@ -130,20 +132,14 @@ def make_quant(
         dynamic=dynamic,
     )
 
-    try:
-        result = create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-    except NotImplementedError as e:
-        if QuantLinear == MarlinQuantLinear:
-            # If create MarlinQuantLinear fails, we try to convert to MarlinQuantLinear.
-            # First use ExllamaV2QuantLinear to preload, then call convert_to_marlin().
-            if bits in ExllamaV2QuantLinear.SUPPORTS_BITS:
-                result = create_quant_layer(ExllamaV2QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-            else:
-                result = create_quant_layer(TorchQuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-        else:
-            raise e
+    for linear in [QuantLinear, ExllamaV2QuantLinear, TorchQuantLinear, TritonV2QuantLinear]:
+        try:
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
+            return result
+        except NotImplementedError as e:
+            continue
 
-    return result
+    raise ValueError("no support quant linear was found for this module.")
 
 
 def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym) -> BaseQuantLinear:
