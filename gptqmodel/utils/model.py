@@ -20,10 +20,6 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from .backend import BACKEND
-from .importer import select_quant_linear
-from .logger import setup_logger
-from .progress import ProgressBar
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
@@ -31,6 +27,10 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
+from .backend import BACKEND
+from .importer import select_quant_linear
+from .logger import setup_logger
+from .progress import ProgressBar
 
 logger = setup_logger()
 
@@ -134,7 +134,10 @@ def make_quant(
         try:
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
-        except NotImplementedError:
+        except NotImplementedError as e:
+            # only fallback to other quant linears when backend is auto.
+            if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
+                raise e
             continue
 
     raise ValueError("no support quant linear was found for this module.")
