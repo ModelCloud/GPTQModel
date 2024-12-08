@@ -96,7 +96,7 @@ GPTQModel is validated for Linux x86_64 with the following devices:
 | ---------------- | --- | -------------- | 
 | Nvidia GPU     | ✅   | Ampere or Higher |
 | Intel/AMD CPU  | ✅   | `avx512_vnni` or `amx` |
-| Intel XPU  | ✅   |   Intel Datacenter Max |
+| Intel XPU  | ✅   |   Intel Arc + Datacenter Max |
 
 ## Install
 
@@ -178,7 +178,7 @@ pip install lm-eval[gptqmodel]
 
 ### Which kernel is used by default?
 
-* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
+* `GPU`: Marlin, Exllama v2, Exllama v1, DynamicCuda, Torch kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
 * `CPU`: Intel/IPEX kernel
 * `XPU`: Intel/IPEX kernel
 
