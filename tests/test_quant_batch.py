@@ -91,4 +91,4 @@ class TestQuantBatch(unittest.TestCase):
 
             del model
 
-        self.assertLess(batch_size_1_ppl, batch_size_256_ppl)
+        self.assertTrue(abs(batch_size_1_ppl - batch_size_256_ppl) / batch_size_1_ppl <= 0.05)
