@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from packaging import version
 
@@ -36,7 +37,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
-    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
@@ -59,6 +60,9 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         self.infeatures = infeatures
         self.outfeatures = outfeatures
+
+        self.padded_infeatures = infeatures + (-infeatures % group_size)
+
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
@@ -103,6 +107,17 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)
+
+        if self.padded_infeatures != self.infeatures:
+            self.qweight.resize_(self.padded_infeatures // 32 * self.bits, self.outfeatures)
+            self.qzeros.resize_(
+                math.ceil(self.padded_infeatures / self.group_size),
+                self.outfeatures // 32 * self.bits
+            )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
+                                      device=self.g_idx.device)
+
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
@@ -157,6 +172,10 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x):
+        # if infeatures is padded, we need to pad the input as well
+        if x.size(-1) != self.padded_infeatures:
+            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+
         out_shape = x.shape[:-1] + (self.outfeatures,)
         quant_linear_fn = QuantLinearFunction
 
