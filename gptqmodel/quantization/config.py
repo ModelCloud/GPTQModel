@@ -141,6 +141,11 @@ class QuantizeConfig():
             raise ValueError(f"only support quantize to {fields_info[0].metadata['choices']} bits.")
 
         if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},  # 先添加以 "-" 开头的键
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')}  # 然后添加其他键
+            }
+
             for layer, layer_dict in self.dynamic.items():
                 for key, value in layer_dict.items():
                     if key == "bits" and value not in fields_info[0].metadata["choices"]:
