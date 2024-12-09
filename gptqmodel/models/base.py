@@ -514,7 +514,7 @@ class BaseGPTQModel(nn.Module):
                         layer_name = f"{self.layers_node}.{i}.{name}"
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
-                            logger.info(f"skip layer: {layer_name}")
+                            logger.info(f"skip module: {layer_name}")
 
                             skipped_modules.append(name)
                             continue
