@@ -178,7 +178,7 @@ class QuantizeConfig():
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
                     return False
-            if re.match(pattern.removeprefix("+:"), layer_name):
+            elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
                     return pattern_dict
                 else:
