@@ -5,6 +5,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
@@ -199,6 +200,10 @@ class TorchQuantLinear(BaseQuantLinear):
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x: torch.Tensor):
+        # if infeatures is padded, we need to pad the input as well
+        if x.size(-1) != self.padded_infeatures:
+            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype

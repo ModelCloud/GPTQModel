@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from packaging import version
 
@@ -171,6 +172,10 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x):
+        # if infeatures is padded, we need to pad the input as well
+        if x.size(-1) != self.padded_infeatures:
+            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+
         out_shape = x.shape[:-1] + (self.outfeatures,)
         quant_linear_fn = QuantLinearFunction
 
