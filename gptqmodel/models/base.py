@@ -505,6 +505,7 @@ class BaseGPTQModel(nn.Module):
             full = find_layers(layer)
             for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
+                skipped_modules = []
                 gptq = {}
                 for name in subset:
                     bits = self.quantize_config.bits
@@ -514,6 +515,8 @@ class BaseGPTQModel(nn.Module):
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
                             logger.info(f"skip layer: {layer_name}")
+
+                            skipped_modules.append(name)
                             continue
 
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
@@ -525,6 +528,9 @@ class BaseGPTQModel(nn.Module):
                         sym=sym,
                         mse=False,
                     )
+
+                for name in skipped_modules:
+                    subset.pop(name)
 
                 if len(gptq) == 0:
                     continue
