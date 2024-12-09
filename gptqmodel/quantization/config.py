@@ -177,7 +177,7 @@ class QuantizeConfig():
         for pattern, pattern_dict in self.dynamic.items():
             if pattern.startswith("-:"):
                 if re.match(pattern.removeprefix("-:"), layer_name):
-                    return -1
+                    return False
             elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
                     return pattern_dict
