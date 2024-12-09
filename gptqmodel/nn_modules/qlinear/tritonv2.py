@@ -60,7 +60,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         self.infeatures = infeatures
         self.outfeatures = outfeatures
 
-        self.padded_infeatures = infeatures + (-infeatures % self.group_size)
+        self.padded_infeatures = infeatures + (-infeatures % group_size)
 
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
