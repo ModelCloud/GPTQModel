@@ -97,7 +97,7 @@ class TestDynamic(unittest.TestCase):
             backend=backend,
         )
 
-        for name, submodule in model.named_modules():
+        for _, submodule in model.named_modules():
             if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinQuantLinear):
                 break
         else:
