@@ -52,7 +52,7 @@ class TestDynamic(unittest.TestCase):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r"-:model\.layers\.([1-9]|3[0-1])\.\w+": {},  # skip 1-31 layers
+            r"-:model\.layers\.(?:[1-9]|1[0-9]|2[0-9]|3[01])\.self_attn\.k_proj": {},  # skip 1-31 layers
             r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
             r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
             r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
