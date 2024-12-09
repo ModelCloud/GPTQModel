@@ -526,7 +526,7 @@ class BaseGPTQModel(nn.Module):
                         mse=False,
                     )
 
-                if not gptq:
+                if len(gptq) == 0:
                     continue
 
                 def add_batch(name):
