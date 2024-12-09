@@ -36,6 +36,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
@@ -93,7 +94,8 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             self.bias = None
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
+                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         if not TRITON_AVAILABLE:
             return False, ValueError(TRITON_INSTALL_HINT)

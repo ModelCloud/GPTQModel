@@ -81,6 +81,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [16]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
 
@@ -135,7 +136,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.reset_parameters()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
+    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
+                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         if not BITBLAS_AVAILABLE:
             return False, ValueError(BITBLAS_INSTALL_HINT)

@@ -129,16 +129,23 @@ def make_quant(
         dynamic=dynamic,
     )
 
+    if pack:
+        reserve_quant_linear = ExllamaQuantLinear
+    else:
+        reserve_quant_linear = ExllamaV2QuantLinear
+
     # TODO, we need fix here. if select other linears
-    for linear in list(dict.fromkeys([QuantLinear, TorchQuantLinear])):
+    for linear in list(dict.fromkeys([QuantLinear, reserve_quant_linear, TorchQuantLinear])):
         try:
+            if linear is not QuantLinear:
+                logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
+
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
-            continue
 
     raise ValueError("no support quant linear was found for this module.")
 
@@ -159,8 +166,18 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
             elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
                 in_features = submodule.weight.shape[0]
                 out_features = submodule.weight.shape[1]
+            elif isinstance(submodule, BaseQuantLinear):
+                # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
+                in_features = submodule.infeatures
+                out_features = submodule.outfeatures
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
+
+            # check in_features and out_features validate
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
+                                          infeatures=in_features, outfeatures=out_features)
+            if err is not None:
+                raise err
 
             bias = submodule.bias is not None
 
@@ -183,7 +200,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 infeatures=in_features,
                 outfeatures=out_features,
                 bias=bias,
-                weight_dtype=submodule.weight.dtype,
+                weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
