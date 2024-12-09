@@ -1,6 +1,7 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -72,7 +73,7 @@ class TestDynamic(unittest.TestCase):
         model.quantize(cls.calibration_dataset, batch_size=4)
 
         for name, submodule in model.named_modules():
-            if name == 'model.model.layers.0.self_attn.q_proj' and not isinstance(submodule, Linear): # module 0 was skipped
+            if name == 'model.model.layers.0.self_attn.q_proj' and not isinstance(submodule, BaseQuantLinear): # module 0 was skipped
                raise ValueError("first layer should be native module")
 
         model.save(
