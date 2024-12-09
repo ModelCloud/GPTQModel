@@ -17,7 +17,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestDynamic(unittest.TestCase):
-    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     tmp_dir = None
 
     def calculate_avg_ppl(self, model, tokenizer):
@@ -52,10 +52,11 @@ class TestDynamic(unittest.TestCase):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 18 gate module
-            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 19 gate module
-            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 20 gate module
-            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 21 gate module
+            r"-:model\.layers\.([1-9]|3[0-1])\.\w+": {},  # skip 1-31 layers
+            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
+            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
+            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
+            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 21 gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
