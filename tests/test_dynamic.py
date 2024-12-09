@@ -8,6 +8,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
@@ -52,7 +53,6 @@ class TestDynamic(unittest.TestCase):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r"-:model\.layers\.(?:[1-9]|1[0-9]|2[0-9]|3[01])\.self_attn\.k_proj": {},  # skip 1-31 layers
             r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
             r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
             r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
@@ -69,9 +69,7 @@ class TestDynamic(unittest.TestCase):
         )
         model.quantize(cls.calibration_dataset, batch_size=4)
 
-        model.save(
-            cls.tmp_dir.name,
-        )
+        model.save(cls.tmp_dir.name)
 
     @classmethod
     def tearDownClass(cls):
@@ -84,7 +82,6 @@ class TestDynamic(unittest.TestCase):
             (BACKEND.MARLIN),
         ]
     )
-
     def test_dynamic_bits(self, backend):
         model = GPTQModel.load(
             self.tmp_dir.name,
@@ -101,3 +98,17 @@ class TestDynamic(unittest.TestCase):
 
         del model
         assert dynamic_bits_ppl < 10
+
+    def test_skip_module(self):
+        dynamic = {
+            r"-:model\.layers\.0\..*": {},  # skip 0 layers
+        }
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            quantize_config=QuantizeConfig(dynamic=dynamic),
+        )
+        model.quantize(self.calibration_dataset, batch_size=4)
+
+        for name, submodule in model.named_modules():
+            if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
+                raise ValueError("first layer should be native module")
