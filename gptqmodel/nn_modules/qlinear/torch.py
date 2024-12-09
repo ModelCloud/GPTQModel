@@ -20,7 +20,7 @@ class TorchQuantLinear(BaseQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
-    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
@@ -45,6 +45,9 @@ class TorchQuantLinear(BaseQuantLinear):
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
+
+        self.padded_infeatures = infeatures + (-infeatures % group_size)
+
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
@@ -93,7 +96,15 @@ class TorchQuantLinear(BaseQuantLinear):
             ).reshape(1, 3, 12)
 
     def post_init(self):
-        pass
+        if self.padded_infeatures != self.infeatures:
+            self.qweight.resize_(self.padded_infeatures // 32 * self.bits, self.outfeatures)
+            self.qzeros.resize_(
+                math.ceil(self.padded_infeatures / self.group_size),
+                self.outfeatures // 32 * self.bits
+            )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
+                                      device=self.g_idx.device)
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
