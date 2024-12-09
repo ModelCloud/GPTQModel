@@ -472,6 +472,7 @@ class BaseGPTQModel(nn.Module):
         avg_losses = []
         module_names = []
         shared_kv_cache_dict = {}
+
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -510,6 +511,11 @@ class BaseGPTQModel(nn.Module):
                     sym = self.quantize_config.sym
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
+
+                        if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
+                            logger.info(f"skip layer: {layer_name}")
+                            continue
+
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                     gptq[name] = GPTQ(subset[name])
@@ -519,6 +525,9 @@ class BaseGPTQModel(nn.Module):
                         sym=sym,
                         mse=False,
                     )
+
+                if len(gptq) == 0:
+                    continue
 
                 def add_batch(name):
                     def tmp(_, inp, out):
