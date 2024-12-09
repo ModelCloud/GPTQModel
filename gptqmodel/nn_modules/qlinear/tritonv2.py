@@ -36,7 +36,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
-    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
@@ -59,6 +59,9 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
         self.infeatures = infeatures
         self.outfeatures = outfeatures
+
+        self.padded_infeatures = infeatures + (-infeatures % self.group_size)
+
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
@@ -104,7 +107,18 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     def post_init(self):
         self.validate_device(self.qweight.device.type)
 
-    def pack(self, linear, scales, zeros, g_idx=None):
+        if self.padded_infeatures != self.infeatures:
+            self.qweight.resize_(self.padded_infeatures // 32 * self.bits, self.outfeatures)
+            self.qzeros.resize_(
+                math.ceil(self.padded_infeatures / self.group_size),
+                self.outfeatures // 32 * self.bits
+            )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
+                                      device=self.g_idx.device)
+
+
+def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
