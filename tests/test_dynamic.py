@@ -14,6 +14,7 @@ from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer  # noqa: E402
 
 
 class TestDynamic(unittest.TestCase):
@@ -52,7 +53,7 @@ class TestDynamic(unittest.TestCase):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r"-:model\.layers\.(?:[1-9]|1[0-9]|2[0-9]|3[01])\.self_attn\.k_proj": {},  # skip 1-31 layers
+            r"-:model\.layers\.0\..*": {},  # skip 0 layers
             r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
             r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
             r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
@@ -84,14 +85,17 @@ class TestDynamic(unittest.TestCase):
             (BACKEND.MARLIN),
         ]
     )
-
     def test_dynamic_bits(self, backend):
         model = GPTQModel.load(
             self.tmp_dir.name,
             backend=backend,
         )
 
-        for _, submodule in model.named_modules():
+        for name, submodule in model.named_modules():
+            print(name)
+            if name == 'model.model.layers.0': # module 0 was skipped
+                if not isinstance(submodule, LlamaDecoderLayer):
+                    raise ValueError("first layer should be native module")
             if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinQuantLinear):
                 break
         else:
