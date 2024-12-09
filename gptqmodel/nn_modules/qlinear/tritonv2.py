@@ -118,7 +118,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
                                       device=self.g_idx.device)
 
 
-def pack(self, linear, scales, zeros, g_idx=None):
+    def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
