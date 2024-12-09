@@ -92,7 +92,6 @@ class TestDynamic(unittest.TestCase):
         )
 
         for name, submodule in model.named_modules():
-            print(name)
             if name == 'model.model.layers.0': # module 0 was skipped
                 if not isinstance(submodule, LlamaDecoderLayer):
                     raise ValueError("first layer should be native module")
