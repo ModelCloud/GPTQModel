@@ -1,6 +1,7 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import tempfile  # noqa: E402
@@ -14,7 +15,7 @@ from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer  # noqa: E402
+from torch.nn import Linear  # noqa: E402
 
 
 class TestDynamic(unittest.TestCase):
@@ -70,6 +71,10 @@ class TestDynamic(unittest.TestCase):
         )
         model.quantize(cls.calibration_dataset, batch_size=4)
 
+        for name, submodule in model.named_modules():
+            if name == 'model.model.layers.0.self_attn.q_proj' and not isinstance(submodule, Linear): # module 0 was skipped
+               raise ValueError("first layer should be native module")
+
         model.save(
             cls.tmp_dir.name,
         )
@@ -92,9 +97,6 @@ class TestDynamic(unittest.TestCase):
         )
 
         for name, submodule in model.named_modules():
-            if name == 'model.model.layers.0': # module 0 was skipped
-                if not isinstance(submodule, LlamaDecoderLayer):
-                    raise ValueError("first layer should be native module")
             if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinQuantLinear):
                 break
         else:
