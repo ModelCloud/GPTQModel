@@ -1,3 +1,4 @@
+
 # coding=utf-8
 # Copyright 2023 HuggingFace Inc. team and GPTQ and AutoGPTQ authors.
 #
@@ -128,7 +129,7 @@ class GPTQQuantizer(object):
                 Properties, such as tooling:version, that do not directly contributes to quantization or quant inference are stored in meta.
                 i.e. `meta.quantizer`: ["optimum:_version_", "gptqmodel:_version_"]
             backend (`str`, *optional*):
-                Controls which gptq kernel to be used. Valid values for gptqmodel are `auto`, `auto_trainable` and more. For auto-gptq, only 
+                Controls which gptq kernel to be used. Valid values for gptqmodel are `auto`, `auto_trainable` and more. For auto-gptq, only
                 valid value is None and `auto_trainable`. Ref gptqmodel backends: https://github.com/ModelCloud/GPTQModel/blob/main/gptqmodel/utils/backend.py
             use_cuda_fp16 (`bool`, defaults to `False`):
                 Whether or not to use optimized cuda kernel for fp16 model. Need to have model in fp16.

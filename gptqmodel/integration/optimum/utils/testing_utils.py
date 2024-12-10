@@ -1,211 +1,206 @@
-#  Copyright 2023 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Inc. team. All rights reserved.
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+import importlib.util
+import itertools
 import os
-from typing import Callable, Optional, Union
+import shutil
+import subprocess
+import sys
+import unittest
+from collections.abc import MutableMapping
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
-from torch import nn
-from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import Conv1D
 
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.integration.optimum.gptq.quantizer import BLOCK_PATTERNS, SEQLEN_KEYS_TRANFORMERS
-
-ori_save_pretrained = PreTrainedModel.save_pretrained
-
-logger = setup_logger()
-
-
-"""
-Set of utilities to get specific attributes of a model
-"""
+from . import (
+    is_accelerate_available,
+    is_auto_gptq_available,
+    is_datasets_available,
+    is_diffusers_available,
+    is_gptqmodel_available,
+    is_sentence_transformers_available,
+    is_timm_available,
+)
 
 
-def get_layers(module: nn.Module, layers=[Conv1D, nn.Conv2d, nn.Linear], prefix: Optional[str] = None, name: str = ""):
+# Used to test the hub
+USER = "__DUMMY_OPTIMUM_USER__"
+
+
+def flatten_dict(dictionary: Dict):
     """
-    Get all the layers with a specific prefix in the module
-    Args:
-        module (`nn.Module`):
-            The module that contains our layers
-        layers (`list`, defaults to `[Conv1D, nn.Conv2d, nn.Linear]`):
-            Type of the layers that we want to get
-        prefix (`Optional[str]`, defaults to `None`):
-            Prefix of layers
-        name (`str`, defaults to `""`):
-            Used for recursion. Don't modify
-
-    Returns:
-        `Dict[str,Union[Conv1D, nn.Conv2d, nn.Linear]]`: Mapping of the name of the layer and the actual layer
+    Flatten a nested dictionaries as a flat dictionary.
     """
-    for layer in layers:
-        if isinstance(module, layer):
-            if prefix is not None:
-                if name.startswith(prefix):
-                    return {name: module}
-            else:
-                return {name: module}
-    res = {}
-    for name1, child in module.named_children():
-        res.update(get_layers(child, layers=layers, prefix=prefix, name=name + "." + name1 if name != "" else name1))
-    return res
+    items = []
+    for k, v in dictionary.items():
+        new_key = k
+        if isinstance(v, MutableMapping):
+            items.extend(flatten_dict(v).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 
-def get_block_name_with_pattern(model: nn.Module):
+def require_accelerate(test_case):
     """
-    Get the name of the module that contains the transformers blocks by checking if any modules has a specific pattern
-
-    Args:
-        model (`nn.Module`):
-        The input model
-    Returns:
-        `str`: The name of the module that contains the Transformer blocks.
+    Decorator marking a test that requires accelerate. These tests are skipped when accelerate isn't installed.
     """
-    modules_names = [n for n, _ in model.named_modules()]
-    for pattern_candidate in BLOCK_PATTERNS:
-        pattern_candidate = pattern_candidate
-        if any(pattern_candidate in name for name in modules_names):
-            return pattern_candidate
-    raise ValueError("Block pattern could not be match. Pass `block_name_to_quantize` argument in `quantize_model`")
+    return unittest.skipUnless(is_accelerate_available(), "test requires accelerate")(test_case)
 
 
-def get_preceding_modules(model: nn.Module, module_name: str):
-    previous_module_name = []
-    stop_adding = False
-
-    def _get_preceding_modules(model: nn.Module, module_name: str, name: str = ""):
-        nonlocal stop_adding
-        for name_bis, child in model.named_children():
-            new_name = name + "." + name_bis if name != "" else name_bis
-            if new_name == module_name:
-                stop_adding = True
-                break
-            _get_preceding_modules(child, module_name, name=new_name)
-        if not stop_adding:
-            previous_module_name.append(name)
-        return previous_module_name
-
-    return _get_preceding_modules(model, module_name)
-
-
-def get_device(obj: Union[torch.Tensor, nn.Module]):
-    if isinstance(obj, torch.Tensor):
-        return obj.device
-    return next(obj.parameters()).device
-
-
-def get_seqlen(model: nn.Module):
-    if hasattr(model, "config"):
-        model_config = model.config.to_dict()
-        if any(k in model_config for k in SEQLEN_KEYS_TRANFORMERS):
-            for key in SEQLEN_KEYS_TRANFORMERS:
-                if key in model_config:
-                    return model_config[key]
-    logger.info(
-        "We couldn't get the model sequence length. Setting it to 2048. You can overwrite this value by passing `model_seqlen` in` GPTQQuantizer`"
+def require_gptq(test_case):
+    """
+    Decorator marking a test that requires gptqmodel or auto-gptq. These tests are skipped when gptqmodel and auto-gptq are not installed.
+    """
+    return unittest.skipUnless(is_auto_gptq_available() or is_gptqmodel_available(), "test requires auto-gptq")(
+        test_case
     )
-    return 2048
 
 
-def monkey_patch_gptqmodel_into_transformers():
-    # monkey_patch transformers.utils.quantization_config.GPTQConfig.post_init()
-    # Because it checks the auto_gptq version
-    def post_init(self):
-        r"""
-        Safety checker that arguments are correct
-        """
-        import importlib
+def require_torch_gpu(test_case):
+    """Decorator marking a test that requires CUDA and PyTorch."""
+    torch_device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        from packaging import version
-        print("monkey patch postin")
-        if self.bits not in [2, 3, 4, 8]:
-            raise ValueError(f"Only support quantization to [2,3,4,8] bits but found {self.bits}")
-        if self.group_size != -1 and self.group_size <= 0:
-            raise ValueError("group_size must be greater than 0 or equal to -1")
-        if not (0 < self.damp_percent < 1):
-            raise ValueError("damp_percent must between 0 and 1.")
-        if self.dataset is not None:
-            if isinstance(self.dataset, str):
-                if self.dataset in ["ptb", "ptb-new"]:
-                    raise ValueError(
-                        f"""{self.dataset} dataset was deprecated. You can only choose between
-                        ['wikitext2','c4','c4-new']"""
-                    )
-                if self.dataset not in ["wikitext2", "c4", "c4-new"]:
-                    raise ValueError(
-                        f"""You have entered a string value for dataset. You can only choose between
-                        ['wikitext2','c4','c4-new'], but we found {self.dataset}"""
-                    )
-            elif not isinstance(self.dataset, list):
-                raise ValueError(
-                    f"""dataset needs to be either a list of string or a value in
-                    ['wikitext2','c4','c4-new'], but we found {self.dataset}"""
-                )
+    return unittest.skipUnless(torch_device == "cuda", "test requires CUDA")(test_case)
 
-        if self.use_exllama is None:
-            # New default behaviour
-            self.use_exllama = True
 
-        if self.bits == 4 and self.use_exllama:
-            optimum_version = version.parse(importlib.metadata.version("optimum"))
-            # autogptq_version = version.parse(importlib.metadata.version("auto_gptq"))
-            # if optimum_version <= version.parse("1.13.2") or autogptq_version <= version.parse("0.4.2"):
-            if optimum_version <= version.parse("1.13.2"):
-                raise ValueError(
-                    # f"You need optimum > 1.13.2 and auto-gptq > 0.4.2 . Make sure to have that version installed - detected version : optimum {optimum_version} and autogptq {autogptq_version}"
-                    f"You need optimum > 1.13.2 . Make sure to have that version installed - detected version : optimum {optimum_version}"
-                )
-        if self.modules_in_block_to_quantize is not None:
-            optimum_version = version.parse(importlib.metadata.version("optimum"))
-            if optimum_version < version.parse("1.15.0"):
-                raise ValueError(
-                    "You current version of `optimum` does not support `modules_in_block_to_quantize` quantization argument, please upgrade `optimum` package to a version superior than 1.15.0 ."
-                )
+def require_ort_rocm(test_case):
+    """Decorator marking a test that requires ROCMExecutionProvider for ONNX Runtime."""
+    import onnxruntime as ort
 
-    from transformers.utils.quantization_config import GPTQConfig
-    GPTQConfig.post_init = post_init
+    providers = ort.get_available_providers()
 
-    from transformers.quantizers import auto
+    return unittest.skipUnless("ROCMExecutionProvider" == providers[0], "test requires ROCMExecutionProvider")(
+        test_case
+    )
 
-    from .hf_quantizer_gptq import GptqHfQuantizer
 
-    auto.AUTO_QUANTIZER_MAPPING["gptq"] = GptqHfQuantizer
+def require_hf_token(test_case):
+    """
+    Decorator marking a test that requires huggingface hub token.
+    """
+    # is HF_AUTH_TOKEN used instead of HF_TOKEN to avoid huggigface_hub picking it up ?
+    hf_token = os.environ.get("HF_AUTH_TOKEN", None)
+    if hf_token is None:
+        return unittest.skip("test requires hf token as `HF_AUTH_TOKEN` environment variable")(test_case)
+    else:
+        return test_case
 
-    # TODO monkey patch GPTQConfig?
 
-    # model.save_pretrained() will not call optimum.quantizer.GPTQModelQuantizer.save(),
-    # we need to monkey patch save_pretrained() to convert gptq_v2 to gptq_v1 format.
-    def monkey_patch_save_pretrained(self,
-                                     save_directory: Union[str, os.PathLike],
-                                     is_main_process: bool = True,
-                                     state_dict: Optional[dict] = None,
-                                     save_function: Callable = torch.save,
-                                     push_to_hub: bool = False,
-                                     max_shard_size: Union[int, str] = "5GB",
-                                     safe_serialization: bool = True,
-                                     variant: Optional[str] = None,
-                                     token: Optional[Union[str, bool]] = None,
-                                     save_peft_format: bool = True,
-                                     **kwargs, ):
-        hf_quantizer = getattr(self, "hf_quantizer", None)
-        if hf_quantizer:
-            ori_model = getattr(self, "model", None)
-            assert ori_model
+def require_sigopt_token_and_project(test_case):
+    """
+    Decorator marking a test that requires sigopt API token.
+    """
+    sigopt_api_token = os.environ.get("SIGOPT_API_TOKEN", None)
+    has_sigopt_project = os.environ.get("SIGOPT_PROJECT", None)
+    if sigopt_api_token is None or has_sigopt_project is None:
+        return unittest.skip("test requires an environment variable `SIGOPT_API_TOKEN` and `SIGOPT_PROJECT`")(
+            test_case
+        )
+    else:
+        return test_case
 
-            model = hf_quantizer.optimum_quantizer.convert_gptq_v2_to_v1(ori_model)
-            setattr(self, "model", model)
 
-        ori_save_pretrained(self, save_directory, is_main_process, state_dict, save_function, push_to_hub,
-                            max_shard_size, safe_serialization, variant, token, save_peft_format, **kwargs)
+def is_ort_training_available():
+    is_ort_train_available = importlib.util.find_spec("onnxruntime.training") is not None
 
-    PreTrainedModel.save_pretrained = monkey_patch_save_pretrained
+    if importlib.util.find_spec("torch_ort") is not None:
+        try:
+            is_torch_ort_configured = True
+            subprocess.run([sys.executable, "-m", "torch_ort.configure"], shell=False, check=True)
+        except subprocess.CalledProcessError:
+            is_torch_ort_configured = False
+
+    return is_ort_train_available and is_torch_ort_configured
+
+
+def require_ort_training(test_case):
+    """
+    Decorator marking a test that requires onnxruntime-training and torch_ort correctly installed and configured.
+    These tests are skipped otherwise.
+    """
+    return unittest.skipUnless(
+        is_ort_training_available(),
+        "test requires torch_ort correctly installed and configured",
+    )(test_case)
+
+
+def require_diffusers(test_case):
+    return unittest.skipUnless(is_diffusers_available(), "test requires diffusers")(test_case)
+
+
+def require_timm(test_case):
+    return unittest.skipUnless(is_timm_available(), "test requires timm")(test_case)
+
+
+def require_sentence_transformers(test_case):
+    return unittest.skipUnless(is_sentence_transformers_available(), "test requires sentence-transformers")(test_case)
+
+
+def require_datasets(test_case):
+    return unittest.skipUnless(is_datasets_available(), "test requires datasets")(test_case)
+
+
+def grid_parameters(
+        parameters: Dict[str, Iterable[Any]],
+        yield_dict: bool = False,
+        add_test_name: bool = True,
+        filter_params_func: Optional[Callable[[Tuple], Tuple]] = None,
+) -> Iterable:
+    """
+    Generates an iterable over the grid of all combinations of parameters.
+
+    Args:
+        `parameters` (`Dict[str, Iterable[Any]]`):
+            Dictionary of multiple values to generate a grid from.
+        `yield_dict` (`bool`, defaults to `False`):
+            If True, a dictionary with all keys, and sampled values will be returned. Otherwise, return sampled values as a list.
+        `add_test_name` (`bool`, defaults to `True`):
+            Whether to add the test name in the yielded list or dictionary.
+        filter_params_func (`Optional[Callable[[Tuple], Tuple]]`, defaults to `None`):
+            A function that can modify or exclude the current set of parameters. The function should take a tuple of the
+            parameters and return the same. If a parameter set is to be excluded, the function should return an empty tuple.
+    """
+    for params in itertools.product(*parameters.values()):
+        if filter_params_func is not None:
+            params = filter_params_func(list(params))
+            if params is None:
+                continue
+
+        test_name = "_".join([str(param) for param in params])
+        if yield_dict is True:
+            res_dict = {}
+            for i, key in enumerate(parameters.keys()):
+                res_dict[key] = params[i]
+            if add_test_name is True:
+                res_dict["test_name"] = test_name
+            yield res_dict
+        else:
+            returned_list = [test_name] + list(params) if add_test_name is True else list(params)
+            yield returned_list
+
+
+def remove_directory(dirpath):
+    """
+    Remove a directory and its content.
+    This is a cross-platform solution to remove a directory and its content that avoids the use of `shutil.rmtree` on Windows.
+    Reference: https://github.com/python/cpython/issues/107408
+    """
+    if os.path.exists(dirpath) and os.path.isdir(dirpath):
+        if os.name == "nt":
+            os.system(f"rmdir /S /Q {dirpath}")
+        else:
+            shutil.rmtree(dirpath)
