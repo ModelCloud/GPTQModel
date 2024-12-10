@@ -28,13 +28,14 @@ from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
 from transformers.utils.quantization_config import QuantizationMethod
 
-from ..utils import is_accelerate_available, is_auto_gptq_available, is_gptqmodel_available
-from ..utils.modeling_utils import recurse_getattr
-from .constants import GPTQ_CONFIG
-from .data import get_dataset, prepare_dataset
-from .utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
-from ..version import __version__ as optimum_version
+from optimum.utils import is_accelerate_available, is_auto_gptq_available
+from optimum.utils.modeling_utils import recurse_getattr
+from optimum.gptq.constants import GPTQ_CONFIG
+from optimum.gptq.data import get_dataset, prepare_dataset
+from optimum.gptq.utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
+from optimum.version import __version__ as optimum_version
 
+from gptqmodel.integration.optimum.utils.import_utils import is_gptqmodel_available
 
 if is_accelerate_available():
     from accelerate import (
