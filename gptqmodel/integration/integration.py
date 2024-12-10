@@ -1,18 +1,18 @@
 from optimum.gptq import quantizer
 from .optimum.gptq import quantizer as patched_quantizer
-from optimum.utils import import_utils
-from .optimum.utils import import_utils as patched_import_utils
+from optimum.utils import import_utils as optimum_import_utils
+from .optimum.utils import import_utils as patched_optimum_import_utils
 from optimum.utils import testing_utils
 from .optimum.utils import testing_utils as patched_testing_utils
 
-from peft import import_utils as import_utils
+from peft import import_utils as peft_import_utils
+from .peft import import_utils as patched_peft_import_utils
 from peft.tuners.adalora.model import AdaLoraModel
 from .peft.tuners.adalora.model import AdaLoraModel as patched_AdaLoraModel
 from peft.tuners.lora import gptq
 from .peft.tuners.lora import gptq as patched_gptq
 from peft.tuners.lora import model
 from .peft.tuners.lora import model as patched_model
-from .peft import import_utils as patched_import_utils
 
 from peft.utils import other
 from .peft.utils import other as patched_other
@@ -22,7 +22,7 @@ from .transformers.quantizers.quantizer_gptq import GptqHfQuantizer as patched_G
 
 
 def monkey_patch_peft():
-    import_utils.is_gptqmodel_available = patched_import_utils.is_gptqmodel_available
+    peft_import_utils.is_gptqmodel_available = patched_peft_import_utils.is_gptqmodel_available
 
     AdaLoraModel._create_and_replace = patched_AdaLoraModel._create_and_replace
 
@@ -39,8 +39,8 @@ def monkey_patch_optimum():
     quantizer.has_device_more_than_cpu = patched_quantizer.has_device_more_than_cpu
     quantizer.GPTQQuantizer = patched_quantizer.GPTQQuantizer
 
-    import_utils._gptqmodel_available = patched_import_utils._gptqmodel_available
-    import_utils.is_gptqmodel_available = patched_import_utils.is_gptqmodel_available
+    optimum_import_utils._gptqmodel_available = patched_optimum_import_utils._gptqmodel_available
+    optimum_import_utils.is_gptqmodel_available = patched_optimum_import_utils.is_gptqmodel_available
     testing_utils.require_gptq = patched_testing_utils.require_gptq
 
 

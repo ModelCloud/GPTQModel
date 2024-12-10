@@ -45,15 +45,15 @@ from peft.utils import (
 from peft.utils.merge_utils import dare_linear, dare_ties, magnitude_prune, task_arithmetic, ties
 from peft.utils.other import get_pattern_key
 
-from .aqlm import dispatch_aqlm
-from .awq import dispatch_awq
-from .config import LoraConfig
-from .eetq import dispatch_eetq
-from .gptq import dispatch_gptq
-from .hqq import dispatch_hqq
-from .layer import Conv2d, LoraLayer, dispatch_default
-from .torchao import dispatch_torchao
-from .tp_layer import dispatch_megatron
+from peft.tuners.lora.aqlm import dispatch_aqlm
+from peft.tuners.lora.awq import dispatch_awq
+from peft.tuners.lora.config import LoraConfig
+from peft.tuners.lora.eetq import dispatch_eetq
+from peft.tuners.lora.gptq import dispatch_gptq
+from peft.tuners.lora.hqq import dispatch_hqq
+from peft.tuners.lora.layer import Conv2d, LoraLayer, dispatch_default
+from peft.tuners.lora.torchao import dispatch_torchao
+from peft.tuners.lora.tp_layer import dispatch_megatron
 
 
 def _adapter_names_pre_forward_hook(target, args, kwargs, adapter_names):
@@ -327,12 +327,12 @@ class LoraModel(BaseTuner):
 
         # avoid eager bnb import
         if is_bnb_available():
-            from .bnb import dispatch_bnb_8bit
+            from peft.tuners.lora.bnb import dispatch_bnb_8bit
 
             dispatchers.append(dispatch_bnb_8bit)
 
         if is_bnb_4bit_available():
-            from .bnb import dispatch_bnb_4bit
+            from peft.tuners.lora.bnb import dispatch_bnb_4bit
 
             dispatchers.append(dispatch_bnb_4bit)
 
