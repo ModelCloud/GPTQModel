@@ -18,9 +18,6 @@
 # limitations under the License.
 
 # from .config import PeftConfig, PeftType, PromptLearningConfig, TaskType
-from .integrations import map_cache_to_layer_device_map
-from .loftq_utils import replace_lora_weights_loftq
-from .peft_types import PeftType, TaskType
 from .other import (
     TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
     TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
@@ -54,4 +51,3 @@ from .other import (
     id_tensor_storage,
     cast_mixed_precision_params,
 )
-from .save_and_load import get_peft_model_state_dict, set_peft_model_state_dict, load_peft_weights

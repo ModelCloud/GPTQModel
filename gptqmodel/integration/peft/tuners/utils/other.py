@@ -29,28 +29,10 @@ from accelerate.utils import is_npu_available, is_xpu_available
 from huggingface_hub import file_exists
 from huggingface_hub.errors import EntryNotFoundError, HFValidationError
 from packaging import version
+from peft.utils.constants import *
 from safetensors.torch import storage_ptr, storage_size
 
-from ..import_utils import is_auto_gptq_available, is_gptqmodel_available, is_torch_tpu_available
-from .constants import (
-    CONFIG_NAME,
-    EMBEDDING_LAYER_NAMES,
-    INCLUDE_LINEAR_LAYERS_SHORTHAND,
-    SAFETENSORS_WEIGHTS_NAME,
-    TRANSFORMERS_MODELS_TO_ADALORA_TARGET_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_FOURIERFT_TARGET_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_IA3_FEEDFORWARD_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_IA3_TARGET_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_LNTUNING_TARGET_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
-    TRANSFORMERS_MODELS_TO_VBLORA_TARGET_MODULES_MAPPING,
-    TRANSFORMERS_MODELS_TO_VERA_TARGET_MODULES_MAPPING,
-    WEIGHTS_NAME,
-    bloom_model_postprocess_past_key_value,
-    starcoder_model_postprocess_past_key_value,
-)
-
+from gptqmodel.integration.peft.import_utils import is_auto_gptq_available, is_torch_tpu_available, is_gptqmodel_available
 
 mlu_available = False
 if version.parse(accelerate.__version__) >= version.parse("0.29.0"):
@@ -517,7 +499,7 @@ def fsdp_auto_wrap_policy(model):
         from accelerate.utils.dataclasses import get_module_class_from_name
     from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
 
-    from ..tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
+    from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 
     default_transformer_cls_names_to_wrap = (
         ",".join(model._no_split_modules) if getattr(model, "_no_split_modules", None) is not None else ""

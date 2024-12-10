@@ -15,6 +15,7 @@
 import warnings
 
 import torch
+from peft.tuners.adalora import RankAllocator, AdaLoraLayer, SVDQuantLinear, SVDLinear
 from transformers.pytorch_utils import Conv1D
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
@@ -25,14 +26,12 @@ from peft.utils import (
     _freeze_adapter,
     _get_submodules,
     get_auto_gptq_quant_linear,
-    get_gptqmodel_quant_linear,
     get_quantization_config,
 )
-from peft.import_utils import is_gptqmodel_available
 from peft.utils.integrations import gather_params_ctx
 
-from .gptq import SVDQuantLinear
-from .layer import AdaLoraLayer, RankAllocator, SVDLinear
+from ..utils import get_gptqmodel_quant_linear
+from ...import_utils import is_gptqmodel_available
 
 
 class AdaLoraModel(LoraModel):
@@ -157,9 +156,9 @@ class AdaLoraModel(LoraModel):
         if is_bnb_available():
             import bitsandbytes as bnb
 
-            from .bnb import SVDLinear8bitLt
+            from peft.tuners.adalora.bnb import SVDLinear8bitLt
         if is_bnb_4bit_available():
-            from .bnb import SVDLinear4bit
+            from peft.tuners.adalora.bnb import SVDLinear4bit
 
         gptq_quantization_config = kwargs.get("gptq_quantization_config", None)
 
