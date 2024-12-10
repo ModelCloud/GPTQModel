@@ -35,7 +35,7 @@ from optimum.gptq.data import get_dataset, prepare_dataset
 from optimum.gptq.utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
 from optimum.version import __version__ as optimum_version
 
-from gptqmodel.integration.optimum.utils.import_utils import is_gptqmodel_available
+from gptqmodel.integration.src.optimum.utils.import_utils import is_gptqmodel_available
 
 if is_accelerate_available():
     from accelerate import (

@@ -20,8 +20,8 @@ from peft.tuners.lora.layer import LoraLayer
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils import get_auto_gptq_quant_linear
 
-from gptqmodel.integration.peft.import_utils import is_gptqmodel_available
-from gptqmodel.integration.peft.utils import get_gptqmodel_quant_linear
+from gptqmodel.integration.src.peft.import_utils import is_gptqmodel_available
+from gptqmodel.integration.src.peft.utils import get_gptqmodel_quant_linear
 
 
 class QuantLinear(torch.nn.Module, LoraLayer):

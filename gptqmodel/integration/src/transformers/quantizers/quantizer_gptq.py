@@ -18,7 +18,7 @@ from packaging import version
 
 from transformers.quantizers.base import HfQuantizer
 
-from gptqmodel.integration.transformers.utils.import_utils import is_gptqmodel_available
+from gptqmodel.integration.src.transformers.utils.import_utils import is_gptqmodel_available
 
 if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel

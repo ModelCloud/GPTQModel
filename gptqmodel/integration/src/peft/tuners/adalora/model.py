@@ -30,7 +30,7 @@ from peft.utils import (
 )
 from peft.utils.integrations import gather_params_ctx
 
-from gptqmodel.integration.peft.utils import get_gptqmodel_quant_linear
+from gptqmodel.integration.src.peft.utils import get_gptqmodel_quant_linear
 from ...import_utils import is_gptqmodel_available
 
 

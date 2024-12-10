@@ -33,7 +33,7 @@ from optimum.utils import (
     is_timm_available,
 )
 
-from gptqmodel.integration.optimum.utils.import_utils import is_datasets_available, is_gptqmodel_available
+from gptqmodel.integration.src.optimum.utils.import_utils import is_datasets_available, is_gptqmodel_available
 
 # Used to test the hub
 USER = "__DUMMY_OPTIMUM_USER__"

@@ -32,7 +32,7 @@ from packaging import version
 from peft.utils.constants import *
 from safetensors.torch import storage_ptr, storage_size
 
-from gptqmodel.integration.peft.import_utils import is_auto_gptq_available, is_torch_tpu_available, is_gptqmodel_available
+from gptqmodel.integration.src.peft.import_utils import is_auto_gptq_available, is_torch_tpu_available, is_gptqmodel_available
 
 mlu_available = False
 if version.parse(accelerate.__version__) >= version.parse("0.29.0"):
