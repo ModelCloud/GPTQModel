@@ -32,7 +32,7 @@ from typing import Any, Dict, FrozenSet, Optional, Set, Tuple, Union
 
 from packaging import version
 
-from . import logging
+from transformers.utils import logging
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name

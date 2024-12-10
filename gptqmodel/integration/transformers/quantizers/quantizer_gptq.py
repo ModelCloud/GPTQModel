@@ -16,14 +16,15 @@ from typing import TYPE_CHECKING, Optional
 
 from packaging import version
 
-from .base import HfQuantizer
+from transformers.quantizers.base import HfQuantizer
 
+from gptqmodel.integration.transformers.utils.import_utils import is_gptqmodel_available
 
 if TYPE_CHECKING:
-    from ..modeling_utils import PreTrainedModel
+    from transformers.modeling_utils import PreTrainedModel
 
-from ..utils import is_auto_gptq_available, is_gptqmodel_available, is_optimum_available, is_torch_available, logging
-from ..utils.quantization_config import GPTQConfig, QuantizationConfigMixin
+from transformers.utils import is_auto_gptq_available, is_optimum_available, is_torch_available, logging
+from transformers.utils.quantization_config import GPTQConfig, QuantizationConfigMixin
 
 
 if is_torch_available():

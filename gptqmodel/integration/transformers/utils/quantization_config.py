@@ -25,16 +25,14 @@ from typing import Any, Dict, List, Optional, Union
 
 from packaging import version
 
-from ..utils import (
+from transformers.utils import (
     is_auto_awq_available,
-    is_gptqmodel_available,
     is_hqq_available,
     is_torch_available,
     is_torchao_available,
     logging,
 )
-from .import_utils import is_auto_gptq_available
-
+from .import_utils import is_auto_gptq_available, is_gptqmodel_available
 
 if is_torch_available():
     import torch
