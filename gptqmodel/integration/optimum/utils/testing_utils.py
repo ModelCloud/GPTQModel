@@ -25,16 +25,15 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
 
-from . import (
+from optimum.utils import (
     is_accelerate_available,
     is_auto_gptq_available,
-    is_datasets_available,
     is_diffusers_available,
-    is_gptqmodel_available,
     is_sentence_transformers_available,
     is_timm_available,
 )
 
+from gptqmodel.integration.optimum.utils.import_utils import is_datasets_available, is_gptqmodel_available
 
 # Used to test the hub
 USER = "__DUMMY_OPTIMUM_USER__"
