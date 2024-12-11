@@ -21,8 +21,8 @@ try:
 except BaseException:
     HAS_PEFT = False
 
-from transformers.quantizers.quantizer_gptq import GptqHfQuantizer as transformers_GptqHfQuantizer  # noqa: E402
-from .src.transformers.quantizers.quantizer_gptq import GptqHfQuantizer as patched_transformers_GptqHfQuantizer  # noqa: E402
+from transformers.quantizers import quantizer_gptq as transformers_quantizer_gptq #import GptqHfQuantizer as transformers_GptqHfQuantizer  # noqa: E402
+from .src.transformers.quantizers import quantizer_gptq as patched_transformers_quantizer_gptq # import GptqHfQuantizer as patched_transformers_GptqHfQuantizer  # noqa: E402
 
 
 def monkey_patch_transformers():
@@ -61,7 +61,8 @@ def _patch_optimum():
 
 
 def _patch_transformers():
-    transformers_GptqHfQuantizer._process_model_after_weight_loading = patched_transformers_GptqHfQuantizer._process_model_after_weight_loading
-    transformers_GptqHfQuantizer.required_packages = patched_transformers_GptqHfQuantizer.required_packages
-    transformers_GptqHfQuantizer.validate_environment = patched_transformers_GptqHfQuantizer.validate_environment
-    transformers_GptqHfQuantizer.update_torch_dtype = patched_transformers_GptqHfQuantizer.update_torch_dtype
+    transformers_quantizer_gptq.GptqHfQuantizer = patched_transformers_quantizer_gptq.GptqHfQuantizer
+    # transformers_GptqHfQuantizer._process_model_after_weight_loading = patched_transformers_GptqHfQuantizer._process_model_after_weight_loading
+    # transformers_GptqHfQuantizer.required_packages = patched_transformers_GptqHfQuantizer.required_packages
+    # transformers_GptqHfQuantizer.validate_environment = patched_transformers_GptqHfQuantizer.validate_environment
+    # transformers_GptqHfQuantizer.update_torch_dtype = patched_transformers_GptqHfQuantizer.update_torch_dtype
