@@ -180,7 +180,7 @@ class GPTQModel:
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if quantize_config.dynamic:
-            logger.warning("GPTQModel dynamic feature has not been supported by vLLM and SGLang yet. If you're using vllm, you need to install this pr: https://github.com/vllm-project/vllm/pull/7086")
+            logger.warning("GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
