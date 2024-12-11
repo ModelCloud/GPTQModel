@@ -171,12 +171,39 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and we highly recommend avoid using PPL and use `lm-eval` to validate post-quantization model quality. 
+GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and  [evalplus](https://github.com/evalplus/evalplus)  
+we highly recommend avoid using PPL and use `lm-eval`/`evalplus` to validate post-quantization model quality. 
 
 ```
 # gptqmodel is integrated into lm-eval >= v0.4.6
-pip install lm-eval[gptqmodel]
+pip install lm-eval>=0.4.6
 ```
+
+```
+# gptqmodel is integrated into evalplus main branch
+pip install --upgrade "evalplus @ git+https://github.com/evalplus/evalplus"
+```
+
+Below is a basic sample using GPTQModel eval API to validate post-quantization model quality
+
+```py
+from gptqmodel import GPTQModel
+from gptqmodel.utils import EVAL, EVALPLUS_TASK, LM_EVAL_TASK
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+output_file = "result.json"
+
+# Use `lm-eval` as framework to evaluate the model
+eval_framework = EVAL.LM_EVAL
+tasks = [LM_EVAL_TASK.ARC_CHALLENGE]
+results = GPTQModel.eval(model_id, framework=eval_framework, tasks=tasks, output_file=output_file)
+
+# Use `evalplus` as framework to evaluate the model
+eval_framework = EVAL.EVALPLUS_
+tasks = [EVALPLUS_TASK.HUMAN]
+results = GPTQModel.eval(model_id, framework=eval_framework, tasks=tasks, output_file=output_file)
+```
+
 
 ### Which kernel is used by default?
 
