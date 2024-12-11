@@ -21,8 +21,12 @@ try:
 except BaseException:
     HAS_PEFT = False
 
-from transformers.quantizers import quantizer_gptq as transformers_quantizer_gptq #import GptqHfQuantizer as transformers_GptqHfQuantizer  # noqa: E402
-from .src.transformers.quantizers import quantizer_gptq as patched_transformers_quantizer_gptq # import GptqHfQuantizer as patched_transformers_GptqHfQuantizer  # noqa: E402
+from transformers.quantizers import quantizer_gptq as transformers_quantizer_gptq  # noqa: E402
+from .src.transformers.quantizers import quantizer_gptq as patched_transformers_quantizer_gptq  # noqa: E402
+from transformers.utils import import_utils as transformers_import_utils  # noqa: E402
+from .src.transformers.utils import import_utils as patched_transformers_import_utils  # noqa: E402
+from transformers.utils import quantization_config as transformers_quantization_config  # noqa: E402
+from .src.transformers.utils import quantization_config as patched_transformers_quantization_config  # noqa: E402
 
 
 def monkey_patch_transformers():
@@ -63,7 +67,8 @@ def _patch_optimum():
 
 def _patch_transformers():
     transformers_quantizer_gptq.GptqHfQuantizer = patched_transformers_quantizer_gptq.GptqHfQuantizer
-    # transformers_GptqHfQuantizer._process_model_after_weight_loading = patched_transformers_GptqHfQuantizer._process_model_after_weight_loading
-    # transformers_GptqHfQuantizer.required_packages = patched_transformers_GptqHfQuantizer.required_packages
-    # transformers_GptqHfQuantizer.validate_environment = patched_transformers_GptqHfQuantizer.validate_environment
-    # transformers_GptqHfQuantizer.update_torch_dtype = patched_transformers_GptqHfQuantizer.update_torch_dtype
+
+    transformers_import_utils._gptqmodel_available  = patched_transformers_import_utils._gptqmodel_available
+    transformers_import_utils.is_gptqmodel_available = patched_transformers_import_utils.is_gptqmodel_available
+
+    transformers_quantization_config.AWQLinearVersion =  patched_transformers_quantization_config.AWQLinearVersion
