@@ -4,59 +4,37 @@ from enum import Enum
 from typing import List, Optional, Union
 
 
-class EVAL(Enum):
-    LM_EVAL = 0
-    EVALPLUS = 1
+class EVAL:
+    class LM_EVAL(Enum):
+        ARC_CHALLENGE = "arc_challenge"
+        MMLU = "mmlu"
+        HELLASWAG = "hellaswag"
+        GSM8K_COT = "gsm8k_cot"
+
+    class EVALPLUS(Enum):
+        HUMAN = "humaneval"
+        MBPP = "mbpp"
 
     @classmethod
     def get_task_enums(cls):
-        return list(cls)
+        task_lists = []
+        for name in dir(cls):
+            attr = getattr(cls, name)
+            if isinstance(attr, type) and issubclass(attr, Enum):
+                task_lists.extend(list(attr))
+        return task_lists
 
     @classmethod
     def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.name}"
-
-    @classmethod
-    def get_all_eval_backend_string(cls):
-        full_names = [cls.get_full_name(member) for member in cls]
-        return ', '.join(full_names)
-
-
-class LM_EVAL_TASK(Enum):
-    ARC_CHALLENGE = "arc_challenge"
-    MMLU = "mmlu"
-    HELLASWAG = "hellaswag"
-    GSM8K_COT = "gsm8k_cot"
-
-    @classmethod
-    def get_task_enums(cls):
-        return list(cls)
-
-    @classmethod
-    def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.name}"
+        return f"{cls.__name__}.{member.__class__.__name__}.{member.name}"
 
     @classmethod
     def get_all_tasks_string(cls):
-        full_names = [cls.get_full_name(member) for member in cls]
-        return ', '.join(full_names)
-
-
-class EVALPLUS_TASK(Enum):
-    HUMAN = "humaneval"
-    MBPP = "mbpp"
-
-    @classmethod
-    def get_task_enums(cls):
-        return list(cls)
-
-    @classmethod
-    def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.name}"
-
-    @classmethod
-    def get_all_tasks_string(cls):
-        full_names = [cls.get_full_name(member) for member in cls]
+        full_names = []
+        for name in dir(cls):
+            attr = getattr(cls, name)
+            if isinstance(attr, type) and issubclass(attr, Enum):
+                full_names.extend(cls.get_full_name(member) for member in attr)
         return ', '.join(full_names)
 
 
@@ -151,10 +129,11 @@ def lm_eval(
         from lm_eval.loggers import EvaluationTracker, WandbLogger
         from lm_eval.models.huggingface import HFLM
         from lm_eval.utils import handle_non_serializable
+        from transformers import PreTrainedModel as PreTrainedModelType
     except BaseException:
         raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
-    if model_name == "hf":
+    if model_name == "hf" and isinstance(model, PreTrainedModelType):
         model_name = HFLM(
             pretrained=model,
             batch_size=batch_size,

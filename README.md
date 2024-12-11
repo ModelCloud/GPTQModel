@@ -188,16 +188,15 @@ Below is a basic sample using `GPTQModel.eval` API
 
 ```py
 from gptqmodel import GPTQModel
-from gptqmodel.utils import EVAL, EVALPLUS_TASK, LM_EVAL_TASK
+from gptqmodel.utils import EVAL
 
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-output_file = "result.json"
+model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
 # Use `lm-eval` as framework to evaluate the model
-results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[LM_EVAL_TASK.ARC_CHALLENGE], output_file=output_file)
+lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
 
 # Use `evalplus` as framework to evaluate the model
-results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVALPLUS_TASK.HUMAN], output_file=output_file)
+evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
 ```
 
 

@@ -9,7 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND, EVAL, EVALPLUS_TASK, LM_EVAL_TASK
+from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -226,7 +226,7 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             framework: EVAL,
-            tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
             batch: int = 1,
             trust_remote_code: bool = False,
             output_file: Optional[str] = None,
@@ -239,8 +239,8 @@ class GPTQModel:
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
-                if task not in LM_EVAL_TASK.get_task_enums():
-                    raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
             from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
@@ -266,8 +266,8 @@ class GPTQModel:
             return results
         elif framework == EVAL.EVALPLUS:
             for task in tasks:
-                if task not in EVALPLUS_TASK.get_task_enums():
-                    raise ValueError(f"evalplus support tasks: {EVALPLUS_TASK.get_all_tasks_string()}")
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
             from gptqmodel.utils.eval import evalplus, evalplus_make_table
 
             results = {}
@@ -285,4 +285,4 @@ class GPTQModel:
             print('--------evalplus Result End---------')
             return results
         else:
-            raise ValueError(f"Eval backend support: {EVAL.get_all_eval_backend_string()}")
+            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
