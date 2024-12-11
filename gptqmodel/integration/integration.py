@@ -30,6 +30,8 @@ from .src.transformers.utils import quantization_config as patched_transformers_
 import transformers.testing_utils as transformers_testing_utils
 from .src.transformers import testing_utils as patched_transformers_testing_utils
 
+
+
 def monkey_patch_transformers():
     _patch_peft()
     _patch_optimum()
@@ -72,6 +74,6 @@ def _patch_transformers():
     transformers_import_utils._gptqmodel_available  = patched_transformers_import_utils._gptqmodel_available
     transformers_import_utils.is_gptqmodel_available = patched_transformers_import_utils.is_gptqmodel_available
 
-    transformers_quantization_config.AWQLinearVersion =  patched_transformers_quantization_config.AWQLinearVersion
+    transformers_quantization_config.GPTQConfig =  patched_transformers_quantization_config.GPTQConfig
 
     transformers_testing_utils.require_gptq = patched_transformers_testing_utils.require_gptq
