@@ -54,6 +54,7 @@ def _patch_optimum():
     optimum_gptq.GPTQQuantizer = patched_optimum_quantizer.GPTQQuantizer
     optimum_quantizer.is_gptqmodel_available = patched_optimum_quantizer.is_gptqmodel_available
     optimum_quantizer.has_device_more_than_cpu = patched_optimum_quantizer.has_device_more_than_cpu
+    optimum_quantizer.ExllamaVersion = patched_optimum_quantizer.ExllamaVersion
 
     optimum_import_utils._gptqmodel_available = patched_optimum_import_utils._gptqmodel_available
     optimum_import_utils.is_gptqmodel_available = patched_optimum_import_utils.is_gptqmodel_available
