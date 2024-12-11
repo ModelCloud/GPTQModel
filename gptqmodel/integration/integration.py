@@ -1,3 +1,6 @@
+import importlib
+
+import optimum.gptq as optimum_gptq
 from optimum.gptq import quantizer as optimum_quantizer
 from .src.optimum.gptq import quantizer as patched_optimum_quantizer
 from optimum.utils import testing_utils as optimum_testing_utils , import_utils as optimum_import_utils
@@ -30,10 +33,17 @@ def monkey_patch_peft():
 
 
 def monkey_patch_optimum():
+    optimum_gptq.GPTQQuantizer = patched_optimum_quantizer.GPTQQuantizer
+    # optimum_quantizer.GPTQQuantizer = patched_optimum_quantizer.GPTQQuantizer
+    # importlib.reload(optimum_quantizer)
     optimum_quantizer.is_gptqmodel_available = patched_optimum_quantizer.is_gptqmodel_available
     optimum_quantizer.has_device_more_than_cpu = patched_optimum_quantizer.has_device_more_than_cpu
-    optimum_quantizer.GPTQQuantizer.quantize_model = patched_optimum_quantizer.GPTQQuantizer.quantize_model
-    optimum_quantizer.GPTQQuantizer.__init__ = patched_optimum_quantizer.GPTQQuantizer.__init__
+    # optimum_quantizer.GPTQQuantizer.quantize_model = patched_optimum_quantizer.GPTQQuantizer.quantize_model
+    # optimum_quantizer.GPTQQuantizer.__init__ = patched_optimum_quantizer.GPTQQuantizer.__init__
+    # optimum_quantizer.GPTQQuantizer.pack_model = patched_optimum_quantizer.GPTQQuantizer.pack_model
+    # optimum_quantizer.GPTQQuantizer.select_quant_linear = patched_optimum_quantizer.GPTQQuantizer.select_quant_linear
+    # optimum_quantizer.GPTQQuantizer._replace_by_quant_layers = patched_optimum_quantizer.GPTQQuantizer._replace_by_quant_layers
+    # optimum_quantizer.GPTQQuantizer.post_init_model = patched_optimum_quantizer.GPTQQuantizer.post_init_model
 
     optimum_import_utils._gptqmodel_available = patched_optimum_import_utils._gptqmodel_available
     optimum_import_utils.is_gptqmodel_available = patched_optimum_import_utils.is_gptqmodel_available
@@ -41,6 +51,7 @@ def monkey_patch_optimum():
 
 
 def monkey_patch_transformers():
+    transformers_GptqHfQuantizer._process_model_after_weight_loading = patched_transformers_GptqHfQuantizer._process_model_after_weight_loading
     transformers_GptqHfQuantizer.required_packages = patched_transformers_GptqHfQuantizer.required_packages
     transformers_GptqHfQuantizer.validate_environment = patched_transformers_GptqHfQuantizer.validate_environment
     transformers_GptqHfQuantizer.update_torch_dtype = patched_transformers_GptqHfQuantizer.update_torch_dtype
