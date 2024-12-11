@@ -27,7 +27,8 @@ from transformers.utils import import_utils as transformers_import_utils  # noqa
 from .src.transformers.utils import import_utils as patched_transformers_import_utils  # noqa: E402
 from transformers.utils import quantization_config as transformers_quantization_config  # noqa: E402
 from .src.transformers.utils import quantization_config as patched_transformers_quantization_config  # noqa: E402
-
+import transformers.testing_utils as transformers_testing_utils
+from .src.transformers import testing_utils as patched_transformers_testing_utils
 
 def monkey_patch_transformers():
     _patch_peft()
@@ -72,3 +73,5 @@ def _patch_transformers():
     transformers_import_utils.is_gptqmodel_available = patched_transformers_import_utils.is_gptqmodel_available
 
     transformers_quantization_config.AWQLinearVersion =  patched_transformers_quantization_config.AWQLinearVersion
+
+    transformers_testing_utils.require_gptq = patched_transformers_testing_utils.require_gptq

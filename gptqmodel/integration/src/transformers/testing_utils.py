@@ -46,7 +46,7 @@ from huggingface_hub import delete_repo
 
 from transformers import logging as transformers_logging
 
-from .integrations import (
+from transformers.integrations import (
     is_clearml_available,
     is_optuna_available,
     is_ray_available,
@@ -54,8 +54,8 @@ from .integrations import (
     is_tensorboard_available,
     is_wandb_available,
 )
-from .integrations.deepspeed import is_deepspeed_available
-from .utils import (
+from transformers.integrations.deepspeed import is_deepspeed_available
+from transformers.utils import (
     ACCELERATE_MIN_VERSION,
     GGUF_MIN_VERSION,
     is_accelerate_available,
@@ -82,7 +82,6 @@ from .utils import (
     is_g2p_en_available,
     is_galore_torch_available,
     is_gguf_available,
-    is_gptqmodel_available,
     is_grokadamw_available,
     is_ipex_available,
     is_jieba_available,
@@ -145,6 +144,7 @@ from .utils import (
     strtobool,
 )
 
+from .utils.import_utils import is_gptqmodel_available
 
 if is_accelerate_available():
     from accelerate.state import AcceleratorState, PartialState
