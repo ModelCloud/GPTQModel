@@ -77,3 +77,19 @@ def _patch_transformers():
     transformers_quantization_config.GPTQConfig =  patched_transformers_quantization_config.GPTQConfig
 
     transformers_testing_utils.require_gptq = patched_transformers_testing_utils.require_gptq
+
+    # if 'transformers.quantizers.quantizer_gptq' in sys.modules:
+    #     del sys.modules['transformers.quantizers.quantizer_gptq']
+    # sys.modules['transformers.quantizers.quantizer_gptq'] = patched_transformers_quantizer_gptq
+    #
+    # if 'transformers.utils.import_utils' in sys.modules:
+    #     del sys.modules['transformers.utils.import_utils']
+    # sys.modules['transformers.utils.import_utils'] = patched_transformers_import_utils
+    #
+    # if 'transformers.utils.quantization_config' in sys.modules:
+    #     del sys.modules['transformers.utils.quantization_config']
+    # sys.modules['transformers.utils.quantization_config'] = patched_transformers_quantization_config
+    #
+    # if 'transformers.testing_utils' in sys.modules:
+    #     del sys.modules['transformers.testing_utils']
+    # sys.modules['transformers.testing_utils'] = patched_transformers_testing_utils
