@@ -32,7 +32,8 @@ def monkey_patch_peft():
 def monkey_patch_optimum():
     optimum_quantizer.is_gptqmodel_available = patched_optimum_quantizer.is_gptqmodel_available
     optimum_quantizer.has_device_more_than_cpu = patched_optimum_quantizer.has_device_more_than_cpu
-    optimum_quantizer.GPTQQuantizer = patched_optimum_quantizer.GPTQQuantizer
+    optimum_quantizer.GPTQQuantizer.quantize_model = patched_optimum_quantizer.GPTQQuantizer.quantize_model
+    optimum_quantizer.GPTQQuantizer.__init__ = patched_optimum_quantizer.GPTQQuantizer.__init__
 
     optimum_import_utils._gptqmodel_available = patched_optimum_import_utils._gptqmodel_available
     optimum_import_utils.is_gptqmodel_available = patched_optimum_import_utils.is_gptqmodel_available
