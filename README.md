@@ -172,7 +172,7 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 ### Evaluation and Quality Benchmarks
 
 GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and  [evalplus](https://github.com/evalplus/evalplus)  
-we highly recommend avoid using PPL and use `lm-eval`/`evalplus` to validate post-quantization model quality. 
+We highly recommend avoid using PPL and use `lm-eval`/`evalplus` to validate post-quantization model quality. 
 
 ```
 # gptqmodel is integrated into lm-eval >= v0.4.6
@@ -184,7 +184,7 @@ pip install lm-eval>=0.4.6
 pip install --upgrade "evalplus @ git+https://github.com/evalplus/evalplus"
 ```
 
-Below is a basic sample using GPTQModel eval API to validate post-quantization model quality
+Below is a basic sample using `GPTQModel.eval` API
 
 ```py
 from gptqmodel import GPTQModel
