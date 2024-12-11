@@ -194,14 +194,10 @@ model_id = "meta-llama/Llama-3.2-1B-Instruct"
 output_file = "result.json"
 
 # Use `lm-eval` as framework to evaluate the model
-eval_framework = EVAL.LM_EVAL
-tasks = [LM_EVAL_TASK.ARC_CHALLENGE]
-results = GPTQModel.eval(model_id, framework=eval_framework, tasks=tasks, output_file=output_file)
+results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[LM_EVAL_TASK.ARC_CHALLENGE], output_file=output_file)
 
 # Use `evalplus` as framework to evaluate the model
-eval_framework = EVAL.EVALPLUS
-tasks = [EVALPLUS_TASK.HUMAN]
-results = GPTQModel.eval(model_id, framework=eval_framework, tasks=tasks, output_file=output_file)
+results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVALPLUS_TASK.HUMAN], output_file=output_file)
 ```
 
 
