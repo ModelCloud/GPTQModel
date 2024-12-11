@@ -199,7 +199,7 @@ tasks = [LM_EVAL_TASK.ARC_CHALLENGE]
 results = GPTQModel.eval(model_id, framework=eval_framework, tasks=tasks, output_file=output_file)
 
 # Use `evalplus` as framework to evaluate the model
-eval_framework = EVAL.EVALPLUS_
+eval_framework = EVAL.EVALPLUS
 tasks = [EVALPLUS_TASK.HUMAN]
 results = GPTQModel.eval(model_id, framework=eval_framework, tasks=tasks, output_file=output_file)
 ```
