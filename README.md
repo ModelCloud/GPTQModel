@@ -77,19 +77,18 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ![image](https://github.com/user-attachments/assets/aab69119-f9c8-4c94-9634-a3c63e57095e)
 
 ## Model Support:  🚀 (Added by GPTQModel) 
-| Model            |     |                |     |                  |     |            |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- |
-| Baichuan         | ✅   | Falcon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
-| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |
-| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |
-| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |
-| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | RefinedWeb | ✅   |
-| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | StableLM   | ✅   |
-| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StarCoder2 | ✅   |
-| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | XVERSE     | ✅   |
-| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | Yi         | ✅   |
-| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |
-
+| Model            |     |                |     |                  |     |            |     |     |
+| ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- |
+| Baichuan         | ✅   | Falcon         | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |     |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |     |
+| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |     |
+| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |     |
+| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | Qwen2VL    | 🚀  |     |
+| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | RefinedWeb | ✅   |     |
+| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StableLM   | ✅   |     |
+| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | StarCoder2 | ✅   |     |
+| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | XVERSE     | ✅   |     |
+| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | Yi         | ✅   |     |
 
 ## HW Accelerator Requirements
 

@@ -53,6 +53,7 @@ from .definitions.phi3 import Phi3GPTQ
 from .definitions.qwen import QwenGPTQ
 from .definitions.qwen2 import Qwen2GPTQ
 from .definitions.qwen2_moe import Qwen2MoeGPTQ
+from .definitions.qwen2_vl import Qwen2VLGPTQ
 from .definitions.rw import RWGPTQ
 from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
@@ -98,6 +99,7 @@ MODEL_MAP = {
     "minicpm": MiniCPMGPTQ,
     "minicpm3":MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
+    "qwen2_vl": Qwen2VLGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
