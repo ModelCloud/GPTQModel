@@ -148,7 +148,7 @@ class GPTQModel:
                             is_quantized = True
                             break
 
-        if not device and not device:
+        if not device and not device_map:
             device = get_best_device()
 
         if is_quantized:
