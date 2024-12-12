@@ -83,3 +83,9 @@ export RUN_ID=$run_id
 echo "Docker image: $docker"
 export DOCKER_IMAGE=$docker
 
+install_requirements
+compile
+find_gpu
+test || true
+release_gpu
+clear_cache
