@@ -17,14 +17,17 @@ class TestEval(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE),
-            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN)
+            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
+            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm')
         ]
     )
-    def test_eval(self, eval_backend: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS]):
+    def test_eval_gptqmodel(self, eval_backend: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_file = f"{tmp_dir}/result.json"
-            results = GPTQModel.eval(self.MODEL_ID, framework=eval_backend, tasks=[task], batch=32, output_file=output_file)
+            results = GPTQModel.eval(self.MODEL_ID, framework=eval_backend, tasks=[task], batch=32,
+                                     output_file=output_file, backend=backend)
             if eval_backend == EVAL.LM_EVAL:
                 acc_score = results['results'].get(task.value, {}).get('acc,none')
                 acc_norm_score = results['results'].get(task.value, {}).get('acc_norm,none')
