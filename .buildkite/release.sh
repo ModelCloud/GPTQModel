@@ -28,11 +28,11 @@ function compile() {
     fi
 }
 
-cuda=$2
-torch=$3
-python=$4
-run_id=$5
-repo=$6
+cuda=$1
+torch=$2
+python=$3
+run_id=$4
+repo=$5
 ref=$6
 
 echo "CUDA Version: $cuda"
