@@ -18,7 +18,7 @@ from transformers import AutoConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
+from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
                                    META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
                                    META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
@@ -106,6 +106,13 @@ def ModelWriter(cls):
             key=META_FIELD_TRUE_SEQUENTIAL,
             value=self.quantize_config.true_sequential
         )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_MSE,
+            value=self.quantize_config.mse
+        )
+
+
         # The config, quantize_config and model may be edited in place in save_quantized.
         config = copy.deepcopy(self.model.config)
         quantize_config = copy.deepcopy(self.quantize_config)
