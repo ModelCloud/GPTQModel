@@ -72,7 +72,7 @@ def ModelWriter(cls):
         quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
         if meta_quantizer:
             if len(meta_quantizer.split(":")) == 2:
-                quantizers.append(meta_quantizer)
+                quantizers.append(meta_quantizer.replace(" ",""))
             else:
                 logger.warning(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
 
