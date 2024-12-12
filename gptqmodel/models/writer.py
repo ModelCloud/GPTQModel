@@ -74,7 +74,7 @@ def ModelWriter(cls):
             if len(meta_quantizer.split(":")) == 2:
                 quantizers.append(meta_quantizer)
             else:
-                logger.warning(f"meta_quantizer: '{meta_quantizer}' was ignored, please provide following format: 'quantizer_name: version'")
+                logger.warning(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
 
         # write gptqmodel tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
