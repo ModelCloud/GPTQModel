@@ -9,6 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
+from ._const import get_best_device
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
@@ -146,6 +147,9 @@ class GPTQModel:
                         if f == name:
                             is_quantized = True
                             break
+
+        if not device and not device_map:
+            device = get_best_device()
 
         if is_quantized:
             return cls.from_quantized(
