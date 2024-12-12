@@ -9,7 +9,9 @@
 </p>
 
 ## News
-* 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) Internal logic/unit-tests refractor and preparing for Transformer/Optimum/Peft integration upstream. Triton kernel now auto-padded for max model support.
+* 12/12/2024 1.4.1-dev: Added Qwen2-VL model support. `mse` quantization property exposed in `QuantizeConfig`. 
+* 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
+
 * 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton pkg. 
 * 11/26/2024 [1.3.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.0) Zero-Day Hymba model support. Removed `tqdm` and `rogue` dependency. 
 * 11/24/2024 [1.2.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.3) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
@@ -75,19 +77,18 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ![image](https://github.com/user-attachments/assets/aab69119-f9c8-4c94-9634-a3c63e57095e)
 
 ## Model Support:  🚀 (Added by GPTQModel) 
-| Model            |     |                |     |                  |     |            |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- |
-| Baichuan         | ✅   | Falcon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
-| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |
-| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |
-| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |
-| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | RefinedWeb | ✅   |
-| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | StableLM   | ✅   |
-| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StarCoder2 | ✅   |
-| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | XVERSE     | ✅   |
-| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | Yi         | ✅   |
-| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |
-
+| Model            |     |                |     |                  |     |            |     |     |
+| ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- |
+| Baichuan         | ✅   | Falcon         | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |     |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |     |
+| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |     |
+| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |     |
+| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | Qwen2VL    | 🚀  |     |
+| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | RefinedWeb | ✅   |     |
+| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StableLM   | ✅   |     |
+| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | StarCoder2 | ✅   |     |
+| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | XVERSE     | ✅   |     |
+| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | Yi         | ✅   |     |
 
 ## HW Accelerator Requirements
 
@@ -129,7 +130,7 @@ Below is a basic sample using `GPTQModel` to quantize a llm model and perform po
 ```py
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
+from gptqmodel import GPTQModel, QuantizeConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
@@ -153,7 +154,7 @@ model.quantize(calibration_dataset)
 
 model.save(quant_path)
 
-model = GPTQModel.load(quant_path, device=get_best_device())
+model = GPTQModel.load(quant_path)
 
 result = model.generate(
   **tokenizer(
@@ -170,12 +171,34 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and we highly recommend avoid using PPL and use `lm-eval` to validate post-quantization model quality. 
+GPTQModel inference is integrated into both [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) and [evalplus](https://github.com/evalplus/evalplus)  
+We highly recommend avoid using `ppl` and use `lm-eval`/`evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
 
 ```
 # gptqmodel is integrated into lm-eval >= v0.4.6
-pip install lm-eval[gptqmodel]
+pip install lm-eval>=0.4.6
 ```
+
+```
+# gptqmodel is integrated into evalplus[main]
+pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
+```
+
+Below is a basic sample using `GPTQModel.eval` API
+
+```py
+from gptqmodel import GPTQModel
+from gptqmodel.utils import EVAL
+
+model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+
+# Use `lm-eval` as framework to evaluate the model
+lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
+
+# Use `evalplus` as framework to evaluate the model
+evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
+```
+
 
 ### Which kernel is used by default?
 

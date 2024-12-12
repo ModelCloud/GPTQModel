@@ -510,6 +510,7 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
+                    mse = self.quantize_config.mse
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
 
@@ -526,7 +527,7 @@ class BaseGPTQModel(nn.Module):
                         bits,
                         perchannel=True,
                         sym=sym,
-                        mse=False,
+                        mse=mse,
                     )
 
                 for name in skipped_modules:
@@ -727,10 +728,11 @@ class BaseGPTQModel(nn.Module):
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[str] = None,
+            meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
         if self.quantized:
-            self.save_quantized(save_dir, safetensors_metadata, max_shard_size)
+            self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
         else:
             self.save_pretrained(save_dir, **kwargs)
 

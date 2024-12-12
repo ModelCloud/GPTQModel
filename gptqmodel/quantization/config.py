@@ -37,6 +37,8 @@ META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
 META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
+META_FIELD_MSE = "mse"
+
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
 
@@ -116,6 +118,8 @@ class QuantizeConfig():
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
 
+    mse: float = field(default=0.0)
+
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False
     parallel_packing: bool = field(default=True)
@@ -191,8 +195,8 @@ class QuantizeConfig():
         return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_set_versionable(self, key: str, value: str, version: str):
-        self.meta_set(key, [f"{value}:{version}"])
+    def meta_set_versionable(self, key: str, value: List[str]):
+        self.meta_set(key, value)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_get_versionable(self, key: str) -> List[Tuple[str, str]]:

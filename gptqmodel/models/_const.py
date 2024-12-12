@@ -73,6 +73,7 @@ SUPPORTED_MODELS = [
     "minicpm",
     "minicpm3"
     "qwen2_moe",
+    "qwen2_vl",
     "dbrx_converted",
     "deepseek_v2",
     "exaone",
