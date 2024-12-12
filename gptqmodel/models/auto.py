@@ -9,7 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND, EVAL, EVALPLUS_TASK, LM_EVAL_TASK
+from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
 from .base import BaseGPTQModel, QuantizeConfig
@@ -226,10 +226,13 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             framework: EVAL,
-            tasks: Union[List[LM_EVAL_TASK], List[EVALPLUS_TASK]],
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
             batch: int = 1,
             trust_remote_code: bool = False,
             output_file: Optional[str] = None,
+            backend: str = 'gptqmodel',
+            random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
+            extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
     ):
         if framework is None:
             raise ValueError("eval parameter: `framework` cannot be set to None")
@@ -237,10 +240,13 @@ class GPTQModel:
         if not isinstance(tasks, list):
             raise ValueError("eval parameter: `tasks` must be of List type")
 
+        if backend not in ['gptqmodel', 'vllm']:
+            raise ValueError('Eval framework support backend: [gptqmodel, vllm]')
+
         if framework == EVAL.LM_EVAL:
             for task in tasks:
-                if task not in LM_EVAL_TASK.get_task_enums():
-                    raise ValueError(f"lm_eval support tasks: {LM_EVAL_TASK.get_all_tasks_string()}")
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
             from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
@@ -248,15 +254,24 @@ class GPTQModel:
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
+            model_name = 'hf' if backend == 'gptqmodel' else backend
+            def_args = f"pretrained={model_id_or_path}"
+            if backend == "gptqmodel":
+                def_args += ",gptqmodel=True"
+            model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
+
             results = lm_eval(
                 model_id_or_path,
-                model_name="hf",
-                model_args=f"pretrained={model_id_or_path},gptqmodel=True",
+                model_name=model_name,
+                model_args=model_args,
                 tasks=[task.value for task in tasks],
                 trust_remote_code=trust_remote_code,
                 batch_size=batch,
                 apply_chat_template=True if tokenizer.chat_template is not None else False,
-                output_path=output_file
+                output_path=output_file,
+                numpy_random_seed=random_seed,
+                torch_random_seed=random_seed,
+                fewshot_random_seed=random_seed,
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -266,8 +281,8 @@ class GPTQModel:
             return results
         elif framework == EVAL.EVALPLUS:
             for task in tasks:
-                if task not in EVALPLUS_TASK.get_task_enums():
-                    raise ValueError(f"evalplus support tasks: {EVALPLUS_TASK.get_all_tasks_string()}")
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
             from gptqmodel.utils.eval import evalplus, evalplus_make_table
 
             results = {}
@@ -277,7 +292,8 @@ class GPTQModel:
                     dataset=task.value,
                     batch=batch,
                     trust_remote_code=trust_remote_code,
-                    output_file=output_file
+                    output_file=output_file,
+                    backend=backend
                 )
                 results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
             print('--------evalplus Eval Result---------')
@@ -285,4 +301,4 @@ class GPTQModel:
             print('--------evalplus Result End---------')
             return results
         else:
-            raise ValueError(f"Eval backend support: {EVAL.get_all_eval_backend_string()}")
+            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")

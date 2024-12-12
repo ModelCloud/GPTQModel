@@ -171,12 +171,34 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and we highly recommend avoid using PPL and use `lm-eval` to validate post-quantization model quality. 
+GPTQModel inference is integrated into both [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) and [evalplus](https://github.com/evalplus/evalplus)  
+We highly recommend avoid using `ppl` and use `lm-eval`/`evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
 
 ```
 # gptqmodel is integrated into lm-eval >= v0.4.6
-pip install lm-eval[gptqmodel]
+pip install lm-eval>=0.4.6
 ```
+
+```
+# gptqmodel is integrated into evalplus[main]
+pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
+```
+
+Below is a basic sample using `GPTQModel.eval` API
+
+```py
+from gptqmodel import GPTQModel
+from gptqmodel.utils import EVAL
+
+model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+
+# Use `lm-eval` as framework to evaluate the model
+lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
+
+# Use `evalplus` as framework to evaluate the model
+evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
+```
+
 
 ### Which kernel is used by default?
 
