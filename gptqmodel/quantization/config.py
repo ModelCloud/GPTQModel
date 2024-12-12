@@ -37,6 +37,8 @@ META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
 META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
+META_FIELD_MSE = "mse"
+
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
 
@@ -115,6 +117,8 @@ class QuantizeConfig():
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
+
+    mse: Optional[float] = field(default=None)
 
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False
