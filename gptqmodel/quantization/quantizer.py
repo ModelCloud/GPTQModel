@@ -28,7 +28,7 @@ class Quantizer(nn.Module):
         bits,
         perchannel=False,
         sym=True,
-        mse=0.0,
+        mse=0.0,  # 2.4
         grid=100,
         maxshrink=0.8,
         trits=False,

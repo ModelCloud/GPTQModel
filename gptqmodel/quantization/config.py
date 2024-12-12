@@ -118,7 +118,7 @@ class QuantizeConfig():
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
 
-    mse: Optional[float] = field(default=0.0)
+    mse: float = field(default=0.0)
 
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False
