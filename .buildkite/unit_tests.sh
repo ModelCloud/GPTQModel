@@ -55,6 +55,13 @@ function release_gpu() {
 }
 
 function test() {
+  echo "current dir:"
+  pwd
+  echo "===="
+  ls
+  echo "===="
+  ls ..
+  echo "===="
   pytest --durations=0 ../tests/$TEST_NAME.py || { export ERROR=1; exit 1; }
 }
 
