@@ -191,8 +191,8 @@ class QuantizeConfig():
         return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_set_versionable(self, key: str, value: str, version: str):
-        self.meta_set(key, [f"{value}:{version}"])
+    def meta_set_versionable(self, key: str, value: List[str]):
+        self.meta_set(key, value)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_get_versionable(self, key: str) -> List[Tuple[str, str]]:
