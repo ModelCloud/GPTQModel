@@ -193,18 +193,19 @@ def lm_eval(
             if log_samples:
                 wandb_logger.log_eval_samples(samples=samples)
 
-        evaluation_tracker.save_results_aggregated(
-            results=results, samples=samples if log_samples else None
-        )
+        if evaluation_tracker is not None:
+            evaluation_tracker.save_results_aggregated(
+                results=results, samples=samples if log_samples else None
+            )
 
-        if log_samples:
-            for task_name, config in results["configs"].items():
-                evaluation_tracker.save_results_samples(
-                    task_name=task_name, samples=samples[task_name]
-                )
+            if log_samples:
+                for task_name, config in results["configs"].items():
+                    evaluation_tracker.save_results_samples(
+                        task_name=task_name, samples=samples[task_name]
+                    )
 
-        if (evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub):
-            evaluation_tracker.recreate_metadata_card()
+            if (evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub):
+                evaluation_tracker.recreate_metadata_card()
 
         return results
     else:
