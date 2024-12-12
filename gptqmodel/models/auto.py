@@ -9,7 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from .. import get_best_device
+from ._const import get_best_device
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
