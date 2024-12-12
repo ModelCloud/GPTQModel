@@ -69,7 +69,7 @@ def ModelWriter(cls):
         pre_quantized_size_mb = get_model_files_size(self.model_id_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
-        quantizers = [f"{META_QUANTIZER_GPTQMODEL}: {__version__}"]
+        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
         if meta_quantizer:
             if len(meta_quantizer.split(":")) == 2:
                 quantizers.append(meta_quantizer)
