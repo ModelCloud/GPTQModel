@@ -55,6 +55,7 @@ function release_gpu() {
 }
 
 function test() {
+
   pytest --durations=0 ../tests/$TEST_NAME.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 }
 
@@ -71,7 +72,7 @@ run_id=$5
 docker=$6
 
 echo "Test Name: $test_name"
-export TEST_NAME=$test_name
+export TEST_NAME="${test_name%.py}"
 echo "CUDA Version: $cuda"
 export CUDA=$cuda
 echo "Torch Version: $torch"
