@@ -9,6 +9,7 @@ from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
+from . import Qwen2VLGPTQ
 from ._const import get_best_device
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
@@ -53,6 +54,7 @@ from .definitions.phi3 import Phi3GPTQ
 from .definitions.qwen import QwenGPTQ
 from .definitions.qwen2 import Qwen2GPTQ
 from .definitions.qwen2_moe import Qwen2MoeGPTQ
+from .definitions.qwen2_vl import Qwen2VLGPTQ
 from .definitions.rw import RWGPTQ
 from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
@@ -98,6 +100,7 @@ MODEL_MAP = {
     "minicpm": MiniCPMGPTQ,
     "minicpm3":MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
+    "qwen2_vl": Qwen2VLGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
