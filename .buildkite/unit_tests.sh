@@ -62,7 +62,7 @@ function test() {
   echo "===="
   ls ..
   echo "===="
-  pytest --durations=0 ../tests/$TEST_NAME.py || { export ERROR=1; exit 1; }
+  pytest --durations=0 tests/$TEST_NAME.py || { export ERROR=1; exit 1; }
 }
 
 if [ "$#" -ne 6 ]; then
