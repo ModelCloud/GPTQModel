@@ -32,7 +32,7 @@ from .src.transformers import testing_utils as patched_transformers_testing_util
 
 
 
-def monkey_patch_transformers():
+def patch_hf():
     _patch_peft()
     _patch_optimum()
     _patch_transformers()
@@ -69,12 +69,15 @@ def _patch_optimum():
 
 
 def _patch_transformers():
-    transformers_quantizer_gptq.GptqHfQuantizer = patched_transformers_quantizer_gptq.GptqHfQuantizer
+    transformers_quantizer_gptq.GptqHfQuantizer.required_packages = patched_transformers_quantizer_gptq.GptqHfQuantizer.required_packages
+    transformers_quantizer_gptq.GptqHfQuantizer.validate_environment = patched_transformers_quantizer_gptq.GptqHfQuantizer.validate_environment
+    transformers_quantizer_gptq.GptqHfQuantizer._process_model_before_weight_loading = patched_transformers_quantizer_gptq.GptqHfQuantizer._process_model_before_weight_loading
 
     transformers_import_utils._gptqmodel_available  = patched_transformers_import_utils._gptqmodel_available
     transformers_import_utils.is_gptqmodel_available = patched_transformers_import_utils.is_gptqmodel_available
 
-    transformers_quantization_config.GPTQConfig =  patched_transformers_quantization_config.GPTQConfig
+    transformers_quantization_config.GPTQConfig.__init__ =  patched_transformers_quantization_config.GPTQConfig.__init__
+    transformers_quantization_config.GPTQConfig.post_init =  patched_transformers_quantization_config.GPTQConfig.post_init
 
     transformers_testing_utils.require_gptq = patched_transformers_testing_utils.require_gptq
 
