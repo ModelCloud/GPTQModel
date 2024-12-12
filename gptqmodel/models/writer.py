@@ -55,6 +55,7 @@ def ModelWriter(cls):
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[str] = None,
+            meta_quantizer: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -69,11 +70,17 @@ def ModelWriter(cls):
         pre_quantized_size_mb = get_model_files_size(self.model_id_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
+        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+        if meta_quantizer:
+            if len(meta_quantizer.split(":")) == 2:
+                quantizers.append(meta_quantizer.replace(" ",""))
+            else:
+                logger.warning(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
+
         # write gptqmodel tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
-            value=META_QUANTIZER_GPTQMODEL,
-            version=__version__,
+            value=quantizers
         )
 
         self.quantize_config.meta_set(

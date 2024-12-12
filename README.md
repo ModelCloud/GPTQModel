@@ -130,7 +130,7 @@ Below is a basic sample using `GPTQModel` to quantize a llm model and perform po
 ```py
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
+from gptqmodel import GPTQModel, QuantizeConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
@@ -154,7 +154,7 @@ model.quantize(calibration_dataset)
 
 model.save(quant_path)
 
-model = GPTQModel.load(quant_path, device=get_best_device())
+model = GPTQModel.load(quant_path)
 
 result = model.generate(
   **tokenizer(
