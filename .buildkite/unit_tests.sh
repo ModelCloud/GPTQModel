@@ -55,7 +55,7 @@ function release_gpu() {
 }
 
 function test() {
-  pytest --durations=0 ../tests/TEST_NAME.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+  pytest --durations=0 ../tests/$TEST_NAME.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 }
 
 if [ "$#" -ne 6 ]; then
