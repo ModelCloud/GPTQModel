@@ -5,13 +5,10 @@ from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
 import torch
-from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND, EVAL
-from ..utils.logger import setup_logger
-from ..utils.model import check_and_get_model_type
+from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from .base import BaseGPTQModel, QuantizeConfig
 from .definitions.baichuan import BaiChuanGPTQ
 from .definitions.bloom import BloomGPTQ
@@ -57,6 +54,10 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+from .. import get_best_device
+from ..utils import BACKEND, EVAL
+from ..utils.logger import setup_logger
+from ..utils.model import check_and_get_model_type
 
 logger = setup_logger()
 
@@ -146,6 +147,9 @@ class GPTQModel:
                         if f == name:
                             is_quantized = True
                             break
+
+        if not device and not device:
+            device = get_best_device()
 
         if is_quantized:
             return cls.from_quantized(
