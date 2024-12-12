@@ -2,7 +2,6 @@ from ..base import BaseGPTQModel
 from transformers import AutoModelForVision2Seq
 
 class Qwen2VLGPTQ(BaseGPTQModel):
-    # use correct Qwen2VLForConditionalGeneration for qwen2_vl.
     loader = AutoModelForVision2Seq
 
     base_modules = ["model.embed_tokens", "model.norm"]
