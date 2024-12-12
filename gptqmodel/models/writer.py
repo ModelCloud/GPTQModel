@@ -107,11 +107,11 @@ def ModelWriter(cls):
             value=self.quantize_config.true_sequential
         )
 
-        if self.quantize_config.mse is not None:
-            self.quantize_config.meta_set(
-                key=META_FIELD_MSE,
-                value=self.quantize_config.mse
-            )
+        self.quantize_config.meta_set(
+            key=META_FIELD_MSE,
+            value=self.quantize_config.mse
+        )
+
 
         # The config, quantize_config and model may be edited in place in save_quantized.
         config = copy.deepcopy(self.model.config)

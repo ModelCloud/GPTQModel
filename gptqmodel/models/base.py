@@ -510,8 +510,7 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
-                    mse_enable = True if self.quantize_config.mse is not None else False
-                    mse_norm = self.quantize_config.mse
+                    mse = self.quantize_config.mse
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
 
@@ -528,8 +527,7 @@ class BaseGPTQModel(nn.Module):
                         bits,
                         perchannel=True,
                         sym=sym,
-                        mse=mse_enable,
-                        norm=mse_norm
+                        mse=mse,
                     )
 
                 for name in skipped_modules:
