@@ -1,5 +1,7 @@
-from ..base import BaseGPTQModel
 from transformers import AutoModelForVision2Seq
+
+from ..base import BaseGPTQModel
+
 
 class Qwen2VLGPTQ(BaseGPTQModel):
     loader = AutoModelForVision2Seq

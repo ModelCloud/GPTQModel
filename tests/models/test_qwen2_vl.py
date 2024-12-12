@@ -1,5 +1,6 @@
 from model_test import ModelTest
 
+
 class TestQwen2_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2-VL-2B-Instruct"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
