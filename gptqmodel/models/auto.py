@@ -230,12 +230,18 @@ class GPTQModel:
             batch: int = 1,
             trust_remote_code: bool = False,
             output_file: Optional[str] = None,
+            backend: str = 'gptqmodel',
+            random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
+            extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
     ):
         if framework is None:
             raise ValueError("eval parameter: `framework` cannot be set to None")
 
         if not isinstance(tasks, list):
             raise ValueError("eval parameter: `tasks` must be of List type")
+
+        if backend not in ['gptqmodel', 'vllm']:
+            raise ValueError('Eval framework support backend: [gptqmodel, vllm]')
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
@@ -248,15 +254,24 @@ class GPTQModel:
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
+            model_name = 'hf' if backend == 'gptqmodel' else backend
+            def_args = f"pretrained={model_id_or_path}"
+            if backend == "gptqmodel":
+                def_args += ",gptqmodel=True"
+            model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
+
             results = lm_eval(
                 model_id_or_path,
-                model_name="hf",
-                model_args=f"pretrained={model_id_or_path},gptqmodel=True",
+                model_name=model_name,
+                model_args=model_args,
                 tasks=[task.value for task in tasks],
                 trust_remote_code=trust_remote_code,
                 batch_size=batch,
                 apply_chat_template=True if tokenizer.chat_template is not None else False,
-                output_path=output_file
+                output_path=output_file,
+                numpy_random_seed=random_seed,
+                torch_random_seed=random_seed,
+                fewshot_random_seed=random_seed,
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -277,7 +292,8 @@ class GPTQModel:
                     dataset=task.value,
                     batch=batch,
                     trust_remote_code=trust_remote_code,
-                    output_file=output_file
+                    output_file=output_file,
+                    backend=backend
                 )
                 results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
             print('--------evalplus Eval Result---------')

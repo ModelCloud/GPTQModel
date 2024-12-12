@@ -44,6 +44,7 @@ def evalplus(
         batch: int = 1,
         trust_remote_code: bool = False,
         output_file: Optional[str] = None,
+        backend: str = 'gptqmodel'
 ):
     try:
         from evalplus.evaluate import evaluate
@@ -52,7 +53,7 @@ def evalplus(
 
     assert dataset in ["humaneval", "mbpp"], f"Invalid dataset {dataset}"
 
-    evaluate(dataset=dataset, model=model, backend="gptqmodel", bs=batch, trust_remote_code=trust_remote_code, output_file=output_file,
+    evaluate(dataset=dataset, model=model, backend=backend, bs=batch, trust_remote_code=trust_remote_code, output_file=output_file,
              greedy=True)
 
     if output_file is None:
