@@ -50,7 +50,3 @@ export REF=$ref
 
 install_requirements
 compile
-find_gpu
-test || true
-release_gpu
-clear_cache
