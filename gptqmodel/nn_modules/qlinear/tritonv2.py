@@ -36,7 +36,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]

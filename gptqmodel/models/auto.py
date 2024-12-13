@@ -5,10 +5,11 @@ from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
 import torch
-from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from ..quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
+from ..integration.integration_vllm import patch_vllm
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
@@ -53,6 +54,7 @@ from .definitions.phi3 import Phi3GPTQ
 from .definitions.qwen import QwenGPTQ
 from .definitions.qwen2 import Qwen2GPTQ
 from .definitions.qwen2_moe import Qwen2MoeGPTQ
+from .definitions.qwen2_vl import Qwen2VLGPTQ
 from .definitions.rw import RWGPTQ
 from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
@@ -98,6 +100,7 @@ MODEL_MAP = {
     "minicpm": MiniCPMGPTQ,
     "minicpm3":MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
+    "qwen2_vl": Qwen2VLGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
@@ -131,6 +134,8 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if backend == BACKEND.VLLM:
+            patch_vllm()
         is_quantized = False
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             is_quantized = True
