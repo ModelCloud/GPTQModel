@@ -157,12 +157,11 @@ class GPTQMarlinConfig(QuantizationConfig):
                          prefix: str
                          ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod", UnquantizedLinearMethod]]:
         if self.dynamic_get(layer_name=prefix) == False:  # noqa: E712
-            print(f"skip module: {prefix}")
             return UnquantizedLinearMethod()
 
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
-            return GPTQMarlinLinearMethod(self)
+            return GPTQMarlinLinearMethod(self, prefix=prefix)
         elif isinstance(layer, FusedMoE):
             return GPTQMarlinMoEMethod(self)
         return None
@@ -203,8 +202,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
     _kernel_backends_being_used: Set[str] = set()
 
-    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+    def __init__(self, quant_config: GPTQMarlinConfig, prefix: str) -> None:
         self.quant_config = deepcopy(quant_config)
+        self.prefix = prefix
 
         # Verify supported on platform.
         verify_marlin_supported(quant_type=self.quant_config.quant_type,
@@ -220,9 +220,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        prefix = extra_weight_attrs.get("prefix", "")
         # Depending on prefix and dynamic, some arguments may be modified.
-        self.quant_config.update_config(prefix=prefix)
+        self.quant_config.update_config(prefix=self.prefix)
 
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
