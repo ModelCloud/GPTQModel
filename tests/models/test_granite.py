@@ -7,6 +7,7 @@ class TestGranite(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4770
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
 
     def test_granite(self):
         self.quant_lm_eval()

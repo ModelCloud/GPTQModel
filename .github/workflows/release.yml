@@ -28,7 +28,7 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '6'
+        default: '12'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
@@ -82,7 +82,7 @@ jobs:
           echo "ip: $ip"
 
           max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-6}}"
+          max_p="{\"size\": ${max_p:-12}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
@@ -121,7 +121,7 @@ jobs:
   release:
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 12 }}
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.task_list) }}
     runs-on: self-hosted

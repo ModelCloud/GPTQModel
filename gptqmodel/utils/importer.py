@@ -17,6 +17,7 @@ from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from .backend import BACKEND, get_backend
 
+message_logged = False
 logger = setup_logger()
 
 backend_dict = OrderedDict({
@@ -31,8 +32,8 @@ backend_dict = OrderedDict({
 })
 
 format_dict = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
-    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -73,6 +74,7 @@ def hf_select_quant_linear(
         device=device,
         format=FORMAT.GPTQ,
         pack=True,
+        allow_marlin=False, # TODO: remove this after marlin padding is fixed
         dynamic=None,
     )
 
@@ -87,6 +89,7 @@ def select_quant_linear(
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
+        allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
 ) -> Type[BaseQuantLinear]:
     if not torch.cuda.is_available():
@@ -102,19 +105,32 @@ def select_quant_linear(
         trainable = backend == BACKEND.AUTO_TRAINABLE
 
         allow_backends = format_dict[format]
+
+        # TODO: fix marlin padding
+        # Since Marlin does not support padding in_features and out_features, Marlin is not allowed for hf_select_quant_linear scenarios
+        # for gptq internal use, allow_marlin is set to True
+        if format in [FORMAT.GPTQ, FORMAT.GPTQ_V2] and allow_marlin:
+            allow_backends = [BACKEND.MARLIN] + allow_backends
+
         allow_quant_linears = backend_dict
         err = None
+        global message_logged
+        # Suppose all quant linears in the model should have the same backend.
         for k, v in allow_quant_linears.items():
             in_allow_backends = k in allow_backends
-            validate, err = v.validate(bits, group_size, desc_act, sym, dynamic=dynamic, device=device, trainable=trainable)
+            validate, err = v.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
             if in_allow_backends and validate:
                 if pack:
                     check_pack_func = hasattr(v, "pack")
                     if check_pack_func:
-                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        if not message_logged:
+                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                            message_logged = True
                         return v
                 else:
-                    logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                    if not message_logged:
+                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        message_logged = True
                     return v
 
         if err:

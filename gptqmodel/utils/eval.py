@@ -4,59 +4,37 @@ from enum import Enum
 from typing import List, Optional, Union
 
 
-class EVAL(Enum):
-    LM_EVAL = 0
-    EVALPLUS = 1
+class EVAL:
+    class LM_EVAL(Enum):
+        ARC_CHALLENGE = "arc_challenge"
+        MMLU = "mmlu"
+        HELLASWAG = "hellaswag"
+        GSM8K_COT = "gsm8k_cot"
+
+    class EVALPLUS(Enum):
+        HUMAN = "humaneval"
+        MBPP = "mbpp"
 
     @classmethod
     def get_task_enums(cls):
-        return list(cls)
+        task_lists = []
+        for name in dir(cls):
+            attr = getattr(cls, name)
+            if isinstance(attr, type) and issubclass(attr, Enum):
+                task_lists.extend(list(attr))
+        return task_lists
 
     @classmethod
     def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.name}"
-
-    @classmethod
-    def get_all_eval_backend_string(cls):
-        full_names = [cls.get_full_name(member) for member in cls]
-        return ', '.join(full_names)
-
-
-class LM_EVAL_TASK(Enum):
-    ARC_CHALLENGE = "arc_challenge"
-    MMLU = "mmlu"
-    HELLASWAG = "hellaswag"
-    GSM8K_COT = "gsm8k_cot"
-
-    @classmethod
-    def get_task_enums(cls):
-        return list(cls)
-
-    @classmethod
-    def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.name}"
+        return f"{cls.__name__}.{member.__class__.__name__}.{member.name}"
 
     @classmethod
     def get_all_tasks_string(cls):
-        full_names = [cls.get_full_name(member) for member in cls]
-        return ', '.join(full_names)
-
-
-class EVALPLUS_TASK(Enum):
-    HUMAN = "humaneval"
-    MBPP = "mbpp"
-
-    @classmethod
-    def get_task_enums(cls):
-        return list(cls)
-
-    @classmethod
-    def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.name}"
-
-    @classmethod
-    def get_all_tasks_string(cls):
-        full_names = [cls.get_full_name(member) for member in cls]
+        full_names = []
+        for name in dir(cls):
+            attr = getattr(cls, name)
+            if isinstance(attr, type) and issubclass(attr, Enum):
+                full_names.extend(cls.get_full_name(member) for member in attr)
         return ', '.join(full_names)
 
 
@@ -65,6 +43,8 @@ def evalplus(
         dataset: str,
         batch: int = 1,
         trust_remote_code: bool = False,
+        output_file: Optional[str] = None,
+        backend: str = 'gptqmodel'
 ):
     try:
         from evalplus.evaluate import evaluate
@@ -73,20 +53,21 @@ def evalplus(
 
     assert dataset in ["humaneval", "mbpp"], f"Invalid dataset {dataset}"
 
-    evaluate(dataset=dataset, model=model, backend="gptqmodel", bs=batch, trust_remote_code=trust_remote_code,
+    evaluate(dataset=dataset, model=model, backend=backend, bs=batch, trust_remote_code=trust_remote_code, output_file=output_file,
              greedy=True)
 
-    result_path = model.strip("./").replace("/", "--") + "_gptqmodel_temp_0.0_eval_results.json"
-    result_path = os.path.join("evalplus_results", dataset, result_path)
+    if output_file is None:
+        output_file = model.strip("./").replace("/", "--") + "_gptqmodel_temp_0.0_eval_results.json"
+        output_file = os.path.join("evalplus_results", dataset, output_file)
 
-    if not os.path.exists(result_path):
-        raise FileNotFoundError(f"No such file: {result_path}")
+    if not os.path.exists(output_file):
+        raise FileNotFoundError(f"No such file: {output_file}")
 
     try:
-        with open(result_path, 'r') as file:
+        with open(output_file, 'r') as file:
             data = json.load(file)
     except json.JSONDecodeError:
-        raise ValueError(f"Failed to decode JSON: {result_path}")
+        raise ValueError(f"Failed to decode JSON: {output_file}")
 
     try:
         pass_at_k = data["pass_at_k"]
@@ -100,7 +81,7 @@ def evalplus(
     except ValueError as e:
         raise ValueError(f"Data format error: {str(e)}")
 
-    return base_formatted, plus_formatted, result_path
+    return base_formatted, plus_formatted, output_file
 
 
 def evalplus_make_table(results):
@@ -149,10 +130,11 @@ def lm_eval(
         from lm_eval.loggers import EvaluationTracker, WandbLogger
         from lm_eval.models.huggingface import HFLM
         from lm_eval.utils import handle_non_serializable
+        from transformers import PreTrainedModel as PreTrainedModelType
     except BaseException:
         raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
-    if model_name == "hf":
+    if model_name == "hf" and isinstance(model, PreTrainedModelType):
         model_name = HFLM(
             pretrained=model,
             batch_size=batch_size,
@@ -212,18 +194,19 @@ def lm_eval(
             if log_samples:
                 wandb_logger.log_eval_samples(samples=samples)
 
-        evaluation_tracker.save_results_aggregated(
-            results=results, samples=samples if log_samples else None
-        )
+        if evaluation_tracker is not None:
+            evaluation_tracker.save_results_aggregated(
+                results=results, samples=samples if log_samples else None
+            )
 
-        if log_samples:
-            for task_name, config in results["configs"].items():
-                evaluation_tracker.save_results_samples(
-                    task_name=task_name, samples=samples[task_name]
-                )
+            if log_samples:
+                for task_name, config in results["configs"].items():
+                    evaluation_tracker.save_results_samples(
+                        task_name=task_name, samples=samples[task_name]
+                    )
 
-        if (evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub):
-            evaluation_tracker.recreate_metadata_card()
+            if (evaluation_tracker.push_results_to_hub or evaluation_tracker.push_samples_to_hub):
+                evaluation_tracker.recreate_metadata_card()
 
         return results
     else:

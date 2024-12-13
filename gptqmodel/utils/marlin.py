@@ -89,7 +89,7 @@ def _validate_marlin_device_support() -> bool:
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion
 def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = False):
-    validate, err = MarlinQuantLinear.validate(cfg.bits, cfg.group_size, cfg.desc_act, cfg.sym, cfg.dynamic)
+    validate, err = MarlinQuantLinear.validate(bits=cfg.bits, group_size=cfg.group_size, desc_act=cfg.desc_act, sym=cfg.sym, dynamic=cfg.dynamic)
     if throw_error and err is not None:
         raise ValueError(err)
     return err

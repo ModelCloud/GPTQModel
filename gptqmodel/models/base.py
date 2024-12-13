@@ -472,6 +472,7 @@ class BaseGPTQModel(nn.Module):
         avg_losses = []
         module_names = []
         shared_kv_cache_dict = {}
+
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -504,12 +505,21 @@ class BaseGPTQModel(nn.Module):
             full = find_layers(layer)
             for names in layer_modules:
                 subset = {n: full[n] for n in names if n in full}
+                skipped_modules = []
                 gptq = {}
                 for name in subset:
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
+                    mse = self.quantize_config.mse
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
+
+                        if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
+                            logger.info(f"skip module: {layer_name}")
+
+                            skipped_modules.append(name)
+                            continue
+
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                     gptq[name] = GPTQ(subset[name])
@@ -517,8 +527,14 @@ class BaseGPTQModel(nn.Module):
                         bits,
                         perchannel=True,
                         sym=sym,
-                        mse=False,
+                        mse=mse,
                     )
+
+                for name in skipped_modules:
+                    subset.pop(name)
+
+                if len(gptq) == 0:
+                    continue
 
                 def add_batch(name):
                     def tmp(_, inp, out):
@@ -712,10 +728,11 @@ class BaseGPTQModel(nn.Module):
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[str] = None,
+            meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
         if self.quantized:
-            self.save_quantized(save_dir, safetensors_metadata, max_shard_size)
+            self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
         else:
             self.save_pretrained(save_dir, **kwargs)
 

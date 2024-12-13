@@ -37,6 +37,8 @@ META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
 META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
+META_FIELD_MSE = "mse"
+
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
 
@@ -116,6 +118,8 @@ class QuantizeConfig():
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
 
+    mse: float = field(default=0.0)
+
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False
     parallel_packing: bool = field(default=True)
@@ -141,11 +145,15 @@ class QuantizeConfig():
             raise ValueError(f"only support quantize to {fields_info[0].metadata['choices']} bits.")
 
         if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},  # 先添加以 "-" 开头的键
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')}  # 然后添加其他键
+            }
+
             for layer, layer_dict in self.dynamic.items():
                 for key, value in layer_dict.items():
                     if key == "bits" and value not in fields_info[0].metadata["choices"]:
-                        raise ValueError(
-                            f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
+                        raise ValueError(f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
                     elif key == "group_size" and value != -1 and value <= 0:
                         raise ValueError("unless equal to -1, group_size must greater then 0.")
 
@@ -176,7 +184,10 @@ class QuantizeConfig():
 
     def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
-            if re.match(pattern, layer_name):
+            if pattern.startswith("-:"):
+                if re.match(pattern.removeprefix("-:"), layer_name):
+                    return False
+            elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
                     return pattern_dict
                 else:
@@ -184,8 +195,8 @@ class QuantizeConfig():
         return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_set_versionable(self, key: str, value: str, version: str):
-        self.meta_set(key, [f"{value}:{version}"])
+    def meta_set_versionable(self, key: str, value: List[str]):
+        self.meta_set(key, value)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_get_versionable(self, key: str) -> List[Tuple[str, str]]:
