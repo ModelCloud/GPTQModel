@@ -68,7 +68,7 @@ class TestLoadVLLM(unittest.TestCase):
             prompts=self.prompts,
             temperature=0.8,
             top_p=0.95,
-            max_tokens=16,
+            max_length=16,
         )
         
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
