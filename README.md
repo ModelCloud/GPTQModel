@@ -60,17 +60,18 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Features
 * 🚀 Extensive model support for: `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
-* ✨ 100% CI coverage for all supported models and kernels including quality regression.
+* 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+* ✨ `Dynamic`/Mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (recent Intel/AMD) and Intel/XPU. 
-* 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
-* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference. 
-* 🚀 Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
-* 🚀`lm_head` module quant inference support for further VRAM reduction (auto-round only). 
+* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
+* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization.
+* ✨ Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
+* ✨ `lm_head` module quant inference support for further VRAM reduction (auto-round only). 
 * 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
-* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
-* 🚀 Model weights sharding support
-* 🚀 Security: hash check of model weights on load
+* ✨ Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
+* ✨ Model weights sharding support
+* ✨ Security: hash check of model weights on load
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
