@@ -25,7 +25,7 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
         'top_p': hf_params.get('top_p', 1.0),
         'max_tokens': hf_params.get('max_length', 2048),
         'min_tokens': hf_params.get('min_length', 0),
-        'stop_token_ids': [hf_params.get('eos_token_id'), None],
+        'stop_token_ids': [hf_params.get('eos_token_id'), [None, None]],
     }
     return SamplingParams(**params)
 
@@ -66,11 +66,17 @@ def vllm_generate(model, **kwargs):
         sampling_params = convert_hf_params_to_vllm({k: v for k, v in hf_params.items() if v is not None})
 
     # Convert prompts to vLLM format
-    if isinstance(prompts, (list, torch.Tensor)):
-        token_ids = prompts.tolist() if isinstance(prompts, torch.Tensor) else prompts
-        req_results = model.generate(prompt_token_ids=token_ids, sampling_params=sampling_params)
-    else:
+    if isinstance(prompts, torch.Tensor):
+        req_results = model.generate(prompt_token_ids=prompts.tolist(), sampling_params=sampling_params)
+    elif isinstance(prompts, list):
+        if isinstance(prompts[0], list) or isinstance(prompts[0], int):
+            req_results = model.generate(prompt_token_ids=prompts, sampling_params=sampling_params)
+        else:
+            req_results = model.generate(prompts=prompts, sampling_params=sampling_params)
+    elif isinstance(prompts, str):
         req_results = model.generate(prompts=prompts, sampling_params=sampling_params)
+    else:
+        raise ValueError(f"Invalid input type for vllm_generate, type is {type(prompts)}")
 
     outputs = []
     for result in req_results:
@@ -78,6 +84,8 @@ def vllm_generate(model, **kwargs):
         outputs.append(combined_token_ids)
 
     pad_token_id = model.get_tokenizer().pad_token_id
+    if pad_token_id is None:
+        pad_token_id = model.get_tokenizer().eos_token_id
     max_length = max(len(sublist) for sublist in outputs)
     padded_list = [sublist + [pad_token_id] * (max_length - len(sublist)) for sublist in outputs]
 
