@@ -11,7 +11,6 @@ except ImportError:
 
 VLLM_INSTALL_HINT = "vLLM not installed. Please install via `pip install -U vllm`."
 
-
 # returns SamplingParams but we can't use this typehint since vLLM is optional depend
 def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
     if not VLLM_AVAILABLE:
@@ -25,7 +24,7 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
         'top_p': hf_params.get('top_p', 1.0),
         'max_tokens': hf_params.get('max_length', 2048),
         'min_tokens': hf_params.get('min_length', 0),
-        'stop_token_ids': [hf_params.get('eos_token_id'), [None, None]],
+        'stop_token_ids': [hf_params.get('eos_token_id'), []],
     }
     return SamplingParams(**params)
 

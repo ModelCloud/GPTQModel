@@ -52,25 +52,27 @@ class TestLoadVLLM(unittest.TestCase):
             backend=BACKEND.VLLM,
             gpu_memory_utilization=0.2,
         )
+
+        tokenizer = model.get_tokenizer()
+
         outputs = model.generate(
             prompts=self.prompts,
             sampling_params=self.sampling_params,
         )
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            self.assertEquals(generated_text, " Paris, which is also the capital of France.")
-        outputs_param = model.generate(
+
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
+        print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
+        self.assertEquals(generated_text, " Paris, which is also the capital of France.")
+
+        outputs = model.generate(
             prompts=self.prompts,
             temperature=0.8,
             top_p=0.95,
         )
-        for output in outputs_param:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            self.assertEquals(generated_text, " ___________.\n6. City Name: Paris, France\n7. C")
+        
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
+        print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
+        self.assertEquals(generated_text, " ___________.\n6. City Name: Paris, Franc[4467 chars]ial?")
 
         del model
         self.release_vllm_model()
@@ -82,17 +84,16 @@ class TestLoadVLLM(unittest.TestCase):
             backend=BACKEND.VLLM,
             gpu_memory_utilization=0.2,
         )
+        tokenizer = model.get_tokenizer()
         outputs = model.generate(
             prompts=self.prompts,
             temperature=0.8,
             top_p=0.95,
         )
-        for output in outputs:
-            prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            self.assertEquals(generated_text,
-                              " Paris, which is also known as the city of love.")
+
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
+        print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
+        self.assertEquals(generated_text, " Paris, which is also known as the city of love.")
 
         del model
         self.release_vllm_model()
@@ -140,6 +141,8 @@ class TestLoadVLLM(unittest.TestCase):
                 gpu_memory_utilization=0.2,
             )
 
+            tokenizer = model.get_tokenizer()
+
             for name, submodule in model.named_modules():
                 if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule,
                                                                                   BaseQuantLinear):  # module 0 was skipped
@@ -150,12 +153,11 @@ class TestLoadVLLM(unittest.TestCase):
                 temperature=0.8,
                 top_p=0.95,
             )
-            for output in outputs:
-                prompt = output.prompt
-                generated_text = output.outputs[0].text
-                print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-                self.assertEquals(generated_text,
-                                  " Paris, which is also the country's largest city.")
+
+            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
+            print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
+            self.assertEquals(generated_text,
+                              " Paris, which is also the country's largest city.")
 
             del model
             self.release_vllm_model()
