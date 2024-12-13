@@ -83,6 +83,11 @@ def ModelLoader(cls):
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
+        if quantize_config.desc_act not in cls.supports_desc_act:
+            raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
+                             f"but quantize_config.desc_act is {quantize_config.desc_act}.")
+
+
         got_cuda = check_cuda(raise_exception=False)
 
         if not got_cuda:

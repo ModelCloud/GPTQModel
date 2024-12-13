@@ -2,6 +2,7 @@ from ..base import BaseGPTQModel
 
 
 class HymbaGPTQ(BaseGPTQModel):
+    supports_desc_act = [False]
     require_trust_remote_code = True
     require_monkeypatch = True
     require_pkgs_version = ["tiktoken>=0.7.0",
