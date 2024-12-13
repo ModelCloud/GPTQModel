@@ -94,15 +94,15 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | XVERSE     | ✅   |     |
 | EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | Yi         | ✅   |     |
 
-## HW Accelerator Requirements
+## Kernel and HW Accelerator Support 
 
 GPTQModel is validated for Linux x86_64 with the following devices:
 
-| Device           |     |  Optimized              | 
-| ---------------- | --- | -------------- | 
-| Nvidia GPU     | ✅   | Ampere or Higher |
-| Intel/AMD CPU  | ✅   | `avx512 or `amx` |
-| Intel XPU  | ✅   |   Intel Arc + Datacenter Max |
+| Device           |     |  Optimized Arch              |  Kernels |
+| ---------------- | --- | -------------- | -------------- | 
+| Nvidia GPU     | ✅   | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
+| Intel/AMD CPU  | ✅   | `avx512` or `amx` | IPEX, Torch |
+| Intel XPU  | ✅   |   Intel Arc + Datacenter Max | IPEX, Torch |
 
 ## Install
 
@@ -202,13 +202,6 @@ lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.L
 # Use `evalplus` as framework to evaluate the model
 evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
 ```
-
-
-### Which kernel is used by default?
-
-* `GPU`: Marlin, Exllama v2, Exllama v1, DynamicCuda, Torch kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
-* `CPU`: Intel/IPEX kernel
-* `XPU`: Intel/IPEX kernel
 
 ## Citation
 ```
