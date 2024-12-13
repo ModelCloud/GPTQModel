@@ -4,7 +4,6 @@ import tempfile
 
 from transformers import AutoTokenizer
 
-from gptqmodel.integration.integration_vllm import patch_vllm
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -99,8 +98,6 @@ class TestLoadVLLM(unittest.TestCase):
         self.release_vllm_model()
 
     def test_dynamic(self):
-        patch_vllm()
-
         NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
         tokenizer = AutoTokenizer.from_pretrained(NATIVE_MODEL_ID, use_fast=True)
         if not tokenizer.pad_token_id:
