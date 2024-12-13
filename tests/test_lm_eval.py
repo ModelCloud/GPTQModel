@@ -21,7 +21,6 @@ class TestLmEval(unittest.TestCase):
     def test_lm_eval(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
            results = lm_eval(
-                self.MODEL_ID,
                 model_name='hf',
                 model_args=f'pretrained={self.MODEL_ID},gptqmodel=True',
                 apply_chat_template=True,

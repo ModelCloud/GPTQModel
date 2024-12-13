@@ -92,7 +92,7 @@ def evalplus_make_table(results):
 
 
 def lm_eval(
-        model,
+        model=None,
         model_args: str = "",
         model_name: Optional[str] = "hf",
         tasks: Optional[List[Union[str, dict, object]]] = None,
@@ -133,7 +133,7 @@ def lm_eval(
     except BaseException:
         raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
-    if model_name == "hf" and not isinstance(model, str):
+    if model_name == "hf" and model is not None:
         model_name = HFLM(
             pretrained=model,
             batch_size=batch_size,
