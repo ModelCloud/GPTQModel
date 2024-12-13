@@ -15,18 +15,33 @@ VLLM_INSTALL_HINT = "vLLM not installed. Please install via `pip install -U vllm
 def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
     if not VLLM_AVAILABLE:
         raise ValueError(VLLM_INSTALL_HINT)
+    sampling_params = SamplingParams()
 
-    params = {
-        'n': hf_params.get('num_return_sequences', 1),
-        'repetition_penalty': hf_params.get('repetition_penalty', 1.0),
-        'temperature': hf_params.get('temperature', 1.0),
-        'top_k': hf_params.get('top_k', -1),
-        'top_p': hf_params.get('top_p', 1.0),
-        'max_tokens': hf_params.get('max_length', 2048),
-        'min_tokens': hf_params.get('min_length', 0),
-        'stop_token_ids': [hf_params.get('eos_token_id'), None],
-    }
-    return SamplingParams(**params)
+    if hf_params.get('num_return_sequences', None):
+        sampling_params.n = hf_params.get('num_return_sequences')
+
+    if hf_params.get('repetition_penalty', None):
+        sampling_params.repetition_penalty = hf_params.get('repetition_penalty')
+
+    if hf_params.get('temperature', None):
+        sampling_params.temperature = hf_params.get('temperature')
+
+    if hf_params.get('top_k', None):
+        sampling_params.top_k = hf_params.get('top_k')
+
+    if hf_params.get('top_p', None):
+        sampling_params.top_p = hf_params.get('top_p')
+
+    if hf_params.get('max_length', None):
+        sampling_params.max_tokens = hf_params.get('max_length')
+
+    if hf_params.get('min_length', None):
+        sampling_params.min_tokens = hf_params.get('min_length')
+
+    if hf_params.get('eos_token_id', None):
+        sampling_params.stop_token_ids = [hf_params.get('eos_token_id'), None]
+
+    return sampling_params
 
 
 def load_model_by_vllm(
