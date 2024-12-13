@@ -705,13 +705,21 @@ class BaseGPTQModel(nn.Module):
     @property
     def device(self):
         if not self.hf_device_map:
-            return self.model.device
+            if hasattr(self.model, "device"):
+                return self.model.device
+            elif hasattr(self.model, "llm_engine"):
+                return self.model.llm_engine.device_config.device_type
+            else:
+                return torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             device = [d for d in self.hf_device_map.values() if d not in {"disk"}][0]
             return torch.device(device)
 
     def to(self, device: Union[str, torch.device]):
-        self.model.to(device)
+        if hasattr(self.model, "to"):
+            self.model.to(device)
+        else:
+            logger.warning(f"{self.model.__class__.__name__} does not support the to() method")
         return self
 
     def forward(self, *args, **kwargs):
