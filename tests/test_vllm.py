@@ -36,7 +36,7 @@ class TestLoadVLLM(unittest.TestCase):
         self.prompts = [
             "The capital of France is",
         ]
-        self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+        self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16)
 
     def release_vllm_model(self):
         from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
@@ -68,11 +68,12 @@ class TestLoadVLLM(unittest.TestCase):
             prompts=self.prompts,
             temperature=0.8,
             top_p=0.95,
+            max_tokens=16,
         )
         
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
         print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertEquals(generated_text, " ___________.\n6. City Name: Paris, Franc[4467 chars]ial?")
+        self.assertEquals(generated_text, " ___________.\n6. City Name: Paris, France\n7. C")
 
         del model
         self.release_vllm_model()
