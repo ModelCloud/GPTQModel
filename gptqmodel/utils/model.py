@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
@@ -17,19 +17,20 @@ import torch.nn as nn
 import transformers
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
-from tqdm import tqdm
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear
-from ..nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear
+from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
+from .progress import ProgressBar
 
 logger = setup_logger()
 
@@ -117,7 +118,6 @@ def make_quant(
     pack: bool = False,
     dynamic=None,
 ) -> BaseQuantLinear:
-
     QuantLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -129,17 +129,25 @@ def make_quant(
         dynamic=dynamic,
     )
 
-    try:
-        result = create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-    except NotImplementedError as e:
-        if QuantLinear == MarlinInferenceQuantLinear:
-            # If create MarlinInferenceQuantLinear fails, we try to convert to MarlinQuantLinear.
-            # First use ExllamaV2QuantLinear to preload, then call convert_to_marlin().
-            result = create_quant_layer(ExllamaV2QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym)
-        else:
-            raise e
+    if pack:
+        reserve_quant_linear = ExllamaQuantLinear
+    else:
+        reserve_quant_linear = ExllamaV2QuantLinear
 
-    return result
+    # TODO, we need fix here. if select other linears
+    for linear in list(dict.fromkeys([QuantLinear, reserve_quant_linear, TorchQuantLinear])):
+        try:
+            if linear is not QuantLinear:
+                logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
+
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
+            return result
+        except NotImplementedError as e:
+            # only fallback to other quant linears when backend is auto.
+            if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
+                raise e
+
+    raise ValueError("no support quant linear was found for this module.")
 
 
 def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym) -> BaseQuantLinear:
@@ -158,8 +166,18 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
             elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
                 in_features = submodule.weight.shape[0]
                 out_features = submodule.weight.shape[1]
+            elif isinstance(submodule, BaseQuantLinear):
+                # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
+                in_features = submodule.infeatures
+                out_features = submodule.outfeatures
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
+
+            # check in_features and out_features validate
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
+                                          infeatures=in_features, outfeatures=out_features)
+            if err is not None:
+                raise err
 
             bias = submodule.bias is not None
 
@@ -182,18 +200,36 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 infeatures=in_features,
                 outfeatures=out_features,
                 bias=bias,
-                weight_dtype=submodule.weight.dtype,
+                weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
     return QuantLinear
 
+# public/stable api exposed to transformer/optimum
+def hf_convert_gptq_v1_to_v2_format(
+    model: nn.Module,
+    bits: int,
+    qlinear_kernel: Type[BaseQuantLinear],
+    checkpoint_format: str,
+    meta: Optional[Dict[str, any]],
+) -> Tuple[nn.Module, bool]:
+    if checkpoint_format == "gptq":
+        quantize_config = QuantizeConfig(bits=bits)
+        return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel), True
+    else:
+        return model, False
+
 
 def convert_gptq_v1_to_v2_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+    qlinear_kernel: Type[BaseQuantLinear],
 ):
+    # skip v1 to v2 conversion for ipex
+    if qlinear_kernel == IPEXQuantLinear:
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
@@ -224,11 +260,32 @@ def convert_gptq_v1_to_v2_format(
     return model
 
 
+# public/stable api exposed to transformer/optimum
+def hf_convert_gptq_v2_to_v1_format(
+    model: nn.Module,
+    sym: bool,
+    bits: int,
+    qlinear_kernel: Type[BaseQuantLinear],
+    checkpoint_format: str,
+    meta: Optional[Dict[str, any]],
+) -> Tuple[nn.Module, bool]:
+    # note: sym=False is valid for gptq_v2 for all gptqmodel and gptq(v1) for gptqmodel >= `0.9.0`
+    if sym and checkpoint_format == "gptq_v2":
+        quantize_config = QuantizeConfig(bits=bits)
+        return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel), True
+    else:
+        return model, False
+
+
 def convert_gptq_v2_to_v1_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: nn.Module,
+    qlinear_kernel: Type[BaseQuantLinear],
 ):
+    # skip v2 to v1 conversion for ipex
+    if qlinear_kernel == IPEXQuantLinear:
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
@@ -269,12 +326,9 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        if QuantLinear is MarlinQuantLinear:
-            qlayers[name].pack(layers[name], scale)
-        else:
-            qlayers[name].pack(layers[name], scale, zero, g_idx)
+        qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
-        pbar.update()
+        pbar.progress()
 
 
 def pack_model(
@@ -328,7 +382,7 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with tqdm(total=len(names), leave=True) as pbar:
+        with ProgressBar(total=len(names)) as pbar:
             def wrapper(name):
                 pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
 
@@ -418,12 +472,21 @@ def simple_dispatch_model(model, device_map):
     return model
 
 
+# public/stable api exposed to transformer/optimum
+def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
+                        max_input_length: Optional[int] = None):
+    return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
+
+
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
     """
     The max_input_length argument is specific to the exllama backend, that requires to initialize a buffer temp_state.
     """
     # post init for bitblas backend.
+    device_to_buffers_size = {}
+    # exllama
+    model_uses_exllama = False
 
     # exllamav2
     fixed_bytes = {}
@@ -435,9 +498,89 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
+        elif isinstance(submodule, ExllamaQuantLinear):
+            model_uses_exllama = True
+            device = submodule.qweight.device
+            if device not in device_to_buffers_size:
+                device_to_buffers_size[device] = {
+                    "max_dq_buffer_size": 1,
+                    "max_inner_outer_dim": 1,
+                }
+            submodule._use_act_order = True if use_act_order else False
+
+            # Disable this heuristic for detecting act_order, but it could be used instead of the config.
+            """
+            if submodule.g_idx is None:
+                submodule.act_order = False
+            elif submodule.g_idx is not None and ((submodule.g_idx == 0).all() or torch.equal(submodule.g_idx.cpu(), torch.tensor([i // submodule.group_size for i in range(submodule.g_idx.shape[0])], dtype=torch.int32))):
+                submodule.g_idx = None
+                submodule.act_order = False
+            else:
+                submodule.act_order = True
+            """
+
+            device_to_buffers_size[device]["max_dq_buffer_size"] = max(
+                device_to_buffers_size[device]["max_dq_buffer_size"],
+                submodule.qweight.numel() * 8,
+                )
+
+            if use_act_order:
+                device_to_buffers_size[device]["max_inner_outer_dim"] = max(
+                    device_to_buffers_size[device]["max_inner_outer_dim"],
+                    submodule.infeatures,
+                    submodule.outfeatures,
+                )
+
+    if model_uses_exllama:
+        # To be honest this is quite ugly, not proud of this.
+        from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params
+
+        device_to_buffers = {}
+
+        if use_act_order:
+            if max_input_length is None:
+                max_input_len = EXLLAMA_DEFAULT_MAX_INPUT_LENGTH
+            else:
+                max_input_len = max_input_length
+        else:
+            if max_input_length is not None:
+                logger.info(
+                    "Using exllama backend without act-order, the parameter max_input_length was set although not needed, it will be ignored."
+                )
+            max_input_len = 1
+
+        for device, buffers_size in device_to_buffers_size.items():
+            # The temp_state buffer is required to reorder X in the act-order case.
+            # The temp_dq buffer is required to dequantize weights when using cuBLAS, typically for the prefill.
+            device_to_buffers[device] = {
+                "temp_state": torch.zeros(
+                    (max_input_len, buffers_size["max_inner_outer_dim"]),
+                    dtype=torch.float16,
+                    device=device,
+                ),
+                "temp_dq": torch.zeros(
+                    (1, buffers_size["max_dq_buffer_size"]),
+                    dtype=torch.float16,
+                    device=device,
+                ),
+                "max_dq_buffer_size": buffers_size["max_dq_buffer_size"],
+                "max_inner_outer_dim": buffers_size["max_inner_outer_dim"],
+            }
+
+        # Buffers need to be persistent to avoid any bug.
+        model.device_to_buffers = device_to_buffers
+
+        for device, buffers in model.device_to_buffers.items():
+            prepare_buffers(device, buffers["temp_state"], buffers["temp_dq"])
+
+        # Using the default from exllama repo here.
+        matmul_recons_thd = 8
+        matmul_fused_remap = False
+        matmul_no_half2 = False
+        set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
 
     if model_uses_exllamav2:
-        from ..nn_modules.qlinear.qlinear_exllamav2 import ExLlamaV2DeviceTensors
+        from ..nn_modules.qlinear.exllamav2 import ExLlamaV2DeviceTensors
 
         device_tensors = {}
         for device, scratch_bytes in fixed_bytes.items():
@@ -455,6 +598,9 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             submodule.post_init()
 
     torch.cuda.empty_cache()
+
+    # if use_act_order and max_input_length and isinstance(submodule, ExllamaQuantLinear):
+    #     model = exllama_set_max_input_length(model, max_input_length)
 
     return model
 

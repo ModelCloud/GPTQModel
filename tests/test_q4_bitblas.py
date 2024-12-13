@@ -7,14 +7,8 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_bitblas import BitBLASQuantLinear  # noqa: E402
-
-try:
-    from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: F401
-except ImportError as e:
-    print(f"[WARNING] Could not load gptqmodel_exllama_kernels: {e}")
-
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 

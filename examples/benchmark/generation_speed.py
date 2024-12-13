@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import torch
 from datasets import Dataset, load_dataset
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
-from tqdm import tqdm
+from gptqmodel.utils.progress import ProgressBar
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
 
@@ -148,7 +148,6 @@ def load_model_tokenizer(
     model_basename: Optional[str] = None,
     quantize_config: Optional[str] = None,
     trust_remote_code: bool = False,
-    use_safetensors: bool = True,
     use_fast_tokenizer: bool = False,
 ):
     tokenizer = AutoTokenizer.from_pretrained(
@@ -170,7 +169,6 @@ def load_model_tokenizer(
             model_id_or_path,
             quantize_config=quantize_config,
             model_basename=model_basename,
-            use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
             backend=backend,
         )
@@ -181,7 +179,7 @@ def load_model_tokenizer(
 def benchmark_generation_speed(model, tokenizer, examples, generation_config):
     generation_time_list = []
     num_generated_tokens_list = []
-    progress_bar = tqdm(examples)
+    progress_bar = ProgressBar(examples)
     for example in progress_bar:
         input_ids = example["input_ids"].to(model.device)
 
@@ -224,8 +222,7 @@ def main():
     parser.add_argument("--model_basename", type=str, default=None)
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX'])
-    parser.add_argument("--use_safetensors", action="store_true")
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX'])
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
     parser.add_argument("--max_new_tokens", type=int, default=512)
@@ -237,11 +234,6 @@ def main():
     if args.quantize_config_save_dir:
         quantize_config = QuantizeConfig.from_pretrained(args.quantize_config_save_dir)
 
-    if args.use_safetensors:
-        logger.warning(
-            "The command --use_safetensors is deprecated and will be removed in the next release. It is now by default activated."
-        )
-
     logger.info("loading model and tokenizer")
     start = time.time()
     model, tokenizer = load_model_tokenizer(
@@ -251,7 +243,6 @@ def main():
         model_basename=args.model_basename,
         quantize_config=quantize_config,
         trust_remote_code=args.trust_remote_code,
-        use_safetensors=True,
         use_fast_tokenizer=args.use_fast_tokenizer,
         backend=get_backend(args.backend),
     )

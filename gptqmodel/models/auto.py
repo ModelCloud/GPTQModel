@@ -4,13 +4,15 @@ import os.path
 from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
+import torch
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..utils import BACKEND
+from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
+from ._const import get_best_device
 from .base import BaseGPTQModel, QuantizeConfig
 from .definitions.baichuan import BaiChuanGPTQ
 from .definitions.bloom import BloomGPTQ
@@ -31,6 +33,7 @@ from .definitions.gpt_neox import GPTNeoXGPTQ
 from .definitions.gptj import GPTJGPTQ
 from .definitions.granite import GraniteGPTQ
 from .definitions.grinmoe import GrinMOEGPTQ
+from .definitions.hymba import HymbaGPTQ
 from .definitions.internlm import InternLMGPTQ
 from .definitions.internlm2 import InternLM2GPTQ
 from .definitions.llama import LlamaGPTQ
@@ -43,6 +46,7 @@ from .definitions.mllama import MLlamaGPTQ
 from .definitions.mobilellm import MobileLLMGPTQ
 from .definitions.moss import MOSSGPTQ
 from .definitions.mpt import MPTGPTQ
+from .definitions.olmo2 import Olmo2GPTQ
 from .definitions.opt import OPTGPTQ
 from .definitions.phi import PhiGPTQ
 from .definitions.phi3 import Phi3GPTQ
@@ -102,6 +106,8 @@ MODEL_MAP = {
     "mllama": MLlamaGPTQ,
     "granite": GraniteGPTQ,
     "mobilellm": MobileLLMGPTQ,
+    "hymba": HymbaGPTQ,
+    "olmo2": Olmo2GPTQ,
 }
 
 
@@ -121,7 +127,6 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
-            use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
@@ -143,13 +148,15 @@ class GPTQModel:
                             is_quantized = True
                             break
 
+        if not device and not device_map:
+            device = get_best_device()
+
         if is_quantized:
             return cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
                 device=device,
                 backend=backend,
-                use_safetensors=use_safetensors,
                 trust_remote_code=trust_remote_code,
                 verify_hash=verify_hash,
                 **kwargs,
@@ -176,6 +183,9 @@ class GPTQModel:
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
+        if quantize_config.dynamic:
+            logger.warning("GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
+
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
@@ -191,7 +201,6 @@ class GPTQModel:
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
         device: Optional[Union[str, int]] = None,
         backend: BACKEND = BACKEND.AUTO,
-        use_safetensors: bool = True,
         trust_remote_code: bool = False,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
@@ -202,13 +211,98 @@ class GPTQModel:
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
+        if backend == BACKEND.AUTO and not torch.cuda.is_available():
+            logger.warning("No cuda found, use IPEX backend")
+            backend = BACKEND.IPEX
+
         return quant_func(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
             device=device,
             backend=backend,
-            use_safetensors=use_safetensors,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,
             **kwargs,
         )
+
+    @classmethod
+    def eval(
+            cls,
+            model_id_or_path: str,
+            framework: EVAL,
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
+            batch: int = 1,
+            trust_remote_code: bool = False,
+            output_file: Optional[str] = None,
+            backend: str = 'gptqmodel',
+            random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
+            extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
+    ):
+        if framework is None:
+            raise ValueError("eval parameter: `framework` cannot be set to None")
+
+        if not isinstance(tasks, list):
+            raise ValueError("eval parameter: `tasks` must be of List type")
+
+        if backend not in ['gptqmodel', 'vllm']:
+            raise ValueError('Eval framework support backend: [gptqmodel, vllm]')
+
+        if framework == EVAL.LM_EVAL:
+            for task in tasks:
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
+
+            from gptqmodel.utils.eval import lm_eval
+            from lm_eval.utils import make_table
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
+            model_name = 'hf' if backend == 'gptqmodel' else backend
+            def_args = f"pretrained={model_id_or_path}"
+            if backend == "gptqmodel":
+                def_args += ",gptqmodel=True"
+            model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
+
+            results = lm_eval(
+                model_id_or_path,
+                model_name=model_name,
+                model_args=model_args,
+                tasks=[task.value for task in tasks],
+                trust_remote_code=trust_remote_code,
+                batch_size=batch,
+                apply_chat_template=True if tokenizer.chat_template is not None else False,
+                output_path=output_file,
+                numpy_random_seed=random_seed,
+                torch_random_seed=random_seed,
+                fewshot_random_seed=random_seed,
+            )
+            print('--------lm_eval Eval Result---------')
+            print(make_table(results))
+            if "groups" in results:
+                print(make_table(results, "groups"))
+            print('--------lm_eval Result End---------')
+            return results
+        elif framework == EVAL.EVALPLUS:
+            for task in tasks:
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
+            from gptqmodel.utils.eval import evalplus, evalplus_make_table
+
+            results = {}
+            for task in tasks:
+                base_formatted, plus_formatted, result_path = evalplus(
+                    model=model_id_or_path,
+                    dataset=task.value,
+                    batch=batch,
+                    trust_remote_code=trust_remote_code,
+                    output_file=output_file,
+                    backend=backend
+                )
+                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+            print('--------evalplus Eval Result---------')
+            evalplus_make_table(results)
+            print('--------evalplus Result End---------')
+            return results
+        else:
+            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")

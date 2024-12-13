@@ -1,13 +1,14 @@
+# -- do not touch
 import os
-import tempfile
-import unittest
-
-import torch
-from gptqmodel import BACKEND, GPTQModel
-from parameterized import parameterized
-from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+
+from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
@@ -16,6 +17,7 @@ class TestSave(unittest.TestCase):
         [
             (BACKEND.AUTO),
             (BACKEND.EXLLAMA_V2),
+            (BACKEND.EXLLAMA_V1),
             (BACKEND.TRITON),
             (BACKEND.BITBLAS),
             (BACKEND.MARLIN),
@@ -24,7 +26,7 @@ class TestSave(unittest.TestCase):
     )
     def test_save(self, backend):
         prompt = "I am in Paris and"
-        device = torch.device("cuda:0") if backend != BACKEND.IPEX else torch.device("cpu")
+        device = get_best_device(backend)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 

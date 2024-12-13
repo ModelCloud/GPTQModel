@@ -1,20 +1,8 @@
-#include <cuda.h>
-#include <cuda_runtime.h>
+#include <torch/all.h>
 
-int marlin_cuda(
-  const void* A,
-  const void* B,
-        void* C,
-        void* s,
-  int prob_m,
-  int prob_n,
-  int prob_k,
-  void* workspace,
-  int groupsize,
-  int dev,
-  cudaStream_t stream,
-  int thread_k,
-  int thread_n,
-  int sms,
-  int max_par
-);
+torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
+                               torch::Tensor& b_scales, torch::Tensor& b_zeros,
+                               torch::Tensor& g_idx, torch::Tensor& perm,
+                               torch::Tensor& workspace, int64_t num_bits,
+                               int64_t size_m, int64_t size_n, int64_t size_k,
+                               bool is_k_full, bool has_zp);

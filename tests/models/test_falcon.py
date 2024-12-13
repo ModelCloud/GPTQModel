@@ -1,5 +1,5 @@
-import torch  # noqa: E402
-from model_test import ModelTest  # noqa: E402
+import torch  # noqa: E402from tests.model_test import ModelTest
+from model_test import ModelTest
 
 
 class TestFalcon(ModelTest):
@@ -9,8 +9,9 @@ class TestFalcon(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
     TORCH_DTYPE = torch.float16
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.52
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.52
     BATCH_SIZE = 6
+    USE_VLLM = False
 
     def test_falcon(self):
         self.quant_lm_eval()

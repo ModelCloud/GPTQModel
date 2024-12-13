@@ -3,12 +3,12 @@ import gc
 import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
-from tqdm import tqdm
 
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import recurse_getattr, recurse_setattr
+from .progress import ProgressBar
 
 logger = setup_logger()
 
@@ -89,7 +89,7 @@ def _validate_marlin_device_support() -> bool:
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion
 def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = False):
-    validate, err = MarlinQuantLinear.validate(cfg.bits, cfg.group_size, cfg.desc_act, cfg.sym, cfg.dynamic)
+    validate, err = MarlinQuantLinear.validate(bits=cfg.bits, group_size=cfg.group_size, desc_act=cfg.desc_act, sym=cfg.sym, dynamic=cfg.dynamic)
     if throw_error and err is not None:
         raise ValueError(err)
     return err
@@ -112,7 +112,7 @@ def convert_to_marlin(
         # TODO: load directly Marlin QuantLinear.
         message = "Overriding QuantLinear layers to use Marlin's QuantLinear"
 
-    for name, module in tqdm(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
+    for name, module in ProgressBar(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
         if not isinstance(module, model_quantlinear):
             continue
 

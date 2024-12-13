@@ -17,6 +17,7 @@ from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
 from .granite import GraniteGPTQ
 from .grinmoe import GrinMOEGPTQ
+from .hymba import HymbaGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
@@ -28,6 +29,7 @@ from .mllama import MLlamaGPTQ
 from .mobilellm import MobileLLMGPTQ
 from .moss import MOSSGPTQ
 from .mpt import MPTGPTQ
+from .olmo2 import Olmo2GPTQ
 from .opt import OPTGPTQ
 from .phi import PhiGPTQ
 from .phi3 import Phi3GPTQ

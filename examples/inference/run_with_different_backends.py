@@ -3,23 +3,22 @@ import subprocess
 import sys
 from argparse import ArgumentParser
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend, get_best_device
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "./TinyLlama/TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     global quantized_model_id
 
     parser = ArgumentParser()
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
     args = parser.parse_args()
 
     backend = get_backend(args.backend)
-
-    device = 'cpu' if backend == BACKEND.IPEX else 'cuda:0'
+    device = get_best_device(backend)
 
     if backend == BACKEND.SGLANG:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])

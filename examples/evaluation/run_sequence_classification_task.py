@@ -38,7 +38,7 @@ def main():
     )
     parser.add_argument("--sample_max_len", type=int, default=1024, help="max tokens for each sample")
     parser.add_argument("--block_max_len", type=int, default=2048, help="max tokens for each data block")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'BITBLAS', 'IPEX'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX'])
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_dir)

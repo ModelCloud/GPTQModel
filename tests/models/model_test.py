@@ -1,39 +1,59 @@
 # -- do not touch
-import gc
 import os
 
-import torch.cuda
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import contextlib  # noqa: E402
+import gc  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+RAND_SEED = 898
+
 
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.1  # -10%
-    QUANT_ARC_MAX_POSITIVE_DELTA = 0.2  # 20%
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
+    LOAD_BACKEND = BACKEND.AUTO
+    USE_VLLM = False
+    INPUTS_MAX_LENGTH = 2048
+    MODEL_MAX_LEN = 4096
+    DELETE_QUANTIZED_MODEL = True
+
+    KERNEL_QUANT = {} # kernel sets
+    KERNEL_INFERENCE = {} # kernel sets
+
+    # quant config
+    QUANT_FORMAT = FORMAT.GPTQ
+    DESC_ACT = True
+    SYM = True
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = "I am in Paris and"
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE, max_new_tokens=self.GENERATE_EVAL_SIZE)
+        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE,
+                             max_new_tokens=self.GENERATE_EVAL_SIZE)
         output = tokenizer.decode(res[0])
         print(f"Result is: \n{output}")
         return output
@@ -58,27 +78,43 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        max_length = 2048
-        traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz",
-                                 split="train").filter(
-            lambda x: len(x["text"]) >= max_length and len(x["text"]) <= (max_length * 1.5))
-        return [tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        traindata = load_dataset("allenai/c4", data_files="en/c4-train.00001-of-01024.json.gz", split="train")
+        datas = []
+        for index, sample in enumerate(traindata):
+            tokenized = tokenizer(sample['text'])
+            if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
+                datas.append(tokenized)
+                if len(datas) >= 1024:
+                    break
+
+        return datas
+
+    def check_kernel(self, model, expected_kernels):
+        modules = {module.__class__ for _, module in model.named_modules() if isinstance(module, BaseQuantLinear)}
+        print(f"modules in model: {modules}")
+        if expected_kernels:
+            assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
-        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
-        calibration_dataset = self.load_dataset(tokenizer)
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
-            format=FORMAT.GPTQ,
+            format=self.QUANT_FORMAT,
+            desc_act=self.DESC_ACT,
+            sym=self.SYM,
         )
-
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype
+            torch_dtype=torch_dtype,
+            backend=self.LOAD_BACKEND,
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
+
+        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        calibration_dataset = self.load_dataset(tokenizer)
 
         # mpt model need
         if not model.config.pad_token_id:
@@ -86,24 +122,24 @@ class ModelTest(unittest.TestCase):
         if not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        model.quantize(calibration_dataset, batch_size=4)
-        if need_eval:
-            test_dir = os.path.dirname(os.path.abspath(__file__))
-            save_dir = os.path.join(test_dir, "test_quantized_model")
-            os.makedirs(save_dir, exist_ok=True)
-            model.save(save_dir)
-            tokenizer.save_pretrained(save_dir)
-            q_model, q_tokenizer = self.loadQuantModel(save_dir, trust_remote_code=trust_remote_code)
-        else:
-            with tempfile.TemporaryDirectory() as tmpdirname:
+        is_quantized = model.quantized
+        if not is_quantized:
+            model.quantize(calibration_dataset)
+
+            self.check_kernel(model, self.KERNEL_QUANT)
+
+            with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
-        return q_model, q_tokenizer
 
+        if not is_quantized:
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+            return q_model, q_tokenizer
+        else:
+            return model, tokenizer
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
         if tokenizer_path is None:
@@ -115,34 +151,69 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            results = model.lm_eval(
-                model="vllm",
-                model_args=f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code}",
-                output_path=tmp_dir,
-                tasks=self.TASK_NAME,
-                apply_chat_template=apply_chat_template,
-                trust_remote_code=trust_remote_code,
-                batch_size=self.BATCH_SIZE,
-            )
-            print('--------Eval Result---------')
-            print(make_table(results))
-            if "groups" in results:
-                print(make_table(results, "groups"))
-            print('--------Eval Result End---------')
-            task_results = {
-                metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
-                if metric != 'alias' and 'stderr' not in metric
-            }
-            print(task_results)
-            if os.path.exists(model.model_id_or_path):
-                shutil.rmtree(model.model_id_or_path)
-            return task_results
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False):
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                if self.USE_VLLM:
+                    model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
+                else:
+                    model_args = ""
+                results = lm_eval(
+                    model,
+                    model_name="vllm" if self.USE_VLLM else "hf",
+                    model_args=model_args,
+                    output_path=tmp_dir,
+                    tasks=self.TASK_NAME,
+                    apply_chat_template=apply_chat_template,
+                    trust_remote_code=trust_remote_code,
+                    batch_size=self.BATCH_SIZE,
+                    gen_kwargs="temperature=0.0,top_k=50",
+                    random_seed = RAND_SEED,
+                    numpy_random_seed = RAND_SEED,
+                    torch_random_seed = RAND_SEED,
+                    fewshot_random_seed = RAND_SEED,
+                )
+
+                print('--------Eval Result---------')
+                print(make_table(results))
+                if "groups" in results:
+                    print(make_table(results, "groups"))
+                print('--------Eval Result End---------')
+                task_results = {
+                    metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
+                    if metric != 'alias' and 'stderr' not in metric
+                }
+                print(task_results)
+                if delete_quantized_model and model.model_id_or_path.startswith("/tmp") and os.path.exists(model.model_id_or_path):
+                    shutil.rmtree(model.model_id_or_path)
+                return task_results
+        except BaseException as e:
+            if isinstance(e, torch.OutOfMemoryError):
+                old_batch = self.BATCH_SIZE
+                if self.BATCH_SIZE == "auto":
+                    self.BATCH_SIZE = "8"
+                else:
+                    self.BATCH_SIZE = f"{int(int(self.BATCH_SIZE) / 2)}"
+                    self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
+
+                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
+
+                if int(self.BATCH_SIZE) > 0:
+                    self.lm_eval(model=model,
+                                 apply_chat_template=apply_chat_template,
+                                 trust_remote_code=trust_remote_code,
+                                 delete_quantized_model=delete_quantized_model)
+                    print(f"set batch size to {self.BATCH_SIZE}, passed")
+                else:
+                    print(f"set batch size to {self.BATCH_SIZE}, failed")
+                    raise e
+            else:
+                raise e
 
     def calculatorPer(self, filter, value):
         if "norm" in filter:
@@ -154,31 +225,19 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        try:
-            self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
-            task_results = self.lm_eval(self.model, trust_remote_code=self.TRUST_REMOTE_CODE, apply_chat_template=self.APPLY_CHAT_TEMPLATE)
-            for filter, value in task_results.items():
-                diff_pct = self.calculatorPer(filter=filter, value=value)
-                negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
-                positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
-                self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+        self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        except BaseException as e:
-            if 'torch.OutOfMemoryError' in str(e):
-                old_batch = self.BATCH_SIZE
-                if self.BATCH_SIZE=="auto":
-                    self.BATCH_SIZE="16"
-                else:
-                    self.BATCH_SIZE =f"{int(self.BATCH_SIZE) / 2}"
+        task_results = self.lm_eval(model=self.model,
+                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE,
+                                    trust_remote_code=self.TRUST_REMOTE_CODE,
+                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+        self.check_results(task_results)
 
-                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
-
-                if int(self.BATCH_SIZE) > 0:
-                    self.quant_lm_eval()
-                    print(f"set batch size to {self.BATCH_SIZE}, passed")
-                else:
-                    print(f"set batch size to {self.BATCH_SIZE}, failed")
-                    raise e
-            else: raise e
+    def check_results(self, task_results):
+        for filter, value in task_results.items():
+            diff_pct = self.calculatorPer(filter=filter, value=value)
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
+            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")

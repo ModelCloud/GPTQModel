@@ -3,11 +3,17 @@
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
-    <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img src="https://static.pepy.tech/badge/gptqmodel" alt="PyPI Downloads"></a>
+    <a href="https://pepy.tech/projects/gptqmodel" style="text-decoration:none;"><img src="https://static.pepy.tech/badge/gptqmodel" alt="PyPI Downloads"></a>
     <a href="https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/gptqmodel"></a>
+    <a href="https://huggingface.co/modelcloud/"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-ModelCloud-%23ff8811.svg"></a>
 </p>
 
 ## News
+* 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
+
+* 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton pkg. 
+* 11/26/2024 [1.3.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.0) Zero-Day Hymba model support. Removed `tqdm` and `rogue` dependency. 
+* 11/24/2024 [1.2.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.3) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
 * 11/11/2024 🚀 [1.2.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.1) Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
 * 10/29/2024 🚀 [1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 * 10/12/2024 ✨ [1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
@@ -15,12 +21,12 @@
 * 10/08/2024 ✨ [1.0.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.7) Fixed marlin (faster) kernel was not auto-selected for some models.
 * 09/26/2024 ✨ [1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed quantized Llama 3.2 vision quantized loader.
 * 09/26/2024 ✨ [1.0.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.5) Partial Llama 3.2 Vision model support (mllama): only text-layer quantization layers are supported for now.
-* 09/26/2024 ✨ [1.0.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.4) Integrated Liger Kernel support for ~1/2 memory reduction on some models during quantization. Added control toggle disable parallel packing. 
-* 09/18/2024 ✨ [1.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.3) Added Microsoft GRIN-MoE and MiniCPM3 support.
 
 <details>
     
 <summary>Archived News:</summary>
+* 09/26/2024 ✨ [1.0.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.4) Integrated Liger Kernel support for ~1/2 memory reduction on some models during quantization. Added control toggle disable parallel packing. 
+* 09/18/2024 ✨ [1.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.3) Added Microsoft GRIN-MoE and MiniCPM3 support.
 * 08/16/2024 ✨ [1.0.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.2) Support Intel/AutoRound v0.3, pre-built whl packages, and PyPI release. 
 * 08/14/2024 ✨ [1.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.0) 40% faster `packing`, Fixed Python 3.9 compat, added `lm_eval` api. 
 * 08/10/2024 🚀 [0.9.11](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.11) Added LG EXAONE 3.0 model support. New `dynamic` per layer/module flexible quantization where each layer/module may have different bits/params. Added proper sharding support to `backend.BITBLAS`. Auto-heal quantization errors due to small damp values. 
@@ -44,20 +50,19 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphed into a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, faster quantization, higher quality quants and a pledge that ModelCloud, together with the open-source ML community, will take every effort to bring the library up-to-date with latest advancements and model support.
 
-## Why GPTQ specifically and not the dozens of other low-bit quantizers?
+## Why GPTQ and not other low-bit quantizers?
 
-Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has currently the optimal blend of quality and inference speed you would want to use in a real-world production system. 
+Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
-* 🚀 Extensive model support for: `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX` (Converted).
+* 🚀 Extensive model support for: `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX`.
 * ✨ 100% CI coverage for all supported models including quality/ppl regression.
-* 🚀 vLLM inference integration for quantized model where format = `FORMAT.GPTQ` 
-* 🚀 SGLang inference integration for quantized model where format = `FORMAT.GPTQ` 
+* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (`avx512_vnni`) and Intel/XPU. 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
-* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) support added for 4 bit quantization/inference on CPU.
-* 🚀 [BITBLAS](https://github.com/microsoft/BitBLAS) format/inference support from Microsoft
-* 🚀`Sym=False` Support. AutoGPTQ has unusable `sym=false`. (Re-quant required)
-* 🚀`lm_head` module quant inference support for further VRAM reduction. 
+* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference. 
+* 🚀 Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
+* 🚀`lm_head` module quant inference support for further VRAM reduction (auto-round only). 
 * 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
 * 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
 * 🚀 Model weights sharding support
@@ -65,32 +70,35 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
+## Quality: GPTQModel 4bit can match BF16:
+🤗 [ModelCloud quantized ultra-high recovery vortex-series models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
+
+![image](https://github.com/user-attachments/assets/aab69119-f9c8-4c94-9634-a3c63e57095e)
 
 ## Model Support:  🚀 (Added by GPTQModel) 
-[🤗 Pre-quantized models on HF](https://hf.co/ModelCloud)
+| Model            |     |                |     |                  |     |            |     |
+| ---------------- | --- | -------------- | --- | ---------------- | --- |------------| --- |
+| Baichuan         | ✅   | Falcon          | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |
+| ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |
+| CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |
+| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | RefinedWeb | ✅   |
+| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | StableLM   | ✅   |
+| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StarCoder2 | ✅   |
+| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | XVERSE     | ✅   |
+| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | Yi         | ✅   |
+| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |
 
 
-| Model            |     |                |     |                  |     |            |     |     |     |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- | --- | --- |
-| Baichuan         | ✅   | Falon          | ✅   | Llama 3.2 Vision | 🚀  | Qwen       | ✅   |     |     |     |
-| Bloom            | ✅   | Gemma 2        | 🚀  | LongLLaMA        | ✅   | Qwen2MoE   | 🚀  |     |     |     |
-| ChatGLM          | 🚀  | GPTBigCod      | ✅   | MiniCPM3         | 🚀  | RefinedWeb | ✅   |     |     |     |
-| CodeGen          | ✅   | GPTNeoX        | ✅   | Mistral          | ✅   | StableLM   | ✅   |     |     |     |
-| Cohere           | ✅   | GPT-2          | ✅   | Mixtral          | ✅   | StarCoder2 | ✅   |     |     |     |
-| DBRX Converted   | 🚀  | GPT-J          | ✅   | MobileLLM        | 🚀  | XVERSE     | ✅   |     |     |     |
-| Deci             | ✅   | Granite        | 🚀  | MOSS             | ✅   | Yi         | ✅   |     |     |     |
-| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MPT              | ✅   |            |     |     |     |     |
-| DeepSeek-V2-Lite | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   |            |     |     |     |     |
-| EXAONE 3.0       | 🚀  | Llama 1/2/3    | ✅   | Phi/Phi-3        | 🚀  |            |     |     |     |     |## Compatiblity 
+## HW Accelerator Requirements
 
+GPTQModel is validated for Linux x86_64 with the following devices:
 
-## Quality: Quantized Llama-3.2-Instruct models with 100% avg recovery:
-![plus-v2 5v3@2x](https://github.com/user-attachments/assets/dd223d08-f790-41ff-814d-4c2a98e4a3de)
-
-
-## Platform Requirements
-
-GPTQModel is validated for Linux x86_64 with Nvidia GPUs. Windows WSL2 may work but un-tested. 
+| Device           |     |                | 
+| ---------------- | --- | -------------- | 
+| Nvidia GPU     | ✅   | Ampere or Higher |
+| Intel/AMD CPU  | ✅   | `avx512_vnni` or `amx` |
+| Intel XPU  | ✅   |   Intel Arc + Datacenter Max |
 
 ## Install
 
@@ -111,7 +119,7 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
 # pip: compile and install
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas, and ipex.
-# Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas,ipex,auto_round]
+# Example: pip install -v --no-build-isolation .[vllm,sglang,bitblas,ipex,auto_round]
 pip install -v . --no-build-isolation
 ```
 
@@ -163,17 +171,40 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel inference is integrated into [lm-evaluation-hardness](https://github.com/EleutherAI/lm-evaluation-harness) and we highly recommend avoid using PPL and use `lm-eval` to validate post-quantization model quality. 
+GPTQModel inference is integrated into both [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) and [evalplus](https://github.com/evalplus/evalplus)  
+We highly recommend avoid using `ppl` and use `lm-eval`/`evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
 
 ```
-# currently gptqmodel is merged into lm-eval main but not yet released on pypi
-pip install lm-eval[gptqmodel]
+# gptqmodel is integrated into lm-eval >= v0.4.6
+pip install lm-eval>=0.4.6
 ```
+
+```
+# gptqmodel is integrated into evalplus[main]
+pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
+```
+
+Below is a basic sample using `GPTQModel.eval` API
+
+```py
+from gptqmodel import GPTQModel
+from gptqmodel.utils import EVAL
+
+model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+
+# Use `lm-eval` as framework to evaluate the model
+lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
+
+# Use `evalplus` as framework to evaluate the model
+evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
+```
+
 
 ### Which kernel is used by default?
 
-* `GPU`: Marlin, Exllama v2, Triton kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled. 
-* `CPU`: Intel/IPEX kernel  
+* `GPU`: Marlin, Exllama v2, Exllama v1, DynamicCuda, Torch kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
+* `CPU`: Intel/IPEX kernel
+* `XPU`: Intel/IPEX kernel
 
 ## Citation
 ```

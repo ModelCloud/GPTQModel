@@ -104,7 +104,6 @@ class TestPerplexity(unittest.TestCase):
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.MARLIN, 4),
             (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
             (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
         ]

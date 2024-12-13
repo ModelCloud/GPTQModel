@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
 import accelerate
 import torch
 import transformers
 from gptqmodel.utils.device import check_cuda
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
-from transformers import __version__ as transformers_version
+from packaging.version import InvalidVersion, Version
+from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear, ipex_dtype
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear, ipex_dtype
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
@@ -20,25 +21,65 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
-                           find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
+                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import CPU, DEVICE, SUPPORTED_MODELS
+from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, is_torch_support_xpu
 
 logger = setup_logger()
 
-class ModelLoader():
-    # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
-    model_loader = AutoModelForCausalLM
+def parse_version_string(version_str: str):
+    try:
+        return Version(version_str)
+    except InvalidVersion:
+        raise ValueError(f"Invalid version format: {version_str}")
 
+
+def parse_requirement(req):
+    for op in [">=", "<=", ">", "<", "=="]:
+        if op in req:
+            pkg, version_required = req.split(op, 1)
+            return pkg.strip(), op, version_required.strip()
+    raise ValueError(f"Unsupported version constraint in: {req}")
+
+
+def compare_versions(installed_version, required_version, operator):
+    installed = parse_version_string(installed_version)
+    required = parse_version_string(required_version)
+    if operator == ">":
+        return installed > required
+    elif operator == ">=":
+        return installed >= required
+    elif operator == "<":
+        return installed < required
+    elif operator == "<=":
+        return installed <= required
+    elif operator == "==":
+        return installed == required
+    else:
+        raise ValueError(f"Unsupported operator: {operator}")
+
+
+def check_versions(model_id_or_path: str, requirements: List[str]):
+    if requirements is None:
+        return
+    for req in requirements:
+        pkg, operator, version_required = parse_requirement(req)
+        try:
+            installed_version = version(pkg)
+            if not compare_versions(installed_version, version_required, operator):
+                raise ValueError(f"{model_id_or_path} requires version {req}, but current {pkg} version is {installed_version} ")
+        except PackageNotFoundError:
+            raise ValueError(f"{model_id_or_path} requires version {req}, but {pkg} not installed.")
+
+def ModelLoader(cls):
     @classmethod
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
+            quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
-            require_trust_remote_code=None,
-            require_transformers_version: Optional[str] = None,
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
@@ -49,26 +90,18 @@ class ModelLoader():
                 pass
             except Exception as e:
                 raise ValueError(
-                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
+                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-ipex`."
                 )
 
-            model_init_kwargs["device_map"] = "cpu"
+            model_init_kwargs["device_map"] = {"":"xpu"} if is_torch_support_xpu() else {"":"cpu"}
             torch_dtype = ipex_dtype()
 
-        if require_trust_remote_code and not trust_remote_code:
+        if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        if require_transformers_version:
-            passed = check_requires_version(require_transformers_version, current_version=transformers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(
-                        f"{pretrained_model_id_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
-            else:
-                raise ValueError(
-                    f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
+        check_versions(pretrained_model_id_or_path, cls.require_pkgs_version)
 
         def skip(*args, **kwargs):
             pass
@@ -93,9 +126,12 @@ class ModelLoader():
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         if model_init_kwargs.get("cpu") != "cpu":
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif is_torch_support_xpu():
+                torch.xpu.empty_cache()
 
-        model = cls.model_loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
@@ -109,7 +145,15 @@ class ModelLoader():
             model.seqlen = 4096
         model.eval()
 
-        return model
+        return cls(
+            model,
+            quantized=False,
+            quantize_config=quantize_config,
+            trust_remote_code=trust_remote_code,
+            model_id_or_path=pretrained_model_id_or_path
+        )
+
+    cls.from_pretrained = from_pretrained
 
     @classmethod
     def from_quantized(
@@ -119,16 +163,8 @@ class ModelLoader():
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
-            use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
-            require_trust_remote_code: bool = False,
-            require_transformers_version: Optional[str] = None,
-            dynamic_expert_index: Optional[str] = None,
-            base_modules: List[str] = None,
-            layer_modules: List[List[str]] = None,
-            lm_head: str = "lm_head",
-            layer_type: Union[List[str], str] = None,
             **kwargs,
     ):
         if backend == BACKEND.VLLM:
@@ -138,7 +174,8 @@ class ModelLoader():
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
         if backend == BACKEND.IPEX:
-            device = CPU
+            device = get_best_device(backend)
+
             try:
                 pass
             except Exception as e:
@@ -151,22 +188,20 @@ class ModelLoader():
 
         if backend != BACKEND.IPEX and not torch.cuda.is_available():
             raise EnvironmentError(
-                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu only quantization and inference.")
+                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu and xpu quantization and inference.")
+
+        if backend == BACKEND.TRITON:
+            from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
+            if not TRITON_AVAILABLE:
+                raise ValueError(TRITON_INSTALL_HINT)
 
         """load quantized model from local disk"""
-        if require_trust_remote_code and not trust_remote_code:
+        if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        if require_transformers_version:
-            passed = check_requires_version(require_transformers_version, current_version=transformers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(
-                        f"{model_id_or_path} requires transformers version {require_transformers_version} current transformers version is {transformers_version} ")
-            else:
-                raise ValueError(f"can not parse requires_transformers_version {require_transformers_version}, need (>, <, ==, >=, <=)version")
+        check_versions(model_id_or_path, cls.require_pkgs_version)
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
@@ -235,13 +270,11 @@ class ModelLoader():
                 )
                 model.config = hf_config
                 cls.generate = lambda self, **kwargs: sglang_generate(self.model, **kwargs)
-            return (
+            return cls(
                 model,
-                quantize_config,
-                None,  # qlinear_kernel
-                False,  # load_quantized_model
-                cls.generate,
-                None # return None if is SGLANG or VLLM
+                quantized=True,
+                quantize_config=quantize_config,
+                qlinear_kernel=None,
             )
 
         if quantize_config.format == FORMAT.MARLIN:
@@ -266,7 +299,7 @@ class ModelLoader():
             backend = BACKEND.BITBLAS
 
         if backend == BACKEND.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
@@ -275,11 +308,7 @@ class ModelLoader():
             "model",
         ]
 
-        extensions = []
-        if use_safetensors:
-            extensions.append(".safetensors")
-        else:
-            extensions += [".pt", ".pth"]
+        extensions = [".safetensors"]
 
         model_id_or_path = str(model_id_or_path)
 
@@ -322,29 +351,29 @@ class ModelLoader():
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            model = cls.model_loader.from_config(
+            model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
             model.checkpoint_file_name = model_save_name
 
-            if dynamic_expert_index is not None:
-                num_experts = getattr(config, dynamic_expert_index)
-                layer_modules = get_moe_layer_modules(layer_modules=layer_modules,
+            if cls.dynamic_expert_index is not None:
+                num_experts = getattr(config, cls.dynamic_expert_index)
+                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 
             layers = find_layers(model)
-            ignore_layers = [lm_head] + base_modules
+            ignore_layers = [cls.lm_head] + cls.base_modules
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == lm_head:
+                if quantize_config.lm_head and name == cls.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in layer_modules for ignore_layer in sublist
+                        not name.endswith(ignore_layer) for sublist in cls.layer_modules for ignore_layer in sublist
                 ):
                     # log non-lm-head quantizerd layers only
-                    if name is not lm_head:
+                    if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del layers[name]
 
@@ -353,8 +382,7 @@ class ModelLoader():
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend.AUTO if (
-                                                backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
@@ -378,11 +406,11 @@ class ModelLoader():
         if not isinstance(device_map, dict):
             if device is not None:
                 device = torch.device(device)
-                device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
+                device_map = {"": device.index if device.type in [DEVICE.CUDA, DEVICE.XPU] else device.type}
             else:
                 device_map = accelerate.infer_auto_device_map(
                     model,
-                    no_split_module_classes=[layer_type] if isinstance(layer_type, str) else layer_type,
+                    no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
                 )
 
         load_checkpoint_in_model = False
@@ -504,11 +532,16 @@ class ModelLoader():
 
         model.eval()
 
-        return (
+        return cls(
             model,
-            quantize_config,
-            qlinear_kernel,
-            True,  # load_quantized_model
-            None, # return None if not SGLANG or VLLM
-            model.checkpoint_file_name
+            quantized=True,
+            quantize_config=quantize_config,
+            qlinear_kernel=qlinear_kernel,
+            load_quantized_model=True,
+            trust_remote_code=trust_remote_code,
+            model_id_or_path=model_id_or_path,
         )
+
+    cls.from_quantized = from_quantized
+
+    return cls

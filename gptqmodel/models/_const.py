@@ -1,14 +1,24 @@
 from enum import Enum
 
+import torch
 from torch import device
+
+from ..utils import BACKEND
 
 CPU = device("cpu")
 CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
+XPU = device("xpu")
+XPU_0 = device("xpu:0")
 
 class DEVICE(Enum):
     CPU = "cpu"
     CUDA = "cuda"
+    XPU = "xpu"
+
+
+def is_torch_support_xpu():
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 def get_device_by_type(type_value: str):
@@ -16,6 +26,15 @@ def get_device_by_type(type_value: str):
         if enum_constant.value == type_value:
             return enum_constant
     raise ValueError(f"Invalid type_value str: {type_value}")
+
+
+def get_best_device(beckend=BACKEND.AUTO):
+    if torch.cuda.is_available() and beckend != BACKEND.IPEX:
+        return CUDA_0
+    elif is_torch_support_xpu():
+        return XPU_0
+    else:
+        return CPU
 
 SUPPORTED_MODELS = [
     "bloom",
@@ -61,6 +80,8 @@ SUPPORTED_MODELS = [
     "mllama",
     "granite",
     "mobilellm",
+    "hymba",
+    "olmo2",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048

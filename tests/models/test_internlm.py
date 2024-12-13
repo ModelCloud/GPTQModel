@@ -1,4 +1,4 @@
-from model_test import ModelTest  # noqa: E402
+from model_test import ModelTest
 
 
 class TestInternlm(ModelTest):
@@ -6,6 +6,7 @@ class TestInternlm(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.4164
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4309
     TRUST_REMOTE_CODE = True
+    USE_VLLM = False
 
     def test_internlm(self):
         # transformers<=4.44.2 run normal
