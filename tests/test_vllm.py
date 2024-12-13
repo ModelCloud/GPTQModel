@@ -25,7 +25,8 @@ class TestLoadVLLM(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         if importlib.util.find_spec("flashinfer") is None:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i",
+                                   f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
 
         if importlib.util.find_spec("vllm") is None:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
@@ -36,7 +37,7 @@ class TestLoadVLLM(unittest.TestCase):
         self.prompts = [
             "The capital of France is",
         ]
-        self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16)
+        self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16, top_k=1)
 
     def release_vllm_model(self):
         from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
@@ -62,18 +63,19 @@ class TestLoadVLLM(unittest.TestCase):
 
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
         print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertEquals(generated_text, " Paris, which is also the capital of France.")
+        self.assertEquals(generated_text, " Paris.\n\n2. The capital of the United States is Washington, D")
 
         outputs = model.generate(
             prompts=self.prompts,
             temperature=0.8,
             top_p=0.95,
             max_length=16,
+            top_k=1,
         )
-        
+
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
         print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertEquals(generated_text, " ___________.\n6. City Name: Paris, France\n7. C")
+        self.assertEquals(generated_text, " Paris.\n\n2. The capital of the United States is Washington, D")
 
         del model
         self.release_vllm_model()
