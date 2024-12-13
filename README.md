@@ -62,7 +62,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 Extensive model support for: `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX`.
 * ✨ 100% CI coverage for all supported models including quality/ppl regression.
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
-* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (`avx512_vnni`) and Intel/XPU. 
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (recent Intel/AMD) and Intel/XPU. 
 * 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference. 
 * 🚀 Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
@@ -82,8 +82,8 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |     |
 | ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- |
-| Baichuan         | ✅   | Falcon         | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |     |
-| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |     |
+| Baichuan         | ✅   | Falcon         | ✅   | Llama 1-3.3      | ✅   | OLMo2      | 🚀  |     |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi 1-4  | 🚀  |     |
 | ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |     |
 | CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |     |
 | Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | Qwen2VL    | 🚀  |     |
@@ -97,10 +97,10 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 GPTQModel is validated for Linux x86_64 with the following devices:
 
-| Device           |     |                | 
+| Device           |     |  Optimized              | 
 | ---------------- | --- | -------------- | 
 | Nvidia GPU     | ✅   | Ampere or Higher |
-| Intel/AMD CPU  | ✅   | `avx512_vnni` or `amx` |
+| Intel/AMD CPU  | ✅   | `avx512 or `amx` |
 | Intel XPU  | ✅   |   Intel Arc + Datacenter Max |
 
 ## Install
