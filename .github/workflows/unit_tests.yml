@@ -24,6 +24,10 @@ on:
         description: 'Input Test(s) to Run (default all)'
         required: false
         default: ''
+      test_regex:
+        description: 'Regex to filter test files'
+        required: false
+        default: ''
       artifact_id:
         description: 'Run id for artifact to be downloaded'
         required: false
@@ -115,6 +119,7 @@ jobs:
           script="
           import json
           import os
+          import re
 
           cpu_file_list = [f.strip().removesuffix('.py') for f in '${TORCH_2_5_TESTS}'.split(',') if f.strip()]
           test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
@@ -128,6 +133,10 @@ jobs:
           all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${TORCH_2_5_TESTS}']
 
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list) and f not in transformers_diff_list]
+
+          cpu_test_files = [test for test in cpu_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
+          gpu_test_files = [test for test in gpu_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
+          transformers_test_files = [test for test in transformers_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
 
           print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}|{json.dumps(transformers_test_files)}')
           "
