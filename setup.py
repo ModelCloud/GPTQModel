@@ -240,7 +240,7 @@ setup(
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
-        'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
+        'vllm': ["vllm>=0.6.4", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
         'bitblas': ["bitblas==0.0.1.dev13"],
         'hf': ["optimum>=1.21.2"],
