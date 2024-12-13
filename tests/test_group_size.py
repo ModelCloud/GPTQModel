@@ -54,7 +54,6 @@ class TestGroupSize(unittest.TestCase):
 
     def test_group_size(self):
         # quantize
-        group_sizes = [-1, 16, 32, 64, 128]
         TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
         OPT_MODEL_ID = "/monster/data/model/opt-125m"
         model_id = OPT_MODEL_ID
@@ -62,11 +61,12 @@ class TestGroupSize(unittest.TestCase):
         dataset = [
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         calibration_dataset = [tokenizer(example) for example in dataset]
-        for group_size in group_sizes:
-            quantize_config = QuantizeConfig(bits=4, group_size=group_size, sym=True, desc_act=False)
-            for quant_backend in self.pack_backends:
+        for quant_backend in self.pack_backends:
+            group_sizes = self.QLINEAR_DICT[quant_backend].SUPPORTS_GROUP_SIZE
+            for group_size in group_sizes:
                 print("-----------------------quant-----------------------")
-                print(f"{quantize_config.group_size}, quant_backend: {quant_backend} start quant")
+                quantize_config = QuantizeConfig(bits=4, group_size=group_size, sym=True, desc_act=False)
+                print(f"group_size: {quantize_config.group_size}, quant_backend: {quant_backend} start quant")
                 try:
                     self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
                 except Exception:
