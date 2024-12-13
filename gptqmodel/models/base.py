@@ -73,6 +73,8 @@ class BaseGPTQModel(nn.Module):
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}
 
+    supports_desc_act = [True, False]
+
     def __init__(
         self,
         model: PreTrainedModel,
