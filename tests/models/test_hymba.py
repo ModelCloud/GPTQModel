@@ -1,3 +1,7 @@
+import subprocess
+import sys
+import importlib.util
+
 from model_test import ModelTest
 
 
@@ -16,6 +20,10 @@ class TestHymba(ModelTest):
     # Hymba currently tests that DESC_ACT=False to get better results.
     # If DESC_ACT=False, the output will be terrible.
     DESC_ACT = False
+    @classmethod
+    def setUpClass(self):
+        if importlib.util.find_spec("mamba_ssm") is None:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "mamba_ssm"])
 
     def test_hymba(self):
         self.quant_lm_eval()
