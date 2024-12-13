@@ -5,10 +5,11 @@ from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
 import torch
-from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from ..quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
+from ..integration.integration_vllm import patch_vllm
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type
@@ -133,6 +134,8 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if backend == BACKEND.VLLM:
+            patch_vllm()
         is_quantized = False
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             is_quantized = True
