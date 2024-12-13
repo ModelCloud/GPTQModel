@@ -1,13 +1,14 @@
 # -- do not touch
 import os
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 
 class TestLmEval(unittest.TestCase):
 

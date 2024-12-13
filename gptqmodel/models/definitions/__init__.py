@@ -36,9 +36,9 @@ from .phi3 import Phi3GPTQ
 from .qwen import QwenGPTQ
 from .qwen2 import Qwen2GPTQ
 from .qwen2_moe import Qwen2MoeGPTQ
+from .qwen2_vl import Qwen2VLGPTQ
 from .rw import RWGPTQ
 from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .qwen2_vl import Qwen2VLGPTQ
