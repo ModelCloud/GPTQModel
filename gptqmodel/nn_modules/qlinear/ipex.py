@@ -51,7 +51,7 @@ def convert_dtype_torch2str(dtype):
 
 class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
@@ -80,6 +80,12 @@ class IPEXQuantLinear(BaseQuantLinear):
         **kwargs,
     ):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+
+        # Normalize group_size
+        if group_size != -1:
+            group_size = group_size
+        else:
+            group_size = infeatures
 
         if weight_dtype is None:
             weight_dtype = torch.float16 if is_torch_support_xpu() else torch.bfloat16
