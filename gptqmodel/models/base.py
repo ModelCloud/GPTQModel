@@ -578,16 +578,16 @@ class BaseGPTQModel(nn.Module):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
-                    actorder = self.quantize_config.desc_act
+                    desc_act = self.quantize_config.desc_act
                     if self.quantize_config.dynamic is not None:
                         layer_name = f"{self.layers_node}.{i}.{name}"
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
-                        actorder = self.quantize_config.dynamic_get(layer_name, "actorder", actorder)
+                        desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
 
                     scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].fasterquant(
                         percdamp=self.quantize_config.damp_percent,
                         group_size=group_size,
-                        actorder=actorder,
+                        actorder=desc_act,
                         static_groups=self.quantize_config.static_groups,
                     )
                     if task is not None:

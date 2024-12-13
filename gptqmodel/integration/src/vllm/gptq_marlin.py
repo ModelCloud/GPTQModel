@@ -68,7 +68,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         if len(self.dynamic) > 0 and prefix:
             bits = self.dynamic_get(prefix, "bits", bits)
             self.group_size = self.dynamic_get(prefix, "group_size", self.group_size)
-            self.desc_act = self.dynamic_get(prefix, "actorder", self.desc_act)
+            self.desc_act = self.dynamic_get(prefix, "desc_act", self.desc_act)
             self.is_sym = self.dynamic_get(prefix, "sym", self.is_sym)
 
         self.pack_factor = 32 // bits  # packed into int32
