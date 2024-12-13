@@ -92,7 +92,7 @@ def evalplus_make_table(results):
 
 
 def lm_eval(
-        model,
+        model=None,
         model_args: str = "",
         model_name: Optional[str] = "hf",
         tasks: Optional[List[Union[str, dict, object]]] = None,
@@ -130,11 +130,10 @@ def lm_eval(
         from lm_eval.loggers import EvaluationTracker, WandbLogger
         from lm_eval.models.huggingface import HFLM
         from lm_eval.utils import handle_non_serializable
-        from transformers import PreTrainedModel as PreTrainedModelType
     except BaseException:
         raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
-    if model_name == "hf" and isinstance(model, PreTrainedModelType):
+    if model_name == "hf" and model is not None:
         model_name = HFLM(
             pretrained=model,
             batch_size=batch_size,

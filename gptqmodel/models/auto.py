@@ -270,7 +270,6 @@ class GPTQModel:
             model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
 
             results = lm_eval(
-                model_id_or_path,
                 model_name=model_name,
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
