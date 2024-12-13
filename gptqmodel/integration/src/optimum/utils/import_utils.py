@@ -24,14 +24,8 @@ from collections.abc import MutableMapping
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
-
-from optimum.utils import (
-    is_accelerate_available,
-    is_auto_gptq_available,
-    is_diffusers_available,
-    is_sentence_transformers_available,
-    is_timm_available,
-)
+from optimum.utils import (is_accelerate_available, is_auto_gptq_available, is_diffusers_available,
+                           is_sentence_transformers_available, is_timm_available)
 
 # Copyright 2022 The HuggingFace Team. All rights reserved.
 #

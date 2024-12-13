@@ -5,11 +5,11 @@ from os.path import isdir, join
 from typing import Dict, List, Optional, Union
 
 import torch
-from ..quantization import QUANT_CONFIG_FILENAME
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
 from ..integration.integration_vllm import patch_vllm
+from ..quantization import QUANT_CONFIG_FILENAME
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
 from ..utils.model import check_and_get_model_type

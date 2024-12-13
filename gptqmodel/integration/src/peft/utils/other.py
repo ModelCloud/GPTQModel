@@ -26,13 +26,13 @@ import accelerate
 import torch
 from accelerate.hooks import add_hook_to_module, remove_hook_from_module
 from accelerate.utils import is_npu_available, is_xpu_available
+from gptqmodel.integration.src.peft.import_utils import (is_auto_gptq_available, is_gptqmodel_available,
+                                                         is_torch_tpu_available)
 from huggingface_hub import file_exists
 from huggingface_hub.errors import EntryNotFoundError, HFValidationError
 from packaging import version
 from peft.utils.constants import *
 from safetensors.torch import storage_ptr, storage_size
-
-from gptqmodel.integration.src.peft.import_utils import is_auto_gptq_available, is_torch_tpu_available, is_gptqmodel_available
 
 mlu_available = False
 if version.parse(accelerate.__version__) >= version.parse("0.29.0"):
@@ -497,9 +497,8 @@ def fsdp_auto_wrap_policy(model):
         get_module_class_from_name = FullyShardedDataParallelPlugin.get_module_class_from_name
     else:
         from accelerate.utils.dataclasses import get_module_class_from_name
-    from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
-
     from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
+    from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
 
     default_transformer_cls_names_to_wrap = (
         ",".join(model._no_split_modules) if getattr(model, "_no_split_modules", None) is not None else ""
