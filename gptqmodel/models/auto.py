@@ -8,7 +8,6 @@ import torch
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
-from ..integration.integration_vllm import patch_vllm
 from ..quantization import QUANT_CONFIG_FILENAME
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
@@ -135,7 +134,9 @@ class GPTQModel:
             **kwargs,
     ):
         if backend == BACKEND.VLLM:
+            from ..integration.integration_vllm import patch_vllm
             patch_vllm()
+
         is_quantized = False
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             is_quantized = True
