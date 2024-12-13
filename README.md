@@ -9,7 +9,7 @@
 </p>
 
 ## News
-* 12/12/2024 1.4.1-dev: Added Qwen2-VL model support. `mse` quantization property exposed in `QuantizeConfig`. 
+* 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` api added to allow Transformers/Optimum/PEFT and vLLM to correctly loaded GPTQModel quantized models while upstream PRs are in pending status. 
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
 
 * 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton pkg. 
@@ -17,15 +17,18 @@
 * 11/24/2024 [1.2.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.3) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
 * 11/11/2024 🚀 [1.2.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.1) Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
 * 10/29/2024 🚀 [1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
-* 10/12/2024 ✨ [1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
-* 10/11/2024 ✨ [1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Add wheel for python 3.12 and cuda 11.8.
-* 10/08/2024 ✨ [1.0.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.7) Fixed marlin (faster) kernel was not auto-selected for some models.
-* 09/26/2024 ✨ [1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed quantized Llama 3.2 vision quantized loader.
-* 09/26/2024 ✨ [1.0.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.5) Partial Llama 3.2 Vision model support (mllama): only text-layer quantization layers are supported for now.
 
 <details>
     
 <summary>Archived News:</summary>
+* 10/12/2024 ✨ [1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
+
+* 10/11/2024 ✨ [1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Add wheel for python 3.12 and cuda 11.8.
+* 10/08/2024 ✨ [1.0.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.7) Fixed marlin (faster) kernel was not auto-selected for some models.
+
+* 09/26/2024 ✨ [1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed quantized Llama 3.2 vision quantized loader.
+* 09/26/2024 ✨ [1.0.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.5) Partial Llama 3.2 Vision model support (mllama): only text-layer quantization layers are supported for now.
+
 * 09/26/2024 ✨ [1.0.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.4) Integrated Liger Kernel support for ~1/2 memory reduction on some models during quantization. Added control toggle disable parallel packing. 
 * 09/18/2024 ✨ [1.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.3) Added Microsoft GRIN-MoE and MiniCPM3 support.
 * 08/16/2024 ✨ [1.0.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.2) Support Intel/AutoRound v0.3, pre-built whl packages, and PyPI release. 
@@ -56,18 +59,19 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
-* 🚀 Extensive model support for: `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 3.5`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Phi-3`, `Qwen2MoE`, `DBRX`.
-* ✨ 100% CI coverage for all supported models including quality/ppl regression.
+* 🚀 Extensive model support for: `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
+* 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+* ✨ `Dynamic`/Mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
-* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (`avx512_vnni`) and Intel/XPU. 
-* 🚀 [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more vram reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
-* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference. 
-* 🚀 Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
-* 🚀`lm_head` module quant inference support for further VRAM reduction (auto-round only). 
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (recent Intel/AMD) and Intel/XPU. 
+* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
+* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization.
+* ✨ Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
+* ✨ `lm_head` module quant inference support for further VRAM reduction (auto-round only). 
 * 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
-* 🚀 Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
-* 🚀 Model weights sharding support
-* 🚀 Security: hash check of model weights on load
+* ✨ Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
+* ✨ Model weights sharding support
+* ✨ Security: hash check of model weights on load
 * 🚀 Over 50% faster PPL calculations (OPT)
 * 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
 
@@ -79,8 +83,8 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |     |
 | ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- |
-| Baichuan         | ✅   | Falcon         | ✅   | Llama 1/2/3      | ✅   | OLMo2      | 🚀  |     |
-| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi/Phi-3  | 🚀  |     |
+| Baichuan         | ✅   | Falcon         | ✅   | Llama 1-3.3      | ✅   | OLMo2      | 🚀  |     |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi 1-4  | 🚀  |     |
 | ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |     |
 | CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |     |
 | Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | Qwen2VL    | 🚀  |     |
@@ -90,15 +94,15 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | XVERSE     | ✅   |     |
 | EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | Yi         | ✅   |     |
 
-## HW Accelerator Requirements
+## Kernel and HW Accelerator Support 
 
 GPTQModel is validated for Linux x86_64 with the following devices:
 
-| Device           |     |                | 
-| ---------------- | --- | -------------- | 
-| Nvidia GPU     | ✅   | Ampere or Higher |
-| Intel/AMD CPU  | ✅   | `avx512_vnni` or `amx` |
-| Intel XPU  | ✅   |   Intel Arc + Datacenter Max |
+| Device           |     |  Optimized Arch              |  Kernels |
+| ---------------- | --- | -------------- | -------------- | 
+| Nvidia GPU     | ✅   | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
+| Intel/AMD CPU  | ✅   | `avx512` or `amx` | IPEX, Torch |
+| Intel XPU  | ✅   |   Intel Arc + Datacenter Max | IPEX, Torch |
 
 ## Install
 
@@ -198,13 +202,6 @@ lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.L
 # Use `evalplus` as framework to evaluate the model
 evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
 ```
-
-
-### Which kernel is used by default?
-
-* `GPU`: Marlin, Exllama v2, Exllama v1, DynamicCuda, Torch kernels in that order for maximum inference performance. Optional Microsoft/BITBLAS kernel can be toggled.
-* `CPU`: Intel/IPEX kernel
-* `XPU`: Intel/IPEX kernel
 
 ## Citation
 ```
