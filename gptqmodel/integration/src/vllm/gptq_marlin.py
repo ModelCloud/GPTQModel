@@ -141,9 +141,6 @@ class GPTQMarlinConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
     def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
             if pattern.startswith("-:"):
