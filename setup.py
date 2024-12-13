@@ -122,22 +122,11 @@ if BUILD_CUDA_EXT:
         "cxx": [
             "-O3",
             "-std=c++17",
-            "-fopenmp",
-            "-lgomp",
-            "-DENABLE_BF16"
             "-Wno-switch-bool",
         ],
         "nvcc": [
             "-O3",
             "-std=c++17",
-            "-DENABLE_BF16",
-            "-U__CUDA_NO_HALF_OPERATORS__",
-            "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_HALF2_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
             "--threads",
             "4",
             "-Xfatbin",
