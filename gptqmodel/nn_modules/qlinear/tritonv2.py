@@ -101,6 +101,8 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
                   outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
+        if trainable:
+            return False, ValueError("exclude triton from trainable")
         if not TRITON_AVAILABLE:
             return False, ValueError(TRITON_INSTALL_HINT)
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
