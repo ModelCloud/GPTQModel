@@ -705,6 +705,8 @@ class BaseGPTQModel(nn.Module):
         if not self.hf_device_map:
             if hasattr(self.model, "device"):
                 return self.model.device
+            elif hasattr(self.model, "llm_engine"):
+                return self.model.llm_engine.device_config.device_type
             else:
                 return torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
