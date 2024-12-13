@@ -119,6 +119,7 @@ jobs:
           script="
           import json
           import os
+          import re
 
           cpu_file_list = [f.strip().removesuffix('.py') for f in '${TORCH_2_5_TESTS}'.split(',') if f.strip()]
           test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
