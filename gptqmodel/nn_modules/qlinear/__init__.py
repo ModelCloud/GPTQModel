@@ -26,7 +26,7 @@ class BaseQuantLinear(nn.Module):
         if err:
             raise err
 
-        if DEVICE.CUDA in self.SUPPORTS_DEVICES:
+        if len(self.SUPPORTS_DEVICES) == 1 and DEVICE.CUDA in self.SUPPORTS_DEVICES:
             check_cuda()
 
     @classmethod
