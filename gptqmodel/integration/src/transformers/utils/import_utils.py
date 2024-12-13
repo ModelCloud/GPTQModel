@@ -31,9 +31,7 @@ from types import ModuleType
 from typing import Any, Dict, FrozenSet, Optional, Set, Tuple, Union
 
 from packaging import version
-
 from transformers.utils import logging
-
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 

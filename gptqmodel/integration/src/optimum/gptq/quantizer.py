@@ -21,6 +21,13 @@ from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+from gptqmodel.integration.src.optimum.utils.import_utils import is_gptqmodel_available
+from optimum.gptq.constants import GPTQ_CONFIG
+from optimum.gptq.data import get_dataset, prepare_dataset
+from optimum.gptq.utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
+from optimum.utils import is_accelerate_available, is_auto_gptq_available
+from optimum.utils.modeling_utils import recurse_getattr
+from optimum.version import __version__ as optimum_version
 from packaging import version
 from torch import nn
 from tqdm.auto import tqdm
@@ -28,28 +35,16 @@ from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
 from transformers.utils.quantization_config import QuantizationMethod
 
-from optimum.utils import is_accelerate_available, is_auto_gptq_available
-from optimum.utils.modeling_utils import recurse_getattr
-from optimum.gptq.constants import GPTQ_CONFIG
-from optimum.gptq.data import get_dataset, prepare_dataset
-from optimum.gptq.utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
-from optimum.version import __version__ as optimum_version
-
-from gptqmodel.integration.src.optimum.utils.import_utils import is_gptqmodel_available
-
 if is_accelerate_available():
-    from accelerate import (
-        cpu_offload_with_hook,
-        load_checkpoint_and_dispatch,
-    )
+    from accelerate import cpu_offload_with_hook, load_checkpoint_and_dispatch
     from accelerate.hooks import remove_hook_from_module
 
 if is_auto_gptq_available():
+    from auto_gptq import __version__ as autogptq_version
     from auto_gptq import exllama_set_max_input_length
     from auto_gptq.modeling._utils import autogptq_post_init as gptq_post_init
     from auto_gptq.quantization import GPTQ
     from auto_gptq.utils.import_utils import dynamically_import_QuantLinear as hf_select_quant_linear
-    from auto_gptq import __version__ as autogptq_version
 
 if is_gptqmodel_available():
     from gptqmodel import exllama_set_max_input_length

@@ -23,28 +23,7 @@ from functools import partial, reduce
 from typing import Literal, Optional
 
 import torch
-from torch import nn
-from tqdm import tqdm
-
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
-from peft.tuners.tuners_utils import (
-    BaseTuner,
-    BaseTunerLayer,
-    check_target_module_exists,
-    onload_layer,
-    replicate_layers,
-)
-from peft.utils import (
-    TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
-    ModulesToSaveWrapper,
-    _freeze_adapter,
-    _get_submodules,
-    get_peft_model_state_dict,
-    get_quantization_config,
-)
-from peft.utils.merge_utils import dare_linear, dare_ties, magnitude_prune, task_arithmetic, ties
-from peft.utils.other import get_pattern_key
-
 from peft.tuners.lora.aqlm import dispatch_aqlm
 from peft.tuners.lora.awq import dispatch_awq
 from peft.tuners.lora.config import LoraConfig
@@ -54,6 +33,14 @@ from peft.tuners.lora.hqq import dispatch_hqq
 from peft.tuners.lora.layer import Conv2d, LoraLayer, dispatch_default
 from peft.tuners.lora.torchao import dispatch_torchao
 from peft.tuners.lora.tp_layer import dispatch_megatron
+from peft.tuners.tuners_utils import (BaseTuner, BaseTunerLayer, check_target_module_exists,
+                                      onload_layer, replicate_layers)
+from peft.utils import (TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING, ModulesToSaveWrapper,
+                        _freeze_adapter, _get_submodules, get_peft_model_state_dict, get_quantization_config)
+from peft.utils.merge_utils import dare_linear, dare_ties, magnitude_prune, task_arithmetic, ties
+from peft.utils.other import get_pattern_key
+from torch import nn
+from tqdm import tqdm
 
 
 def _adapter_names_pre_forward_hook(target, args, kwargs, adapter_names):

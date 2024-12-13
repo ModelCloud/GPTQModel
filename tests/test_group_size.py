@@ -1,31 +1,25 @@
 # -- do not touch
-import importlib
-import logging
 import os
-import pkgutil
-import traceback
-
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import logging  # noqa: E402
 import tempfile  # noqa: E402
+import traceback  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import GPTQModel, QuantizeConfig, BACKEND  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
-
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
-
 from lm_eval.utils import make_table  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +48,6 @@ class TestGroupSize(unittest.TestCase):
 
     def test_group_size(self):
         # quantize
-        TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
         OPT_MODEL_ID = "/monster/data/model/opt-125m"
         model_id = OPT_MODEL_ID
         tokenizer = AutoTokenizer.from_pretrained(model_id)

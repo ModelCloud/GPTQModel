@@ -24,14 +24,9 @@ from inspect import Parameter, signature
 from typing import Any, Dict, List, Optional, Union
 
 from packaging import version
+from transformers.utils import (is_auto_awq_available, is_hqq_available,
+                                is_torch_available, is_torchao_available, logging)
 
-from transformers.utils import (
-    is_auto_awq_available,
-    is_hqq_available,
-    is_torch_available,
-    is_torchao_available,
-    logging,
-)
 from .import_utils import is_auto_gptq_available, is_gptqmodel_available
 
 if is_torch_available():
@@ -1333,11 +1328,7 @@ class TorchAoConfig(QuantizationConfigMixin):
 
     def _get_torchao_quant_type_to_method(self):
         if is_torchao_available():
-            from torchao.quantization import (
-                int4_weight_only,
-                int8_dynamic_activation_int8_weight,
-                int8_weight_only,
-            )
+            from torchao.quantization import int4_weight_only, int8_dynamic_activation_int8_weight, int8_weight_only
 
             return {
                 "int4_weight_only": int4_weight_only,
