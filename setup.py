@@ -93,6 +93,11 @@ if TORCH_CUDA_ARCH_LIST is None:
     if not at_least_one_cuda_v6:
         BUILD_CUDA_EXT = False
 
+# if cuda compute is < 8.0, always force build since we only compile cached wheels for >= 8.0
+if BUILD_CUDA_EXT and not FORCE_BUILD:
+    at_least_one_cuda_v8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
+    FORCE_BUILD = True
+
 if BUILD_CUDA_EXT:
     if CUDA_RELEASE == "1":
         common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
