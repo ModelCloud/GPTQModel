@@ -189,6 +189,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
+          overwrite: true
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
 
