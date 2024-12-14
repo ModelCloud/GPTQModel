@@ -189,8 +189,8 @@ jobs:
 
       - name: Install requirements
         run: |
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          pip install transformers -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          pip install transformers typing-extensions -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         timeout-minutes: 35
@@ -303,8 +303,8 @@ jobs:
         run: |
           pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          pip install transformers numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          pip install transformers typing-extensions numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Check platform
         run: |
@@ -418,8 +418,8 @@ jobs:
         run: |
           pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          pip install transformers==4.38.2 numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" = "test_xverse" ]; then
             pip install tokenizers==0.15.2 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
@@ -519,8 +519,8 @@ jobs:
 
       - name: Install wheel
         run: |
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.5.1 3.11
-          pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
+          pip install -U intel_extension_for_pytorch auto_round typing-extensions bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           pip install dist/*.whl
 
       - name: Find suitable GPU
