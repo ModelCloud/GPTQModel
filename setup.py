@@ -89,9 +89,17 @@ with open('requirements.txt') as f:
 import torch  # noqa: E402
 
 if TORCH_CUDA_ARCH_LIST is None:
-    at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-    if not at_least_one_cuda_v6:
+    got_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+    got_cuda_between_v6_and_v8 = any(6 <= torch.cuda.get_device_capability(i)[0] < 8 for i in range(torch.cuda.device_count()))
+    
+    # not validated for compute < 6
+    if not got_cuda_v6:
         BUILD_CUDA_EXT = False
+
+    # if cuda compute is < 8.0, always force build since we only compile cached wheels for >= 8.0
+    if BUILD_CUDA_EXT and not FORCE_BUILD:
+        if got_cuda_between_v6_and_v8:
+            FORCE_BUILD = True
 
 if BUILD_CUDA_EXT:
     if CUDA_RELEASE == "1":
