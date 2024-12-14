@@ -215,15 +215,16 @@ class TorchQuantLinear(BaseQuantLinear):
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, 32 // self.bits),
                 self.wf.unsqueeze(0),
             ).to(torch.int16 if self.bits == 8 else torch.int8)
-            zeros = torch.bitwise_and(zeros, (2**self.bits) - 1)
+            zeros = torch.bitwise_and(zeros, (2**self.bits) - 1).reshape(self.scales.shape)
 
-            zeros = zeros.reshape(self.scales.shape)
-
-            weight = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qweight, 1).expand(-1, 32 // self.bits, -1),
-                self.wf.unsqueeze(-1),
-            ).to(torch.int16 if self.bits == 8 else torch.int8)
-            weight = torch.bitwise_and(weight, (2**self.bits) - 1)
+            weight = torch.bitwise_and(
+                torch.bitwise_right_shift(
+                    torch.unsqueeze(self.qweight, 1).expand(-1, 32 // self.bits, -1),
+                    self.wf.unsqueeze(-1),
+                ).to(torch.int16 if self.bits == 8 else torch.int8),
+                (2**self.bits) - 1
+            ).reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+            )
         elif self.bits == 3:
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
                 -1, -1, -1, 12
@@ -235,9 +236,7 @@ class TorchQuantLinear(BaseQuantLinear):
             zeros = torch.cat(
                 [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
                 dim=2,
-            )
-
-            zeros = zeros.reshape(self.scales.shape)
+            ).reshape(self.scales.shape)
 
             weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
                 -1, -1, 12, -1
@@ -246,9 +245,8 @@ class TorchQuantLinear(BaseQuantLinear):
             weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
             weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
             weight = weight & 0x7
-            weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
+            weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1).reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         if num_itr == 1:
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
