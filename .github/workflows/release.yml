@@ -162,7 +162,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          bash -c "$(curl -L http://${RUNNER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://${RUNNER}/files/scripts/init_compiler.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -189,6 +189,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
+          overwrite: true
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
 
