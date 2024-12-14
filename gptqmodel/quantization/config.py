@@ -106,8 +106,8 @@ class QuantizeConfig():
     # 128 offer good balance between inference speed and quantization quality
     group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
-    damp_percent: float = field(default=0.005)
-    damp_auto_increment: float = field(default=0.0015)
+    damp_percent: float = field(default=0.01)
+    damp_auto_increment: float = field(default=0.0025)
     desc_act: bool = field(default=True)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
