@@ -225,6 +225,8 @@ class GPTQ:
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
 
+        print(f"q shape:{q.dtype} {q.shape()}")
+        print(f"w shape:{w.dtype} {w.shape()}")
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
 
         if os.environ.get("DEBUG"):
