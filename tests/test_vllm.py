@@ -50,7 +50,7 @@ class TestLoadVLLM(unittest.TestCase):
             self.MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
-            gpu_memory_utilization=0.2,
+            gpu_memory_utilization=0.8,
         )
 
         tokenizer = model.get_tokenizer()
@@ -84,7 +84,7 @@ class TestLoadVLLM(unittest.TestCase):
             self.SHARDED_MODEL_ID,
             device="cuda:0",
             backend=BACKEND.VLLM,
-            gpu_memory_utilization=0.2,
+            gpu_memory_utilization=0.8,
         )
         tokenizer = model.get_tokenizer()
         outputs = model.generate(
@@ -140,7 +140,7 @@ class TestLoadVLLM(unittest.TestCase):
                 tmp_dir,
                 device="cuda:0",
                 backend=BACKEND.VLLM,
-                gpu_memory_utilization=0.2,
+                gpu_memory_utilization=0.8,
             )
 
             tokenizer = model.get_tokenizer()
