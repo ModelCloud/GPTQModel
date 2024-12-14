@@ -276,13 +276,15 @@ def ModelWriter(cls):
                     content = json.dumps(index, indent=2, sort_keys=True) + "\n"
                     f.write(content)
 
-        total_size_gb = total_size_mb / 1024
-        size_diff_mb = pre_quantized_size_mb - total_size_mb
-        size_diff_gb = size_diff_mb / 1024
-        percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
-        logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
-        logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
-        logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+        # If the saved model is a loaded quantized model, do not calculate the size diff.
+        if not self.load_quantized_model:
+            total_size_gb = total_size_mb / 1024
+            size_diff_mb = pre_quantized_size_mb - total_size_mb
+            size_diff_gb = size_diff_mb / 1024
+            percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
+            logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
+            logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+            logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
