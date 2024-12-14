@@ -224,7 +224,6 @@ class TorchQuantLinear(BaseQuantLinear):
                 ).to(torch.int16 if self.bits == 8 else torch.int8),
                 (2**self.bits) - 1
             ).reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-            )
         elif self.bits == 3:
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
                 -1, -1, -1, 12
