@@ -139,7 +139,7 @@ class IPEXQuantLinear(BaseQuantLinear):
             return False, Exception("IPEX is only available on Linux platform.")
 
         if device not in [DEVICE.CPU, DEVICE.XPU]:
-            return False, Exception("IPEX not supported on device: `{device}`.")
+            return False, Exception(f"IPEX not supported on device: `{device}`.")
 
         if not HAS_IPEX:
             return False, IPEX_ERROR_LOG

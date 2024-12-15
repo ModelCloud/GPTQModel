@@ -11,8 +11,9 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
+from ..utils import get_backend
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear, ipex_dtype
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
@@ -23,7 +24,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
                            get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, torch_supports_xpu, torch_supports_mps, torch_supports_cuda
+from ._const import DEVICE, SUPPORTED_MODELS, torch_supports_xpu, torch_supports_mps, torch_supports_cuda
 
 logger = setup_logger()
 
@@ -151,9 +152,15 @@ def ModelLoader(cls):
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        # TODO need to normalize backend and others in a unified api
+        if isinstance(backend, str):
+            backend = get_backend(backend)
+
         # auto device if none is passed
         if device is None and device_map is None:
-            if torch_supports_cuda():
+            if backend == BACKEND.IPEX:
+                device = "xpu" if torch_supports_xpu() else "cpu"
+            elif torch_supports_cuda():
                 device = "cuda"
             elif torch_supports_xpu():
                 device = "xpu"
