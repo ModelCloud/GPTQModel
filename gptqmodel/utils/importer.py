@@ -152,8 +152,8 @@ def select_quant_linear(
     elif backend == BACKEND.CUDA:
         return DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
-        from ..nn_modules.qlinear.ipex import IPEX_AVAILABLE
-        if not IPEX_AVAILABLE:
+        from ..nn_modules.qlinear.ipex import HAS_IPEX
+        if not HAS_IPEX:
             raise ValueError("IPEX is not available.")
 
         from device_smi import Device
