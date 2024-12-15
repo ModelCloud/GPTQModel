@@ -26,6 +26,8 @@ class TestsQ4Torch(unittest.TestCase):
     def test_generation_desc_act_true(self, torch_dtype, device):
         if sys.platform == "darwin" and device not in ["cpu","mps"]:
             self.skipTest(f"MacOS env skipping unsupported device `{device}`")
+        elif sys.platform == "linux" and device not in ["cpu", "cuda", "xpu"]:
+            self.skipTest(f"MacOS env skipping unsupported device `{device}`")
 
         prompt = "I am in Paris and"
 
@@ -73,6 +75,8 @@ class TestsQ4Torch(unittest.TestCase):
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
         if sys.platform == "darwin" and device not in ["cpu","mps"]:
+            self.skipTest(f"MacOS env skipping unsupported device `{device}`")
+        elif sys.platform == "linux" and device not in ["cpu", "cuda", "xpu"]:
             self.skipTest(f"MacOS env skipping unsupported device `{device}`")
 
         prompt = "I am in Paris and"
