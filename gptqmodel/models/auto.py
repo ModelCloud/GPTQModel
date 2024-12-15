@@ -112,6 +112,12 @@ MODEL_MAP = {
     "olmo2": Olmo2GPTQ,
 }
 
+HAS_IPEX = False
+try:
+    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
+    HAS_IPEX = True
+except Exception:
+    pass
 
 class GPTQModel:
     def __init__(self):
@@ -217,9 +223,10 @@ class GPTQModel:
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         quant_func = MODEL_MAP[model_type].from_quantized
 
-        if backend == BACKEND.AUTO and not torch.cuda.is_available():
-            logger.warning("No cuda found, use IPEX backend")
-            backend = BACKEND.IPEX
+        if backend == BACKEND.AUTO:
+            if not torch.cuda.is_available() and HAS_IPEX:
+                logger.warning("No cuda found, use IPEX backend")
+                backend = BACKEND.IPEX
 
         return quant_func(
             model_id_or_path=model_id_or_path,

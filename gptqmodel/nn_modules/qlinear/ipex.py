@@ -1,6 +1,7 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -18,18 +19,19 @@ BITS_DTYPE_MAPPING = {
     4: "int4_clip",
 }
 
-IPEX_AVAILABLE = False
+HAS_IPEX = False
 IPEX_ERROR_LOG = None
 try:
     from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
-    IPEX_AVAILABLE = True
+    HAS_IPEX = True
 except Exception:
+    HAS_IPEX = False
     IPEX_ERROR_LOG = Exception
 
 def ipex_dtype() -> torch.dtype:
-    if not IPEX_AVAILABLE:
+    if not HAS_IPEX:
         raise ImportError("intel_extension_for_pytorch not installed. "
-                          "Please install via 'pip install intel_extension_for_pytorch'")
+                          "Please install via `pip install intel_extension_for_pytorch`")
 
     return torch.float16 if is_torch_support_xpu() else torch.bfloat16
 
@@ -133,7 +135,10 @@ class IPEXQuantLinear(BaseQuantLinear):
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
                   outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
-        if not IPEX_AVAILABLE:
+        if sys.platform != "linux":
+            return False, Exception("IPEX is only available on Linux platform.")
+
+        if not HAS_IPEX:
             return False, IPEX_ERROR_LOG
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
 
@@ -142,7 +147,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         assert self.qweight.device.type in ("cpu", "xpu")
 
     def init_ipex_linear(self, x: torch.Tensor):
-        if not self.training and IPEX_AVAILABLE and not x.requires_grad:
+        if not self.training and HAS_IPEX and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros, \
                                                                     self.infeatures, self.outfeatures, None, self.bias, \
                                                                     self.group_size, self.g_idx, quant_method=0, dtype=0)

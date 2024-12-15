@@ -1,9 +1,10 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-
+import sys
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
@@ -22,13 +23,16 @@ class TestsQ4Torch(unittest.TestCase):
         ]
     )
     def test_generation_desc_act_true(self, torch_dtype, device):
+        if sys.platform == "darwin" and device != "cpu":
+            self.skipTest(f"MacOS env skipping unsupported device `{device}`")
+
         prompt = "I am in Paris and"
 
         # CPU implementation is extremely slow.
         new_tokens = 5
         reference_output = "<s> I am in Paris and I am in love with"
 
-        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
@@ -66,13 +70,16 @@ class TestsQ4Torch(unittest.TestCase):
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
+        if sys.platform == "darwin" and device != "cpu":
+            self.skipTest(f"MacOS env skipping unsupported device `{device}`")
+
         prompt = "I am in Paris and"
 
         # CPU implementation is extremely slow.
         new_tokens = 5
         reference_output = "<s> I am in Paris and I am in love with"
 
-        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         model_q = GPTQModel.from_quantized(
             model_id,

@@ -191,10 +191,6 @@ def ModelLoader(cls):
             if torch_dtype is None or torch_dtype == "auto":
                 torch_dtype = ipex_dtype()
 
-        if backend != BACKEND.IPEX and not torch.cuda.is_available():
-            raise EnvironmentError(
-                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu and xpu quantization and inference.")
-
         if backend == BACKEND.TRITON:
             from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
             if not TRITON_AVAILABLE:
