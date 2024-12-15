@@ -79,29 +79,12 @@ def ModelLoader(cls):
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
-            device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-            device: Optional[Union[str, torch.device]] = None,
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
         if quantize_config.desc_act not in cls.supports_desc_act:
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
-
-        # auto device if none is passed
-        if device is None and device_map is None:
-            if torch_supports_cuda():
-                device = "cuda"
-            elif torch_supports_xpu():
-                device = "xpu"
-            elif torch_supports_mps():
-                device = "mps"
-            else:
-                device = "cpu"
-
-        # TODO mps has errors with bfloat16, lock to float16 for now
-        if device == "mps" or (device_map is not None and "mps" in device_map.values()):
-           torch_dtype = torch.float16
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -128,8 +111,6 @@ def ModelLoader(cls):
 
         # enforce some values despite user specified
         model_init_kwargs["torch_dtype"] = torch_dtype
-        model_init_kwargs["device"] = device
-        model_init_kwargs["device_map"] = device_map
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
@@ -180,10 +161,6 @@ def ModelLoader(cls):
                 device = "mps"
             else:
                 device = "cpu"
-
-        # TODO mps has errors with bfloat16, lock to float16 for now
-        if device == "mps" or (device_map is not None and "mps" in device_map.values()):
-           torch_dtype = torch.float16
 
         if backend == BACKEND.VLLM:
             import os
@@ -236,7 +213,7 @@ def ModelLoader(cls):
         )
 
         if torch_dtype is None or torch_dtype == "auto":
-            torch_dtype = auto_dtype_from_config(config, quant_inference=True)
+            torch_dtype = auto_dtype_from_config(config=config, device=device, device_map=device_map)
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
 

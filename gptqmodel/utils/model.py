@@ -7,8 +7,9 @@ import operator
 import os
 import re
 import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import threadpoolctl as tctl
@@ -675,9 +676,9 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
 
 
 # return the most stable tensor dtype for quantization while minimizing vram
-def auto_dtype_from_config(config: PretrainedConfig, quant_inference: bool = False) -> torch.dtype:
-    # all the gptq inference kernels are float16 only
-    if quant_inference:
+def auto_dtype_from_config(config: PretrainedConfig, device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None, device: Optional[Union[str, int]] = None ) -> torch.dtype:
+    # TODO mps has errors with bfloat16, lock to float16 for now
+    if sys.platform == "darwin" or (device == "mps" or (device_map is not None and "mps" in device_map.values())):
         return torch.float16
 
     dtype = getattr(config, "torch_dtype")
