@@ -3,6 +3,7 @@ from typing import Dict, Optional, Type, Union
 
 import torch
 
+from . import BACKEND
 from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -15,7 +16,6 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
-from .backend import BACKEND, get_backend
 
 message_logged = False
 logger = setup_logger()
@@ -52,7 +52,7 @@ def hf_select_quant_linear(
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
     if isinstance(backend, str):
-        backend = get_backend(backend)
+        backend = BACKEND(backend.lower())
 
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())

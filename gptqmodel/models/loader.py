@@ -11,7 +11,6 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..utils import get_backend
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
@@ -154,7 +153,7 @@ def ModelLoader(cls):
     ):
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
-            backend = get_backend(backend)
+            backend = BACKEND(backend.lower())
 
         # auto device if none is passed
         if device is None and device_map is None:
