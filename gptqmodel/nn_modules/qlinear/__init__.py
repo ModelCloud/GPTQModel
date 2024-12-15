@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch.nn as nn
 
-from ...models._const import DEVICE, get_device_by_type
+from ...models._const import DEVICE, normalize_device
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -151,7 +151,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate_device(cls, device: Union[DEVICE, str]):
-        device = get_device_by_type(device) if isinstance(device, str) else device
+        device = normalize_device(device)
 
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}` bits: actual device = `{device}`")

@@ -42,15 +42,25 @@ def torch_supports_xpu():
 def torch_supports_mps():
     return hasattr(torch, "mps") and torch.mps.is_available()
 
-def get_device_by_type(type_value: str):
+def normalize_device(type_value: str|DEVICE) -> DEVICE:
+    if isinstance(type_value, DEVICE):
+        return type_value
+
+    if not isinstance(type_value, str):
+        raise ValueError(f"Invalid device type_value type: {type(type_value)}")
+
+    type_value = type_value.lower()
+
     for enum_constant in DEVICE:
-        if enum_constant.value == type_value:
+        if enum_constant.value.startswith(type_value):
             return enum_constant
     raise ValueError(f"Invalid type_value str: {type_value}")
 
 
-def get_best_device(beckend=BACKEND.AUTO):
-    if torch.cuda.is_available() and beckend != BACKEND.IPEX:
+def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
+    if backend == BACKEND.IPEX:
+        return XPU_0 if torch_supports_xpu() else CPU
+    elif torch.cuda.is_available():
         return CUDA_0
     elif torch_supports_xpu():
         return XPU_0
