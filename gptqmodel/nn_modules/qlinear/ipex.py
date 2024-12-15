@@ -1,6 +1,7 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -134,6 +135,9 @@ class IPEXQuantLinear(BaseQuantLinear):
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
                   outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
+        if sys.platform != "linux":
+            return False, Exception("IPEX is only available on Linux platform.")
+
         if not HAS_IPEX:
             return False, IPEX_ERROR_LOG
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
