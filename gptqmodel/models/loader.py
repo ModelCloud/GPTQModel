@@ -128,11 +128,13 @@ def ModelLoader(cls):
 
         # enforce some values despite user specified
         model_init_kwargs["torch_dtype"] = torch_dtype
+        model_init_kwargs["device"] = device
+        model_init_kwargs["device_map"] = device_map
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        model = cls.loader.from_pretrained(pretrained_model_id_or_path, device, device_map, **model_init_kwargs)
+        model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
