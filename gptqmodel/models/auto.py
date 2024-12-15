@@ -224,17 +224,9 @@ class GPTQModel:
         quant_func = MODEL_MAP[model_type].from_quantized
 
         if backend == BACKEND.AUTO:
-            if not torch.cuda.is_available():
-                import sys
-                if HAS_IPEX:
-                    logger.warning("No cuda found, use IPEX backend")
-                    backend = BACKEND.IPEX
-                elif sys.platform == "linux":
-                    logger.warning("Please install IPEX package for cpu accelerated inference: `pip install intel_extension_for_pytorch`")
-                    backend = BACKEND.TORCH
-                else:
-                    logger.warning("MacOS has no hardware optimized kernel. Execution may be slow.")
-                    backend = BACKEND.TORCH
+            if not torch.cuda.is_available() and HAS_IPEX:
+                logger.warning("No cuda found, use IPEX backend")
+                backend = BACKEND.IPEX
 
         return quant_func(
             model_id_or_path=model_id_or_path,

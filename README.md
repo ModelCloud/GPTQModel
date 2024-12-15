@@ -99,12 +99,12 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 GPTQModel is validated for Linux x86_64 with the following devices:
 
-| Device           |     |  Optimized Arch              |  Kernels |
-| ---------------- | --- | -------------- | -------------- | 
-| Nvidia GPU     | ✅   | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
-| Intel/AMD CPU  | ✅   | `avx512` or `amx` | IPEX, Torch |
-| Intel XPU  | ✅   |   Intel Arc + Datacenter Max | IPEX, Torch |
-| MacOS CPU/GPU  | ✅   |   M1+ | Torch |
+| Platform        | Device        |     |  Optimized Arch              |  Kernels |
+|-----------------|---------------| --- | -------------- | -------------- | 
+| Linux           | Nvidia GPU    | ✅       | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
+| Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
+| Linux | Intel XPU     | ✅             |   Intel Arc + Datacenter Max | IPEX, Torch |
+| MacOS | CPU           | ✅             |   M1+ | Torch |
 
 
 ## Install
