@@ -104,7 +104,7 @@ GPTQModel is validated for Linux x86_64 with the following devices:
 | Linux           | Nvidia GPU    | ✅       | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
 | Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
 | Linux | Intel XPU     | ✅             |   Intel Arc + Datacenter Max | IPEX, Torch |
-| MacOS | CPU           | ✅             |   M1+ | Torch |
+| MacOS | GPU (Metal) and CPU           | ✅             |   M1+ | Torch |
 
 
 ## Install
