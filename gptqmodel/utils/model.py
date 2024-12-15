@@ -176,7 +176,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
 
             # check in_features and out_features validate
             _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
-                                          infeatures=in_features, outfeatures=out_features)
+                                          infeatures=in_features, outfeatures=out_features, device=ori_layer_device.type)
             if err is not None:
                 raise err
 
