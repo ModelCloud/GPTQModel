@@ -150,11 +150,11 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device: Union[DEVICE, str]):
-        device = normalize_device(device)
+    def validate_device(cls, device: DEVICE):
+        dev = normalize_device(device)
 
-        if device not in cls.SUPPORTS_DEVICES:
-            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}` bits: actual device = `{device}`")
+        if dev not in cls.SUPPORTS_DEVICES:
+            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{dev}`")
 
     # override me
     def post_init(self):

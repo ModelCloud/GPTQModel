@@ -133,7 +133,7 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-            device: Optional[Union[str, int]] = None,
+            device: Optional[Union[str, torch.device]] = None,
             backend: BACKEND = BACKEND.AUTO,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
