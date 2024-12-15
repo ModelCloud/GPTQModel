@@ -10,16 +10,37 @@ CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
 XPU = device("xpu")
 XPU_0 = device("xpu:0")
+MPS = device("mps")
 
 class DEVICE(Enum):
-    CPU = "cpu"
-    CUDA = "cuda"
-    XPU = "xpu"
+    CPU = "cpu" # All CPU
+    CUDA = "cuda" # Nvidia GPU
+    XPU = "xpu" # Intel GPU
+    MPS = "mps" # MacOS GPU
 
 
-def is_torch_support_xpu():
+def torch_supports_cuda(raise_exception: bool = False):
+    has_cuda = hasattr(torch, "cuda") and torch.cuda.is_available()
+
+    if has_cuda:
+        at_least_one_cuda_v6 = any(
+            torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+        if not at_least_one_cuda_v6:
+            if raise_exception:
+                raise EnvironmentError(
+                    "GPTQModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
+            else:
+                has_cuda = False
+
+    return has_cuda
+
+
+def torch_supports_xpu():
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
+def torch_supports_mps():
+    return hasattr(torch, "mps") and torch.mps.is_available()
 
 def get_device_by_type(type_value: str):
     for enum_constant in DEVICE:
@@ -31,8 +52,10 @@ def get_device_by_type(type_value: str):
 def get_best_device(beckend=BACKEND.AUTO):
     if torch.cuda.is_available() and beckend != BACKEND.IPEX:
         return CUDA_0
-    elif is_torch_support_xpu():
+    elif torch_supports_xpu():
         return XPU_0
+    elif torch_supports_mps():
+        return MPS
     else:
         return CPU
 

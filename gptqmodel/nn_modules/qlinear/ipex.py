@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.models._const import DEVICE, is_torch_support_xpu
+from gptqmodel.models._const import DEVICE, torch_supports_xpu
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...utils.logger import setup_logger
@@ -33,7 +33,7 @@ def ipex_dtype() -> torch.dtype:
         raise ImportError("intel_extension_for_pytorch not installed. "
                           "Please install via `pip install intel_extension_for_pytorch`")
 
-    return torch.float16 if is_torch_support_xpu() else torch.bfloat16
+    return torch.float16 if torch_supports_xpu() else torch.bfloat16
 
 
 def convert_dtype_torch2str(dtype):
@@ -84,7 +84,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
 
         if weight_dtype is None:
-            weight_dtype = torch.float16 if is_torch_support_xpu() else torch.bfloat16
+            weight_dtype = torch.float16 if torch_supports_xpu() else torch.bfloat16
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures

@@ -3,8 +3,6 @@ from typing import List, Optional, Tuple, Union
 import torch.nn as nn
 
 from ...models._const import DEVICE, get_device_by_type
-from ...utils.device import check_cuda
-
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -25,9 +23,6 @@ class BaseQuantLinear(nn.Module):
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures)
         if err:
             raise err
-
-        if len(self.SUPPORTS_DEVICES) == 1 and DEVICE.CUDA in self.SUPPORTS_DEVICES:
-            check_cuda()
 
     @classmethod
     # custom quant linear class can override this and add custom checks

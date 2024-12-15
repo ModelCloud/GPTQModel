@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Union
 import accelerate
 import torch
 import transformers
-from gptqmodel.utils.device import check_cuda
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
@@ -24,7 +23,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
                            get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, is_torch_support_xpu
+from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, torch_supports_xpu, torch_supports_mps, torch_supports_cuda
 
 logger = setup_logger()
 
@@ -80,6 +79,8 @@ def ModelLoader(cls):
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
+            device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+            device: Optional[Union[str, torch.device]] = None,
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
@@ -87,19 +88,20 @@ def ModelLoader(cls):
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
+        # auto device if none is passed
+        if device is None and device_map is None:
+            if torch_supports_cuda():
+                device = "cuda"
+            elif torch_supports_xpu():
+                device = "xpu"
+            elif torch_supports_mps():
+                device = "mps"
+            else:
+                device = "cpu"
 
-        got_cuda = check_cuda(raise_exception=False)
-
-        if not got_cuda:
-            try:
-                pass
-            except Exception as e:
-                raise ValueError(
-                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-ipex`."
-                )
-
-            model_init_kwargs["device_map"] = {"":"xpu"} if is_torch_support_xpu() else {"":"cpu"}
-            torch_dtype = ipex_dtype()
+        # TODO mps has errors with bfloat16, lock to float16 for now
+        if device == "mps" or (device_map is not None and "mps" in device_map.values()):
+           torch_dtype = torch.float16
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
@@ -119,7 +121,7 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
-        if torch_dtype == "auto":
+        if torch_dtype is None or torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config)
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
@@ -130,13 +132,7 @@ def ModelLoader(cls):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        if model_init_kwargs.get("cpu") != "cpu":
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            elif is_torch_support_xpu():
-                torch.xpu.empty_cache()
-
-        model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(pretrained_model_id_or_path, device, device_map, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions"]
@@ -172,24 +168,26 @@ def ModelLoader(cls):
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        # auto device if none is passed
+        if device is None and device_map is None:
+            if torch_supports_cuda():
+                device = "cuda"
+            elif torch_supports_xpu():
+                device = "xpu"
+            elif torch_supports_mps():
+                device = "mps"
+            else:
+                device = "cpu"
+
+        # TODO mps has errors with bfloat16, lock to float16 for now
+        if device == "mps" or (device_map is not None and "mps" in device_map.values()):
+           torch_dtype = torch.float16
+
         if backend == BACKEND.VLLM:
             import os
 
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
-
-        if backend == BACKEND.IPEX:
-            device = get_best_device(backend)
-
-            try:
-                pass
-            except Exception as e:
-                raise ValueError(
-                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
-                )
-
-            if torch_dtype is None or torch_dtype == "auto":
-                torch_dtype = ipex_dtype()
 
         if backend == BACKEND.TRITON:
             from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
@@ -235,7 +233,7 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if torch_dtype == "auto":
+        if torch_dtype is None or torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config, quant_inference=True)
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")

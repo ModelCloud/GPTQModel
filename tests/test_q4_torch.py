@@ -19,11 +19,12 @@ class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
             (torch.bfloat16, "cpu"),
+            (torch.float16, "mps"),
             (torch.float16, "cuda"),
         ]
     )
     def test_generation_desc_act_true(self, torch_dtype, device):
-        if sys.platform == "darwin" and device != "cpu":
+        if sys.platform == "darwin" and device not in ["cpu","mps"]:
             self.skipTest(f"MacOS env skipping unsupported device `{device}`")
 
         prompt = "I am in Paris and"
@@ -64,13 +65,14 @@ class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
             (torch.bfloat16, "cpu"),
+            (torch.float16, "mps"),
             (torch.float16, "cuda"),
             # TODO: pending pytorch fix https://github.com/pytorch/pytorch/issues/100932
             # (torch.float16, "cpu"),
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
-        if sys.platform == "darwin" and device != "cpu":
+        if sys.platform == "darwin" and device not in ["cpu","mps"]:
             self.skipTest(f"MacOS env skipping unsupported device `{device}`")
 
         prompt = "I am in Paris and"
