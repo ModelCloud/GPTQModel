@@ -43,7 +43,17 @@ def torch_supports_xpu():
 def torch_supports_mps():
     return sys.platform == "darwin" and hasattr(torch, "mps") and torch.mps.is_available()
 
-def normalize_device(type_value: str|DEVICE|torch.device) -> DEVICE:
+def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
+    if isinstance(type_value, int):
+        if torch_supports_cuda():
+            return DEVICE.CUDA
+        elif torch_supports_xpu():
+            return DEVICE.XPU
+        elif torch_supports_mps():
+            return DEVICE.MPS
+        else:
+            return DEVICE.CPU
+
     if isinstance(type_value, torch.device):
         type_value = type_value.type
 

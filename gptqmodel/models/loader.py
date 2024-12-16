@@ -28,6 +28,7 @@ from ._const import DEVICE, SUPPORTED_MODELS, torch_supports_xpu, torch_supports
 
 logger = setup_logger()
 
+
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -71,6 +72,7 @@ def check_versions(model_id_or_path: str, requirements: List[str]):
                 raise ValueError(f"{model_id_or_path} requires version {req}, but current {pkg} version is {installed_version} ")
         except PackageNotFoundError:
             raise ValueError(f"{model_id_or_path} requires version {req}, but {pkg} not installed.")
+
 
 def ModelLoader(cls):
     @classmethod
@@ -153,16 +155,7 @@ def ModelLoader(cls):
             **kwargs,
     ):
         # TODO need to normalize backend and others in a unified api
-        if device is None and device_map is not None:
-            devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
-            devices = {normalize_device(device) for device in devices}
-            if len(devices) == 1:
-                d = devices.pop()
-                if d in DEVICE:
-                    device = d
-            elif len(devices) > 1:
-                devices.discard(DEVICE.CPU)
-                device = devices.pop()
+        device = parse_device_map(device, device_map)
 
         # auto device if none is passed
         if device is None and device_map is None:
@@ -538,6 +531,19 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_id_or_path=model_id_or_path,
         )
+
+    def parse_device_map(device, device_map) -> Optional[DEVICE]:
+        if device is None and device_map is not None:
+            devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
+            devices = {normalize_device(device) for device in devices}
+            if len(devices) == 1:
+                d = devices.pop()
+                if d in DEVICE:
+                    device = d
+            elif len(devices) > 1:
+                devices.discard(DEVICE.CPU)
+                device = devices.pop()
+        return device
 
     cls.from_quantized = from_quantized
 
