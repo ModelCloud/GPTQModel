@@ -497,6 +497,9 @@ class BaseGPTQModel(nn.Module):
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
 
+            if get_device(layer) == CPU and best_device != CPU:
+                move_to(layer, best_device)
+
             cur_layer_device = get_device(layer)
             full = find_layers(layer)
             for names in layer_modules:
