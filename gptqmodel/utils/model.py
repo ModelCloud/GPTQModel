@@ -130,6 +130,7 @@ def make_quant(
         format=format,
         pack=pack,
         dynamic=dynamic,
+        device=device,
     )
 
     if pack:
