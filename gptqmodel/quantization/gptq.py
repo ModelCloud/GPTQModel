@@ -3,6 +3,7 @@
 
 import math
 import os
+import sys
 import time
 
 import torch
@@ -78,6 +79,9 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
+        if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
+            raise RuntimeError("You're running quant on darwin, please set the PYTORCH_ENABLE_MPS_FALLBACK environment variable, otherwise torch will throw an error.")
+
         W = self.layer.weight.data.clone()
 
         if isinstance(self.layer, nn.Conv2d):
