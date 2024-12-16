@@ -152,10 +152,6 @@ def ModelLoader(cls):
             **kwargs,
     ):
         # TODO need to normalize backend and others in a unified api
-        if device_map is not None:
-            devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
-            if "cpu" in devices or torch.device("cpu") in devices:
-                backend = BACKEND.IPEX
 
         # auto device if none is passed
         if device is None and device_map is None:
