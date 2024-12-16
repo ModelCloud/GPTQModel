@@ -45,7 +45,7 @@ def torch_supports_mps():
 
 def normalize_device(type_value: str|DEVICE|torch.device) -> DEVICE:
     if isinstance(type_value, torch.device):
-        return type_value.type
+        type_value = type_value.type
 
     if isinstance(type_value, DEVICE):
         return type_value
