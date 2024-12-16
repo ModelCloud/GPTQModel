@@ -394,8 +394,7 @@ def ModelLoader(cls):
 
         if not isinstance(device_map, dict):
             if device is not None:
-                device = torch.device(device)
-                device_map = {"": device.index if device.type in [DEVICE.CUDA, DEVICE.XPU] else device.type}
+                device_map = {"": 0 if device in [DEVICE.CUDA, DEVICE.XPU, DEVICE.MPS] else DEVICE.CPU}
             else:
                 device_map = accelerate.infer_auto_device_map(
                     model,
