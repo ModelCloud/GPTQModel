@@ -1,8 +1,9 @@
 # -- do not touch
 import os
+import sys
 
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-
+if sys.platform == "darwin":
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import contextlib  # noqa: E402
@@ -14,6 +15,7 @@ import unittest  # noqa: E402
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402

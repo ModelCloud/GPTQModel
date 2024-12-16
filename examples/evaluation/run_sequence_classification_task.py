@@ -3,7 +3,7 @@ from functools import partial
 
 import datasets
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig, get_backend
+from gptqmodel import GPTQModel, QuantizeConfig, BACKEND
 from gptqmodel.eval_tasks import SequenceClassificationTask
 from transformers import AutoTokenizer
 
@@ -70,7 +70,7 @@ def main():
     del model
     torch.cuda.empty_cache()
 
-    model = GPTQModel.from_quantized(args.quantized_model_dir, device=device, backend=get_backend(args.backend))
+    model = GPTQModel.from_quantized(args.quantized_model_dir, device=device, backend=BACKEND(args.backend.lower()))
     task.model = model
     task.device = model.device
     print(f"eval result for quantized model: {task.run()}")

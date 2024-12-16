@@ -2,7 +2,7 @@ import argparse
 import os
 
 import torch
-from gptqmodel.utils import Perplexity, get_backend
+from gptqmodel.utils import Perplexity
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -51,14 +51,14 @@ if __name__ == "__main__":
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if args.is_quantized:
-        from gptqmodel import GPTQModel
+        from gptqmodel import GPTQModel, BACKEND
 
         model = GPTQModel.load(
             args.model_name,
             device_map="auto",
             model_basename=args.model_basename,
             trust_remote_code=args.trust_remote_code,
-            backend=get_backend(args.backend),
+            backend=BACKEND(args.backend.lower()),
         )
     else:
         from transformers import AutoModelForCausalLM

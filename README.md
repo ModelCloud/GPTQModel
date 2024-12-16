@@ -9,7 +9,7 @@
 </p>
 
 ## News
-* 12/15/2024 1.4.2-dev: MacOS support added/validated with `cpu` + `Torch` kernel. 
+* 12/15/2024 1.4.2-dev: MacOS `gpu` (Metal) and `cpu` support added/validated via the  `Torch` kernel. 
 * 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` api added to allow Transformers/Optimum/PEFT and vLLM to correctly loaded GPTQModel quantized models while upstream PRs are in pending status. 
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
 
@@ -104,7 +104,7 @@ GPTQModel is validated for Linux x86_64 with the following devices:
 | Linux           | Nvidia GPU    | ✅       | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
 | Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
 | Linux | Intel XPU     | ✅             |   Intel Arc + Datacenter Max | IPEX, Torch |
-| MacOS | CPU           | ✅             |   M1+ | Torch |
+| MacOS | GPU (Metal) and CPU           | ✅             |   M1+ | Torch |
 
 
 ## Install

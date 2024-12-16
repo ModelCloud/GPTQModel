@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 import torch
 from datasets import Dataset, load_dataset
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.utils.progress import ProgressBar
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
@@ -244,7 +244,7 @@ def main():
         quantize_config=quantize_config,
         trust_remote_code=args.trust_remote_code,
         use_fast_tokenizer=args.use_fast_tokenizer,
-        backend=get_backend(args.backend),
+        backend=BACKEND(args.backend.lower()),
     )
     end = time.time()
     logger.info(f"model and tokenizer loading time: {end - start:.4f}s")

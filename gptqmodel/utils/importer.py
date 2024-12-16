@@ -3,6 +3,7 @@ from typing import Dict, Optional, Type, Union
 
 import torch
 
+from . import BACKEND
 from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -15,7 +16,6 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
-from .backend import BACKEND, get_backend
 
 message_logged = False
 logger = setup_logger()
@@ -52,7 +52,7 @@ def hf_select_quant_linear(
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
     if isinstance(backend, str):
-        backend = get_backend(backend)
+        backend = BACKEND(backend.lower())
 
     if device_map is not None:
         devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
@@ -92,12 +92,6 @@ def select_quant_linear(
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
 ) -> Type[BaseQuantLinear]:
-    if not torch.cuda.is_available():
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            device = DEVICE.XPU
-        else:
-            device = DEVICE.CPU
-
     backend = BACKEND.AUTO if backend is None else backend
 
     # Handle the case where backend is AUTO.
@@ -152,8 +146,8 @@ def select_quant_linear(
     elif backend == BACKEND.CUDA:
         return DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
-        from ..nn_modules.qlinear.ipex import IPEX_AVAILABLE
-        if not IPEX_AVAILABLE:
+        from ..nn_modules.qlinear.ipex import HAS_IPEX
+        if not HAS_IPEX:
             raise ValueError("IPEX is not available.")
 
         from device_smi import Device

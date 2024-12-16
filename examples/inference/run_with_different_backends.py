@@ -3,7 +3,7 @@ import subprocess
 import sys
 from argparse import ArgumentParser
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_backend, get_best_device
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX', 'SGLANG', 'VLLM'])
     args = parser.parse_args()
 
-    backend = get_backend(args.backend)
+    backend = BACKEND(args.backend.lower())
     device = get_best_device(backend)
 
     if backend == BACKEND.SGLANG:

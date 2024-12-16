@@ -2,9 +2,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch.nn as nn
 
-from ...models._const import DEVICE, get_device_by_type
-from ...utils.device import check_cuda
-
+from ...models._const import DEVICE, normalize_device
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -25,9 +23,6 @@ class BaseQuantLinear(nn.Module):
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures)
         if err:
             raise err
-
-        if len(self.SUPPORTS_DEVICES) == 1 and DEVICE.CUDA in self.SUPPORTS_DEVICES:
-            check_cuda()
 
     @classmethod
     # custom quant linear class can override this and add custom checks
@@ -155,11 +150,11 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device: Union[DEVICE, str]):
-        device = get_device_by_type(device) if isinstance(device, str) else device
+    def validate_device(cls, device: DEVICE):
+        dev = normalize_device(device)
 
-        if device not in cls.SUPPORTS_DEVICES:
-            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}` bits: actual device = `{device}`")
+        if dev not in cls.SUPPORTS_DEVICES:
+            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{dev}`")
 
     # override me
     def post_init(self):

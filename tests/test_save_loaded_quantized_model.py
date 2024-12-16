@@ -24,7 +24,7 @@ class TestSave(unittest.TestCase):
             (BACKEND.IPEX),
         ]
     )
-    def test_save(self, backend):
+    def test_save(self, backend: BACKEND):
         prompt = "I am in Paris and"
         device = get_best_device(backend)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)

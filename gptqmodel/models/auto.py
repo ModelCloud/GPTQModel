@@ -133,7 +133,7 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-            device: Optional[Union[str, int]] = None,
+            device: Optional[Union[str, torch.device]] = None,
             backend: BACKEND = BACKEND.AUTO,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
@@ -160,7 +160,8 @@ class GPTQModel:
                             is_quantized = True
                             break
 
-        if not device and not device_map:
+        # TODO fix me...unify device + device_map auto logic
+        if not device and not device_map or device_map == "auto":
             device = get_best_device()
 
         if is_quantized:
@@ -195,7 +196,7 @@ class GPTQModel:
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        if quantize_config.dynamic:
+        if quantize_config and quantize_config.dynamic:
             logger.warning("GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)

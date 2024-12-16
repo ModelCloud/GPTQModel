@@ -25,7 +25,7 @@ class TorchQuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU, DEVICE.CUDA]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU, DEVICE.CUDA, DEVICE.MPS]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"

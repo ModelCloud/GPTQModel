@@ -7,8 +7,9 @@ import operator
 import os
 import re
 import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import threadpoolctl as tctl
@@ -20,7 +21,7 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -117,6 +118,8 @@ def make_quant(
     sym: bool = True,
     pack: bool = False,
     dynamic=None,
+    device: DEVICE = None,
+    from_quantized: bool = False,
 ) -> BaseQuantLinear:
     QuantLinear = select_quant_linear(
         bits=bits,
@@ -140,7 +143,7 @@ def make_quant(
             if linear is not QuantLinear:
                 logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
@@ -150,13 +153,12 @@ def make_quant(
     raise ValueError("no support quant linear was found for this module.")
 
 
-def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym) -> BaseQuantLinear:
+def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
     for name, submodule in module.named_modules():
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
-
             if isinstance(submodule, nn.Linear):
                 in_features = submodule.in_features
                 out_features = submodule.out_features
@@ -173,9 +175,9 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
+            # when load a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
-            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
-                                          infeatures=in_features, outfeatures=out_features)
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, device=device)
             if err is not None:
                 raise err
 
@@ -340,7 +342,6 @@ def pack_model(
     format: str | FORMAT,
     desc_act=False,
     sym: bool = True,
-    force_layer_back_to_cpu: bool = False,
     dynamic=None,
     parallel_packing: bool = True,
 ):
@@ -355,8 +356,7 @@ def pack_model(
         pack=True,
     )
 
-    if force_layer_back_to_cpu:
-        model.to(CPU)
+    model.to(CPU)
 
     logger.info("Packing model...")
 
@@ -675,9 +675,9 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
 
 
 # return the most stable tensor dtype for quantization while minimizing vram
-def auto_dtype_from_config(config: PretrainedConfig, quant_inference: bool = False) -> torch.dtype:
-    # all the gptq inference kernels are float16 only
-    if quant_inference:
+def auto_dtype_from_config(config: PretrainedConfig, device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None, device: Optional[Union[str, int]] = None ) -> torch.dtype:
+    # TODO mps has errors with bfloat16, lock to float16 for now
+    if sys.platform == "darwin" or "mps" in [device, device_map] or (isinstance(device_map, Dict) and "mps" in device_map.values()):
         return torch.float16
 
     dtype = getattr(config, "torch_dtype")
