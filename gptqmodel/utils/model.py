@@ -158,7 +158,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
         return QuantLinear
     for name, submodule in module.named_modules():
         if name in names:
-
+            ori_layer_device = next(submodule.parameters()).device
             if isinstance(submodule, nn.Linear):
                 in_features = submodule.in_features
                 out_features = submodule.out_features
