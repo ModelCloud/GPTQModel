@@ -3,12 +3,14 @@ import unittest
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
+from gptqmodel.integration import integration
+
 
 class TestTransformersIntegration(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        pass
+        integration.patch_hf()
 
     def _test_load_quantized_model_gptq_v1(self, device_map):
         model_id_or_path = "TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ"
