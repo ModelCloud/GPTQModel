@@ -348,7 +348,6 @@ def pack_model(
     format: str | FORMAT,
     desc_act=False,
     sym: bool = True,
-    force_layer_back_to_cpu: bool = False,
     dynamic=None,
     parallel_packing: bool = True,
 ):
@@ -363,8 +362,7 @@ def pack_model(
         pack=True,
     )
 
-    if force_layer_back_to_cpu:
-        model.to(CPU)
+    model.to(CPU)
 
     logger.info("Packing model...")
 

@@ -160,7 +160,8 @@ class GPTQModel:
                             is_quantized = True
                             break
 
-        if not device and not device_map:
+        # TODO fix me...unify device + device_map auto logic
+        if not device and not device_map or device_map == "auto":
             device = get_best_device()
 
         if is_quantized:

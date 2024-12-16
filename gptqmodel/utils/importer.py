@@ -92,12 +92,6 @@ def select_quant_linear(
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
 ) -> Type[BaseQuantLinear]:
-    if not torch.cuda.is_available():
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            device = DEVICE.XPU
-        else:
-            device = DEVICE.CPU
-
     backend = BACKEND.AUTO if backend is None else backend
 
     # Handle the case where backend is AUTO.

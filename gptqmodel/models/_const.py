@@ -1,3 +1,4 @@
+import sys
 from enum import Enum
 
 import torch
@@ -20,7 +21,7 @@ class DEVICE(str, Enum):
 
 
 def torch_supports_cuda(raise_exception: bool = False):
-    has_cuda = hasattr(torch, "cuda") and torch.cuda.is_available()
+    has_cuda = sys.platform != "darwin" and hasattr(torch, "cuda") and torch.cuda.is_available()
 
     if has_cuda:
         at_least_one_cuda_v6 = any(
@@ -37,10 +38,10 @@ def torch_supports_cuda(raise_exception: bool = False):
 
 
 def torch_supports_xpu():
-    return hasattr(torch, "xpu") and torch.xpu.is_available()
+    return sys.platform != "darwin" and hasattr(torch, "xpu") and torch.xpu.is_available()
 
 def torch_supports_mps():
-    return hasattr(torch, "mps") and torch.mps.is_available()
+    return sys.platform == "darwin" and hasattr(torch, "mps") and torch.mps.is_available()
 
 def normalize_device(type_value: str|DEVICE) -> DEVICE:
     if isinstance(type_value, DEVICE):
@@ -60,7 +61,7 @@ def normalize_device(type_value: str|DEVICE) -> DEVICE:
 def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
     if backend == BACKEND.IPEX:
         return XPU_0 if torch_supports_xpu() else CPU
-    elif torch.cuda.is_available():
+    elif torch_supports_cuda():
         return CUDA_0
     elif torch_supports_xpu():
         return XPU_0

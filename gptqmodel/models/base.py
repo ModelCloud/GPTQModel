@@ -195,10 +195,9 @@ class BaseGPTQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
 
+        # TODO FIX ME! not best device, but if user pass device/device_map
+        # use it! else, best-device
         best_device = get_best_device(backend)
-
-        if not torch.cuda.is_available():
-            backend = BACKEND.IPEX
 
         if backend == BACKEND.IPEX:
             self.quantize_config.format = FORMAT.IPEX
@@ -363,7 +362,6 @@ class BaseGPTQModel(nn.Module):
                 group_size=self.quantize_config.group_size,
                 backend=backend,
                 desc_act=self.quantize_config.desc_act,
-                force_layer_back_to_cpu=True,
                 format=self.quantize_config.format,
                 parallel_packing=self.quantize_config.parallel_packing,
             )
@@ -416,10 +414,8 @@ class BaseGPTQModel(nn.Module):
             layer_input_kwargs.append(one_kwargs)
             raise ValueError
 
-        force_layer_back_to_cpu = False
-        if get_device(layers[0]) == CPU and best_device != CPU:
-            layers[0] = layers[0].to(best_device)
-            force_layer_back_to_cpu = True
+        # move layer to target device
+        layers[0] = layers[0].to(best_device)
 
         ori_outside_layer_module_devices = {}
         for module_name in self.base_modules:
@@ -445,7 +441,7 @@ class BaseGPTQModel(nn.Module):
                 pass
         handle.remove()
 
-        move_to(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
+        move_to(layers[0], CPU)
         for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
@@ -499,10 +495,7 @@ class BaseGPTQModel(nn.Module):
                 )
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
-            force_layer_back_to_cpu = False
-            if get_device(layer) == CPU and best_device != CPU:
-                move_to(layer, best_device)
-                force_layer_back_to_cpu = True
+
             cur_layer_device = get_device(layer)
             full = find_layers(layer)
             for names in layer_modules:
@@ -619,10 +612,10 @@ class BaseGPTQModel(nn.Module):
                     logger.info(stat)
 
                     quantizers[f"{self.layers_node}.{i}.{name}"] = (
-                        gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
-                        move_to(g_idx, CPU if force_layer_back_to_cpu else cur_layer_device),
+                        gptq[name].quantizer.to(CPU),
+                        move_to(scale, CPU),
+                        move_to(zero, CPU),
+                        move_to(g_idx, CPU),
                     )
                     gptq[name].free()
 
@@ -654,7 +647,7 @@ class BaseGPTQModel(nn.Module):
 
                 torch.cuda.empty_cache()
 
-            layers[i] = move_to(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+            layers[i] = move_to(layer, CPU)
             del layer
             del gptq
             del layer_inputs
@@ -685,7 +678,6 @@ class BaseGPTQModel(nn.Module):
             group_size=self.quantize_config.group_size,
             backend=backend,
             desc_act=self.quantize_config.desc_act,
-            force_layer_back_to_cpu=force_layer_back_to_cpu,
             format=self.quantize_config.format,
             dynamic=self.quantize_config.dynamic,
             parallel_packing=self.quantize_config.parallel_packing,
