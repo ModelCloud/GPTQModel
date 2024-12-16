@@ -23,7 +23,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
                            get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, torch_supports_xpu, torch_supports_mps, torch_supports_cuda
+from ._const import DEVICE, SUPPORTED_MODELS, torch_supports_xpu, torch_supports_mps, torch_supports_cuda, \
+    normalize_device
 
 logger = setup_logger()
 
@@ -152,6 +153,16 @@ def ModelLoader(cls):
             **kwargs,
     ):
         # TODO need to normalize backend and others in a unified api
+        if device is None and device_map is not None:
+            devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
+            devices = {normalize_device(device) for device in devices}
+            if len(devices) == 1:
+                d = devices.pop()
+                if d in DEVICE:
+                    device = d
+            elif len(devices) > 1:
+                devices.discard(DEVICE.CPU)
+                device = devices.pop()
 
         # auto device if none is passed
         if device is None and device_map is None:
@@ -370,6 +381,7 @@ def ModelLoader(cls):
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
+                device=device,
             )
             if preload_qlinear_kernel == IPEXQuantLinear:
                 quantize_config.runtime_format = FORMAT.IPEX
@@ -497,6 +509,7 @@ def ModelLoader(cls):
             sym=quantize_config.sym,
             backend=backend,
             format=quantize_config.format,
+            device=device,
         )
 
         # == step4: set seqlen == #
