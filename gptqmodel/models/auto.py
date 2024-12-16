@@ -116,6 +116,7 @@ MODEL_MAP = {
 
 HAS_IPEX = False
 try:
+    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
     HAS_IPEX = True
 except Exception:
     pass
