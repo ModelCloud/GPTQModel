@@ -158,15 +158,15 @@ def ModelLoader(cls):
         # auto device if none is passed
         if device is None and device_map is None:
             if backend == BACKEND.IPEX:
-                device = "xpu" if torch_supports_xpu() else "cpu"
+                device = DEVICE.XPU if torch_supports_xpu() else DEVICE.CPU
             elif torch_supports_cuda():
-                device = "cuda"
+                device = DEVICE.CUDA
             elif torch_supports_xpu():
-                device = "xpu"
+                device = DEVICE.XPU
             elif torch_supports_mps():
-                device = "mps"
+                device = DEVICE.MPS
             else:
-                device = "cpu"
+                device = DEVICE.CPU
 
         if backend == BACKEND.VLLM:
             import os
