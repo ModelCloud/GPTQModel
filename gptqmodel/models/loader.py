@@ -23,7 +23,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
                            get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, torch_supports_xpu, torch_supports_mps, torch_supports_cuda
+from ._const import DEVICE, SUPPORTED_MODELS, get_best_device, torch_supports_xpu, torch_supports_cuda, torch_supports_mps
 
 logger = setup_logger()
 
@@ -158,15 +158,19 @@ def ModelLoader(cls):
         # auto device if none is passed
         if device is None and device_map is None:
             if backend == BACKEND.IPEX:
-                device = DEVICE.XPU if torch_supports_xpu() else DEVICE.CPU
+                m_device = "xpu" if torch_supports_xpu() else "cpu"
             elif torch_supports_cuda():
-                device = DEVICE.CUDA
+                m_device = "cuda"
             elif torch_supports_xpu():
-                device = DEVICE.XPU
+                m_device = "xpu"
             elif torch_supports_mps():
-                device = DEVICE.MPS
+                m_device = "mps"
             else:
-                device = DEVICE.CPU
+                m_device = "cpu"
+        elif isinstance(device, str):
+            m_device = torch.device(device).type
+        else:
+            m_device = get_best_device(backend).type
 
         if backend == BACKEND.VLLM:
             import os
@@ -372,6 +376,8 @@ def ModelLoader(cls):
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
+                device=m_device,
+                from_quantized=True,
             )
             if preload_qlinear_kernel == IPEXQuantLinear:
                 quantize_config.runtime_format = FORMAT.IPEX
