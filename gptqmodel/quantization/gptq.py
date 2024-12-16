@@ -3,6 +3,7 @@
 
 import math
 import os
+import sys
 import time
 
 import torch
@@ -78,6 +79,10 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
+        # TODO: waiting for pytorch implementgation of aten ops for MPS
+        if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
+            raise  RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
+
         W = self.layer.weight.data.clone()
 
         if isinstance(self.layer, nn.Conv2d):
