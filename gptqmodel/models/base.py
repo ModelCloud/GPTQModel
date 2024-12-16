@@ -21,7 +21,7 @@ from ..utils.model import (check_to_quantized, find_layers, get_device, get_modu
                            get_module_by_name_suffix, get_moe_layer_modules, move_to,
                            nested_move_to, pack_model, simple_dispatch_model)
 from ..utils.progress import ProgressBar
-from ._const import CPU, get_best_device
+from ._const import CPU, get_best_device, DEVICE
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
 
@@ -236,6 +236,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
+            device=DEVICE(best_device.type),
             pack=True,
             format=self.quantize_config.format,
         )
