@@ -21,7 +21,7 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -118,6 +118,8 @@ def make_quant(
     sym: bool = True,
     pack: bool = False,
     dynamic=None,
+    device: DEVICE = None,
+    from_quantized: bool = False,
 ) -> BaseQuantLinear:
     QuantLinear = select_quant_linear(
         bits=bits,
@@ -141,7 +143,7 @@ def make_quant(
             if linear is not QuantLinear:
                 logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym)
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device, from_quantized)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
@@ -151,12 +153,11 @@ def make_quant(
     raise ValueError("no support quant linear was found for this module.")
 
 
-def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym) -> BaseQuantLinear:
+def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device, from_quantized) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
     for name, submodule in module.named_modules():
         if name in names:
-            ori_layer_device = next(submodule.parameters()).device
 
             if isinstance(submodule, nn.Linear):
                 in_features = submodule.in_features
@@ -174,8 +175,11 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
+            if not from_quantized and device != DEVICE.CPU:
+                device = None
+
             # check in_features and out_features validate
-            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features)
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, device=device)
             if err is not None:
                 raise err
 
