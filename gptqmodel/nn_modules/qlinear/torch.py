@@ -247,7 +247,7 @@ class TorchQuantLinear(BaseQuantLinear):
             weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
 
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-        
+
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         if num_itr == 1:
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])

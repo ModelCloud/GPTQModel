@@ -3,6 +3,7 @@ def patch_vllm():
 
     from vllm.model_executor.layers import quantization
     from vllm.model_executor.layers.quantization import gptq_marlin
+
     from .src.vllm import gptq_marlin as gptqmodel_marlin
 
     # vllm 0.6.4 refactored the quantization methods to be a list
@@ -16,8 +17,8 @@ def patch_vllm():
             from vllm.model_executor.layers.quantization.awq import AWQConfig
             from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
             from vllm.model_executor.layers.quantization.bitsandbytes import BitsAndBytesConfig
-            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-                CompressedTensorsConfig)
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
+                CompressedTensorsConfig  # noqa: E501
             from vllm.model_executor.layers.quantization.deepspeedfp import DeepSpeedFPConfig
             from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
             from vllm.model_executor.layers.quantization.fbgemm_fp8 import FBGEMMFp8Config
