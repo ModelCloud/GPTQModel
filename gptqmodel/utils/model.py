@@ -143,7 +143,7 @@ def make_quant(
             if linear is not QuantLinear:
                 logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device, from_quantized)
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
@@ -153,7 +153,7 @@ def make_quant(
     raise ValueError("no support quant linear was found for this module.")
 
 
-def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device, from_quantized) -> BaseQuantLinear:
+def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
     for name, submodule in module.named_modules():
@@ -176,12 +176,6 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
             # when load a quantized model, device is target device passed in GPTQModel.load()
-            if not from_quantized and device != DEVICE.CPU:
-                device = None
-            else:
-                # after quantization, validate layer is on correct device
-                device = ori_layer_device
-
             # check in_features and out_features validate
             _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, device=device)
             if err is not None:
@@ -363,8 +357,8 @@ def pack_model(
         pack=True,
     )
 
-    if force_layer_back_to_cpu:
-        model.to(CPU)
+    # if force_layer_back_to_cpu: 100% True
+    model.to(CPU)
 
     logger.info("Packing model...")
 
