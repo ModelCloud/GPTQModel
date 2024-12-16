@@ -79,6 +79,7 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
+        # TODO: waiting for pytorch implementgation of aten ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("You're running quant on darwin, please set the PYTORCH_ENABLE_MPS_FALLBACK environment variable, otherwise torch will throw an error.")
 
