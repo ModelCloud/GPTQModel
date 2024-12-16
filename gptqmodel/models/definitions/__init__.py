@@ -3,6 +3,7 @@ from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
 from .codegen import CodeGenGPTQ
 from .cohere import CohereGPTQ
+from .cohere2 import Cohere2GPTQ
 from .dbrx import DbrxGPTQ
 from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ

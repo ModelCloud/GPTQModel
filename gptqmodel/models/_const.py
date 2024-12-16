@@ -70,6 +70,7 @@ SUPPORTED_MODELS = [
     "gemma2",
     "starcoder2",
     "cohere",
+    "cohere2",
     "minicpm",
     "minicpm3"
     "qwen2_moe",

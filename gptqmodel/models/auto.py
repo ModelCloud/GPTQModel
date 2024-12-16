@@ -19,6 +19,7 @@ from .definitions.bloom import BloomGPTQ
 from .definitions.chatglm import ChatGLM
 from .definitions.codegen import CodeGenGPTQ
 from .definitions.cohere import CohereGPTQ
+from .definitions.cohere2 import Cohere2GPTQ
 from .definitions.dbrx import DbrxGPTQ
 from .definitions.dbrx_converted import DbrxConvertedGPTQ
 from .definitions.decilm import DeciLMGPTQ
@@ -75,6 +76,7 @@ MODEL_MAP = {
     "gpt_bigcode": GPTBigCodeGPTQ,
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
+    "cohere2": Cohere2GPTQ,
     "RefinedWebModel": RWGPTQ,
     "RefinedWeb": RWGPTQ,
     "falcon": RWGPTQ,
