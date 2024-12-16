@@ -154,6 +154,9 @@ def ModelLoader(cls):
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if device is not None:
+            device = normalize_device(device)
+
         # TODO need to normalize backend and others in a unified api
         device = parse_device_map(device, device_map)
 
