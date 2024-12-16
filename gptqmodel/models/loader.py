@@ -172,6 +172,11 @@ def ModelLoader(cls):
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if device_map is not None:
+            devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
+            if "cpu" in devices or torch.device("cpu") in devices:
+                backend = BACKEND.IPEX
+
         if backend == BACKEND.VLLM:
             import os
 
