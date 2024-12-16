@@ -68,12 +68,7 @@ def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
     if not isinstance(type_value, str):
         raise ValueError(f"Invalid device type_value type: {type(type_value)}")
 
-    type_value = type_value.lower()
-
-    for enum_constant in DEVICE: # type: DEVICE
-        if enum_constant.startswith(type_value):
-            return enum_constant
-    raise ValueError(f"Invalid type_value str: {type_value}")
+    return DEVICE(type_value.lower())
 
 
 def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
