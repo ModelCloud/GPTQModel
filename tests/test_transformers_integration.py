@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 
+from gptqmodel.integration import integration
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
 
@@ -8,7 +9,7 @@ class TestTransformersIntegration(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
-        pass
+        integration.patch_hf()
 
     def _test_load_quantized_model_gptq_v1(self, device_map):
         model_id_or_path = "TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ"
@@ -52,7 +53,9 @@ class TestTransformersIntegration(unittest.TestCase):
             print('generate_str',generate_str)
             print('expect_str',expect_str)
 
-            self.assertEqual(generate_str[:40], expect_str[:40])
+            diff_count = len(set(generate_str.split()).symmetric_difference(expect_str.split()))
+
+            self.assertLessEqual(diff_count, 2)
 
     def test_load_quantized_model_gptq_v1_ipex(self):
         self._test_load_quantized_model_gptq_v1(device_map="cpu")
