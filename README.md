@@ -83,17 +83,17 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |     |
-| ---------------- | --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- |
+|------------------| --- | -------------- | --- | ---------------- | --- | ---------- | --- | --- |
 | Baichuan         | ✅   | Falcon         | ✅   | Llama 1-3.3      | ✅   | OLMo2      | 🚀  |     |
-| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi 1-4     | 🚀  |     |
+| Bloom            | ✅   | Gemma 2        | 🚀  | Llama 3.2 Vision | 🚀  | Phi 1-4  | 🚀  |     |
 | ChatGLM          | 🚀  | GPTBigCod      | ✅   | LongLLaMA        | ✅   | Qwen       | ✅   |     |
 | CodeGen          | ✅   | GPTNeoX        | ✅   | MiniCPM3         | ✅   | Qwen2MoE   | 🚀  |     |
-| Cohere           | ✅   | GPT-2          | ✅   | Mistral          | ✅   | Qwen2VL    | 🚀  |     |
-| Cohere2          | 🚀  | Granite        | 🚀  | MobileLLM        | 🚀  | RefinedWeb | ✅   |     |
-| DBRX Converted   | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | StableLM   | ✅   |     |
-| Deci             | ✅   | Hymba          | 🚀  | MPT              | ✅   | StarCoder2 | ✅   |     |
-| DeepSeek-V2      | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | XVERSE     | ✅   |     |
-| DeepSeek-V2-Lite | 🚀  | EXAONE 3.0     | 🚀  | Yi               | ✅   |            |     |     |
+| Cohere 1-2       | ✅   | GPT-2          | ✅   | Mistral          | ✅   | Qwen2VL    | 🚀  |     |
+| DBRX Converted   | 🚀  | GPT-J          | ✅   | Mixtral          | ✅   | RefinedWeb | ✅   |     |
+| Deci             | ✅   | Granite        | 🚀  | MobileLLM        | 🚀  | StableLM   | ✅   |     |
+| DeepSeek-V2      | 🚀  | GRIN-MoE       | 🚀  | MOSS             | ✅   | StarCoder2 | ✅   |     |
+| DeepSeek-V2-Lite | 🚀  | Hymba          | 🚀  | MPT              | ✅   | XVERSE     | ✅   |     |
+| EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | Yi         | ✅   |     |
 
 
 ## Kernel and HW Accelerator Support 
