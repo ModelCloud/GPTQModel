@@ -47,6 +47,11 @@ def normalize_device(type_value: str|DEVICE|torch.device) -> DEVICE:
     if isinstance(type_value, torch.device):
         type_value = type_value.type
 
+    # remove device index
+    split_results = [s.strip() for s in type_value.split(":") if s]
+    if len(split_results) == 2:
+        type_value = split_results[0]
+
     if isinstance(type_value, DEVICE):
         return type_value
 
