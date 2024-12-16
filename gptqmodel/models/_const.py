@@ -51,8 +51,8 @@ def normalize_device(type_value: str|DEVICE) -> DEVICE:
 
     type_value = type_value.lower()
 
-    for enum_constant in DEVICE:
-        if enum_constant.value.startswith(type_value):
+    for enum_constant in DEVICE: # type: DEVICE
+        if enum_constant.startswith(type_value):
             return enum_constant
     raise ValueError(f"Invalid type_value str: {type_value}")
 
