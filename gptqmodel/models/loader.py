@@ -220,7 +220,7 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if torch_dtype is None or torch_dtype == "auto":
+        if torch_dtype is None or torch_dtype == "auto" or device == DEVICE.XPU:
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             torch_dtype = torch.float16
             # auto_dtype_from_config(config=config, device=device, device_map=device_map)
