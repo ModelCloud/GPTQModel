@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import sys
 
+# TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
