@@ -118,12 +118,12 @@ def select_quant_linear(
                     check_pack_func = hasattr(v, "pack")
                     if check_pack_func:
                         if not message_logged:
-                            logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                            logger.info(f"Auto pick kernel based on compatibility: {v}")
                             message_logged = True
                         return v
                 else:
                     if not message_logged:
-                        logger.info(f"Auto choose the fastest one based on quant model compatibility: {v}")
+                        logger.info(f"Auto pick kernel based on compatibility: {v}")
                         message_logged = True
                     return v
 

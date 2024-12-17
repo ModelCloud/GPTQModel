@@ -12,6 +12,7 @@ import transformers
 
 from ..utils.logger import setup_logger
 from .quantizer import Quantizer
+from ..utils.torch import torch_sync, torch_empty_cache
 
 logger = setup_logger()
 
@@ -70,7 +71,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     @torch.inference_mode()
-    def fasterquant(
+    def quantize(
         self,
         blocksize=128,
         percdamp=0.01,
@@ -81,7 +82,7 @@ class GPTQ:
     ):
         # TODO: waiting for pytorch implementgation of aten ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-            raise  RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
+            raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         W = self.layer.weight.data.clone()
 
@@ -202,10 +203,7 @@ class GPTQ:
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        if self.dev.type == "cuda":
-            torch.cuda.synchronize()
-        elif self.dev.type == "xpu":
-            torch.xpu.synchronize()
+        torch_sync(self.dev)
 
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
@@ -230,7 +228,10 @@ class GPTQ:
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
 
-        self.layer.weight.data = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+        if Q.shape != self.layer.weight.shape:
+            self.layer.weight.data = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+        else:
+            self.layer.weight.data = Q.type_as(self.layer.weight.data)
 
         if os.environ.get("DEBUG"):
             logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
@@ -253,10 +254,7 @@ class GPTQ:
         self.Losses = None
         self.Trace = None
 
-        if self.dev.type == "cuda":
-            torch.cuda.empty_cache()
-        elif self.dev.type == "xpu":
-            torch.xpu.empty_cache()
+        torch_empty_cache(self.dev)
 
 
 __all__ = ["GPTQ"]

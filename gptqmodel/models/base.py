@@ -245,8 +245,8 @@ class BaseGPTQModel(nn.Module):
         min_calibration_dataset_input_ids_avg_length = 256
 
         if len(calibration_dataset) < min_calibration_dataset_size:
-            logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
-                           f"Current size: {len(calibration_dataset)}.")
+            logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                           f"Current: {len(calibration_dataset)}.")
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
@@ -583,7 +583,7 @@ class BaseGPTQModel(nn.Module):
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
 
-                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].fasterquant(
+                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
                         percdamp=self.quantize_config.damp_percent,
                         group_size=group_size,
                         actorder=desc_act,
