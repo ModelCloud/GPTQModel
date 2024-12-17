@@ -16,7 +16,7 @@ from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.importer import select_quant_linear
+from ..utils.importer import select_quant_linear, select_device
 from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
@@ -158,20 +158,7 @@ def ModelLoader(cls):
             device = normalize_device(device)
 
         # TODO need to normalize backend and others in a unified api
-        device = parse_device_map(device, device_map)
-
-        # auto device if none is passed
-        if device is None and device_map is None:
-            if backend == BACKEND.IPEX:
-                device = DEVICE.XPU if HAS_XPU else DEVICE.CPU
-            elif HAS_CUDA:
-                device = DEVICE.CUDA
-            elif HAS_XPU:
-                device = DEVICE.XPU
-            elif HAS_MPS:
-                device = DEVICE.MPS
-            else:
-                device = DEVICE.CPU
+        device = select_device(device, device_map, backend)
 
         if backend == BACKEND.VLLM:
             import os
@@ -533,19 +520,6 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_id_or_path=model_id_or_path,
         )
-
-    def parse_device_map(device, device_map) -> Optional[DEVICE]:
-        if device is None and device_map is not None:
-            devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
-            devices = {normalize_device(device) for device in devices}
-            if len(devices) == 1:
-                d = devices.pop()
-                if d in DEVICE:
-                    device = d
-            elif len(devices) > 1:
-                devices.discard(DEVICE.CPU)
-                device = devices.pop()
-        return device
 
     cls.from_quantized = from_quantized
 
