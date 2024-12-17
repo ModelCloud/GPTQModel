@@ -139,7 +139,6 @@ class ModelTest(unittest.TestCase):
 
         if not is_quantized:
             del model
-            gc.collect()
             torch_empty_cache()
             return q_model, q_tokenizer
         else:

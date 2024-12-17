@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import gc as py_gc
 
 
 def torch_sync(device: torch.device):
@@ -11,7 +12,10 @@ def torch_sync(device: torch.device):
     elif device.type == "mps":
         torch.mps.synchronize()
 
-def torch_empty_cache(device: torch.device = None):
+def torch_empty_cache(device: torch.device = None, gc: bool = True):
+    if gc:
+        py_gc.collect()
+
     # check all backends
     if device is None:
         torch.cuda.empty_cache()

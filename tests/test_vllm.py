@@ -44,7 +44,6 @@ class TestLoadVLLM(unittest.TestCase):
         from vllm.distributed.parallel_state import destroy_model_parallel  # noqa: E402
 
         destroy_model_parallel()
-        gc.collect()
         torch_empty_cache()
 
     def test_load_vllm(self):

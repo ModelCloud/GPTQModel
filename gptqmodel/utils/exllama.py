@@ -46,7 +46,6 @@ def exllama_set_max_input_length(model, max_input_length: int):
     model.device_to_buffers = None
     del model.device_to_buffers
 
-    gc.collect()
     torch_empty_cache()
     cleanup_buffers_cuda()
 
