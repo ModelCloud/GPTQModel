@@ -25,6 +25,7 @@ from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
                            get_model_files_size, get_moe_layer_modules, make_quant)
+from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU
 
@@ -359,7 +360,7 @@ def ModelWriter(cls):
             # offload_state_dict=True,
             # offload_buffers=True,
         )
-        torch.cuda.empty_cache()
+        torch_empty_cache()
         return model
 
     cls.get_model_with_quantize = get_model_with_quantize

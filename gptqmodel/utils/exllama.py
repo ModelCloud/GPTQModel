@@ -2,6 +2,7 @@ import gc
 
 import torch
 
+from .torch import torch_empty_cache
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 
 
@@ -46,7 +47,7 @@ def exllama_set_max_input_length(model, max_input_length: int):
     del model.device_to_buffers
 
     gc.collect()
-    torch.cuda.empty_cache()
+    torch_empty_cache()
     cleanup_buffers_cuda()
 
     device_to_buffers = {}

@@ -1,6 +1,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.utils.torch import torch_empty_cache
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -90,7 +92,7 @@ class TestQuantization(unittest.TestCase):
                     assert _version == __version__
 
             del model
-            torch.cuda.empty_cache()
+            torch_empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
             if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
@@ -113,5 +115,5 @@ class TestQuantization(unittest.TestCase):
             assert isinstance(model.quantize_config, QuantizeConfig)
 
             del model
-            torch.cuda.empty_cache()
+            torch_empty_cache()
 

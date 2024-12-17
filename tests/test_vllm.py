@@ -5,6 +5,8 @@ import tempfile
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from transformers import AutoTokenizer
 
+from gptqmodel.utils.torch import torch_empty_cache
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -43,7 +45,7 @@ class TestLoadVLLM(unittest.TestCase):
 
         destroy_model_parallel()
         gc.collect()
-        torch.cuda.empty_cache()
+        torch_empty_cache()
 
     def test_load_vllm(self):
         model = GPTQModel.load(

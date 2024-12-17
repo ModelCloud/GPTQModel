@@ -2,6 +2,8 @@
 import os
 import sys
 
+from gptqmodel.utils.torch import torch_empty_cache
+
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -138,7 +140,7 @@ class ModelTest(unittest.TestCase):
         if not is_quantized:
             del model
             gc.collect()
-            torch.cuda.empty_cache()
+            torch_empty_cache()
             return q_model, q_tokenizer
         else:
             return model, tokenizer
