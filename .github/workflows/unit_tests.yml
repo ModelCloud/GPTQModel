@@ -571,6 +571,7 @@ jobs:
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+            export CUDA_VISIBLE_DEVICES=""
             source /opt/intel/oneapi/pytorch-gpu-dev-0.5/oneapi-vars.sh
             source $ONEAPI_ROOT/../pti/0.9/env/vars.sh
             export Pti_DIR=$ONEAPI_ROOT/../pti/0.9/lib/cmake/pti
