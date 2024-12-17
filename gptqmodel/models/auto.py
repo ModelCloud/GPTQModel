@@ -66,6 +66,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
+from .definitions.ovis import OvisGPTQ
 
 logger = setup_logger()
 
@@ -118,6 +119,7 @@ MODEL_MAP = {
     "mobilellm": MobileLLMGPTQ,
     "hymba": HymbaGPTQ,
     "olmo2": Olmo2GPTQ,
+    "ovis": OvisGPTQ,
 }
 
 HAS_IPEX = False
