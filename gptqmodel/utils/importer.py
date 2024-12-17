@@ -1,10 +1,11 @@
 from collections import OrderedDict
-from typing import Dict, Optional, Type, Union
+from typing import Dict, Optional, Type, Union, Tuple
 
 import torch
 
 from . import BACKEND
-from ..models._const import DEVICE
+from .torch import HAS_XPU, HAS_CUDA, HAS_MPS
+from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
@@ -39,6 +40,43 @@ format_dict = {
     FORMAT.IPEX: [BACKEND.IPEX],
 }
 
+def parse_device_map(device, device_map) -> Tuple[Optional[DEVICE], bool]:
+    if device is None and device_map is not None:
+        devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
+        normalized_devices = set()
+        for device in devices:
+            print("device", device, type(device))
+            # Returning None means quant linear will be automatically selected.
+            if isinstance(device, str) and device == "auto":
+                return None, True
+            normalized_devices.add(normalize_device(device))
+        if len(normalized_devices) == 1:
+            d = normalized_devices.pop()
+            if d in DEVICE:
+                device = d
+        elif len(normalized_devices) > 1:
+            normalized_devices.discard(DEVICE.CPU)
+            device = normalized_devices.pop()
+    return device, False
+
+
+def select_device(device, device_map, backend) -> Optional[DEVICE]:
+    device, device_map_is_auto = parse_device_map(device, device_map)
+
+    # auto device if none is passed
+    if device is None and (device_map is None or device_map_is_auto):
+        if backend == BACKEND.IPEX:
+            device = DEVICE.XPU if HAS_XPU else DEVICE.CPU
+        elif HAS_CUDA:
+            device = DEVICE.CUDA
+        elif HAS_XPU:
+            device = DEVICE.XPU
+        elif HAS_MPS:
+            device = DEVICE.MPS
+        else:
+            device = DEVICE.CPU
+    return device
+
 # public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
         bits: int,
@@ -55,13 +93,7 @@ def hf_select_quant_linear(
         backend = BACKEND(backend.lower())
 
     if device_map is not None:
-        devices = [device_map] if isinstance(device_map, str) else list(device_map.values())
-        if "cpu" in devices or torch.device("cpu") in devices:
-            device = DEVICE.CPU
-        elif "xpu" in devices or torch.device("xpu") in devices:
-            device = DEVICE.XPU
-        else:
-            device = DEVICE.CUDA
+        device = select_device(device=None, device_map=device_map, backend=backend)
     else:
         device = DEVICE.CPU
 
