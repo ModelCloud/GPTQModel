@@ -4,6 +4,7 @@ import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
+from .torch import torch_empty_cache
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -186,7 +187,8 @@ def convert_to_marlin(
         del module
         if repack:
             del marlin_repacked_weight
-        gc.collect()
+
+        torch_empty_cache()
 
     # Set quantization config to be Marlin.
     quantization_config.runtime_format = FORMAT.MARLIN

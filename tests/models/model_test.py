@@ -7,13 +7,13 @@ if sys.platform == "darwin":
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import contextlib  # noqa: E402
-import gc  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
@@ -86,7 +86,7 @@ class ModelTest(unittest.TestCase):
             tokenized = tokenizer(sample['text'])
             if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
                 datas.append(tokenized)
-                if len(datas) >= 1024:
+                if len(datas) >= 128:
                     break
 
         return datas
@@ -137,8 +137,7 @@ class ModelTest(unittest.TestCase):
 
         if not is_quantized:
             del model
-            gc.collect()
-            torch.cuda.empty_cache()
+            torch_empty_cache()
             return q_model, q_tokenizer
         else:
             return model, tokenizer

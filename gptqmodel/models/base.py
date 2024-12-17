@@ -24,6 +24,7 @@ from ..utils.progress import ProgressBar
 from ._const import CPU, get_best_device, DEVICE
 from .loader import ModelLoader
 from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
+from ..utils.torch import torch_empty_cache
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -245,8 +246,8 @@ class BaseGPTQModel(nn.Module):
         min_calibration_dataset_input_ids_avg_length = 256
 
         if len(calibration_dataset) < min_calibration_dataset_size:
-            logger.warning(f"Calibration dataset size should be greater than {min_calibration_dataset_size}. "
-                           f"Current size: {len(calibration_dataset)}.")
+            logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                           f"Current: {len(calibration_dataset)}.")
 
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
@@ -448,7 +449,7 @@ class BaseGPTQModel(nn.Module):
             if module is not None:
                 move_to(module, ori_outside_layer_module_devices[module_name])
 
-        torch.cuda.empty_cache()
+        torch_empty_cache()
 
         layer_modules = self.layer_modules
 
@@ -583,7 +584,7 @@ class BaseGPTQModel(nn.Module):
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
 
-                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].fasterquant(
+                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
                         percdamp=self.quantize_config.damp_percent,
                         group_size=group_size,
                         actorder=desc_act,
@@ -649,7 +650,7 @@ class BaseGPTQModel(nn.Module):
                     )
                     layer_outputs.append([layer_output])
 
-                torch.cuda.empty_cache()
+                torch_empty_cache()
 
             layers[i] = move_to(layer, CPU)
             del layer
@@ -659,7 +660,7 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
-            torch.cuda.empty_cache()
+            torch_empty_cache()
 
         logger.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
@@ -694,7 +695,7 @@ class BaseGPTQModel(nn.Module):
 
         self._quantized = True
 
-        torch.cuda.empty_cache()
+        torch_empty_cache()
 
         return self.quant_log
 

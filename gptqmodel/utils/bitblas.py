@@ -6,6 +6,7 @@ import threadpoolctl as tctl
 import torch
 from accelerate.utils import find_tied_parameters
 
+from .torch import torch_empty_cache
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -128,7 +129,7 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
 
             # Free cuda memory.
             del module
-            gc.collect()
+            torch_empty_cache()
 
     # Set quantization config to be BitBLAS.
     quant_config.runtime_format = FORMAT.BITBLAS

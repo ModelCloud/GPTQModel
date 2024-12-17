@@ -5,6 +5,7 @@ import torch
 from torch import device
 
 from ..utils import BACKEND
+from ..utils.torch import HAS_XPU, HAS_MPS, HAS_CUDA
 
 CPU = device("cpu")
 CUDA = device("cuda")
@@ -20,10 +21,9 @@ class DEVICE(str, Enum):
     MPS = "mps" # MacOS GPU
 
 
-def torch_supports_cuda(raise_exception: bool = False):
-    has_cuda = sys.platform != "darwin" and hasattr(torch, "cuda") and torch.cuda.is_available()
-
-    if has_cuda:
+def validate_cuda_support(raise_exception: bool = False):
+    got_cuda = HAS_CUDA
+    if got_cuda:
         at_least_one_cuda_v6 = any(
             torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
 
@@ -32,24 +32,17 @@ def torch_supports_cuda(raise_exception: bool = False):
                 raise EnvironmentError(
                     "GPTQModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
             else:
-                has_cuda = False
+                got_cuda = False
 
-    return has_cuda
-
-
-def torch_supports_xpu():
-    return sys.platform != "darwin" and hasattr(torch, "xpu") and torch.xpu.is_available()
-
-def torch_supports_mps():
-    return sys.platform == "darwin" and hasattr(torch, "mps") and torch.mps.is_available()
+    return got_cuda
 
 def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
     if isinstance(type_value, int):
-        if torch_supports_cuda():
+        if HAS_CUDA:
             return DEVICE.CUDA
-        elif torch_supports_xpu():
+        elif HAS_XPU:
             return DEVICE.XPU
-        elif torch_supports_mps():
+        elif HAS_MPS:
             return DEVICE.MPS
         else:
             return DEVICE.CPU
@@ -73,12 +66,12 @@ def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
 
 def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
     if backend == BACKEND.IPEX:
-        return XPU_0 if torch_supports_xpu() else CPU
-    elif torch_supports_cuda():
+        return XPU_0 if HAS_XPU else CPU
+    elif HAS_CUDA:
         return CUDA_0
-    elif torch_supports_xpu():
+    elif HAS_XPU:
         return XPU_0
-    elif torch_supports_mps():
+    elif HAS_MPS:
         return MPS
     else:
         return CPU

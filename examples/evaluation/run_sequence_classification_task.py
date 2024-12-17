@@ -7,6 +7,8 @@ from gptqmodel import GPTQModel, QuantizeConfig, BACKEND
 from gptqmodel.eval_tasks import SequenceClassificationTask
 from transformers import AutoTokenizer
 
+from gptqmodel.utils.torch import torch_empty_cache
+
 DATASET = "cardiffnlp/tweet_sentiment_multilingual"
 TEMPLATE = "Question:What's the sentiment of the given text? Choices are {labels}.\nText: {text}\nAnswer:"
 ID2LABEL = {0: "negative", 1: "neutral", 2: "positive"}
@@ -68,7 +70,7 @@ def main():
     task.model = None
     model.cpu()
     del model
-    torch.cuda.empty_cache()
+    torch_empty_cache()
 
     model = GPTQModel.from_quantized(args.quantized_model_dir, device=device, backend=BACKEND(args.backend.lower()))
     task.model = model

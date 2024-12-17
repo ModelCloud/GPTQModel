@@ -7,6 +7,8 @@ from gptqmodel import GPTQModel, QuantizeConfig, BACKEND
 from gptqmodel.eval_tasks import TextSummarizationTask
 from transformers import AutoTokenizer, GenerationConfig
 
+from gptqmodel.utils.torch import torch_empty_cache
+
 os.system("pip install py7zr")
 
 
@@ -66,7 +68,7 @@ def main():
     task.model = None
     model.cpu()
     del model
-    torch.cuda.empty_cache()
+    torch_empty_cache()
 
     model = GPTQModel.load(args.quantized_model_dir, device=device, backend=BACKEND(args.backend.lower()))
     task.model = model

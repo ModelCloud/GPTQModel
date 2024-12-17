@@ -21,6 +21,7 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
+from .torch import torch_empty_cache
 from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
@@ -598,7 +599,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
-    torch.cuda.empty_cache()
+    torch_empty_cache()
 
     # if use_act_order and max_input_length and isinstance(submodule, ExllamaQuantLinear):
     #     model = exllama_set_max_input_length(model, max_input_length)

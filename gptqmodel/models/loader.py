@@ -23,8 +23,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
 from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
                            get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, torch_supports_xpu, torch_supports_mps, torch_supports_cuda, \
-    normalize_device
+from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
+from ..utils.torch import HAS_CUDA, HAS_XPU, HAS_MPS
 
 logger = setup_logger()
 
@@ -163,12 +163,12 @@ def ModelLoader(cls):
         # auto device if none is passed
         if device is None and device_map is None:
             if backend == BACKEND.IPEX:
-                device = DEVICE.XPU if torch_supports_xpu() else DEVICE.CPU
-            elif torch_supports_cuda():
+                device = DEVICE.XPU if HAS_XPU else DEVICE.CPU
+            elif HAS_CUDA:
                 device = DEVICE.CUDA
-            elif torch_supports_xpu():
+            elif HAS_XPU:
                 device = DEVICE.XPU
-            elif torch_supports_mps():
+            elif HAS_MPS:
                 device = DEVICE.MPS
             else:
                 device = DEVICE.CPU
