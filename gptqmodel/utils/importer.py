@@ -45,7 +45,6 @@ def parse_device_map(device, device_map) -> Tuple[Optional[DEVICE], bool]:
         devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
         normalized_devices = set()
         for device in devices:
-            print("device", device, type(device))
             # Returning None means quant linear will be automatically selected.
             if isinstance(device, str) and device == "auto":
                 return None, True
