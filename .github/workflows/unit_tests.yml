@@ -535,7 +535,12 @@ jobs:
 
       - name: Install wheel
         run: |
-          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
+          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+           source /etc/profile.d/pyenv.sh && pyenv activate xpu
+          else
+            bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
+          fi
+
           uv pip install -U intel_extension_for_pytorch typing-extensions bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
             uv pip install auto_round
@@ -564,7 +569,11 @@ jobs:
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+        run: |
+          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+            source /etc/profile.d/pyenv.sh && pyenv activate xpu
+          fi
+          pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
         if: always()
