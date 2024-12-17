@@ -5,13 +5,13 @@ HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False
 
-if hasattr(torch, "cuda") and torch.cuda.is_available():
+if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
     HAS_CUDA = True
 
-if hasattr(torch, "xpu") and torch.xpu.is_available():
+if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is_available():
     HAS_XPU = True
 
-if hasattr(torch, "mps") and torch.mps.is_available():
+if hasattr(torch, "mps") and hasattr(torch.mps, "is_available") and torch.mps.is_available():
     HAS_MPS = True
 
 
