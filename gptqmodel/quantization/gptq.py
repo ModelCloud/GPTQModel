@@ -70,6 +70,17 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
+    def hf_quantize(
+            self,
+            blocksize=128,
+            percdamp=0.01,
+            damp_auto_increment=0.0015,
+            group_size=-1,
+            actorder=False,
+            static_groups=False,
+    ):
+        return self.quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
+
     @torch.inference_mode()
     def quantize(
         self,
