@@ -28,7 +28,7 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '6'
+        default: '12'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
@@ -43,7 +43,7 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   RUNNER: 10.0.14.248
-  TORCH_CUDA_ARCH_LIST: '6.0 6.1 6.2 7.0 7.5 8.0 8.6 8.9 9.0'
+  TORCH_CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0'
   CUDA_RELEASE: 1
   CI: 1
   GPTQMODEL_FORCE_BUILD: 1
@@ -82,7 +82,7 @@ jobs:
           echo "ip: $ip"
 
           max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-6}}"
+          max_p="{\"size\": ${max_p:-12}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
@@ -121,7 +121,7 @@ jobs:
   release:
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 12 }}
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.task_list) }}
     runs-on: self-hosted
@@ -162,7 +162,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          bash -c "$(curl -L http://${RUNNER}/scripts/compiler/init_env.sh)" @ $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://${RUNNER}/files/scripts/init_compiler.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -189,6 +189,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
+          overwrite: true
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
 

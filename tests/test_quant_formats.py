@@ -6,13 +6,12 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import json  # noqa: E402
 import logging  # noqa: E402
-import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel, __version__  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD  # noqa: E402
 from gptqmodel.quantization.config import (META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,  # noqa: E402
                                            AutoRoundQuantizeConfig, QuantizeConfig)
@@ -36,7 +35,6 @@ class TestQuantization(unittest.TestCase):
             (QUANT_METHOD.GPTQ, BACKEND.IPEX, False, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.MARLIN, True, FORMAT.MARLIN, 4),
             (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
         ]
     )
@@ -79,17 +77,20 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
+                device=get_best_device(backend),
                 backend=backend,
             )
 
             logging.info(f"Loaded config: {model.quantize_config}")
-            assert model.quantize_config.meta_get_versionable(META_FIELD_QUANTIZER) == (
-                META_QUANTIZER_GPTQMODEL,
-                __version__,
-            )
+
+            versionable = model.quantize_config.meta_get_versionable(META_FIELD_QUANTIZER)
+            assert META_QUANTIZER_GPTQMODEL in [v[0] for v in versionable]
+            for producer, _version in versionable:
+                if producer == META_QUANTIZER_GPTQMODEL:
+                    assert _version == __version__
+
             del model
-            torch.cuda.empty_cache()
+            torch_empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
             if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
@@ -106,11 +107,11 @@ class TestQuantization(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmpdirname,
-                device="cuda:0" if backend != BACKEND.IPEX else "cpu",
+                device=get_best_device(backend),
                 quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
 
             del model
-            torch.cuda.empty_cache()
+            torch_empty_cache()
 

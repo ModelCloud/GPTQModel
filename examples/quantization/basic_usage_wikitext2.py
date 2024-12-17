@@ -56,7 +56,7 @@ def main():
     model.save(quantized_model_id)
 
     # save quantized model using safetensors
-    model.save(quantized_model_id, use_safetensors=True)
+    model.save(quantized_model_id)
 
     # load quantized model, currently only support cpu or single gpu
     device = "cuda:0" if torch.cuda.is_available() else "cpu"

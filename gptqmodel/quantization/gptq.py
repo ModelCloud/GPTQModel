@@ -1,8 +1,9 @@
-# License: GPTQModel/licenses/LICENSE.mit
+# License: GPTQModel/licenses/LICENSE.apache
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import math
 import os
+import sys
 import time
 
 import torch
@@ -11,6 +12,7 @@ import transformers
 
 from ..utils.logger import setup_logger
 from .quantizer import Quantizer
+from ..utils.torch import torch_sync, torch_empty_cache
 
 logger = setup_logger()
 
@@ -23,10 +25,13 @@ class GPTQ:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
+
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
+
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             W = W.t()
+
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
@@ -37,13 +42,16 @@ class GPTQ:
         if os.environ.get("DEBUG"):
             self.inp1 = inp
             self.out1 = out
+
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
+
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
+
         if isinstance(self.layer, nn.Conv2d):
             unfold = nn.Unfold(
                 self.layer.kernel_size,
@@ -54,6 +62,7 @@ class GPTQ:
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
+
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         # inp = inp.float()
@@ -61,8 +70,19 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
+    def hf_quantize(
+            self,
+            blocksize=128,
+            percdamp=0.01,
+            damp_auto_increment=0.0015,
+            group_size=-1,
+            actorder=False,
+            static_groups=False,
+    ):
+        return self.quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
+
     @torch.inference_mode()
-    def fasterquant(
+    def quantize(
         self,
         blocksize=128,
         percdamp=0.01,
@@ -71,12 +91,22 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
+        # TODO: waiting for pytorch implementation of ops for MPS
+        if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
+            raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
+
+        # save mem and temp move to cpu
+        self.layer.weight.data = self.layer.weight.data.cpu()
+
         W = self.layer.weight.data.clone()
+
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
+
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
-        W = W.float()
+
+        W = W.to(device=self.dev, dtype=torch.float)
 
         tick = time.time()
 
@@ -101,6 +131,7 @@ class GPTQ:
             for i in range(0, self.columns, group_size):
                 quantizer = copy.deepcopy(self.quantizer)
                 quantizer.find_params(W[:, i : (i + group_size)], weight=True)
+
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
                 groups.append(quantizer)
@@ -119,6 +150,7 @@ class GPTQ:
                 damp = percdamp * torch.mean(torch.diag(H))
                 diag = torch.arange(self.columns, device=self.dev)
                 H[diag, diag] += damp
+
                 H = torch.linalg.cholesky(H)
                 H = torch.cholesky_inverse(H)
                 H = torch.linalg.cholesky(H, upper=True)
@@ -162,6 +194,7 @@ class GPTQ:
                         idx = i1 + i
                         if actorder:
                             idx = perm[idx]
+
                         self.quantizer = groups[idx // group_size]
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
@@ -180,11 +213,12 @@ class GPTQ:
             if os.environ.get("DEBUG"):
                 self.layer.weight.data[:, :i2] = Q[:, :i2]
                 self.layer.weight.data[:, i2:] = W[:, i2:]
+
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        torch_sync(self.dev)
+
         duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
@@ -193,24 +227,36 @@ class GPTQ:
             raise ValueError("Quantization failed due to NaN loss")
 
         group_size = group_size if group_size != -1 else self.columns
+
         if static_groups and actorder:
             g_idx = [perm[i] // group_size for i in range(self.columns)]
         else:
             g_idx = [i // group_size for i in range(self.columns)]
+
         g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+
         if actorder:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
-        self.layer.weight.data = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+
+        if Q.shape != self.layer.weight.shape:
+            self.layer.weight.data = Q.cpu().reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+        else:
+            self.layer.weight.data = Q.cpu().type_as(self.layer.weight.data)
+
+        # move back to self.dev
+        self.layer.weight.data = self.layer.weight.data.to(device=self.dev)
+
         if os.environ.get("DEBUG"):
             logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
         if scale == []:
             scale.append(self.quantizer.scale)
             zero.append(self.quantizer.zero)
+
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
 
@@ -220,10 +266,12 @@ class GPTQ:
         if os.environ.get("DEBUG"):
             self.inp1 = None
             self.out1 = None
+
         self.H = None
         self.Losses = None
         self.Trace = None
-        torch.cuda.empty_cache()
+
+        torch_empty_cache(self.dev)
 
 
 __all__ = ["GPTQ"]

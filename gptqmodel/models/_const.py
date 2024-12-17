@@ -1,21 +1,80 @@
+import sys
 from enum import Enum
 
+import torch
 from torch import device
+
+from ..utils import BACKEND
+from ..utils.torch import HAS_XPU, HAS_MPS, HAS_CUDA
 
 CPU = device("cpu")
 CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
+XPU = device("xpu")
+XPU_0 = device("xpu:0")
+MPS = device("mps")
 
-class DEVICE(Enum):
-    CPU = "cpu"
-    CUDA = "cuda"
+class DEVICE(str, Enum):
+    CPU = "cpu" # All CPU
+    CUDA = "cuda" # Nvidia GPU
+    XPU = "xpu" # Intel GPU
+    MPS = "mps" # MacOS GPU
 
 
-def get_device_by_type(type_value: str):
-    for enum_constant in DEVICE:
-        if enum_constant.value == type_value:
-            return enum_constant
-    raise ValueError(f"Invalid type_value str: {type_value}")
+def validate_cuda_support(raise_exception: bool = False):
+    got_cuda = HAS_CUDA
+    if got_cuda:
+        at_least_one_cuda_v6 = any(
+            torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+
+        if not at_least_one_cuda_v6:
+            if raise_exception:
+                raise EnvironmentError(
+                    "GPTQModel cuda requires Pascal or later gpu with compute capability >= `6.0`.")
+            else:
+                got_cuda = False
+
+    return got_cuda
+
+def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
+    if isinstance(type_value, int):
+        if HAS_CUDA:
+            return DEVICE.CUDA
+        elif HAS_XPU:
+            return DEVICE.XPU
+        elif HAS_MPS:
+            return DEVICE.MPS
+        else:
+            return DEVICE.CPU
+
+    if isinstance(type_value, torch.device):
+        type_value = type_value.type
+
+    # remove device index
+    split_results = [s.strip() for s in type_value.split(":") if s]
+    if len(split_results) > 1:
+        type_value = split_results[0]
+
+    if isinstance(type_value, DEVICE):
+        return type_value
+
+    if not isinstance(type_value, str):
+        raise ValueError(f"Invalid device type_value type: {type(type_value)}")
+
+    return DEVICE(type_value.lower())
+
+
+def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
+    if backend == BACKEND.IPEX:
+        return XPU_0 if HAS_XPU else CPU
+    elif HAS_CUDA:
+        return CUDA_0
+    elif HAS_XPU:
+        return XPU_0
+    elif HAS_MPS:
+        return MPS
+    else:
+        return CPU
 
 SUPPORTED_MODELS = [
     "bloom",
@@ -51,9 +110,11 @@ SUPPORTED_MODELS = [
     "gemma2",
     "starcoder2",
     "cohere",
+    "cohere2",
     "minicpm",
     "minicpm3"
     "qwen2_moe",
+    "qwen2_vl",
     "dbrx_converted",
     "deepseek_v2",
     "exaone",

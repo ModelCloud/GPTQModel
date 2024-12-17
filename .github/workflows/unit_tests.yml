@@ -24,6 +24,10 @@ on:
         description: 'Input Test(s) to Run (default all)'
         required: false
         default: ''
+      test_regex:
+        description: 'Regex to filter test files'
+        required: false
+        default: ''
       artifact_id:
         description: 'Run id for artifact to be downloaded'
         required: false
@@ -31,15 +35,16 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '6'
+        default: '10'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
+  TORCH_CUDA_ARCH_LIST: '8.9'
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
-  TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats"
+  TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -63,13 +68,13 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+          echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
+          echo "test_names: ${{ github.event.inputs.test_names }}"
 
       - name: Select server
         id: get_ip
         run: |
           echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
-
-          echo "GPU_IP=$RUNNER" >> $GITHUB_ENV
 
           echo "ip: $ip"
 
@@ -82,7 +87,7 @@ jobs:
           echo "artifact_id=$run_id"
 
           max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-6}}"
+          max_p="{\"size\": ${max_p:-10}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
@@ -115,6 +120,7 @@ jobs:
           script="
           import json
           import os
+          import re
 
           cpu_file_list = [f.strip().removesuffix('.py') for f in '${TORCH_2_5_TESTS}'.split(',') if f.strip()]
           test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
@@ -128,6 +134,10 @@ jobs:
           all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${TORCH_2_5_TESTS}']
 
           gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list) and f not in transformers_diff_list]
+
+          cpu_test_files = [test for test in cpu_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
+          gpu_test_files = [test for test in gpu_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
+          transformers_test_files = [test for test in transformers_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
 
           print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}|{json.dumps(transformers_test_files)}')
           "
@@ -180,8 +190,8 @@ jobs:
 
       - name: Install requirements
         run: |
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          pip install transformers -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          uv pip install transformers typing-extensions -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         timeout-minutes: 35
@@ -193,12 +203,12 @@ jobs:
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           sha256=$(sha256sum dist/$whl)
           echo "hash=$sha256"
-          
+
           echo "WHL_HASH=$sha256" >> $GITHUB_ENV
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
           twine check dist/$whl
-          pip install dist/$whl
+          uv pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
@@ -224,7 +234,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
 
@@ -292,15 +302,24 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          pip install dist/*.whl
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          pip install transformers numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install dist/*.whl
+          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            uv pip install auto_round
+          fi
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          uv pip install typing-extensions numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          if [ "${{ matrix.test_script }}" == "test_cohere2" ]; then
+            uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
+          else
+            uv pip install transformers -U
+          fi
+
+
 
       - name: Check platform
         run: |
           ip=${RUNNER}
-          echo "GPU_IP=$ip" >> $GITHUB_ENV
           echo "-----------"
           pip show torch
           echo "-----------"
@@ -312,10 +331,10 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
@@ -338,7 +357,7 @@ jobs:
 
       - name: Release GPU
         if: always()
-        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   transformers_diff:
     needs:
@@ -353,7 +372,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.transformers-files) }}
     steps:
@@ -382,8 +401,6 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-          ip=${{ needs.check-vm.outputs.ip }}
-          echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Download wheel
         continue-on-error: true
@@ -410,12 +427,15 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install auto_round optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          pip install dist/*.whl
-          bash -c "$(curl -L http://$RUNNER/scripts/compiler/init_env.sh)" @ 12.4 2.4.1 3.11
-          pip install transformers==4.38.2 numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install dist/*.whl
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          uv pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" = "test_xverse" ]; then
-            pip install tokenizers==0.15.2 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+            uv pip install tokenizers==0.15.2 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          fi
+          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            uv pip install auto_round
           fi
 
       - name: Find suitable GPU
@@ -424,10 +444,10 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ env.GPU_IP }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
@@ -444,7 +464,7 @@ jobs:
 
       - name: Release GPU
         if: always()
-        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   torch2_5:
     needs:
@@ -459,7 +479,7 @@ jobs:
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 6 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         test_script:  ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
     steps:
@@ -488,8 +508,6 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
-          ip=${{ needs.check-vm.outputs.ip }}
-          echo "GPU_IP=$ip" >> $GITHUB_ENV
 
       - name: Download wheel
         continue-on-error: true
@@ -515,9 +533,32 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install device-smi -i https://pypi.org/simple
-          pip install intel_extension_for_pytorch auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          pip install dist/*.whl
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
+          uv pip install -U intel_extension_for_pytorch typing-extensions bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            uv pip install auto_round
+          fi
+          uv pip install dist/*.whl
+
+      - name: Find suitable GPU
+        run: |
+          timestamp=$(date +%s%3N)
+          gpu_id=-1
+
+          while [ "$gpu_id" -lt 0 ]; do
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+
+            if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "No available GPU, waiting 5 seconds..."
+              sleep 5
+            else
+              echo "Allocated GPU ID: $gpu_id"
+            fi
+          done
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
+          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
@@ -525,4 +566,4 @@ jobs:
 
       - name: Release GPU
         if: always()
-        run: curl -X GET "http://${{ env.GPU_IP }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"

@@ -1,7 +1,6 @@
 import os
 
-import torch
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -12,8 +11,6 @@ quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
-    import pdb
-    pdb.set_trace()
     calibration_dataset = [
         tokenizer(
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
@@ -46,20 +43,20 @@ def main():
     # (uncomment the following three lines to enable this feature)
     # repo_id = f"YourUserName/{quantized_model_dir}"
     # commit_message = f"GPTQModel model for {pretrained_model_dir}: {quantize_config.bits}bits, gr{quantize_config.group_size}, desc_act={quantize_config.desc_act}"
-    # model.push_to_hub(repo_id, save_dir=quantized_model_dir, use_safetensors=True, commit_message=commit_message, use_auth_token=True)
+    # model.push_to_hub(repo_id, save_dir=quantized_model_dir, commit_message=commit_message, use_auth_token=True)
 
     # save quantized model using safetensors
-    model.save(quantized_model_id, use_safetensors=True)
+    model.save(quantized_model_id)
 
     # load quantized model to the first GPU
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device = get_best_device()
     model = GPTQModel.load(quantized_model_id, device=device)
 
     # load quantized model to CPU with IPEX kernel linear.
     # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
 
     # download quantized model from Hugging Face Hub and load to the first GPU
-    # model = GPTQModel.from_quantized(repo_id, device="cuda:0", use_safetensors=True,)
+    # model = GPTQModel.from_quantized(repo_id, device="cuda:0",)
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))

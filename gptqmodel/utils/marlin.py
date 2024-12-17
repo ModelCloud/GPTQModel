@@ -4,11 +4,12 @@ import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
-from .progress import ProgressBar
-from ..nn_modules.qlinear.qlinear_marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
+from .torch import torch_empty_cache
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import recurse_getattr, recurse_setattr
+from .progress import ProgressBar
 
 logger = setup_logger()
 
@@ -84,12 +85,12 @@ def _validate_marlin_device_support() -> bool:
     Returns:
         bool: indicates if CUDA device is compatible for Marlin
     """
-    return torch.cuda.get_device_capability()[0] >= 8
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
 
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion
 def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = False):
-    validate, err = MarlinQuantLinear.validate(cfg.bits, cfg.group_size, cfg.desc_act, cfg.sym, cfg.dynamic)
+    validate, err = MarlinQuantLinear.validate(bits=cfg.bits, group_size=cfg.group_size, desc_act=cfg.desc_act, sym=cfg.sym, dynamic=cfg.dynamic)
     if throw_error and err is not None:
         raise ValueError(err)
     return err
@@ -186,7 +187,8 @@ def convert_to_marlin(
         del module
         if repack:
             del marlin_repacked_weight
-        gc.collect()
+
+        torch_empty_cache()
 
     # Set quantization config to be Marlin.
     quantization_config.runtime_format = FORMAT.MARLIN

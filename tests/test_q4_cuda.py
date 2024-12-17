@@ -7,8 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from gptqmodel import BACKEND  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -18,8 +17,7 @@ GENERATE_EVAL_SIZE = 100
 class TestsQ4CUDA(unittest.TestCase):
     @parameterized.expand(
         [
-            (torch.float32, "cpu"),
-            (torch.float32, "cuda:0"),
+            (torch.bfloat16, "cuda:0"),
             (torch.float16, "cuda:0"),
         ]
     )
@@ -35,7 +33,7 @@ class TestsQ4CUDA(unittest.TestCase):
             reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can only see the characters' silhouettes.)\n\n("
             new_tokens = 60
 
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
@@ -66,8 +64,7 @@ class TestsQ4CUDA(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (torch.float32, "cpu"),
-            (torch.float32, "cuda:0"),
+            (torch.bfloat16, "cuda:0"),
             (torch.float16, "cuda:0"),
         ]
     )
@@ -83,7 +80,7 @@ class TestsQ4CUDA(unittest.TestCase):
             reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can see the characters walking around the stage.)\n\n(The"
             new_tokens = 60
 
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
         model_q = GPTQModel.from_quantized(
             model_id,

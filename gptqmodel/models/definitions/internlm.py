@@ -2,7 +2,7 @@ from ..base import BaseGPTQModel
 
 
 class InternLMGPTQ(BaseGPTQModel):
-    require_transformers_version = "<=4.44.2"
+    require_pkgs_version = ["transformers<=4.44.2"]
 
     base_modules = ["model.embed_tokens", "model.norm"]
 

@@ -1,5 +1,6 @@
 # -- do not touch
 import os
+import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -18,6 +19,11 @@ class TestsIPEX(ModelTest):
     TORCH_DTYPE = torch.float16
     LOAD_BACKEND = BACKEND.IPEX
     DELETE_QUANTIZED_MODEL = False
+    USE_VLLM = False
 
     def test_ipex_format(self):
+        # TODO: pending ipex windows validation
+        if sys.platform != "linux":
+            self.skipTest("IPEX is only validated on linux for now.")
+
         self.quant_lm_eval()

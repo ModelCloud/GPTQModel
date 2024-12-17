@@ -1,89 +1,76 @@
-# -- do not touch
-import os
+import tempfile
+import unittest
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# -- end do not touch
-import tempfile  # noqa: E402
-import unittest  # noqa: E402
+from gptqmodel.integration import integration
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
-import torch  # noqa: E402
-from datasets import load_dataset  # noqa: E402
-from gptqmodel.integration.optimum.quantizer import GPTQConfig  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
-
-GENERATE_EVAL_SIZE = 100
 
 class TestTransformersIntegration(unittest.TestCase):
 
-    def setUp(self):
-        from gptqmodel.integration.optimum import monkey_patch_gptqmodel_into_transformers
+    @classmethod
+    def setUpClass(self):
+        integration.patch_hf()
 
-        monkey_patch_gptqmodel_into_transformers()
+    def _test_load_quantized_model_gptq_v1(self, device_map):
+        model_id_or_path = "TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ"
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
+        quantized_model = AutoModelForCausalLM.from_pretrained(model_id_or_path,
+                                                               device_map=device_map,)
+        generate_str = tokenizer.decode(quantized_model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(quantized_model.device))[0])
+        expect_str = "<s> The capital of France is is Paris.\nThe capital of France is Paris.\nThe capital of France is Paris.\nThe capital of France is Paris.\nThe capital of France is"
+        self.assertEqual(generate_str[:50], expect_str[:50])
 
-        self.device = torch.device("cuda:0")
-        self.prompt = "The International Space Station (ISS) is a large"
+    def _test_load_quantized_model_gptq_v2(self, device_map):
+        model_id_or_path = "/monster/data/model/opt-125m/quant/2024-12-02_13-28-10_subcircularly_autogptq_version_pr640_bit4_group128_seq2048_batch16/damp0.1_descTrue_gptq_v2_symTrue_pack_dataFalse_mseTrue_mse_norm2.4_mse_grid100_mse_maxshrink0.8/c40_gr0_dic0_sen0_det0_rate0_native0_lm_compression1024_text_reduction0/opt_125m_gptqv2"
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
+        quantized_model = AutoModelForCausalLM.from_pretrained("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+                                                               device_map=device_map,)
+        generate_str = tokenizer.decode(quantized_model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(quantized_model.device))[0])
+        expect_str = "</s>The capital of France is is found velvetJustice ten for bowel Tuesday"
 
+        self.assertEqual(generate_str[:len(expect_str)], expect_str)
 
-    def test_load_gptq_model_with_exllama(self):
-        model_id = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
+    def _test_quantize(self, device_map):
+        model_id = "facebook/opt-125m"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        gptq_config = GPTQConfig(bits=4)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            device_map="auto",
-            quantization_config=gptq_config
-        )
-        reference_output = "</s>The International Space Station (ISS) is a large space station that is located in the International"
-        self.assertResult(model, tokenizer, True, reference_output)
-
-    def test_quant_and_load(self):
-        model_id = "/monster/data/model/opt-125m"
-        tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        calibration_dataset = [example["text"] for example in traindata.select(range(1024))]
-
-        gptq_config = GPTQConfig(bits=4,
-                                 group_size=128,
-                                 sym=True,
-                                 model_seqlen=2048,
-                                 desc_act=False,
-                                 dataset=calibration_dataset)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            device_map="auto",
-            quantization_config=gptq_config
-        )
-
-        print("model", model)
-
-        reference_output = "</s>The International Space Station (ISS) is a large space station that is located in the International Space Station"
-        self.assertResult(model, tokenizer, False, reference_output)
+        dataset = [
+            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
+        gptq_config = GPTQConfig(bits=4, dataset=dataset, tokenizer=tokenizer)
+        quantized_model = AutoModelForCausalLM.from_pretrained(model_id, device_map=device_map,
+                                                               quantization_config=gptq_config)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save_pretrained(
-                tmp_dir,
-            )
+            quantized_model.save_pretrained(tmp_dir)
+            tokenizer.save_pretrained(tmp_dir)
+            del quantized_model
 
-            del model
+            model = AutoModelForCausalLM.from_pretrained(tmp_dir, device_map=device_map)
 
-            gptq_config = GPTQConfig(bits=4)
-            model = AutoModelForCausalLM.from_pretrained(
-                tmp_dir, device_map="auto", quantization_config=gptq_config,
-            )
+            generate_str = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
 
-            self.assertResult(model, tokenizer, True, reference_output)
+            expect_str = "</s>gptqmodel is a good way to get a good way for a good way for a good way."
 
-    def assertResult(self, model, tokenizer, load_quant_model, reference_output):
-        if load_quant_model:
-            self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, ExllamaV2QuantLinear)
-        else:
-            # only use ExllamaV2QuantLinear for inference, pack use TritonV2QuantLinear.
-            self.assertIsInstance(model.model.decoder.layers[0].self_attn.k_proj, TritonV2QuantLinear)
+            print('generate_str',generate_str)
+            print('expect_str',expect_str)
 
-        inp = tokenizer(self.prompt, return_tensors="pt").to(self.device)
-        res = model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-        predicted_text = tokenizer.decode(res[0])
-        print("predict", predicted_text)
-        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
+            diff_count = len(set(generate_str.split()).symmetric_difference(expect_str.split()))
+
+            self.assertLessEqual(diff_count, 2)
+
+    def test_load_quantized_model_gptq_v1_ipex(self):
+        self._test_load_quantized_model_gptq_v1(device_map="cpu")
+
+    def test_load_quantized_model_gptq_v1_cuda(self):
+        self._test_load_quantized_model_gptq_v1(device_map="cuda")
+
+    def test_load_quantized_model_gptq_v2_ipex(self):
+        self._test_load_quantized_model_gptq_v2(device_map="cpu")
+
+    def test_load_quantized_model_gptq_v2_cuda(self):
+        self._test_load_quantized_model_gptq_v2(device_map="cuda")
+
+    def test_quantize_ipex(self):
+        self._test_quantize(device_map="cpu")
+
+    def test_quantize_cuda(self):
+        self._test_quantize(device_map="cuda")

@@ -1,1 +1,2 @@
-from .optimum import monkey_patch_gptqmodel_into_transformers
+from .integration import patch_hf
+from .integration_vllm import patch_vllm

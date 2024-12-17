@@ -2,7 +2,7 @@ from ..base import BaseGPTQModel
 
 
 class Olmo2GPTQ(BaseGPTQModel):
-    require_transformers_version = ">=4.47.0"
+    require_pkgs_version = ["transformers>=4.47.0"]
     base_modules = ["model.embed_tokens", "model.norm"]
 
     layers_node = "model.layers"

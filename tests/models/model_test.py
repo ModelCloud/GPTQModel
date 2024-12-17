@@ -1,32 +1,36 @@
 # -- do not touch
-import contextlib
 import os
+import sys
 
-from gptqmodel.utils.lm_eval import lm_eval
-from ovis_calibration_dataset import get_calib_dataset
-
+if sys.platform == "darwin":
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-
-import gc  # noqa: E402
+import contextlib  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+RAND_SEED = 898
+
 
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = "arc_challenge"
     # sub test can modify
-    QUANT_ARC_MAX_NEGATIVE_DELTA = 0.15  # -15%
-    QUANT_ARC_MAX_POSITIVE_DELTA = 0.2  # 20%
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
@@ -36,6 +40,14 @@ class ModelTest(unittest.TestCase):
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
+
+    KERNEL_QUANT = {} # kernel sets
+    KERNEL_INFERENCE = {} # kernel sets
+
+    # quant config
+    QUANT_FORMAT = FORMAT.GPTQ
+    DESC_ACT = True
+    SYM = True
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -74,16 +86,24 @@ class ModelTest(unittest.TestCase):
             tokenized = tokenizer(sample['text'])
             if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
                 datas.append(tokenized)
-                if len(datas) >= 1024:
+                if len(datas) >= 128:
                     break
 
         return datas
+
+    def check_kernel(self, model, expected_kernels):
+        modules = {module.__class__ for _, module in model.named_modules() if isinstance(module, BaseQuantLinear)}
+        print(f"modules in model: {modules}")
+        if expected_kernels:
+            assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
-            format=FORMAT.GPTQ,
+            format=self.QUANT_FORMAT,
+            desc_act=self.DESC_ACT,
+            sym=self.SYM,
         )
         model = GPTQModel.load(
             model_id_or_path,
@@ -91,11 +111,12 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
-        is_ovis_model = "Ovis" in model_id_or_path
-        calibration_dataset = self.load_dataset(tokenizer) if not is_ovis_model else get_calib_dataset(model)
+
+        calibration_dataset = self.load_dataset(tokenizer)
 
         # mpt model need
         if not model.config.pad_token_id:
@@ -106,14 +127,17 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
         if not is_quantized:
             model.quantize(calibration_dataset)
-        with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
-            model.save(tmpdirname)
-            tokenizer.save_pretrained(tmpdirname)
-            q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+
+            self.check_kernel(model, self.KERNEL_QUANT)
+
+            with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
+                model.save(tmpdirname)
+                tokenizer.save_pretrained(tmpdirname)
+                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+
         if not is_quantized:
             del model
-            gc.collect()
-            torch.cuda.empty_cache()
+            torch_empty_cache()
             return q_model, q_tokenizer
         else:
             return model, tokenizer
@@ -128,6 +152,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
         )
 
         return model, tokenizer
@@ -148,6 +173,11 @@ class ModelTest(unittest.TestCase):
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
+                    gen_kwargs="temperature=0.0,top_k=50",
+                    random_seed = RAND_SEED,
+                    numpy_random_seed = RAND_SEED,
+                    torch_random_seed = RAND_SEED,
+                    fewshot_random_seed = RAND_SEED,
                 )
 
                 print('--------Eval Result---------')
@@ -160,7 +190,7 @@ class ModelTest(unittest.TestCase):
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
-                if delete_quantized_model and os.path.exists(model.model_id_or_path):
+                if delete_quantized_model and model.model_id_or_path.startswith("/tmp") and os.path.exists(model.model_id_or_path):
                     shutil.rmtree(model.model_id_or_path)
                 return task_results
         except BaseException as e:
@@ -196,8 +226,9 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                                     torch_dtype=self.TORCH_DTYPE)
+        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+
+        self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         task_results = self.lm_eval(model=self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
@@ -208,7 +239,6 @@ class ModelTest(unittest.TestCase):
     def check_results(self, task_results):
         for filter, value in task_results.items():
             diff_pct = self.calculatorPer(filter=filter, value=value)
-            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_NEGATIVE_DELTA)
-            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                            f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
+            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")

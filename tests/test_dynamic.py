@@ -8,8 +8,9 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_marlin_inference import MarlinInferenceQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.qlinear_tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -17,7 +18,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestDynamic(unittest.TestCase):
-    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     tmp_dir = None
 
     def calculate_avg_ppl(self, model, tokenizer):
@@ -52,10 +53,10 @@ class TestDynamic(unittest.TestCase):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 18 gate module
-            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 19 gate module
-            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 20 gate module
-            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64}, # match layer 21 gate module
+            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
+            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
+            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
+            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 21 gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
@@ -68,9 +69,7 @@ class TestDynamic(unittest.TestCase):
         )
         model.quantize(cls.calibration_dataset, batch_size=4)
 
-        model.save(
-            cls.tmp_dir.name,
-        )
+        model.save(cls.tmp_dir.name)
 
     @classmethod
     def tearDownClass(cls):
@@ -83,7 +82,6 @@ class TestDynamic(unittest.TestCase):
             (BACKEND.MARLIN),
         ]
     )
-
     def test_dynamic_bits(self, backend):
         model = GPTQModel.load(
             self.tmp_dir.name,
@@ -91,12 +89,26 @@ class TestDynamic(unittest.TestCase):
         )
 
         for _, submodule in model.named_modules():
-            if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinInferenceQuantLinear):
+            if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinQuantLinear):
                 break
         else:
-            raise ValueError("Did not find a " + "tritonv2 linear layer" if backend == BACKEND.TRITON else "marlin inference linear layer")
+            raise ValueError("Did not find a " + "tritonv2 linear layer" if backend == BACKEND.TRITON else "marlin linear layer")
 
         dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
         del model
         assert dynamic_bits_ppl < 10
+
+    def test_skip_module(self):
+        dynamic = {
+            r"-:model\.layers\.0\..*": {},  # skip 0 layers
+        }
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            quantize_config=QuantizeConfig(dynamic=dynamic),
+        )
+        model.quantize(self.calibration_dataset, batch_size=4)
+
+        for name, submodule in model.named_modules():
+            if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
+                raise ValueError("first layer should be native module")

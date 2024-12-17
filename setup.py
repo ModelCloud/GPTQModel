@@ -22,13 +22,13 @@ BASE_WHEEL_URL = (
 )
 
 BUILD_CUDA_EXT = True
-COMPILE_MARLIN = True
 
 if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
     FORCE_BUILD = True
 else:
     FORCE_BUILD = False
 
+extensions = []
 common_setup_kwargs = {
     "version": gptqmodel_version,
     "name": "gptqmodel",
@@ -62,8 +62,7 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
     if not BUILD_CUDA_EXT:
         return common_setup_kwargs["version"]
 
-    default_cuda_version = torch.version.cuda
-    CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", default_cuda_version).split("."))
+    CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", torch.version.cuda).split("."))
 
     if not CUDA_VERSION:
         print(
@@ -90,9 +89,17 @@ with open('requirements.txt') as f:
 import torch  # noqa: E402
 
 if TORCH_CUDA_ARCH_LIST is None:
-    at_least_one_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
-    if not at_least_one_cuda_v6:
+    got_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
+    got_cuda_between_v6_and_v8 = any(6 <= torch.cuda.get_device_capability(i)[0] < 8 for i in range(torch.cuda.device_count()))
+
+    # not validated for compute < 6
+    if not got_cuda_v6:
         BUILD_CUDA_EXT = False
+
+    # if cuda compute is < 8.0, always force build since we only compile cached wheels for >= 8.0
+    if BUILD_CUDA_EXT and not FORCE_BUILD:
+        if got_cuda_between_v6_and_v8:
+            FORCE_BUILD = True
 
 if BUILD_CUDA_EXT:
     if CUDA_RELEASE == "1":
@@ -103,6 +110,8 @@ else:
 additional_setup_kwargs = {}
 
 include_dirs = ["gptqmodel_cuda"]
+
+extensions = []
 
 if BUILD_CUDA_EXT:
     from distutils.sysconfig import get_python_lib
@@ -152,44 +161,41 @@ if BUILD_CUDA_EXT:
             [
                 "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
                 "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
-            ]
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
         ),
         cpp_ext.CUDAExtension(
             "gptqmodel_cuda_256",
             [
                 "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
                 "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
-            ]
-        )
-    ]
-
-    # Marlin is not ROCm-compatible, CUDA only
-    if COMPILE_MARLIN:
-        extensions.append(
-            cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_cuda",
-                [
-                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin/marlin_repack.cu",
-                ],
-                extra_compile_args=extra_compile_args,
-            )
-        )
-
-        extensions.append(
-            cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_cuda_inference",
-                [
-                    "gptqmodel_ext/marlin_inference/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin_inference/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin_inference/marlin_repack.cu",
-                ],
-                extra_compile_args=extra_compile_args,
-            )
-        )
-
-    extensions.append(
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        ),
+        cpp_ext.CUDAExtension(
+            "gptqmodel_marlin_kernels",
+            [
+                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                "gptqmodel_ext/marlin/marlin_repack.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        ),
+        cpp_ext.CUDAExtension(
+            "gptqmodel_exllama_kernels",
+            [
+                "gptqmodel_ext/exllama/exllama_ext.cpp",
+                "gptqmodel_ext/exllama/cuda_buffers.cu",
+                "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        ),
         cpp_ext.CUDAExtension(
             "gptqmodel_exllamav2_kernels",
             [
@@ -200,7 +206,7 @@ if BUILD_CUDA_EXT:
             extra_link_args=extra_link_args,
             extra_compile_args=extra_compile_args,
         )
-    )
+    ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
@@ -230,8 +236,8 @@ class CachedWheelsCommand(_bdist_wheel):
             print("Raw wheel path", wheel_path)
 
             os.rename(wheel_filename, wheel_path)
-        except (urllib.error.HTTPError, urllib.error.URLError):
-            print("Precompiled wheel not found. Building from source...")
+        except BaseException:
+            print(f"Precompiled wheel not found in url: {wheel_url}. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
 
@@ -242,14 +248,15 @@ setup(
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
-        'vllm': ["vllm>=0.6.2", "flashinfer==0.1.6"],
+        'vllm': ["vllm>=0.6.4", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
         'bitblas': ["bitblas==0.0.1.dev13"],
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
-        'logger': ["clearml", "random_word", "device-smi", "plotly"],
-        'eval': ["lm_eval>=0.4.4"],
+        'logger': ["clearml", "random_word", "plotly"],
+        'eval': ["lm_eval>=0.4.6", "evalplus>=0.3.1"],
+        'triton': ["triton>=2.0.0"]
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",

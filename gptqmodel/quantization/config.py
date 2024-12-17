@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import isdir, join
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from packaging import version
 from transformers.utils.hub import cached_file
@@ -36,6 +36,8 @@ META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
 
 META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
+
+META_FIELD_MSE = "mse"
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -104,8 +106,8 @@ class QuantizeConfig():
     # 128 offer good balance between inference speed and quantization quality
     group_size: int = field(default=128)
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
-    damp_percent: float = field(default=0.005)
-    damp_auto_increment: float = field(default=0.0015)
+    damp_percent: float = field(default=0.01)
+    damp_auto_increment: float = field(default=0.0025)
     desc_act: bool = field(default=True)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
@@ -115,6 +117,8 @@ class QuantizeConfig():
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
+
+    mse: float = field(default=0.0)
 
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
     # if OOM, can set to False
@@ -141,11 +145,15 @@ class QuantizeConfig():
             raise ValueError(f"only support quantize to {fields_info[0].metadata['choices']} bits.")
 
         if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},  # 先添加以 "-" 开头的键
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')}  # 然后添加其他键
+            }
+
             for layer, layer_dict in self.dynamic.items():
                 for key, value in layer_dict.items():
                     if key == "bits" and value not in fields_info[0].metadata["choices"]:
-                        raise ValueError(
-                            f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
+                        raise ValueError(f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
                     elif key == "group_size" and value != -1 and value <= 0:
                         raise ValueError("unless equal to -1, group_size must greater then 0.")
 
@@ -176,7 +184,10 @@ class QuantizeConfig():
 
     def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
         for pattern, pattern_dict in self.dynamic.items():
-            if re.match(pattern, layer_name):
+            if pattern.startswith("-:"):
+                if re.match(pattern.removeprefix("-:"), layer_name):
+                    return False
+            elif re.match(pattern.removeprefix("+:"), layer_name):
                 if key is None:
                     return pattern_dict
                 else:
@@ -184,24 +195,33 @@ class QuantizeConfig():
         return default_value
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_set_versionable(self, key: str, value: str, version: str):
-        self.meta_set(key, f"{value}:{version}")
+    def meta_set_versionable(self, key: str, value: List[str]):
+        self.meta_set(key, value)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
-    def meta_get_versionable(self, key: str) -> Tuple[str, str]:
-        val = self.meta_get(key)
-        if val is None:
-            return None, None
-        parts = val.split(":")
-        return parts[0].lower(), parts[1].lower() if len(parts) >= 2 else None
+    def meta_get_versionable(self, key: str) -> List[Tuple[str, str]]:
+        values = self.meta_get(key)
+        if values is None:
+            return []
+        if not isinstance(values, list):
+            values = [values]
+        result = []
+        for val in values:
+            parts = val.split(":")
+            if len(parts) >= 2:
+                result.append((parts[0].lower(), parts[1].lower()))
+        return result
 
     # is quantized model quantized or packed by gptqmodel version with v2 format code
     def is_quantized_by_v2(self) -> bool:
         # check meta.quantizer
-        producer, _version = self.meta_get_versionable(META_FIELD_QUANTIZER)
-        by_v2 = (producer == META_QUANTIZER_GPTQMODEL) and (version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2))
+        result = self.meta_get_versionable(META_FIELD_QUANTIZER)
+        if len(result) > 0:
+            for producer, _version in result:
+                if producer == META_QUANTIZER_GPTQMODEL:
+                    return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
 
-        return by_v2
+        return False
 
     def save_pretrained(self, save_dir: str, **kwargs):
         with open(join(save_dir, QUANT_CONFIG_FILENAME), "w", encoding="utf-8") as f:

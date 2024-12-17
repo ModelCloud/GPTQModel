@@ -1,30 +1,78 @@
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
 import accelerate
 import torch
 import transformers
-from gptqmodel.utils.device import check_cuda
+from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..nn_modules.qlinear.qlinear_exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.qlinear_ipex import IPEXQuantLinear, ipex_dtype
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.importer import select_quant_linear
+from ..utils.importer import select_quant_linear, select_device
 from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype_from_config, check_requires_version, convert_gptq_v1_to_v2_format,
-                           find_layers, get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
+from ..utils.model import (auto_dtype_from_config, convert_gptq_v1_to_v2_format, find_layers,
+                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import CPU, DEVICE, SUPPORTED_MODELS
+from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
+from ..utils.torch import HAS_CUDA, HAS_XPU, HAS_MPS
 
 logger = setup_logger()
+
+
+def parse_version_string(version_str: str):
+    try:
+        return Version(version_str)
+    except InvalidVersion:
+        raise ValueError(f"Invalid version format: {version_str}")
+
+
+def parse_requirement(req):
+    for op in [">=", "<=", ">", "<", "=="]:
+        if op in req:
+            pkg, version_required = req.split(op, 1)
+            return pkg.strip(), op, version_required.strip()
+    raise ValueError(f"Unsupported version constraint in: {req}")
+
+
+def compare_versions(installed_version, required_version, operator):
+    installed = parse_version_string(installed_version)
+    required = parse_version_string(required_version)
+    if operator == ">":
+        return installed > required
+    elif operator == ">=":
+        return installed >= required
+    elif operator == "<":
+        return installed < required
+    elif operator == "<=":
+        return installed <= required
+    elif operator == "==":
+        return installed == required
+    else:
+        raise ValueError(f"Unsupported operator: {operator}")
+
+
+def check_versions(model_id_or_path: str, requirements: List[str]):
+    if requirements is None:
+        return
+    for req in requirements:
+        pkg, operator, version_required = parse_requirement(req)
+        try:
+            installed_version = version(pkg)
+            if not compare_versions(installed_version, version_required, operator):
+                raise ValueError(f"{model_id_or_path} requires version {req}, but current {pkg} version is {installed_version} ")
+        except PackageNotFoundError:
+            raise ValueError(f"{model_id_or_path} requires version {req}, but {pkg} not installed.")
+
 
 def ModelLoader(cls):
     @classmethod
@@ -37,43 +85,16 @@ def ModelLoader(cls):
             **model_init_kwargs,
     ):
         """load un-quantized pretrained model to cpu"""
-        got_cuda = check_cuda(raise_exception=False)
-
-        if not got_cuda:
-            try:
-                pass
-            except Exception as e:
-                raise ValueError(
-                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
-                )
-
-            model_init_kwargs["device_map"] = "cpu"
-            torch_dtype = ipex_dtype()
+        if quantize_config.desc_act not in cls.supports_desc_act:
+            raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
+                             f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        if cls.require_transformers_version:
-            # Do not import version at the top of the file, if you reinstall transformers after the program starts,
-            # the version may not be what you expected.
-            from transformers import __version__ as transformers_version
-            passed = check_requires_version(cls.require_transformers_version, current_version=transformers_version)
-            if passed is not None:
-                if not passed:
-                  raise ValueError(f"{pretrained_model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
-            else:
-                raise ValueError(f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
-
-        if cls.require_tokenizers_version:
-            from tokenizers import __version__ as tokenizers_version
-            passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(f"{pretrained_model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
-            else:
-                raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
+        check_versions(pretrained_model_id_or_path, cls.require_pkgs_version)
 
         def skip(*args, **kwargs):
             pass
@@ -86,7 +107,7 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
-        if torch_dtype == "auto":
+        if torch_dtype is None or torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config)
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
@@ -96,9 +117,6 @@ def ModelLoader(cls):
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
-
-        if model_init_kwargs.get("cpu") != "cpu":
-            torch.cuda.empty_cache()
 
         model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
@@ -132,32 +150,26 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             backend: BACKEND = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
-            use_safetensors: bool = True,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if device is not None:
+            device = normalize_device(device)
+
+        # TODO need to normalize backend and others in a unified api
+        device = select_device(device, device_map, backend)
+
         if backend == BACKEND.VLLM:
             import os
 
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
-        if backend == BACKEND.IPEX:
-            device = CPU
-            try:
-                pass
-            except Exception as e:
-                raise ValueError(
-                    f"IPEX is not available: {e}. Please install with `pip install -U intel-extension-for-transformers`."
-                )
-
-            if torch_dtype is None or torch_dtype == "auto":
-                torch_dtype = ipex_dtype()
-
-        if backend != BACKEND.IPEX and not torch.cuda.is_available():
-            raise EnvironmentError(
-                "Load pretrained model to do quantization requires CUDA gpu. Please set backend=BACKEND.IPEX for cpu only quantization and inference.")
+        if backend == BACKEND.TRITON:
+            from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
+            if not TRITON_AVAILABLE:
+                raise ValueError(TRITON_INSTALL_HINT)
 
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
@@ -165,23 +177,7 @@ def ModelLoader(cls):
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        if cls.require_transformers_version:
-            from transformers import __version__ as transformers_version
-            passed = check_requires_version(cls.require_transformers_version, current_version=transformers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(f"{model_id_or_path} requires transformers version {cls.require_transformers_version} current transformers version is {transformers_version} ")
-            else:
-                raise ValueError(f"can not parse requires_transformers_version {cls.require_transformers_version}, need (>, <, ==, >=, <=)version")
-
-        if cls.require_tokenizers_version:
-            from tokenizers import __version__ as tokenizers_version
-            passed = check_requires_version(cls.require_tokenizers_version, current_version=tokenizers_version)
-            if passed is not None:
-                if not passed:
-                    raise ValueError(f"{model_id_or_path} requires tokenizers version {cls.require_tokenizers_version} current tokenizers version is {tokenizers_version} ")
-            else:
-                raise ValueError(f"can not parse require_tokenizers_version {cls.require_tokenizers_version}, need (>, <, ==, >=, <=)version")
+        check_versions(model_id_or_path, cls.require_pkgs_version)
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
@@ -214,8 +210,10 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if torch_dtype == "auto":
-            torch_dtype = auto_dtype_from_config(config, quant_inference=True)
+        if torch_dtype is None or torch_dtype == "auto" or device == DEVICE.XPU:
+            # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
+            torch_dtype = torch.float16
+            # auto_dtype_from_config(config=config, device=device, device_map=device_map)
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
 
@@ -279,7 +277,7 @@ def ModelLoader(cls):
             backend = BACKEND.BITBLAS
 
         if backend == BACKEND.BITBLAS:
-            from ..nn_modules.qlinear.qlinear_bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
@@ -288,11 +286,7 @@ def ModelLoader(cls):
             "model",
         ]
 
-        extensions = []
-        if use_safetensors:
-            extensions.append(".safetensors")
-        else:
-            extensions += [".pt", ".pth"]
+        extensions = [".safetensors"]
 
         model_id_or_path = str(model_id_or_path)
 
@@ -366,11 +360,11 @@ def ModelLoader(cls):
                 layers,
                 quantize_config.bits,
                 quantize_config.group_size,
-                backend=backend.AUTO if (
-                                                backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
                 dynamic=quantize_config.dynamic,
+                device=device,
             )
             if preload_qlinear_kernel == IPEXQuantLinear:
                 quantize_config.runtime_format = FORMAT.IPEX
@@ -390,8 +384,7 @@ def ModelLoader(cls):
 
         if not isinstance(device_map, dict):
             if device is not None:
-                device = torch.device(device)
-                device_map = {"": device.index if device.type == DEVICE.CUDA else device.type}
+                device_map = {"": 0 if device in [DEVICE.CUDA, DEVICE.XPU, DEVICE.MPS] else DEVICE.CPU}
             else:
                 device_map = accelerate.infer_auto_device_map(
                     model,
@@ -498,6 +491,7 @@ def ModelLoader(cls):
             sym=quantize_config.sym,
             backend=backend,
             format=quantize_config.format,
+            device=device,
         )
 
         # == step4: set seqlen == #

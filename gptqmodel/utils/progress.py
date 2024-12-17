@@ -1,7 +1,7 @@
 import datetime
-
 import time
 from warnings import warn
+
 
 class ProgressBarWarning(Warning):
     def __init__(self, msg, fp_write=None, *a, **k):
@@ -72,7 +72,7 @@ class ProgressBar:
         try:
             orig = self.iterable
         except AttributeError:
-            raise TypeError("'tqdm' object is not reversible")
+            raise TypeError("'progress' object is not reversible")
         else:
             self.iterable = reversed(self.iterable)
             return self.__iter__()

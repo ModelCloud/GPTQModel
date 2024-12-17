@@ -2,7 +2,7 @@ import argparse
 import os
 
 import torch
-from gptqmodel.utils import Perplexity, get_backend
+from gptqmodel.utils import Perplexity
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -39,11 +39,6 @@ if __name__ == "__main__":
         help="Column in the dataset containing the text.",
     )
     parser.add_argument("--is_quantized", action="store_true", help="Is the model GPTQ quantized?")
-    parser.add_argument(
-        "--use_safetensors",
-        action="store_true",
-        help="Whether to use safetensors model file",
-    )
     parser.add_argument("--use_fast_tokenizer", action="store_true", help="Whether to use fast tokenizer")
     parser.add_argument("--trust_remote_code", action="store_true", help="Whether to use remote code")
     parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX'], help="Whether to use BACKEND format")
@@ -55,21 +50,15 @@ if __name__ == "__main__":
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    if args.use_safetensors:
-        print(
-            "The argument --use_safetensors is deprecrated and will be removed in the next release. It is now the default behavior."
-        )
-
     if args.is_quantized:
-        from gptqmodel import GPTQModel
+        from gptqmodel import GPTQModel, BACKEND
 
         model = GPTQModel.load(
             args.model_name,
             device_map="auto",
             model_basename=args.model_basename,
-            use_safetensors=True,
             trust_remote_code=args.trust_remote_code,
-            backend=get_backend(args.backend),
+            backend=BACKEND(args.backend.lower()),
         )
     else:
         from transformers import AutoModelForCausalLM

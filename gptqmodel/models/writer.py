@@ -11,20 +11,21 @@ from typing import Dict, Optional
 import accelerate
 import torch
 import transformers
+from huggingface_hub import split_torch_state_dict_into_shards
+from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
 from transformers import AutoConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
-from huggingface_hub import split_torch_state_dict_into_shards
-from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN, PYTORCH_WEIGHTS_FILE_PATTERN
 
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT,
+from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
                                    META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
                                    META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
                            get_model_files_size, get_moe_layer_modules, make_quant)
+from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU
 
@@ -53,8 +54,8 @@ def ModelWriter(cls):
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            use_safetensors: bool = True,
             max_shard_size: Optional[str] = None,
+            meta_quantizer: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -69,11 +70,17 @@ def ModelWriter(cls):
         pre_quantized_size_mb = get_model_files_size(self.model_id_or_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
+        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+        if meta_quantizer:
+            if len(meta_quantizer.split(":")) == 2:
+                quantizers.append(meta_quantizer.replace(" ",""))
+            else:
+                logger.warning(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
+
         # write gptqmodel tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
-            value=META_QUANTIZER_GPTQMODEL,
-            version=__version__,
+            value=quantizers
         )
 
         self.quantize_config.meta_set(
@@ -101,6 +108,12 @@ def ModelWriter(cls):
             value=self.quantize_config.true_sequential
         )
 
+        self.quantize_config.meta_set(
+            key=META_FIELD_MSE,
+            value=self.quantize_config.mse
+        )
+
+
         # The config, quantize_config and model may be edited in place in save_quantized.
         config = copy.deepcopy(self.model.config)
         quantize_config = copy.deepcopy(self.quantize_config)
@@ -122,14 +135,14 @@ def ModelWriter(cls):
                 # no need to set it back, no calculation below
                 if quantize_config.bits != 4:
                     cuda_name_modules = {}
-                    from gptqmodel.nn_modules.qlinear.qlinear_cuda import CudaQuantLinear
+                    from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
                     for name, module in model.named_modules():
-                        if isinstance(module, CudaQuantLinear):
+                        if isinstance(module, DynamicCudaQuantLinear):
                             cuda_name_modules[name] = module.gptqmodel_cuda
                             module.gptqmodel_cuda = None
 
                     for name, module in model.named_modules():
-                        if isinstance(module, CudaQuantLinear) and name in cuda_name_modules:
+                        if isinstance(module, DynamicCudaQuantLinear) and name in cuda_name_modules:
                             module.gptqmodel_cuda = cuda_name_modules[name]
 
                     del cuda_name_modules
@@ -149,18 +162,74 @@ def ModelWriter(cls):
 
         model_base_name = "model"
 
-        if use_safetensors:
-            state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
-            model_save_name = model_base_name + ".safetensors"
-        else:
-            model_save_name = model_base_name + ".bin"
+        state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
+        model_save_name = model_base_name + ".safetensors"
 
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
             logger.warning("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
 
         if max_shard_size is None:
-            if use_safetensors:
+            if safetensors_metadata is None:
+                safetensors_metadata = {}
+            elif not isinstance(safetensors_metadata, dict):
+                raise TypeError("safetensors_metadata must be a dictionary.")
+            else:
+                logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                new_safetensors_metadata = {}
+                converted_keys = False
+                for key, value in safetensors_metadata.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        converted_keys = True
+                        try:
+                            new_key = str(key)
+                            new_value = str(value)
+                        except Exception as e:
+                            raise TypeError(
+                                f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
+                            )
+                        if new_key in new_safetensors_metadata:
+                            logger.warning(
+                                f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
+                            )
+                        new_safetensors_metadata[new_key] = new_value
+                safetensors_metadata = new_safetensors_metadata
+                if converted_keys:
+                    logger.debug(
+                        f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
+                    )
+
+            # Format is required to enable Accelerate to load the metadata
+            # otherwise it raises an OSError
+            safetensors_metadata["format"] = "pt"
+            safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
+            total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
+        else:
+            file_name_pattern = SAFETENSORS_WEIGHTS_FILE_PATTERN
+
+            # Shard checkpoint
+            state_dict_split= split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size, filename_pattern=file_name_pattern)
+
+            # Clean the folder from a previous save
+            for filename in os.listdir(save_dir):
+                full_filename = join(save_dir, filename)
+
+                # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
+                filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
+                reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
+
+                if (
+                        filename.startswith(model_base_name)
+                        and isfile(full_filename)
+                        and filename not in state_dict_split.filename_to_tensors.keys()
+                        and reg.fullmatch(filename_no_suffix) is not None
+                ):
+                    os.remove(full_filename)
+
+            total_size_mb = 0
+            # Save the model
+            for filename, tensors in state_dict_split.filename_to_tensors.items():
+                shard = {tensor: state_dict[tensor] for tensor in tensors}
                 if safetensors_metadata is None:
                     safetensors_metadata = {}
                 elif not isinstance(safetensors_metadata, dict):
@@ -177,91 +246,21 @@ def ModelWriter(cls):
                                 new_value = str(value)
                             except Exception as e:
                                 raise TypeError(
-                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
-                                )
+                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
                             if new_key in new_safetensors_metadata:
                                 logger.warning(
-                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
-                                )
+                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
                             new_safetensors_metadata[new_key] = new_value
                     safetensors_metadata = new_safetensors_metadata
                     if converted_keys:
                         logger.debug(
-                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
-                        )
+                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
 
                 # Format is required to enable Accelerate to load the metadata
                 # otherwise it raises an OSError
                 safetensors_metadata["format"] = "pt"
-                safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
-            else:
-                logger.warning(
-                    "We highly suggest saving quantized model using safetensors format for security reasons. Please set `use_safetensors=True` whenever possible.")
-                torch.save(model.state_dict(), join(save_dir, model_save_name))
-            total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
-        else:
-            if use_safetensors:
-                file_name_pattern = SAFETENSORS_WEIGHTS_FILE_PATTERN
-            else:
-                file_name_pattern = PYTORCH_WEIGHTS_FILE_PATTERN
 
-            # Shard checkpoint
-            state_dict_split= split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size, filename_pattern=file_name_pattern)
-
-            # Clean the folder from a previous save
-            for filename in os.listdir(save_dir):
-                full_filename = join(save_dir, filename)
-
-                # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
-                filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
-                reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
-
-                if (
-                        filename.startswith(model_base_name)
-                        and isfile(full_filename)
-                        and filename not in shards.keys()
-                        and reg.fullmatch(filename_no_suffix) is not None
-                ):
-                    os.remove(full_filename)
-
-            total_size_mb = 0
-            # Save the model
-            for filename, tensors in state_dict_split.filename_to_tensors.items():
-                shard = {tensor: state_dict[tensor] for tensor in tensors}
-                if use_safetensors:
-                    if safetensors_metadata is None:
-                        safetensors_metadata = {}
-                    elif not isinstance(safetensors_metadata, dict):
-                        raise TypeError("safetensors_metadata must be a dictionary.")
-                    else:
-                        logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
-                        new_safetensors_metadata = {}
-                        converted_keys = False
-                        for key, value in safetensors_metadata.items():
-                            if not isinstance(key, str) or not isinstance(value, str):
-                                converted_keys = True
-                                try:
-                                    new_key = str(key)
-                                    new_value = str(value)
-                                except Exception as e:
-                                    raise TypeError(
-                                        f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
-                                if new_key in new_safetensors_metadata:
-                                    logger.warning(
-                                        f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
-                                new_safetensors_metadata[new_key] = new_value
-                        safetensors_metadata = new_safetensors_metadata
-                        if converted_keys:
-                            logger.debug(
-                                f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
-
-                    # Format is required to enable Accelerate to load the metadata
-                    # otherwise it raises an OSError
-                    safetensors_metadata["format"] = "pt"
-
-                    safe_save(shard, join(save_dir, filename), safetensors_metadata)
-                else:
-                    torch.save(shard, join(save_dir, filename))
+                safe_save(shard, join(save_dir, filename), safetensors_metadata)
                 shard_size_mb = os.path.getsize(join(save_dir, filename)) / (1024 * 1024)
                 total_size_mb += shard_size_mb
 
@@ -270,16 +269,23 @@ def ModelWriter(cls):
                     "metadata": state_dict_split.metadata,
                     "weight_map": state_dict_split.tensor_to_filename,
                 }
-                with open(os.path.join(save_dir, "model.safetensors.index.json"), "w") as f:
-                    f.write(json.dumps(index, indent=2))
 
-        total_size_gb = total_size_mb / 1024
-        size_diff_mb = pre_quantized_size_mb - total_size_mb
-        size_diff_gb = size_diff_mb / 1024
-        percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
-        logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
-        logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
-        logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+                index_save_name = model_save_name + ".index.json"
+                index_save_path = join(save_dir, index_save_name)
+                # Save the index as well
+                with open(index_save_path, "w", encoding="utf-8") as f:
+                    content = json.dumps(index, indent=2, sort_keys=True) + "\n"
+                    f.write(content)
+
+        # If the saved model is a loaded quantized model, do not calculate the size diff.
+        if not self.load_quantized_model:
+            total_size_gb = total_size_mb / 1024
+            size_diff_mb = pre_quantized_size_mb - total_size_mb
+            size_diff_gb = size_diff_mb / 1024
+            percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
+            logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
+            logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+            logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         config.quantization_config = quantize_config.to_dict()
         config.save_pretrained(save_dir)
@@ -314,7 +320,7 @@ def ModelWriter(cls):
 
             if self.dynamic_expert_index is not None:
                 num_experts = getattr(config, self.dynamic_expert_index)
-                layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+                _ = get_moe_layer_modules(layer_modules=self.layer_modules,
                                                       num_experts=num_experts)
 
             layers = find_layers(model)
@@ -354,7 +360,7 @@ def ModelWriter(cls):
             # offload_state_dict=True,
             # offload_buffers=True,
         )
-        torch.cuda.empty_cache()
+        torch_empty_cache()
         return model
 
     cls.get_model_with_quantize = get_model_with_quantize
