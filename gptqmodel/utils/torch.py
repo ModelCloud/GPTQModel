@@ -1,10 +1,31 @@
-from typing import Optional
-
 import torch
 import gc as py_gc
 
+HAS_CUDA = False
+HAS_XPU = False
+HAS_MPS = False
 
-def torch_sync(device: torch.device):
+if hasattr(torch, "cuda") and torch.cuda.is_available():
+    HAS_CUDA = True
+
+if hasattr(torch, "xpu") and torch.xpu.is_available():
+    HAS_XPU = True
+
+if hasattr(torch, "mps") and torch.mps.is_available():
+    HAS_MPS = True
+
+
+def torch_sync(device: torch.device = None):
+    # check all backends
+    if device is None:
+        if HAS_CUDA:
+            torch.cuda.synchronize()
+        if HAS_XPU:
+            torch.xpu.synchronize()
+        if HAS_MPS:
+            torch.mps.synchronize()
+        return
+
     if device.type == "cuda":
         torch.cuda.synchronize()
     elif device.type == "xpu":
@@ -18,10 +39,11 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
 
     # check all backends
     if device is None:
-        torch.cuda.empty_cache()
-        if hasattr(torch, "xpu"):
+        if HAS_CUDA:
+            torch.cuda.empty_cache()
+        if HAS_XPU:
             torch.xpu.empty_cache()
-        if hasattr(torch, "mps"):
+        if HAS_MPS:
             torch.mps.empty_cache()
         return
 
