@@ -15,6 +15,7 @@ XPU_0 = device("xpu:0")
 MPS = device("mps")
 
 class DEVICE(str, Enum):
+    ALL = "all" # All device
     CPU = "cpu" # All CPU
     CUDA = "cuda" # Nvidia GPU
     XPU = "xpu" # Intel GPU
