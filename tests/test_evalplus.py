@@ -1,11 +1,13 @@
+# -- do not touch
 import os
-import tempfile
-import unittest
-
-from gptqmodel.utils.eval import evalplus
-
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+
+from gptqmodel.utils.eval import evalplus  # noqa: E402
 
 
 class TestEvalplus(unittest.TestCase):
