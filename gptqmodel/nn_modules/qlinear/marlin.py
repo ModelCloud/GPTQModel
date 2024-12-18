@@ -150,7 +150,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
-    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
