@@ -64,6 +64,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Features
 * 🚀 Extensive model support for: `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
+* ✨ Linux, MacOS, Windows platform quantization and accelerated inference support.
 * 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 * ✨ `Dynamic`/Mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
