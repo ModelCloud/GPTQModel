@@ -1,8 +1,10 @@
-from typing import List, Optional, Tuple, Union
 import sys
+from typing import List, Optional, Tuple, Union
+
 import torch.nn as nn
 
 from ...models._const import DEVICE, PLATFORM, normalize_device
+
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None

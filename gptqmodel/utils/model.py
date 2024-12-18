@@ -21,8 +21,7 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from .torch import torch_empty_cache
-from ..models._const import CPU, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, DEVICE
+from ..models._const import CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -33,6 +32,8 @@ from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
+from .torch import torch_empty_cache
+
 
 logger = setup_logger()
 

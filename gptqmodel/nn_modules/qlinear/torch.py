@@ -7,10 +7,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+
 
 logger = setup_logger()
 

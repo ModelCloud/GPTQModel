@@ -2,11 +2,12 @@ from argparse import ArgumentParser
 
 import datasets
 import torch
-from gptqmodel import GPTQModel, QuantizeConfig, BACKEND
-from gptqmodel.eval_tasks import LanguageModelingTask
 from transformers import AutoTokenizer
 
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel.eval_tasks import LanguageModelingTask
 from gptqmodel.utils.torch import torch_empty_cache
+
 
 DATASET = "tatsu-lab/alpaca"
 WITH_INPUT_TEMPLATE = "Instruction:\n{instruction}\n\nInput:\n{input}\n\nOutput:\n"

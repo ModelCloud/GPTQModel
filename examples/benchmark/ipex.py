@@ -4,6 +4,7 @@ import time
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+
 try:
     from optimum.intel.utils.modeling_utils import bind_cores_for_best_perf
     bind_cores_for_best_perf()
@@ -12,6 +13,7 @@ except ImportError as e:
     pass
 
 import argparse
+
 
 parser = argparse.ArgumentParser(description="Benchmark IPEX vs HF on a pre-trained model.")
 parser.add_argument("--model", type=str, required=True, help="Path or name of the pre-trained model.")

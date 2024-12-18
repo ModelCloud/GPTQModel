@@ -2,6 +2,7 @@
 import os
 import sys
 
+
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -13,14 +14,16 @@ import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
+from lm_eval.utils import make_table  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+
 
 RAND_SEED = 898
 

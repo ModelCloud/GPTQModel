@@ -1,11 +1,11 @@
-import sys
 from enum import Enum
 
 import torch
 from torch import device
 
 from ..utils import BACKEND
-from ..utils.torch import HAS_XPU, HAS_MPS, HAS_CUDA
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+
 
 CPU = device("cpu")
 CUDA = device("cuda")

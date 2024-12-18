@@ -8,11 +8,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+
 from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
+
 
 logger = setup_logger()
 
