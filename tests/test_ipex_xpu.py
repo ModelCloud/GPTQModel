@@ -14,7 +14,7 @@ from gptqmodel.models._const import DEVICE  # noqa: E402
 
 
 class TestsIPEX(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/opt-125m"  # "facebook/opt-125m"
+    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
 
     def test(self):
         origin_model = GPTQModel.load(
