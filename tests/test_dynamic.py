@@ -114,3 +114,17 @@ class TestDynamic(unittest.TestCase):
         for name, submodule in model.named_modules():
             if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
                 raise ValueError("first layer should be native module")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save(tmp_dir)
+            del model
+
+            q_model = GPTQModel.load(tmp_dir)
+            generate_str = self.tokenizer.decode(
+                q_model.generate(
+                    **self.tokenizer("The capital of France is is", return_tensors="pt").to(q_model.device),
+                    max_new_tokens=2)[0])
+
+            print(f"generate_str: {generate_str}")
+
+            self.assertIn("paris", generate_str.lower())

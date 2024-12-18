@@ -33,7 +33,7 @@ from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
-
+from ..quantization.config import dynamic_get
 
 logger = setup_logger()
 
@@ -191,6 +191,10 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
             d_sym = sym
             # dynamic bits, group_size, sym for each layer/module
             if dynamic is not None:
+                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
+                    # skip create this quant linear
+                    continue
+
                 for pattern, pattern_dict in dynamic.items():
                     if re.match(pattern, name):
                         d_bits = pattern_dict.get("bits", bits)
