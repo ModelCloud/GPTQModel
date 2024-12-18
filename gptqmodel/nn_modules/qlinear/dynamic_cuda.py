@@ -4,7 +4,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
 
 logger = setup_logger()
 
@@ -29,6 +29,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"
