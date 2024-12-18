@@ -11,9 +11,6 @@ from gptqmodel.models._const import DEVICE  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
-GENERATE_EVAL_SIZE = 100
-
-
 class TestsIPEX(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/opt-125m"  # "facebook/opt-125m"
 
