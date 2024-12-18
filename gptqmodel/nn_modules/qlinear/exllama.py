@@ -3,6 +3,7 @@
 
 import math
 from logging import getLogger
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -110,6 +111,13 @@ class ExllamaQuantLinear(BaseQuantLinear):
             self.register_buffer("bias", torch.zeros(self.original_outfeatures, dtype=torch.float16))
         else:
             self.bias = None
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[
+        bool, Optional[Exception]]:
+        if exllama_import_exception is not None:
+            return False, exllama_import_exception
+        return cls._validate(**args)
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)
