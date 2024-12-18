@@ -15,11 +15,11 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_SHARDS: bool = None
     SUPPORTS_TRAINING: bool = None
     SUPPORTS_AUTO_PADDING: bool = None
-    SUPPORTS_PLATFORM: List[str] = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_DEVICES: List[DEVICE] = None
+    SUPPORTS_PLATFORM: List[PLATFORM] = None
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, *args,
                  **kwargs):
@@ -76,11 +76,11 @@ class BaseQuantLinear(nn.Module):
                   outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if cls.SUPPORTS_PLATFORM != PLATFORM.ALL and sys.platform not in cls.SUPPORTS_PLATFORM:
+        if PLATFORM.ALL not in cls.SUPPORTS_PLATFORM and sys.platform not in cls.SUPPORTS_PLATFORM:
             err = f"{cls} does not support platform: {sys.platform}"
             return False, NotImplementedError(err)
 
-        if device is not None:
+        if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None:
             try:
                 cls.validate_device(device)
             except NotImplementedError:
