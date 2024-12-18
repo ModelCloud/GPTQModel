@@ -8,7 +8,7 @@ import torch
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
 
 marlin_import_exception = None
 try:
@@ -150,6 +150,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
