@@ -474,7 +474,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.5.1
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v3-torch2.5.1
       options: --device /dev/dri --ipc=host
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
