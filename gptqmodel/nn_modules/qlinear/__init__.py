@@ -1,6 +1,7 @@
 import sys
 from typing import List, Optional, Tuple, Union
 
+import torch
 import torch.nn as nn
 
 from ...models._const import DEVICE, PLATFORM, normalize_device
@@ -157,7 +158,7 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: str|DEVICE|int|torch.device):
         dev = normalize_device(device)
 
         if dev not in cls.SUPPORTS_DEVICES:
