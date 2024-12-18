@@ -16,6 +16,7 @@ from ..utils.torch import torch_sync, torch_empty_cache
 
 logger = setup_logger()
 
+# TODO do we really need max precision?
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
@@ -23,20 +24,29 @@ torch.backends.cudnn.allow_tf32 = False
 class GPTQ:
     def __init__(self, layer):
         self.layer = layer
-        self.dev = self.layer.weight.device
-        W = layer.weight.data.clone()
+        self.device = self.layer.weight.device
 
-        if isinstance(self.layer, nn.Conv2d):
-            W = W.flatten(1)
+        self.layer_copy = self._clone_layer()
 
-        if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.rows = W.shape[0]
-        self.columns = W.shape[1]
-        self.H = torch.zeros((self.columns, self.columns), device=self.dev)
+        self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
+        self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
         self.quantizer = Quantizer()
+
+    def _clone_layer(self):
+        # mps for m1+ is unified memory
+        if self.device.type not in ["mps", "cpu"]:
+            clone = self.layer.weight.data.cpu()
+        else:
+            clone = self.layer.weight.data.clone()
+
+        if isinstance(clone, nn.Conv2d):
+            clone = clone.flatten(1)
+
+        if isinstance(clone, transformers.pytorch_utils.Conv1D):
+            clone = clone.t()
+
+        return clone.to(device=self.device, dtype=torch.float)
 
     def add_batch(self, inp, out):
         if os.environ.get("DEBUG"):
@@ -105,24 +115,16 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
+        start = time.time()
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
-        # save mem and temp move to cpu
-        self.layer.weight.data = self.layer.weight.data.cpu()
-
-        W = self.layer.weight.data.clone()
-
-        if isinstance(self.layer, nn.Conv2d):
-            W = W.flatten(1)
-
-        if isinstance(self.layer, transformers.Conv1D):
-            W = W.t()
-
-        W = W.to(device=self.dev, dtype=torch.float)
-
-        tick = time.time()
+        if self.layer_copy is None:
+            W = self._clone_layer()
+        else:
+            W = self.layer_copy
+            self.layer_copy = None
 
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
@@ -133,7 +135,7 @@ class GPTQ:
         H[dead, dead] = 1
         W[:, dead] = 0
 
-        g_idx = []
+        # g_idx = []
         scale = []
         zero = []
         now_idx = 1
@@ -162,7 +164,7 @@ class GPTQ:
         while 1 > percdamp > 0:
             try:
                 damp = percdamp * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=self.dev)
+                diag = torch.arange(self.columns, device=self.device)
                 H[diag, diag] += damp
 
                 H = torch.linalg.cholesky(H)
@@ -231,9 +233,8 @@ class GPTQ:
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        torch_sync(self.dev)
+        torch_sync(self.device)
 
-        duration = time.time() - tick
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
         if math.isnan(avg_loss):
@@ -262,7 +263,7 @@ class GPTQ:
             self.layer.weight.data = Q.cpu().type_as(self.layer.weight.data)
 
         # move back to self.dev
-        self.layer.weight.data = self.layer.weight.data.to(device=self.dev)
+        self.layer.weight.data = self.layer.weight.data.to(device=self.device)
 
         if os.environ.get("DEBUG"):
             logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
@@ -274,6 +275,7 @@ class GPTQ:
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
 
+        duration = time.time() - start
         return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
@@ -285,7 +287,10 @@ class GPTQ:
         self.Losses = None
         self.Trace = None
 
-        torch_empty_cache(self.dev)
+        self.quantizer = None
+        self.layer_copy = None
+
+        torch_empty_cache(self.device)
 
 
 __all__ = ["GPTQ"]
