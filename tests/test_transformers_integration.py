@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 
-from gptqmodel.integration import integration
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
+
+from gptqmodel.integration import integration
 
 
 class TestTransformersIntegration(unittest.TestCase):

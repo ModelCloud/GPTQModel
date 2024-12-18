@@ -3,8 +3,10 @@ import subprocess
 import sys
 from argparse import ArgumentParser
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
+
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_best_device
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 pretrained_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"

@@ -1,9 +1,8 @@
-import gc
 
 import torch
 
-from .torch import torch_empty_cache
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from .torch import torch_empty_cache
 
 
 def exllama_set_max_input_length(model, max_input_length: int):

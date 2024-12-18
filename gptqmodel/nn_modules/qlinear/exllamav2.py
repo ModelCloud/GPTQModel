@@ -2,14 +2,16 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
 import math
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+
 
 exllama_v2_import_exception = None
 try:

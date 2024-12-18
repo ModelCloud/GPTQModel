@@ -11,8 +11,9 @@ import torch.nn as nn
 import transformers
 
 from ..utils.logger import setup_logger
+from ..utils.torch import torch_empty_cache, torch_sync
 from .quantizer import Quantizer
-from ..utils.torch import torch_sync, torch_empty_cache
+
 
 logger = setup_logger()
 
@@ -81,7 +82,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     # wrapper for backward compat with optimum
-    # TODO: mark for deprecation 
+    # TODO: mark for deprecation
     def fasterquant(
         self,
         blocksize=128,
@@ -92,7 +93,7 @@ class GPTQ:
         static_groups=False,
     ):
         return self.hf_quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
-        
+
     # public api exposed to hf
     def hf_quantize(
         self,

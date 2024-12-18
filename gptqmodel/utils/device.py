@@ -1,5 +1,6 @@
 
 from device_smi import Device
+
 from gptqmodel.models._const import CPU, CUDA_0
 
 

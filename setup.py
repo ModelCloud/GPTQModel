@@ -9,6 +9,7 @@ from pathlib import Path
 from setuptools import find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
+
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
@@ -87,6 +88,7 @@ with open('requirements.txt') as f:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
+
 
 if TORCH_CUDA_ARCH_LIST is None:
     got_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))

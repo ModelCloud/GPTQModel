@@ -10,9 +10,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
+
 
 exllama_import_exception = None
 try:
