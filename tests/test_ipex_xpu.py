@@ -1,14 +1,13 @@
 # -- do not touch
 import os
-import tempfile
-
-from gptqmodel.models._const import DEVICE
-from gptqmodel.utils.importer import backend_dict
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import torch  # noqa: E402
+import tempfile  # noqa: E402
+
+from gptqmodel.models._const import DEVICE  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
