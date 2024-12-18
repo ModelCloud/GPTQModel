@@ -284,8 +284,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             self.bias = None
 
     @classmethod
-    def validate(cls, **args) -> Tuple[
-        bool, Optional[Exception]]:
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
             return False, marlin_import_exception
         return cls._validate(**args)
