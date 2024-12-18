@@ -15,9 +15,6 @@ from ..utils.logger import setup_logger
 from .quantizer import Quantizer
 from ..utils.torch import torch_sync, torch_empty_cache
 
-# auto eager for torch.compile
-torch._dynamo.config.suppress_errors = True
-
 logger = setup_logger()
 
 # TODO do we really need max precision?
@@ -110,19 +107,7 @@ class GPTQ:
         return self.quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
 
     @torch.inference_mode()
-    def quantize(self, **kwargs):
-        start = time.time()
-
-        if sys.platform == "darwin":
-            scale, zero, g_idx, avg_loss, percdamp = self._quantize(**kwargs)
-        else:
-            with torch.compile(mode="reduce-overhead", fullgraph=True):
-                scale, zero, g_idx, avg_loss, percdamp = self._quantize(**kwargs)
-
-        duration = time.time() - start
-        return scale, zero, g_idx, duration, avg_loss, percdamp
-
-    def _quantize(
+    def quantize(
         self,
         blocksize=128,
         percdamp=0.01,
@@ -131,6 +116,7 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
+        start = time.time()
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
@@ -290,7 +276,8 @@ class GPTQ:
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
 
-        return scale, zero, g_idx, avg_loss, percdamp
+        duration = time.time() - start
+        return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
         if os.environ.get("DEBUG"):
