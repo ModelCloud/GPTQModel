@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple, Union
 import sys
 import torch.nn as nn
 
-from ...models._const import DEVICE, normalize_device
+from ...models._const import DEVICE, PLATFORM, normalize_device
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -73,7 +73,7 @@ class BaseQuantLinear(nn.Module):
                   outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if cls.SUPPORTS_PLATFORM != "all" and sys.platform not in cls.SUPPORTS_PLATFORM:
+        if cls.SUPPORTS_PLATFORM != PLATFORM.ALL and sys.platform not in cls.SUPPORTS_PLATFORM:
             err = f"{cls} does not support platform: {sys.platform}"
             return False, NotImplementedError(err)
 

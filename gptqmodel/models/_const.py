@@ -21,6 +21,7 @@ class DEVICE(str, Enum):
     MPS = "mps" # MacOS GPU
 
 class PLATFORM(str, Enum):
+    ALL = "all" # All platform
     LINUX = "linux" # linux
     WIN32 = "win32" # windows
     DARWIN = "darwin" # macos
