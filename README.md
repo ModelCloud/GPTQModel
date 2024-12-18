@@ -83,7 +83,9 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ## Quality: GPTQModel 4bit can match BF16:
 🤗 [ModelCloud quantized ultra-high recovery vortex-series models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
-![image](https://github.com/user-attachments/assets/aab69119-f9c8-4c94-9634-a3c63e57095e)
+![image](https://github.com/user-attachments/assets/7b2db012-b8af-4d19-a25d-7023cef19220)
+
+
 
 ## Model Support:  🚀 (Added by GPTQModel) 
 | Model            |     |                |     |                  |     |            |     |     |
