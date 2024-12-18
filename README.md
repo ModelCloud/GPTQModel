@@ -9,6 +9,7 @@
 </p>
 
 ## News
+* 12/16/2024 1.4.5-dev: Windows 11 support added/validated.
 * 12/15/2024 [1.4.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.2): MacOS `gpu` (Metal) and `cpu` (M+) support added/validated for inference and quantization. Cohere 2 model support added. 
 * 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` api added to allow Transformers/Optimum/PEFT and vLLM to correctly loaded GPTQModel quantized models while upstream PRs are in pending status. 
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
@@ -16,12 +17,14 @@
 * 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton pkg. 
 * 11/26/2024 [1.3.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.0) Zero-Day Hymba model support. Removed `tqdm` and `rogue` dependency. 
 * 11/24/2024 [1.2.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.3) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
-* 11/11/2024 🚀 [1.2.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.1) Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
-* 10/29/2024 🚀 [1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
 
 <details>
     
 <summary>Archived News:</summary>
+* 11/11/2024 🚀 [1.2.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.1) Meta MobileLLM model support added. `lm-eval[gptqmodel]` integration merged upstream. Intel/IPEX cpu inference merged replacing QBits (deprecated). Auto-fix/patch ChatGLM-3/GLM-4 compat with latest transformers. New `.load()` and `.save()` api. 
+
+* 10/29/2024 🚀 [1.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.1.0) IBM Granite model support. Full auto-buildless wheel install from pypi. Reduce max cpu memory usage by >20% during quantization. 100% CI model/feature coverage. 
+
 * 10/12/2024 ✨ [1.0.9](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.9) Move AutoRound to optional and fix pip install regression in v1.0.8.
 
 * 10/11/2024 ✨ [1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Add wheel for python 3.12 and cuda 11.8.
@@ -96,17 +99,17 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | EXAONE 3.0       | 🚀  | InternLM 1/2.5 | 🚀  | OPT              | ✅   | Yi         | ✅   |     |
 
 
-## Kernel and HW Accelerator Support 
+## Platform and HW Support 
 
-GPTQModel is validated for Linux x86_64 with the following devices:
+GPTQModel is validated for Linux, MacOS, and Windows 11:
 
 | Platform        | Device        |     |  Optimized Arch              |  Kernels |
 |-----------------|---------------| --- | -------------- | -------------- | 
 | Linux           | Nvidia GPU    | ✅       | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
 | Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
 | Linux | Intel XPU     | ✅             |   Intel Arc + Datacenter Max | IPEX, Torch |
-| MacOS | GPU (Metal) and CPU           | ✅             |   M1+ | Torch |
-
+| MacOS | GPU (Metal) / CPU          | ✅             |   M1+ | Torch |
+| Windows 11 | GPU (Nvidia) / CPU       | ✅             |   Nvidia  | DynamicCuda, Torch  |
 
 ## Install
 
