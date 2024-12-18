@@ -177,7 +177,7 @@ if BUILD_CUDA_EXT:
     ]
 
     if sys.platform != "win32":
-        extensions.append([
+        extensions += [
             # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
             cpp_ext.CUDAExtension(
                 "gptqmodel_marlin_kernels",
@@ -213,7 +213,7 @@ if BUILD_CUDA_EXT:
                 extra_link_args=extra_link_args,
                 extra_compile_args=extra_compile_args,
             )
-        ])
+        ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
