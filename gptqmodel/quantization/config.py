@@ -11,7 +11,6 @@ from transformers.utils.hub import cached_file
 
 from ..utils.logger import setup_logger
 
-
 logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
@@ -99,6 +98,21 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
         if isinstance(value, dict):
             dict_scale_dtype_to_str(value)
 
+
+def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], layer_name: str, key: str = None,
+                default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+    for pattern, pattern_dict in dynamic.items():
+        if pattern.startswith("-:"):
+            if re.match(pattern.removeprefix("-:"), layer_name):
+                return False
+        elif re.match(pattern.removeprefix("+:"), layer_name):
+            if key is None:
+                return pattern_dict
+            else:
+                return pattern_dict.get(key, default_value)
+    return default_value
+
+
 @dataclass
 class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
@@ -184,16 +198,7 @@ class QuantizeConfig():
         return self.meta.get(key)
 
     def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
-        for pattern, pattern_dict in self.dynamic.items():
-            if pattern.startswith("-:"):
-                if re.match(pattern.removeprefix("-:"), layer_name):
-                    return False
-            elif re.match(pattern.removeprefix("+:"), layer_name):
-                if key is None:
-                    return pattern_dict
-                else:
-                    return pattern_dict.get(key, default_value)
-        return default_value
+        return dynamic_get(self.dynamic, layer_name, key, default_value)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_set_versionable(self, key: str, value: List[str]):
