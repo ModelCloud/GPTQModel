@@ -12,6 +12,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_SHARDS: bool = None
     SUPPORTS_TRAINING: bool = None
     SUPPORTS_AUTO_PADDING: bool = None
+    SUPPORTS_PLATFORM: List[str] = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 

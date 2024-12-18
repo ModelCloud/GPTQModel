@@ -20,6 +20,11 @@ class DEVICE(str, Enum):
     XPU = "xpu" # Intel GPU
     MPS = "mps" # MacOS GPU
 
+class PLATFORM(str, Enum):
+    LINUX = "linux" # linux
+    WIN32 = "win32" # windows
+    DARWIN = "darwin" # macos
+
 
 def validate_cuda_support(raise_exception: bool = False):
     got_cuda = HAS_CUDA

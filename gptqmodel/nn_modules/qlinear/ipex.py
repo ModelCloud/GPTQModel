@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.models._const import DEVICE
+from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...utils.logger import setup_logger
@@ -64,6 +64,7 @@ class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"

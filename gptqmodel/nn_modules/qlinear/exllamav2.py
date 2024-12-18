@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
 
 exllama_v2_import_exception = None
@@ -115,6 +115,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
