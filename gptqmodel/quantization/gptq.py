@@ -8,7 +8,6 @@ import time
 
 import torch
 import torch.nn as nn
-import torch._dynamo
 import transformers
 
 from ..utils.logger import setup_logger
