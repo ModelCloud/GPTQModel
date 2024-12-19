@@ -202,16 +202,6 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                         d_group_size = pattern_dict.get("group_size", group_size)
                         d_sym = pattern_dict.get("sym", sym)
                         break
-            print(f"======{name} start======")
-            print(f'bits={d_bits}')
-            print(f'group_size={d_group_size}')
-            print(f'desc_act={desc_act}')
-            print(f'sym={d_sym}')
-            print(f'infeatures={in_features}')
-            print(f'outfeatures={out_features}')
-            print(f'bias={bias}')
-            print(f'weight_dtype={submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype}')
-            print(f"======{name} end======")
             new_layer = QuantLinear(
                 bits=d_bits,
                 group_size=d_group_size,
@@ -222,7 +212,6 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 bias=bias,
                 weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             )
-            print(f"=============")
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
     return QuantLinear
