@@ -22,7 +22,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
-from ovis.ovis_calibration_dataset import get_calib_dataset
+from .ovis.ovis_calibration_dataset import get_calib_dataset
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
