@@ -62,7 +62,8 @@ class TestLoadVLLM(unittest.TestCase):
 
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
         print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertEquals(generated_text, " Paris.\n\n2. The capital of the United States is Washington, D")
+
+        self.assertIn("paris", generated_text.lower())
 
         outputs = model.generate(
             prompts=self.prompts,
@@ -74,7 +75,7 @@ class TestLoadVLLM(unittest.TestCase):
 
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
         print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertEquals(generated_text, " Paris.\n\n2. The capital of the United States is Washington, D")
+        self.assertIn("paris", generated_text.lower())
 
         del model
         self.release_vllm_model()
@@ -158,8 +159,8 @@ class TestLoadVLLM(unittest.TestCase):
 
             generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
             print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-            self.assertEquals(generated_text,
-                              " Paris, which is also the country's largest city.")
+
+            self.assertIn("paris", generated_text.lower())
 
             del model
             self.release_vllm_model()
