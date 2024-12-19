@@ -443,4 +443,4 @@ def dequantize_weight(layer):
 
     return unpacked_qweight.T, unpacked_qzeros
 
-__all__ = ["dequantize_weight"]
+__all__ = ["MarlinQuantLinear", "dequantize_weight"]
