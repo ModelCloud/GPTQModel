@@ -272,15 +272,12 @@ class GPTQ:
             Q = Q.t()
 
         if Q.shape != self.layer.weight.shape:
-            self.layer.weight.data = Q.cpu().reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+            self.layer.weight.data = Q.cpu().reshape(self.layer.weight.shape).to(dtype=self.layer.weight.data, device=torch.device("cpu") if move_to_cpu else self.device)
         else:
-            self.layer.weight.data = Q.cpu().type_as(self.layer.weight.data)
+            self.layer.weight.data = Q.cpu().to(dtype=self.layer.weight.data.dtype, device=torch.device("cpu") if move_to_cpu else self.device)
 
         if move_to_cpu:
             self.device = torch.device("cpu")
-        else:
-            # move back to self.dev
-            self.layer.weight.data = self.layer.weight.data.to(device=self.device)
 
         if os.environ.get("DEBUG"):
             logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
