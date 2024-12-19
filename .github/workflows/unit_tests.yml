@@ -561,6 +561,7 @@ jobs:
           uv pip install dist/*.whl
 
       - name: Find suitable GPU
+        if: ${{ !contains(ipex, matrix.test_script) && !cancelled() }}
         run: |
           timestamp=$(date +%s%3N)
           gpu_id=-1
@@ -592,5 +593,5 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
-        if: always()
+        if: always() && !contains(ipex, matrix.test_script)
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
