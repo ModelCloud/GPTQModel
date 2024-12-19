@@ -44,17 +44,17 @@ class TestOvis1_6_Llama(ModelTest):
 
             # generate output
             with torch.inference_mode():
-                gen_kwargs = dict(
-                    max_new_tokens=1024,
-                    do_sample=False,
-                    top_p=None,
-                    top_k=None,
-                    temperature=None,
-                    repetition_penalty=None,
-                    eos_token_id=model.generation_config.eos_token_id,
-                    pad_token_id=text_tokenizer.pad_token_id,
-                    use_cache=True
-                )
+                gen_kwargs = {
+                    "max_new_tokens": 1024,
+                    "do_sample": False,
+                    "top_p": None,
+                    "top_k": None,
+                    "temperature": None,
+                    "repetition_penalty": None,
+                    "eos_token_id": model.generation_config.eos_token_id,
+                    "pad_token_id": text_tokenizer.pad_token_id,
+                    "use_cache": True
+                }
                 output_ids = \
                 model.generate(input_ids, pixel_values=pixel_values, attention_mask=attention_mask, **gen_kwargs)[0]
                 output = text_tokenizer.decode(output_ids, skip_special_tokens=True)

@@ -62,11 +62,11 @@ class CalibrationDataset(Dataset):
         input_ids = input_ids[:self.text_max_length]
         labels = labels[:self.text_max_length]
 
-        return dict(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            labels=labels
-        )
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "labels": labels
+        }
 
 
 class DataCollatorForMultimodalDatasetGPTQ:
@@ -90,12 +90,12 @@ class DataCollatorForMultimodalDatasetGPTQ:
         if num_valid_label == 0:
             logging.warning(
                 f'[DataCollatorForMultimodalDatasetGPTQ] All labels are ignored, may causing training instability\n{input_ids=}\n{attention_mask=}\n{labels=}')
-        return dict(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            pixel_values=pixel_values
-        )
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "pixel_values": pixel_values
+        }
 
 
 class MyDataLoader(DataLoader):
