@@ -136,7 +136,7 @@ class ModelTest(unittest.TestCase):
 
         is_quantized = model.quantized
         if not is_quantized:
-            model.quantize(calibration_dataset)
+            model.quantize(calibration_dataset, batch_size=4)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
