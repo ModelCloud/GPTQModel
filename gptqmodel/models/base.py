@@ -582,6 +582,8 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
                     with torch.no_grad():
+                        layer = layer.to(device=cur_layer_device)
+
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(layer, "reuse_kv"):
                             if layer.reuse_kv:
@@ -611,6 +613,7 @@ class BaseGPTQModel(nn.Module):
                         group_size=group_size,
                         actorder=desc_act,
                         static_groups=self.quantize_config.static_groups,
+                        move_to_cpu=True,
                     )
                     if task is not None:
                         task.get_logger().report_scalar(
@@ -646,6 +649,9 @@ class BaseGPTQModel(nn.Module):
                     )
                     gptq[name].free()
 
+            # need forward, move to non-cpu device
+            layer = layer.to(device=cur_layer_device)
+
             for j in range(num_batches):
                 layer_input = []
                 for k, layer_inp in enumerate(layer_inputs[j]):
@@ -674,7 +680,8 @@ class BaseGPTQModel(nn.Module):
 
                 torch_empty_cache()
 
-            layers[i] = move_to(layer, CPU)
+            # layer complete, move to cpu
+            layers[i] = layer.to(device=CPU)
             del layer
             del gptq
             del layer_inputs
