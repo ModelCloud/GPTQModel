@@ -9,7 +9,7 @@
 </p>
 
 ## News
-* 12/16/2024 1.4.5-dev: Windows 11 support added/validated. Fix `dynamic` loading. 
+* 12/16/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage. 
 * 12/15/2024 [1.4.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.2): MacOS `gpu` (Metal) and `cpu` (M+) support added/validated for inference and quantization. Cohere 2 model support added. 
 * 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` api added to allow Transformers/Optimum/PEFT and vLLM to correctly loaded GPTQModel quantized models while upstream PRs are in pending status. 
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
@@ -60,47 +60,41 @@ GPTQModel started out as a major refractor (fork) of AutoGTQP but has now morphe
 
 ## Why GPTQ and not other low-bit quantizers?
 
-Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production level inference speed in both token latency and rps. GPTQ has the optimal blend of quality and inference speed you would want to use in a real-world production system. 
+Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you would want to use in a real-world production system. 
 
 ## Features
-* 🚀 Extensive model support for: `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`, "Ovis 1.6".
+* 🚀 Extensive model support for: `Ovis VL`, `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support.
 * 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
-* ✨ `Dynamic`/Mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
+* ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
-* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (recent Intel/AMD) and Intel/XPU. 
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) hardware accelerated quantization/inference for CPU [`avx`, `amx`, `xmx`] and Intel GPU [`Arc` + `Datacenter Max`]. 
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
-* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization.
-* ✨ Asymmetric `Sym=False` support via `FORMAT.GPTQ_V2`. 
+* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) support for potentially higher quality quantization.
+* ✨ Asymmetric `Sym=False` support. 
 * ✨ `lm_head` module quant inference support for further VRAM reduction (auto-round only). 
 * 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
-* ✨ Better quality quants as measured by PPL. (Test config: defaults + `sym=True` + `FORMAT.GPTQ`, TinyLlama)
-* ✨ Model weights sharding support
-* ✨ Security: hash check of model weights on load
-* 🚀 Over 50% faster PPL calculations (OPT)
-* 🚀 Over 40% faster `packing` stage in quantization (Llama 3.1 8B)
+* ✨ Model weights sharding support with optional hash check of model weights on load.
+* 🚀 40% faster `packing` stage in quantization (Llama 3.1 8B). 50% faster PPL calculations (OPT).
 
 ## Quality: GPTQModel 4bit can match BF16:
 🤗 [ModelCloud quantized ultra-high recovery vortex-series models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 ![image](https://github.com/user-attachments/assets/7b2db012-b8af-4d19-a25d-7023cef19220)
 
-
-
-## Model Support:  🚀 (Added by GPTQModel) 
+## Model Support:  🚀 (GPTQModel) 
 | Model            |    |                |    |                  |    |            |    |    |   |
 |------------------|----|----------------|----|------------------|----|------------|----|----|---|
 | Baichuan         | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | 🚀 | Yi | ✅ |
-| Bloom            | ✅  | Gemma 2        | 🚀 | Llama 3.2 Vision | 🚀 | Ovis 1.6   | 🚀 |    |   |
+| Bloom            | ✅  | Gemma 2        | 🚀 | Llama 3.2 VL | 🚀 | Ovis 1.6   | 🚀 |    |   |
 | ChatGLM          | 🚀 | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | 🚀 |    |   |
 | CodeGen          | ✅  | GPTNeoX        | ✅  | MiniCPM3         | ✅  | Qwen       | ✅  |    |   |
-| Cohere 1-2       | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2MoE   | 🚀 |    |   |
-| DBRX Converted   | 🚀 | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2VL    | 🚀 |    |   |
+| Cohere 1-2       | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | 🚀 |    |   |
+| DBRX Converted   | 🚀 | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2 VL    | 🚀 |    |   |
 | Deci             | ✅  | Granite        | 🚀 | MobileLLM        | 🚀 | RefinedWeb | ✅  |    |   |
 | DeepSeek-V2      | 🚀 | GRIN-MoE       | 🚀 | MOSS             | ✅  | StableLM   | ✅  |    |   |
 | DeepSeek-V2-Lite | 🚀 | Hymba          | 🚀 | MPT              | ✅  | StarCoder2 | ✅  |    |   |
 | EXAONE 3.0       | 🚀 | InternLM 1/2.5 | 🚀 | OPT              | ✅  | XVERSE     | ✅  |    |   |
-
 
 ## Platform and HW Support 
 
