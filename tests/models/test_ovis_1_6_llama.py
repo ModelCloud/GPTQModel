@@ -29,7 +29,7 @@ class TestOvis1_6_Llama(ModelTest):
             visual_tokenizer = model.get_visual_tokenizer()
 
             # enter image path and prompt
-            image_path = os.path.join(os.path.abspath(__file__), "10016.jpg")
+            image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "10016.jpg")
             image = Image.open(image_path)
             text = "What does this picture show?"
             query = f'<image>\n{text}'
@@ -60,4 +60,4 @@ class TestOvis1_6_Llama(ModelTest):
 
                 print(f'Output:\n{output}')
 
-                self.assertIn(".com", output.lower())
+                self.assertIn("snow", output.lower())
