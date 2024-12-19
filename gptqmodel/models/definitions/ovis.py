@@ -21,7 +21,7 @@ class OvisGPTQ(BaseGPTQModel):
             tokenizer=None, ):
         return calibration_dataset
 
-    def generate(self, **kwargs):
+    def generate(self, inputs, **kwargs):
         """shortcut for model.generate"""
         with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
-            return self.model.generate(inputs=kwargs.pop("input_ids"), **kwargs)
+            return self.model.generate(inputs, **kwargs)
