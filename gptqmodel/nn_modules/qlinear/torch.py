@@ -251,22 +251,23 @@ class TorchQuantLinear(BaseQuantLinear):
 
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
-        if num_itr == 1:
+        count = self.g_idx.shape[0] // x.shape[-1]
+        if count == 1:
             g_idx_int32 = self.g_idx.int()
             weights = self.scales[g_idx_int32] * (weight - zeros[g_idx_int32])
         else:
-            num_dim = self.g_idx.shape[0] // num_itr
+            num_dim = self.g_idx.shape[0] // count
             weights = []
-            for i in range(num_itr):
+            for i in range(count):
                 scale_i = self.scales[:, i * num_dim : (i + 1) * num_dim]
                 weight_i = weight[:, i * num_dim : (i + 1) * num_dim]
                 zeros_i = zeros[:, i * num_dim : (i + 1) * num_dim]
                 g_idx_i = self.g_idx[i * num_dim : (i + 1) * num_dim].int()
                 weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
             weights = torch.cat(weights, dim=1)
-        out = torch.matmul(x, weights).to(x_dtype).reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        out = torch.matmul(x, weights).reshape(out_shape)
+        if self.bias is not None:
+            out = out + self.bias
         return out
 
 
