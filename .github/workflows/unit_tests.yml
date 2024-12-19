@@ -586,6 +586,7 @@ jobs:
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
             export CUDA_VISIBLE_DEVICES=""
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
+            pip uninstall vllm -y
             pip list
           fi
           pytest --durations=0 tests/${{ matrix.test_script }}.py
