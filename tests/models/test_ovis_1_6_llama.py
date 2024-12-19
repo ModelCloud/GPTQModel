@@ -8,7 +8,6 @@ from model_test import ModelTest
 
 class TestOvis1_6_Llama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis1.6-Llama3.2-3B"
-    # NATIVE_MODEL_ID = "/root/projects/GPTQModel/tests/models/ovis_model/Ovis1.6-Llama3.2-3B"
 
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = False
@@ -29,7 +28,7 @@ class TestOvis1_6_Llama(ModelTest):
             visual_tokenizer = model.get_visual_tokenizer()
 
             # enter image path and prompt
-            image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "10016.jpg")
+            image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovis/10016.jpg")
             image = Image.open(image_path)
             text = "What does this picture show?"
             query = f'<image>\n{text}'
