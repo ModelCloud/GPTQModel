@@ -32,6 +32,7 @@ from .moss import MOSSGPTQ
 from .mpt import MPTGPTQ
 from .olmo2 import Olmo2GPTQ
 from .opt import OPTGPTQ
+from .ovis import OvisGPTQ
 from .phi import PhiGPTQ
 from .phi3 import Phi3GPTQ
 from .qwen import QwenGPTQ
@@ -43,4 +44,3 @@ from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .ovis import OvisGPTQ

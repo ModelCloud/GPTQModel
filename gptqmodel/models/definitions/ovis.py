@@ -1,5 +1,7 @@
-from ..base import BaseGPTQModel
 import torch
+
+from ..base import BaseGPTQModel
+
 
 class OvisGPTQ(BaseGPTQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]

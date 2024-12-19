@@ -1,10 +1,12 @@
 import os.path
 import tempfile
 
-from PIL import Image
 import torch
-from gptqmodel import GPTQModel
 from model_test import ModelTest
+from PIL import Image
+
+from gptqmodel import GPTQModel
+
 
 class TestOvis1_6_Llama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis1.6-Llama3.2-3B"

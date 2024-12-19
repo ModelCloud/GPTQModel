@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from gptqmodel.integration.src.optimum.utils.import_utils import is_gptqmodel_available
-from .utils import nested_move_to
 from optimum.gptq.constants import GPTQ_CONFIG
 from optimum.gptq.data import get_dataset, prepare_dataset
 from optimum.gptq.utils import get_block_name_with_pattern, get_device, get_layers, get_preceding_modules, get_seqlen
@@ -35,11 +34,10 @@ from transformers import AutoTokenizer
 from transformers.pytorch_utils import Conv1D
 from transformers.utils.quantization_config import QuantizationMethod
 
+from .utils import nested_move_to
+
 if is_accelerate_available():
-    from accelerate import (
-        cpu_offload_with_hook,
-        load_checkpoint_and_dispatch,
-    )
+    from accelerate import cpu_offload_with_hook, load_checkpoint_and_dispatch
     from accelerate.hooks import remove_hook_from_module
 
 if is_auto_gptq_available():

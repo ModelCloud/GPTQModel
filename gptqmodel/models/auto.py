@@ -57,6 +57,7 @@ from .definitions.moss import MOSSGPTQ
 from .definitions.mpt import MPTGPTQ
 from .definitions.olmo2 import Olmo2GPTQ
 from .definitions.opt import OPTGPTQ
+from .definitions.ovis import OvisGPTQ
 from .definitions.phi import PhiGPTQ
 from .definitions.phi3 import Phi3GPTQ
 from .definitions.qwen import QwenGPTQ
@@ -68,7 +69,6 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-from .definitions.ovis import OvisGPTQ
 
 
 logger = setup_logger()
