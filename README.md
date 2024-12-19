@@ -68,7 +68,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 * ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
-* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) 4bit quantization/inference support on CPU (recent Intel/AMD) and Intel/XPU. 
+* 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) hardware accelerated quantization/inference for CPU [`avx`, `amx`, `xmx`] and Intel GPU [`Arc` + `Datacenter Max`]. 
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
 * ✨ [Intel/AutoRound](https://github.com/intel/auto-round) support for potentially higher quality quantization.
 * ✨ Asymmetric `Sym=False` support. 
