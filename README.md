@@ -9,7 +9,7 @@
 </p>
 
 ## News
-* 12/16/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage. 
+* 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage. 
 * 12/15/2024 [1.4.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.2): MacOS `gpu` (Metal) and `cpu` (M+) support added/validated for inference and quantization. Cohere 2 model support added. 
 * 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` api added to allow Transformers/Optimum/PEFT and vLLM to correctly loaded GPTQModel quantized models while upstream PRs are in pending status. 
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
@@ -70,7 +70,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
 * 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) hardware accelerated quantization/inference for CPU [`avx`, `amx`, `xmx`] and Intel GPU [`Arc` + `Datacenter Max`]. 
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
-* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) support for potentially higher quality quantization.
+* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) alternative gptq-inference compatible quantization method.
 * ✨ Asymmetric `Sym=False` support. 
 * ✨ `lm_head` module quant inference support for further VRAM reduction (auto-round only). 
 * 🚀 Faster quantization: More than 50% faster for TinyLlama + 4090 with batching and large calibration dataset.
@@ -210,12 +210,13 @@ evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL
 ## Citation
 ```
 @misc{gptqmodel,
-    author = {ModelCloud.ai},
+    author = {ModelCloud.ai and qubitium@modelcloud.ai},
     title = {GPTQModel},
     year = {2024},
     publisher = {GitHub},
     journal = {GitHub repository},
     howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
+    note = {Contact: qubitium@modelcloud.ai}
 }
 
 @article{frantar-gptq,
