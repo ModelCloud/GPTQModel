@@ -5,7 +5,7 @@ import os
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from lm_eval.utils import make_table
+from lm_eval.utils import make_table  # noqa: E402
 
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
 
