@@ -611,6 +611,7 @@ class BaseGPTQModel(nn.Module):
                         group_size=group_size,
                         actorder=desc_act,
                         static_groups=self.quantize_config.static_groups,
+                        move_to_cpu=True,
                     )
                     if task is not None:
                         task.get_logger().report_scalar(

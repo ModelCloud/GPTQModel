@@ -92,7 +92,13 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
-        return self.hf_quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
+        return self.hf_quantize(
+            blocksize=blocksize,
+            percdamp=percdamp,
+            damp_auto_increment=damp_auto_increment,
+            group_size=group_size,
+            actorder=actorder,
+            static_groups=static_groups)
 
     # public api exposed to hf
     def hf_quantize(
@@ -104,7 +110,13 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
-        return self.quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
+        return self.quantize(
+            blocksize=blocksize,
+            percdamp=percdamp,
+            damp_auto_increment=damp_auto_increment,
+            group_size=group_size,
+            actorder=actorder,
+            static_groups=static_groups)
 
     @torch.inference_mode()
     def quantize(
@@ -115,6 +127,7 @@ class GPTQ:
         group_size=-1,
         actorder=False,
         static_groups=False,
+        move_to_cpu=False,
     ):
         start = time.time()
         # TODO: waiting for pytorch implementation of ops for MPS
@@ -263,8 +276,11 @@ class GPTQ:
         else:
             self.layer.weight.data = Q.cpu().type_as(self.layer.weight.data)
 
-        # move back to self.dev
-        self.layer.weight.data = self.layer.weight.data.to(device=self.device)
+        if move_to_cpu:
+            self.device = torch.device("cpu")
+        else:
+            # move back to self.dev
+            self.layer.weight.data = self.layer.weight.data.to(device=self.device)
 
         if os.environ.get("DEBUG"):
             logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
