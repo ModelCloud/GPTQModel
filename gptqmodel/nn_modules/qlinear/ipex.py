@@ -8,11 +8,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.models._const import DEVICE
+
+from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
+
 
 logger = setup_logger()
 
@@ -64,6 +66,7 @@ class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
@@ -133,23 +136,21 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
-                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
-        bool, Optional[Exception]]:
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if sys.platform != "linux":
             return False, Exception("IPEX is only available on Linux platform.")
 
         if not HAS_IPEX:
             return False, IPEX_ERROR_LOG
-        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+        return cls._validate(**args)
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)
 
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
-            self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros, \
-                                                                    self.infeatures, self.outfeatures, None, self.bias, \
+            self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
+                                                                    self.infeatures, self.outfeatures, None, self.bias,
                                                                     self.group_size, self.g_idx, quant_method=0, dtype=0)
 
     def pack(self, linear, scales, zeros, g_idx=None):

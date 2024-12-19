@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 import torch
 
+
 try:
     from vllm import LLM, SamplingParams
 

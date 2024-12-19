@@ -18,16 +18,33 @@ from transformers import AutoConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
-                                   META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
-                                   META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
+from ..quantization.config import (
+    FORMAT,
+    META_FIELD_DAMP_AUTO_INCREMENT,
+    META_FIELD_DAMP_PERCENT,
+    META_FIELD_MSE,
+    META_FIELD_QUANTIZER,
+    META_FIELD_STATIC_GROUPS,
+    META_FIELD_TRUE_SEQUENTIAL,
+    META_FIELD_URI,
+    META_QUANTIZER_GPTQMODEL,
+    META_VALUE_URI,
+    MIN_VERSION_WITH_V2,
+)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
-                           get_model_files_size, get_moe_layer_modules, make_quant)
+from ..utils.model import (
+    convert_gptq_v2_to_v1_format,
+    copy_py_files,
+    find_layers,
+    get_model_files_size,
+    get_moe_layer_modules,
+    make_quant,
+)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU
+
 
 logger = setup_logger()
 

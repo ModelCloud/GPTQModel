@@ -5,10 +5,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
-from ...models._const import DEVICE
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+from ...models._const import DEVICE, PLATFORM
+
 
 marlin_import_exception = None
 try:
@@ -150,6 +152,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
@@ -282,6 +285,12 @@ class MarlinQuantLinear(BaseQuantLinear):
             self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
         else:
             self.bias = None
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        if marlin_import_exception is not None:
+            return False, marlin_import_exception
+        return cls._validate(**args)
 
     def post_init(self):
         device = self.qweight.device

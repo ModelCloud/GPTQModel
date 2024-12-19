@@ -1,8 +1,11 @@
+import sys
 from typing import List, Optional, Tuple, Union
 
+import torch
 import torch.nn as nn
 
-from ...models._const import DEVICE, normalize_device
+from ...models._const import DEVICE, PLATFORM, normalize_device
+
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -16,6 +19,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_DEVICES: List[DEVICE] = None
+    SUPPORTS_PLATFORM: List[PLATFORM] = None
 
     def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, *args,
                  **kwargs):
@@ -72,7 +76,11 @@ class BaseQuantLinear(nn.Module):
                   outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if device is not None:
+        if PLATFORM.ALL not in cls.SUPPORTS_PLATFORM and sys.platform not in cls.SUPPORTS_PLATFORM:
+            err = f"{cls} does not support platform: {sys.platform}"
+            return False, NotImplementedError(err)
+
+        if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None:
             try:
                 cls.validate_device(device)
             except NotImplementedError:
@@ -150,7 +158,7 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: str|DEVICE|int|torch.device):
         dev = normalize_device(device)
 
         if dev not in cls.SUPPORTS_DEVICES:

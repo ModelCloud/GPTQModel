@@ -1,7 +1,9 @@
 import torch
+from transformers import AutoTokenizer
+
 from gptqmodel import GPTQModel
 from gptqmodel.quantization.config import AutoRoundQuantizeConfig  # noqa: E402
-from transformers import AutoTokenizer
+
 
 pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "./autoround/TinyLlama-1.1B-Chat-v1.0-4bit-128g"

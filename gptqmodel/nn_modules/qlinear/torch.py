@@ -7,10 +7,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
+
 
 logger = setup_logger()
 
@@ -25,7 +27,8 @@ class TorchQuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU, DEVICE.CUDA, DEVICE.MPS]
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"

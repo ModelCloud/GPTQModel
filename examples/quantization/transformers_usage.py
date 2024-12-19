@@ -1,5 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
+
 model_id = "facebook/opt-125m"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]

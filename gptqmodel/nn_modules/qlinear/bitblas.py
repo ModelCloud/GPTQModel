@@ -9,10 +9,12 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+
 
 logger = setup_logger()
 
@@ -86,6 +88,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -136,12 +139,10 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.reset_parameters()
 
     @classmethod
-    def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
-                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
-        bool, Optional[Exception]]:
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if not BITBLAS_AVAILABLE:
             return False, ValueError(BITBLAS_INSTALL_HINT)
-        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+        return cls._validate(**args)
 
     def _validate_parameters(
         self, group_size: int, infeatures: int, outfeatures: int

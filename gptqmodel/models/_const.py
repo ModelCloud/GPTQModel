@@ -1,11 +1,11 @@
-import sys
 from enum import Enum
 
 import torch
 from torch import device
 
 from ..utils import BACKEND
-from ..utils.torch import HAS_XPU, HAS_MPS, HAS_CUDA
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+
 
 CPU = device("cpu")
 CUDA = device("cuda")
@@ -15,10 +15,17 @@ XPU_0 = device("xpu:0")
 MPS = device("mps")
 
 class DEVICE(str, Enum):
+    ALL = "all" # All device
     CPU = "cpu" # All CPU
     CUDA = "cuda" # Nvidia GPU
     XPU = "xpu" # Intel GPU
     MPS = "mps" # MacOS GPU
+
+class PLATFORM(str, Enum):
+    ALL = "all" # All platform
+    LINUX = "linux" # linux
+    WIN32 = "win32" # windows
+    DARWIN = "darwin" # macos
 
 
 def validate_cuda_support(raise_exception: bool = False):

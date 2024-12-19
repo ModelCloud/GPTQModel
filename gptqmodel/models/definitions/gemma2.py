@@ -2,6 +2,7 @@ from ...utils import BACKEND
 from ...utils.logger import setup_logger
 from ..base import BaseGPTQModel
 
+
 logger = setup_logger()
 
 SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly inference a quantized Gemma2-27B model. Pre-quantized model with sample vLLM code: https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit ."

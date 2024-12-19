@@ -1,7 +1,9 @@
 import os
 
-from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
+
+from gptqmodel import GPTQModel, QuantizeConfig, get_best_device
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 

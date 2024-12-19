@@ -2,13 +2,16 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
 import math
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+
 
 exllama_v2_import_exception = None
 try:
@@ -115,6 +118,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
@@ -177,6 +181,12 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             self.register_buffer("bias", torch.zeros((self.original_outfeatures), dtype=torch.float16))
         else:
             self.bias = None
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        if exllama_v2_import_exception is not None:
+            return False, exllama_v2_import_exception
+        return cls._validate(**args)
 
     def post_init(self, temp_dq):
         self.validate_device(self.qweight.device.type)

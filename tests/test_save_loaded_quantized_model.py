@@ -1,14 +1,17 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
+
 
 MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 

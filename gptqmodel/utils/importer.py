@@ -1,10 +1,6 @@
 from collections import OrderedDict
-from typing import Dict, Optional, Type, Union, Tuple
+from typing import Dict, Optional, Tuple, Type, Union
 
-import torch
-
-from . import BACKEND
-from .torch import HAS_XPU, HAS_CUDA, HAS_MPS
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -17,6 +13,9 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
+from . import BACKEND
+from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
+
 
 message_logged = False
 logger = setup_logger()

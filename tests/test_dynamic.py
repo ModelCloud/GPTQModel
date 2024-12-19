@@ -1,20 +1,22 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestDynamic(unittest.TestCase):
@@ -112,3 +114,17 @@ class TestDynamic(unittest.TestCase):
         for name, submodule in model.named_modules():
             if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
                 raise ValueError("first layer should be native module")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save(tmp_dir)
+            del model
+
+            q_model = GPTQModel.load(tmp_dir)
+            generate_str = self.tokenizer.decode(
+                q_model.generate(
+                    **self.tokenizer("The capital of France is is", return_tensors="pt").to(q_model.device),
+                    max_new_tokens=2)[0])
+
+            print(f"generate_str: {generate_str}")
+
+            self.assertIn("paris", generate_str.lower())

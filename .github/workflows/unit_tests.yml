@@ -44,7 +44,7 @@ env:
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
-  TORCH_2_5_TESTS: "test_q4_ipex.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
+  TORCH_2_5_TESTS: "test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -190,7 +190,9 @@ jobs:
 
       - name: Install requirements
         run: |
+          echo "===== init test env ====="
           bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          echo "===== install transformers typing-extensions ====="
           uv pip install transformers typing-extensions -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
@@ -302,20 +304,24 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          echo "===== install optimum bitblas ====="
+          uv pip install optimum bitblas==0.0.1.dev13 uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          echo "===== install dist/whl ====="
           uv pip install dist/*.whl
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            echo "===== install auto_round ====="
             uv pip install auto_round
           fi
           bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
-          uv pip install typing-extensions numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" == "test_cohere2" ]; then
+            echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
           else
+            echo "===== install transformers from pypi ====="
             uv pip install transformers -U
           fi
-
-
+          echo "===== install typing-extensions numpy==1.26.4 ====="
+          uv pip install typing-extensions numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Check platform
         run: |
@@ -427,14 +433,20 @@ jobs:
 
       - name: Install wheel
         run: |
+          echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          echo "===== install dist/whl ====="
           uv pip install dist/*.whl
+          echo "===== init test env ====="
           bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          echo "===== install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 ====="
           uv pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" = "test_xverse" ]; then
+            echo "===== install tokenizers==0.15.2 ====="
             uv pip install tokenizers==0.15.2 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            echo "===== install auto_round ====="
             uv pip install auto_round
           fi
 
@@ -474,8 +486,10 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.5.1
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v3-torch2.5.1
+      options: --device /dev/dri --ipc=host
       volumes:
+        - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
     strategy:
       fail-fast: false
@@ -533,11 +547,17 @@ jobs:
 
       - name: Install wheel
         run: |
-          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
-          uv pip install -U intel_extension_for_pytorch typing-extensions bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+           source /etc/profile.d/pyenv.sh && pyenv activate xpu
+          else
+            bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
+          fi
+
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            echo "===== install auto_round ====="
             uv pip install auto_round
           fi
+            echo "===== install dist/whl ====="
           uv pip install dist/*.whl
 
       - name: Find suitable GPU
@@ -562,7 +582,16 @@ jobs:
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+        run: |
+          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+            export CUDA_VISIBLE_DEVICES=""
+            source /opt/intel/oneapi/pytorch-gpu-dev-0.5/oneapi-vars.sh
+            source $ONEAPI_ROOT/../pti/0.9/env/vars.sh
+            export Pti_DIR=$ONEAPI_ROOT/../pti/0.9/lib/cmake/pti
+            source /etc/profile.d/pyenv.sh && pyenv activate xpu
+            pip list
+          fi
+          pytest --durations=0 tests/${{ matrix.test_script }}.py
 
       - name: Release GPU
         if: always()

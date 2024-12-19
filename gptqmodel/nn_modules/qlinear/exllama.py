@@ -3,15 +3,18 @@
 
 import math
 from logging import getLogger
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
-from ...models._const import DEVICE
+from ...models._const import DEVICE, PLATFORM
+
 
 exllama_import_exception = None
 try:
@@ -54,6 +57,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
@@ -110,6 +114,12 @@ class ExllamaQuantLinear(BaseQuantLinear):
             self.register_buffer("bias", torch.zeros(self.original_outfeatures, dtype=torch.float16))
         else:
             self.bias = None
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        if exllama_import_exception is not None:
+            return False, exllama_import_exception
+        return cls._validate(**args)
 
     def post_init(self):
         self.validate_device(self.qweight.device.type)

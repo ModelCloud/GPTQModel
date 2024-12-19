@@ -1,6 +1,7 @@
+from model_test import ModelTest
+
 from gptqmodel import BACKEND
 from gptqmodel.utils.importer import backend_dict
-from model_test import ModelTest
 
 
 class TestOpt(ModelTest):

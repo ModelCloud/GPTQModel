@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import os
 import sys
+
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -68,6 +70,7 @@ from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
 from .definitions.ovis import OvisGPTQ
 
+
 logger = setup_logger()
 
 MODEL_MAP = {
@@ -124,7 +127,6 @@ MODEL_MAP = {
 
 HAS_IPEX = False
 try:
-    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
     HAS_IPEX = True
 except Exception:
     pass
@@ -276,9 +278,10 @@ class GPTQModel:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
-            from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
+
+            from gptqmodel.utils.eval import lm_eval
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
