@@ -27,17 +27,18 @@ class GPTQ:
         self.layer = layer
         self.device = self.layer.weight.device
 
-        self.layer_copy = self._clone_layer()
-
-        self.layer.weight.data = self.layer.weight.data.cpu()
+        self.layer.weight.data = self._clone_layer(torch.device("cpu"))
         torch_empty_cache(self.device)
 
-        self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
+        self.shape =  self.layer.weight.data.shape
+        self.dtype = self.layer.weight.data.dtype
+
+        self.rows, self.columns = self.shape[0], self.shape[1]
         self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
         self.quantizer = Quantizer()
 
-    def _clone_layer(self):
+    def _clone_layer(self, device: torch.device):
         # mps for m1+ is unified memory
         if self.device.type not in ["mps", "cpu"]:
             clone = self.layer.weight.data.cpu()
@@ -50,7 +51,7 @@ class GPTQ:
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
-        return clone.to(device=self.device, dtype=torch.float)
+        return clone.to(device=device, dtype=torch.float)
 
     def add_batch(self, inp, out):
         if os.environ.get("DEBUG"):
@@ -137,11 +138,12 @@ class GPTQ:
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
-        if self.layer_copy is None:
-            W = self._clone_layer()
-        else:
-            W = self.layer_copy
-            self.layer_copy = None
+        # if self.layer_copy is None:
+        #     W = self._clone_layer()
+        # else:
+        #     W = self.layer_copy
+        #     self.layer_copy = None
+        W = self.layer.weight.data
 
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
@@ -277,11 +279,11 @@ class GPTQ:
         Q = Q.cpu()
         torch_empty_cache(self.device)
 
-        if Q.shape != self.layer.weight.shape:
-            self.layer.weight.data = (Q.reshape(self.layer.weight.shape)
-                .to(dtype=self.layer.weight.data.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
+        if Q.shape != self.shape:
+            self.layer.weight.data = (Q.reshape(self.shape)
+                .to(dtype=self.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
         else:
-            self.layer.weight.data = (Q.to(dtype=self.layer.weight.data.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
+            self.layer.weight.data = (Q.to(dtype=self.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
 
         if move_to_cpu:
             self.device = torch.device("cpu")
