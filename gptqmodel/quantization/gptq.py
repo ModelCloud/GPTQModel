@@ -29,6 +29,9 @@ class GPTQ:
 
         self.layer_copy = self._clone_layer()
 
+        self.layer.weight.data = self.layer.weight.data.cpu()
+        torch_empty_cache(self.device)
+
         self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
         self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
