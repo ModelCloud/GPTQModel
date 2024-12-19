@@ -137,9 +137,6 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if sys.platform != "linux":
-            return False, Exception("IPEX is only available on Linux platform.")
-
         if not HAS_IPEX:
             return False, IPEX_ERROR_LOG
         return cls._validate(**args)
