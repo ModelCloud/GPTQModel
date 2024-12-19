@@ -38,6 +38,7 @@ on:
         default: '10'
 
 env:
+  DEBUG: 1
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.9'
