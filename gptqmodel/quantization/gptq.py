@@ -38,7 +38,7 @@ class GPTQ:
         self.nsamples = 0
         self.quantizer = Quantizer()
 
-    def _clone_layer(self, device: torch.device):
+    def _clone_layer(self, device: torch.device) -> torch.Tensor:
         # mps for m1+ is unified memory
         if self.device.type not in ["mps", "cpu"]:
             clone = self.layer.weight.data.cpu()
@@ -51,7 +51,7 @@ class GPTQ:
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
-        return clone.to(device=device, dtype=torch.float)
+        return clone.to(device=device)
 
     def add_batch(self, inp, out):
         if os.environ.get("DEBUG"):
@@ -143,7 +143,7 @@ class GPTQ:
         # else:
         #     W = self.layer_copy
         #     self.layer_copy = None
-        W = self.layer.weight.data
+        W = self.layer.weight.data.float()
 
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
