@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
+from ovis.ovis_calibration_dataset import get_calib_dataset
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -100,7 +101,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, **kwargs):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -115,11 +116,13 @@ class ModelTest(unittest.TestCase):
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            **kwargs,
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        calibration_dataset = self.load_dataset(tokenizer)
+        is_ovis_model = "Ovis" in model_id_or_path
+        calibration_dataset = self.load_dataset(tokenizer) if not is_ovis_model else get_calib_dataset(model)
 
         # mpt model need
         if not model.config.pad_token_id:

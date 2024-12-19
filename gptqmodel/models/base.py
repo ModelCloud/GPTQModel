@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import os
+import shutil
 from typing import Dict, List, Optional, Union
 
 import accelerate
@@ -269,10 +271,7 @@ class BaseGPTQModel(nn.Module):
         for row in calibration_dataset:
             input_ids = row["input_ids"]
             if isinstance(input_ids, torch.Tensor):
-                if input_ids.dim() == 1:
-                    input_ids_length = input_ids.shape[0]
-                else:
-                    raise ValueError("Expected a 1-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(input_ids.dim()))
+                input_ids_length = input_ids.numel()
             else:
                 input_ids_length = len(input_ids)
 
@@ -441,13 +440,23 @@ class BaseGPTQModel(nn.Module):
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+        is_ovis = self.__class__.__name__ == "OvisGPTQ"
         for example in calibration_dataset:
             for k, v in example.items():
-                if len(v.shape) == 1:
-                    v = v.unsqueeze(0)
-                example[k] = move_to(v, cur_layer_device)
+                if isinstance(v, list):
+                    for i in range(len(v)):
+                        if len(v[i].shape) == 1:
+                            v[i] = v[i].unsqueeze(0)
+                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], cur_layer_device)
+                else:
+                    if len(v.shape) == 1:
+                        v = v.unsqueeze(0)
+                    example[k] = move_to(v, cur_layer_device)
             try:
-                self.model(**example)
+                if is_ovis:
+                    self.generate(inputs=example.pop("input_ids"), **example)
+                else:
+                    self.model(**example)
             except ValueError:
                 pass
         handle.remove()
@@ -572,14 +581,18 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                    if hasattr(layer, "reuse_kv"):
-                        if layer.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i-1)
-
                     with torch.no_grad():
-                        layer_output = layer(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(i) is None:
-                            shared_kv_cache_dict[i] = layer_output[-1]
+                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                        if hasattr(layer, "reuse_kv"):
+                            if layer.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+
+                            layer_output = layer(*layer_input, **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(i) is None:
+                                shared_kv_cache_dict[i] = layer_output[-1]
+                        else:
+                            layer(*layer_input, **additional_layer_inputs)
+
                 for h in handles:
                     h.remove()
 
@@ -747,6 +760,12 @@ class BaseGPTQModel(nn.Module):
             meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
+        preprocessor_config_path = os.path.join(self.model_id_or_path, "preprocessor_config.json")
+        if os.path.exists(preprocessor_config_path):
+            os.makedirs(save_dir, exist_ok=True)
+
+            shutil.copyfile(preprocessor_config_path, os.path.join(save_dir, "preprocessor_config.json"))
+
         if self.quantized:
             self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
         else:

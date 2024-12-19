@@ -131,6 +131,7 @@ SUPPORTED_MODELS = [
     "mobilellm",
     "hymba",
     "olmo2",
+    "ovis",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
