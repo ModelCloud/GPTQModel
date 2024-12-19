@@ -1,3 +1,4 @@
+import os.path
 from typing import Dict, Sequence, Union, List
 import copy
 import logging
@@ -42,7 +43,7 @@ class CalibrationDataset(Dataset):
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         sample = self.data[i]
         conversations = copy.deepcopy(sample["conversations"])
-        images = [Image.open("./images/" + sample['id'])]
+        images = [Image.open(os.path.join(self.model.model_id_or_path, f"images/{sample['id']}"))]
         max_partition = 9
 
         prompt, input_ids, pixel_values, labels = self.model.preprocess_inputs(
