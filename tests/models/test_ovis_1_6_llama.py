@@ -8,7 +8,6 @@ from model_test import ModelTest
 
 class TestOvis1_6_Llama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis1.6-Llama3.2-3B"
-    # NATIVE_MODEL_ID = "/root/projects/GPTQModel/tests/models/ovis_model/Ovis1.6-Llama3.2-3B"
 
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = False
