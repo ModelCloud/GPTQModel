@@ -313,7 +313,7 @@ jobs:
             uv pip install auto_round
           fi
           bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
-          if [ "${{ matrix.test_script }}" == "test_cohere2" ]; then
+          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ]; then
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
           else
