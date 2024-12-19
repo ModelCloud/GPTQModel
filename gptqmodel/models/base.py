@@ -582,6 +582,7 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
                     with torch.no_grad():
+                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(layer, "reuse_kv"):
                             if layer.reuse_kv:
                                 additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
