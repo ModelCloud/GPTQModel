@@ -41,10 +41,10 @@ class GPTQ:
         else:
             clone = self.layer.weight.data.clone()
 
-        if isinstance(clone, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv2d):
             clone = clone.flatten(1)
 
-        if isinstance(clone, transformers.pytorch_utils.Conv1D):
+        if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
         return clone.to(device=self.device, dtype=torch.float)
