@@ -271,12 +271,14 @@ class GPTQ:
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
 
+        Q = Q.cpu()
+        torch_empty_cache(self.device)
+
         if Q.shape != self.layer.weight.shape:
-            self.layer.weight.data = (Q.cpu().reshape(self.layer.weight.shape)
+            self.layer.weight.data = (Q.reshape(self.layer.weight.shape)
                 .to(dtype=self.layer.weight.data.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
         else:
-            self.layer.weight.data = (Q.cpu()
-                .to(dtype=self.layer.weight.data.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
+            self.layer.weight.data = (Q.to(dtype=self.layer.weight.data.dtype, device=torch.device("cpu") if move_to_cpu else self.device))
 
         if move_to_cpu:
             self.device = torch.device("cpu")
