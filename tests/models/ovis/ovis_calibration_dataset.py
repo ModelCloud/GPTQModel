@@ -1,11 +1,12 @@
-import os.path
-from typing import Dict, Sequence, Union, List
 import copy
 import logging
+import os.path
+from typing import Dict, List, Sequence, Union
 
 import torch
-from torch.utils.data import Dataset, DataLoader
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+
 
 IGNORE_ID = -100
 
@@ -61,11 +62,11 @@ class CalibrationDataset(Dataset):
         input_ids = input_ids[:self.text_max_length]
         labels = labels[:self.text_max_length]
 
-        return dict(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            labels=labels
-        )
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "labels": labels
+        }
 
 
 class DataCollatorForMultimodalDatasetGPTQ:
@@ -89,12 +90,12 @@ class DataCollatorForMultimodalDatasetGPTQ:
         if num_valid_label == 0:
             logging.warning(
                 f'[DataCollatorForMultimodalDatasetGPTQ] All labels are ignored, may causing training instability\n{input_ids=}\n{attention_mask=}\n{labels=}')
-        return dict(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            pixel_values=pixel_values
-        )
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "pixel_values": pixel_values
+        }
 
 
 class MyDataLoader(DataLoader):
@@ -110,7 +111,7 @@ data_list = (data_list * (target_length // len(data_list) + 1))[:target_length]
 
 def get_calib_dataset(model):
     train_dataset = CalibrationDataset(model, text_max_length=832, data_list=data_list)
-    print(f"Dataset Loaded!")
+    print("Dataset Loaded!")
     print(f"Total length of the training set: {len(train_dataset)}")
 
     train_loader = MyDataLoader(
@@ -121,5 +122,5 @@ def get_calib_dataset(model):
         drop_last=True,
         pin_memory=True,
     )
-    print(f"Dataloader Loaded!")
+    print("Dataloader Loaded!")
     return train_loader
