@@ -210,12 +210,13 @@ evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL
 ## Citation
 ```
 @misc{gptqmodel,
-    author = {ModelCloud.ai},
+    author = {ModelCloud.ai and qubitium@modelcloud.ai},
     title = {GPTQModel},
     year = {2024},
     publisher = {GitHub},
     journal = {GitHub repository},
     howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
+    note = {Contact: qubitium@modelcloud.ai}
 }
 
 @article{frantar-gptq,
