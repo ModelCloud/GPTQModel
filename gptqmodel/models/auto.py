@@ -16,6 +16,7 @@ import torch
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
+from ..nn_modules.qlinear.ipex import HAS_IPEX
 from ..quantization import QUANT_CONFIG_FILENAME
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
@@ -125,11 +126,6 @@ MODEL_MAP = {
     "ovis": OvisGPTQ,
 }
 
-HAS_IPEX = False
-try:
-    HAS_IPEX = True
-except Exception:
-    pass
 
 class GPTQModel:
     def __init__(self):
