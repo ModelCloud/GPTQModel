@@ -102,7 +102,7 @@ if TORCH_CUDA_ARCH_LIST is None:
         BUILD_CUDA_EXT = False
 
         if sys.platform == "win32" and 'cu+' not in torch.__version__:
-            print("No CUDA was found! It looks your torch was installed from PyPi, which may not have CUDA support.\nTry to install it form `https://pytorch.org/get-started/locally/`")
+            print("No CUDA device detected: avoid installing torch from PyPi which may not have bundle CUDA support for Windows.\nInstall via PyTorch: `https://pytorch.org/get-started/locally/`")
 
     # if cuda compute is < 8.0, always force build since we only compile cached wheels for >= 8.0
     if BUILD_CUDA_EXT and not FORCE_BUILD:
