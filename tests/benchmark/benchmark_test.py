@@ -1,7 +1,9 @@
 import os
 import time
+import torch
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "11"
 
 import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -33,6 +35,7 @@ class BenchmarkTest(unittest.TestCase):
             self.MODEL_id,
             device=device,
             backend=backend,
+            torch_dtype=torch.bfloat16,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_id)
