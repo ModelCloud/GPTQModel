@@ -1,7 +1,7 @@
 import copy
 import logging
 
-from ...utils.calibration_dataset import batched
+from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY
 import torch

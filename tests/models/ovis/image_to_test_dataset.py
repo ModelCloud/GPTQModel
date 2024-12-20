@@ -1,4 +1,4 @@
-from gptqmodel.models import OvisGPTQ
+from gptqmodel.models import OvisGPTQ, Qwen2VLGPTQ
 
 
 def format_ovis_dataset(image, assistant):
@@ -16,17 +16,19 @@ def format_ovis_dataset(image, assistant):
         ]
     }
 
+
 def format_qwen2_vl_dataset(image, assistant):
     return [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": "generate a caption for this image"},
-                ],
-            },
-            {"role": "assistant", "content": assistant},
-        ]
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "generate a caption for this image"},
+            ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
+
 
 def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
     from datasets import load_dataset
@@ -39,6 +41,12 @@ def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
         for sample in dataset
     ]
 
+
 def get_calib_dataset(model):
     if isinstance(model, OvisGPTQ):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
+
+    if isinstance(model, Qwen2VLGPTQ):
+        return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
+
+    raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")

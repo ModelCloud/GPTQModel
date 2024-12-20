@@ -1,4 +1,5 @@
 # -- do not touch
+import gc
 import os
 import sys
 
@@ -21,7 +22,7 @@ import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
+from transformers import AutoTokenizer, AutoProcessor  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -106,7 +107,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int=4, **kwargs):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -126,7 +127,8 @@ class ModelTest(unittest.TestCase):
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        calibration_dataset = get_calib_dataset(model) if MODALITY.IMAGE_TO_TEXT in model.modality else self.load_dataset(tokenizer)
+        is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
+        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
 
         # mpt model need
         if not model.config.pad_token_id:
@@ -136,7 +138,7 @@ class ModelTest(unittest.TestCase):
 
         is_quantized = model.quantized
         if not is_quantized:
-            model.quantize(calibration_dataset, batch_size=4)
+            model.quantize(calibration_dataset, batch_size=batch_size)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
@@ -144,13 +146,23 @@ class ModelTest(unittest.TestCase):
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-
+                if is_image_to_text_model:
+                    processor = AutoProcessor.from_pretrained(tmpdirname)
+        else:
+            if is_image_to_text_model:
+                processor = AutoProcessor.from_pretrained(model_id_or_path)
         if not is_quantized:
             del model
             torch_empty_cache()
-            return q_model, q_tokenizer
+            if is_image_to_text_model:
+                return q_model, q_tokenizer, processor
+            else:
+                return q_model, q_tokenizer
         else:
-            return model, tokenizer
+            if is_image_to_text_model:
+                return model, tokenizer, processor
+            else:
+                return model, tokenizer
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
         if tokenizer_path is None:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import shutil
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 import accelerate
 import torch
@@ -89,6 +90,8 @@ class BaseGPTQModel(nn.Module):
     supports_desc_act = [True, False]
 
     modality: List[MODALITY] = [MODALITY.TEXT]
+
+    quant_override_files: Dict[str, Dict[str, Any]] = {}
 
     def __init__(
         self,
@@ -769,14 +772,22 @@ class BaseGPTQModel(nn.Module):
             meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
-        preprocessor_config_path = os.path.join(self.model_id_or_path, "preprocessor_config.json")
-        if os.path.exists(preprocessor_config_path):
-            os.makedirs(save_dir, exist_ok=True)
+        extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
+        for name in extra_json_file_names:
+            json_path = os.path.join(self.model_id_or_path, name)
+            if os.path.exists(json_path):
+                os.makedirs(save_dir, exist_ok=True)
 
-            shutil.copyfile(preprocessor_config_path, os.path.join(save_dir, "preprocessor_config.json"))
+                shutil.copyfile(json_path, os.path.join(save_dir, name))
 
         if self.quantized:
             self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
+
+            # overwrite quant_override_files
+            for name, value in self.quant_override_files.items():
+                json_path = os.path.join(save_dir, name)
+                with open(json_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
 
