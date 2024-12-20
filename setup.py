@@ -7,8 +7,11 @@ import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+except BaseException:
+    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
