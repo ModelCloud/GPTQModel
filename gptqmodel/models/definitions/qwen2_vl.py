@@ -1,3 +1,5 @@
+from typing import Dict
+
 from qwen_vl_utils import process_vision_info
 
 from transformers import AutoModelForVision2Seq, Qwen2VLProcessor
@@ -56,14 +58,17 @@ class Qwen2VLGPTQ(BaseGPTQModel):
         }
     }
 
-    def _prepare_dataset_for_quantization(
+    def preprocess_inputs(self, sample: Dict) -> Dict:
+        return sample
+
+    def prepare_dataset(
             self,
             calibration_dataset,
             batch_size: int = 1,
             tokenizer=None, ):
         processor = Qwen2VLProcessor.from_pretrained(self.model_id_or_path)
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=None):
+        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_inputs):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )

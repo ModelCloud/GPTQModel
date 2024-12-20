@@ -130,7 +130,7 @@ class BaseGPTQModel(nn.Module):
     def hf_device_map(self):
         return getattr(self.model, "hf_device_map", None)
 
-    def _prepare_dataset_for_quantization(
+    def prepare_dataset(
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
@@ -281,7 +281,7 @@ class BaseGPTQModel(nn.Module):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, best_device)
 
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
+        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size, tokenizer,)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
