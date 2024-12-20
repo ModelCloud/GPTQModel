@@ -3,6 +3,25 @@ from io import BytesIO
 import requests
 import base64
 
+
+def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
+    vision_infos = []
+    if isinstance(conversations[0], dict):
+        conversations = [conversations]
+    for conversation in conversations:
+        for message in conversation:
+            if isinstance(message["content"], list):
+                for ele in message["content"]:
+                    if (
+                            "image" in ele
+                            or "image_url" in ele
+                            or "video" in ele
+                            or ele["type"] in ("image", "image_url", "video")
+                    ):
+                        vision_infos.append(ele)
+    return vision_infos
+
+
 def fetch_image(ele: dict[str, str | Image.Image]) -> Image.Image:
     if "image" in ele:
         image = ele["image"]
