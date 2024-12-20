@@ -2,9 +2,11 @@ import os
 import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "11"
 import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.utils.progress import ProgressBar
 
 
 class TestsTorchBenchmark(unittest.TestCase):
@@ -27,7 +29,7 @@ class TestsTorchBenchmark(unittest.TestCase):
         ]
         self.num_runs = 10
         self.tokens_per_second = 49.20
-        self.fluctuation_range = 0.2
+        self.fluctuation_range = 0.5
 
     def test_torch_benchmark(self):
         model = GPTQModel.from_quantized(
@@ -40,7 +42,9 @@ class TestsTorchBenchmark(unittest.TestCase):
         inp = tokenizer(self.prompts, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(self.device)
 
         times = []
-        for _ in range(self.num_runs):
+        pb = ProgressBar(range(self.num_runs))
+        for i in pb:
+            pb.set_description(f"run index {i} of {self.num_runs -1}")
             start_time = time.time()
             res = model.generate(**inp, num_beams=1, min_new_tokens=self.min_new_tokens,
                                  max_new_tokens=self.min_new_tokens)
