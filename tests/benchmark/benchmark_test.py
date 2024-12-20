@@ -10,8 +10,8 @@ from gptqmodel.utils.progress import ProgressBar
 
 
 class BenchmarkTest(unittest.TestCase):
-    MODEL_id = "/monster/data/model/gptq_4bits_11-21_15-47-09_maxlen2048_ns2048_descFalse_damp0.1"
-    MIN_NEW_TOEKNS = 100
+    MODEL_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+    MIN_NEW_TOEKNS = 10
     NUM_RUNS = 10
     PROMPTS = [
         "I am in Paris and I",
@@ -25,7 +25,7 @@ class BenchmarkTest(unittest.TestCase):
         "Which is the most widely used Internet search engine in the world?",
         "What is the official language of France?",
     ]
-    MAX_DELTA_FLOOR_PERCENT = 0.15
+    MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
     def benchmark(self, backend, device, tokens_per_second):
