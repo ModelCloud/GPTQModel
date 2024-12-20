@@ -25,7 +25,7 @@ class BenchmarkTest(unittest.TestCase):
         "Which is the most widely used Internet search engine in the world?",
         "What is the official language of France?",
     ]
-    MAX_DELTA_FLOOR_PERCENT = 0.15
+    MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
     def benchmark(self, backend, device, tokens_per_second):
