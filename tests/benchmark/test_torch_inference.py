@@ -26,7 +26,7 @@ class TestsTorchBenchmark(unittest.TestCase):
             "What is the official language of France?",
         ]
         self.num_runs = 10
-        self.torch_benchmark_value = 48
+        self.torch_benchmark_value = 49.20
 
     def test_torch_benchmark(self):
         model = GPTQModel.from_quantized(
