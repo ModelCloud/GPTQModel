@@ -14,6 +14,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 class TestsQ4CUDA(unittest.TestCase):
 
+    @classmethod
     def setUpClass(cls):
         cls.model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         cls.tokenizer = AutoTokenizer.from_pretrained(cls.model_id)
