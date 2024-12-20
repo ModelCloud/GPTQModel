@@ -1,7 +1,5 @@
 from typing import Dict
 
-from qwen_vl_utils import process_vision_info
-
 from transformers import AutoModelForVision2Seq, Qwen2VLProcessor
 
 from ..base import BaseGPTQModel
@@ -10,6 +8,8 @@ from ...utils.model import MODALITY
 
 
 class Qwen2VLGPTQ(BaseGPTQModel):
+    require_pkgs_version = ["qwen_vl_utils>=0.0.8"]
+
     loader = AutoModelForVision2Seq
 
     base_modules = ["model.embed_tokens", "model.norm"]
@@ -66,6 +66,8 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             calibration_dataset,
             batch_size: int = 1,
             tokenizer=None, ):
+        from qwen_vl_utils import process_vision_info
+
         processor = Qwen2VLProcessor.from_pretrained(self.model_id_or_path)
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
