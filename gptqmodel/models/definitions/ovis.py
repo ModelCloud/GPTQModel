@@ -47,11 +47,11 @@ class OvisGPTQ(BaseGPTQModel):
         input_ids = input_ids[:text_max_length]
         labels = labels[:text_max_length]
 
-        return dict(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            labels=labels
-        )
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "labels": labels,
+        }
 
     def prepare_dataset(
             self,
@@ -76,12 +76,12 @@ class OvisGPTQ(BaseGPTQModel):
             if num_valid_label == 0:
                 logging.warning(
                     f'[DataCollatorForMultimodalDatasetGPTQ] All labels are ignored, may causing training instability\n{input_ids=}\n{attention_mask=}\n{labels=}')
-            calib_data.append(dict(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                pixel_values=pixel_values
-            ))
+            calib_data.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "pixel_values": pixel_values,
+            })
 
         return calib_data
 
