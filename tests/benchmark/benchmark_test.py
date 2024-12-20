@@ -12,7 +12,7 @@ from gptqmodel.utils.progress import ProgressBar
 class BenchmarkTest(unittest.TestCase):
     MODEL_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
     MIN_NEW_TOEKNS = 10
-    NUM_RUNS = 5
+    NUM_RUNS = 10
     PROMPTS = [
         "I am in Paris and I",
         "The capital of the United Kingdom is",
