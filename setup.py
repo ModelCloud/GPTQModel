@@ -7,8 +7,11 @@ import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+except BaseException:
+    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
@@ -97,6 +100,9 @@ if TORCH_CUDA_ARCH_LIST is None:
     # not validated for compute < 6
     if not got_cuda_v6:
         BUILD_CUDA_EXT = False
+
+        if sys.platform == "win32" and 'cu+' not in torch.__version__:
+            print("No CUDA device detected: avoid installing torch from PyPi which may not have bundle CUDA support for Windows.\nInstall via PyTorch: `https://pytorch.org/get-started/locally/`")
 
     # if cuda compute is < 8.0, always force build since we only compile cached wheels for >= 8.0
     if BUILD_CUDA_EXT and not FORCE_BUILD:

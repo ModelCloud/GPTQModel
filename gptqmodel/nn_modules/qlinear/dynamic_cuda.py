@@ -1,4 +1,5 @@
 # License: GPTQModel/licenses/LICENSE.apache
+from typing import Tuple, Optional
 
 import torch
 
@@ -66,6 +67,12 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             self.gptqmodel_cuda = gptqmodel_cuda_64
 
         assert infeatures % 64 == 0 and outfeatures % 64 == 0
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        if gptqmodel_cuda_import_exception is not None:
+            return False, gptqmodel_cuda_import_exception
+        return cls._validate(**args)
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.outfeatures,)
