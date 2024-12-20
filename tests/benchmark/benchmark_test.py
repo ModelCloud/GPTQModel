@@ -10,7 +10,7 @@ from gptqmodel.utils.progress import ProgressBar
 
 
 class BenchmarkTest(unittest.TestCase):
-    MODEL_id = "/monster/data/model/gptq_4bit_07-29_06-46-12_maxlen2048_ns1024_descFalse_damp0.005/"
+    MODEL_id = "/monster/data/lrl/llama3_8B/gptq_4bits_11-21_15-47-09_maxlen2048_ns2048_descFalse_damp0.1"
     MIN_NEW_TOEKNS = 100
     NUM_RUNS = 10
     PROMPTS = [
@@ -36,6 +36,7 @@ class BenchmarkTest(unittest.TestCase):
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_id)
+        tokenizer.pad_token = tokenizer.eos_token
         inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(device)
 
         times = []
