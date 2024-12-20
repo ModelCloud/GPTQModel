@@ -1,11 +1,11 @@
-from typing import Dict
-
-from qwen_vl_utils import process_vision_info
+from typing import Dict, Optional
+from PIL import Image
 
 from transformers import AutoModelForVision2Seq, Qwen2VLProcessor
 
 from ..base import BaseGPTQModel
 from ...utils.calibration import batched
+from ...utils.image import fetch_image, extract_vision_info
 from ...utils.model import MODALITY
 
 
@@ -58,6 +58,22 @@ class Qwen2VLGPTQ(BaseGPTQModel):
         }
     }
 
+    @staticmethod
+    def process_vision_info(
+            conversations: list[dict] | list[list[dict]],
+    ) -> Optional[list[Image.Image]]:
+        vision_infos = extract_vision_info(conversations)
+        # Read images
+        image_inputs = []
+        for vision_info in vision_infos:
+            if "image" in vision_info or "image_url" in vision_info:
+                image_inputs.append(fetch_image(vision_info))
+            else:
+                raise ValueError("image, image_url should in content.")
+        if len(image_inputs) == 0:
+            image_inputs = None
+        return image_inputs
+
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 
@@ -72,11 +88,11 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )
-            image_inputs, video_inputs = process_vision_info(batch)
+            image_inputs = self.process_vision_info(batch)
             inputs = processor(
                 text=text,
                 images=image_inputs,
-                videos=video_inputs,
+                videos=None,
                 padding=True,
                 return_tensors="pt",
             )

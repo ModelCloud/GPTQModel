@@ -6,7 +6,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.progress import ProgressBar
+from gptqmodel.utils.progress import ProgressBar  # noqa: E402
 
 
 class BenchmarkTest(unittest.TestCase):
@@ -44,7 +44,7 @@ class BenchmarkTest(unittest.TestCase):
         for i in pb:
             pb.set_description(f"run index {i} of {self.NUM_RUNS -1}")
             start_time = time.time()
-            res = model.generate(**inp, num_beams=1, min_new_tokens=self.MIN_NEW_TOEKNS,
+            _ = model.generate(**inp, num_beams=1, min_new_tokens=self.MIN_NEW_TOEKNS,
                                  max_new_tokens=self.MIN_NEW_TOEKNS)
             end_time = time.time()
 
