@@ -35,7 +35,6 @@ class BenchmarkTest(unittest.TestCase):
             self.MODEL_id,
             device=device,
             backend=backend,
-            torch_dtype=torch.bfloat16,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_id)
