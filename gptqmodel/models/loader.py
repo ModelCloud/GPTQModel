@@ -224,7 +224,7 @@ def ModelLoader(cls):
 
         if torch_dtype is None or torch_dtype == "auto":
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            torch_dtype = auto_dtype_from_config(config=config, device=device, device_map=device_map)
+            torch_dtype = auto_dtype_from_config(config=config, device=device, device_map=device_map, quant_inference=True)
         elif not isinstance(torch_dtype, torch.dtype):
             raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
 

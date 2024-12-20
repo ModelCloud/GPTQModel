@@ -684,7 +684,13 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
 
 
 # return the most stable tensor dtype for quantization while minimizing vram
-def auto_dtype_from_config(config: PretrainedConfig, device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None, device: Optional[Union[str, int]] = None ) -> torch.dtype:
+def auto_dtype_from_config(config: PretrainedConfig,
+                           device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+                           device: Optional[Union[str, int]] = None,
+                           quant_inference: bool = False) -> torch.dtype:
+    if quant_inference and device != DEVICE.CPU:
+        return torch.float16
+
     # TODO mps has errors with bfloat16, lock to float16 for now
     if sys.platform == "darwin" or "mps" in [device, device_map] or (
             isinstance(device_map, Dict) and "mps" in device_map.values()):
