@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import shutil
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 import accelerate
 import torch
@@ -30,6 +31,7 @@ from ..utils.model import (
     nested_move_to,
     pack_model,
     simple_dispatch_model,
+    MODALITY,
 )
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
@@ -87,6 +89,10 @@ class BaseGPTQModel(nn.Module):
 
     supports_desc_act = [True, False]
 
+    modality: List[MODALITY] = [MODALITY.TEXT]
+
+    quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -124,7 +130,7 @@ class BaseGPTQModel(nn.Module):
     def hf_device_map(self):
         return getattr(self.model, "hf_device_map", None)
 
-    def _prepare_dataset_for_quantization(
+    def prepare_dataset(
         self,
         calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
@@ -265,13 +271,30 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
+
+        device_map = self.hf_device_map
+        if device_map:
+            for name, device in device_map.items():
+                if device == "cpu" and best_device != CPU:
+                    logger.info(f"truly offloading {name} to cpu with hook.")
+                    module = get_module_by_name_suffix(self.model, name)
+                    remove_hook_from_module(module, recurse=True)
+                    accelerate.cpu_offload_with_hook(module, best_device)
+
+        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size, tokenizer,)
+
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
         max_input_id_length = 0
         for row in calibration_dataset:
             input_ids = row["input_ids"]
             if isinstance(input_ids, torch.Tensor):
-                input_ids_length = input_ids.numel()
+                if input_ids.dim() <= 2:
+                    input_ids_length = input_ids.shape[-1]
+                else:
+                    raise ValueError(
+                        "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
+                            input_ids.dim()))
             else:
                 input_ids_length = len(input_ids)
 
@@ -283,17 +306,6 @@ class BaseGPTQModel(nn.Module):
         if avg < min_calibration_dataset_input_ids_avg_length:
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
                            f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
-
-        device_map = self.hf_device_map
-        if device_map:
-            for name, device in device_map.items():
-                if device == "cpu" and best_device != CPU:
-                    logger.info(f"truly offloading {name} to cpu with hook.")
-                    module = get_module_by_name_suffix(self.model, name)
-                    remove_hook_from_module(module, recurse=True)
-                    accelerate.cpu_offload_with_hook(module, best_device)
-
-        calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
@@ -760,14 +772,25 @@ class BaseGPTQModel(nn.Module):
             meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
-        preprocessor_config_path = os.path.join(self.model_id_or_path, "preprocessor_config.json")
-        if os.path.exists(preprocessor_config_path):
-            os.makedirs(save_dir, exist_ok=True)
+        extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
+        for name in extra_json_file_names:
+            json_path = os.path.join(self.model_id_or_path, name)
+            if os.path.exists(json_path):
+                os.makedirs(save_dir, exist_ok=True)
 
-            shutil.copyfile(preprocessor_config_path, os.path.join(save_dir, "preprocessor_config.json"))
+                shutil.copyfile(json_path, os.path.join(save_dir, name))
 
         if self.quantized:
             self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
+
+            # overwrite quant_override_files
+            for name, value in self.quant_override_files.items():
+                json_path = os.path.join(save_dir, name)
+                with open(json_path, "w", encoding="utf-8") as f:
+                    if isinstance(value, str):
+                        f.write(value)
+                    else:
+                        f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
 
