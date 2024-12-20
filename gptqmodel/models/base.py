@@ -30,6 +30,7 @@ from ..utils.model import (
     nested_move_to,
     pack_model,
     simple_dispatch_model,
+    MODALITY,
 )
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
@@ -86,6 +87,8 @@ class BaseGPTQModel(nn.Module):
     info: Dict[str, str] = {}
 
     supports_desc_act = [True, False]
+
+    modality: List[MODALITY] = [MODALITY.TEXT]
 
     def __init__(
         self,
@@ -265,24 +268,6 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        # Calculate the average length of the average input_ids
-        total_input_ids_length = 0
-        max_input_id_length = 0
-        for row in calibration_dataset:
-            input_ids = row["input_ids"]
-            if isinstance(input_ids, torch.Tensor):
-                input_ids_length = input_ids.numel()
-            else:
-                input_ids_length = len(input_ids)
-
-            if input_ids_length > max_input_id_length:
-                max_input_id_length = input_ids_length
-            total_input_ids_length += input_ids_length
-        avg = total_input_ids_length / len(calibration_dataset)
-
-        if avg < min_calibration_dataset_input_ids_avg_length:
-            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
         device_map = self.hf_device_map
         if device_map:
@@ -294,6 +279,30 @@ class BaseGPTQModel(nn.Module):
                     accelerate.cpu_offload_with_hook(module, best_device)
 
         calibration_dataset = self._prepare_dataset_for_quantization(calibration_dataset, batch_size, tokenizer,)
+
+        # Calculate the average length of the average input_ids
+        total_input_ids_length = 0
+        max_input_id_length = 0
+        for row in calibration_dataset:
+            input_ids = row["input_ids"]
+            if isinstance(input_ids, torch.Tensor):
+                if input_ids.dim() <= 2:
+                    input_ids_length = input_ids.shape[-1]
+                else:
+                    raise ValueError(
+                        "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
+                            input_ids.dim()))
+            else:
+                input_ids_length = len(input_ids)
+
+            if input_ids_length > max_input_id_length:
+                max_input_id_length = input_ids_length
+            total_input_ids_length += input_ids_length
+        avg = total_input_ids_length / len(calibration_dataset)
+
+        if avg < min_calibration_dataset_input_ids_avg_length:
+            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
+                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
             from auto_round import AutoRound
