@@ -91,7 +91,7 @@ class BaseGPTQModel(nn.Module):
 
     modality: List[MODALITY] = [MODALITY.TEXT]
 
-    quant_override_files: Dict[str, Dict[str, Any]] = {}
+    quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
 
     def __init__(
         self,
@@ -787,7 +787,10 @@ class BaseGPTQModel(nn.Module):
             for name, value in self.quant_override_files.items():
                 json_path = os.path.join(save_dir, name)
                 with open(json_path, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(value))
+                    if isinstance(value, str):
+                        f.write(value)
+                    else:
+                        f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
 
