@@ -22,9 +22,9 @@ class TestsTorchBenchmark(unittest.TestCase):
             "The tallest mountain in the world is",
             "The currency used in Japan is",
             "How to consult a dictionary?",
-            "What is the boiling point of water in degrees Celsius?"
+            "What is the boiling point of water in degrees Celsius?",
             "Which is the most widely used Internet search engine in the world?",
-            "What is the official language of France?"
+            "What is the official language of France?",
         ]
         self.num_runs = 10
 
@@ -49,16 +49,17 @@ class TestsTorchBenchmark(unittest.TestCase):
             times.append(elapsed_time)
 
         sum_time = sum(times)
-        avg_tokens_per_second = (self.min_new_tokens * self.num_runs) / sum_time
+        sum_tokens = len(self.prompts) * self.min_new_tokens * self.num_runs
+        avg_tokens_per_second = sum_tokens / sum_time
 
         print("**************** Result(token/s) Info****************")
         print(f"Times: {times}")
         print(f"Sum Times: {sum_time}")
-        print(f"Sum New Tokens: {self.min_new_tokens * self.num_runs}")
+        print(f"Sum New Tokens: {sum_tokens}")
         print(f"Benchmark Result: {avg_tokens_per_second} token/s")
         print("**************** Result(token/s) Info End****************")
 
-        self.assertTrue(avg_tokens_per_second > 4, f"Average tokens per second {avg_tokens_per_second} is not greater than 4.")
+        self.assertTrue(avg_tokens_per_second > 49, f"Average tokens per second {avg_tokens_per_second} is not greater than 49.")
 
 
 
