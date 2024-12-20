@@ -2,7 +2,6 @@ import os
 import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "11"
 import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
