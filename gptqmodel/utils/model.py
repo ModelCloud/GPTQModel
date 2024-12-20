@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 from typing import Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
@@ -782,3 +783,8 @@ def check_requires_version(requires_version, current_version):
         return OPERATOR_MAP[op_symbol](current_version, required_version)
     else:
         return None
+
+class MODALITY(str, Enum):
+    TEXT = "text"
+    IMAGE_TO_TEXT = "image_to_text"
+    # TEXT_TO_IMAGE = "text_to_image"
