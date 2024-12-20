@@ -174,7 +174,7 @@ class TorchQuantLinear(BaseQuantLinear):
         i = 0
         col = 0
         while col < qzeros.shape[1]:
-            if self.bits in [2, 4, 8]:
+            if self.bits == 4 or self.bits == 8 or self.bits == 2:
                 for j in range(i, i + (32 // self.bits)):
                     qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
                 i += 32 // self.bits
