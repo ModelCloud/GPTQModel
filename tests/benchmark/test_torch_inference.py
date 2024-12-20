@@ -52,12 +52,12 @@ class TestsTorchBenchmark(unittest.TestCase):
         sum_tokens = len(self.prompts) * self.min_new_tokens * self.num_runs
         avg_tokens_per_second = sum_tokens / sum_time
 
-        print("**************** Result(token/s) Info****************")
+        print("**************** Benchmark Result Info****************")
         print(f"Times: {times}")
         print(f"Sum Times: {sum_time}")
         print(f"Sum New Tokens: {sum_tokens}")
         print(f"Benchmark Result: {avg_tokens_per_second} token/s")
-        print("**************** Result(token/s) Info End****************")
+        print("**************** Benchmark Result Info End****************")
 
         self.assertTrue(avg_tokens_per_second > self.tokens_per_second, f"Average tokens per second {avg_tokens_per_second} is not greater than {self.tokens_per_second}.")
 
