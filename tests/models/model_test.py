@@ -1,5 +1,6 @@
 # -- do not touch
 import os
+import subprocess
 import sys
 
 
@@ -56,6 +57,13 @@ class ModelTest(unittest.TestCase):
     QUANT_FORMAT = FORMAT.GPTQ
     DESC_ACT = True
     SYM = True
+
+    REQUIRED_PACKAGES = []
+
+    @classmethod
+    def setUpClass(cls):
+        for pkg in cls.REQUIRED_PACKAGES:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", pkg])
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
