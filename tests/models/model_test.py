@@ -2,6 +2,7 @@
 import os
 import sys
 
+from gptqmodel.utils.model import MODALITY
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -22,7 +23,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
-from ovis.ovis_calibration_dataset import get_calib_dataset
+from ovis.image_to_test_dataset import get_calib_dataset # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -121,8 +122,7 @@ class ModelTest(unittest.TestCase):
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        is_ovis_model = "Ovis" in model_id_or_path
-        calibration_dataset = self.load_dataset(tokenizer) if not is_ovis_model else get_calib_dataset(model)
+        calibration_dataset = get_calib_dataset(model) if MODALITY.IMAGE_TO_TEXT in model.modality else self.load_dataset(tokenizer)
 
         # mpt model need
         if not model.config.pad_token_id:
