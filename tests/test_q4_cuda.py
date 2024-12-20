@@ -64,6 +64,6 @@ class TestsQ4CUDA(unittest.TestCase):
         self.generate(model_q.model, input)
 
     def generate(self, model, input):
-        generate_str = self.tokenizer.decode(model.model.generate(**input, max_new_tokens=2)[0])
+        generate_str = self.tokenizer.decode(model.generate(**input, max_new_tokens=2)[0])
         print(f"generate_str: {generate_str}")
         self.assertIn("paris", generate_str.lower())
