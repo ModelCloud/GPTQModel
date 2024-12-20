@@ -16,6 +16,7 @@ import torch
 from huggingface_hub import list_repo_files
 from transformers import AutoConfig
 
+from ..nn_modules.qlinear.ipex import HAS_IPEX
 from ..quantization import QUANT_CONFIG_FILENAME
 from ..utils import BACKEND, EVAL
 from ..utils.logger import setup_logger
@@ -57,6 +58,7 @@ from .definitions.moss import MOSSGPTQ
 from .definitions.mpt import MPTGPTQ
 from .definitions.olmo2 import Olmo2GPTQ
 from .definitions.opt import OPTGPTQ
+from .definitions.ovis import OvisGPTQ
 from .definitions.phi import PhiGPTQ
 from .definitions.phi3 import Phi3GPTQ
 from .definitions.qwen import QwenGPTQ
@@ -68,7 +70,6 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ
 from .definitions.starcoder2 import Starcoder2GPTQ
 from .definitions.xverse import XverseGPTQ
 from .definitions.yi import YiGPTQ
-from .definitions.ovis import OvisGPTQ
 
 
 logger = setup_logger()
@@ -125,11 +126,6 @@ MODEL_MAP = {
     "ovis": OvisGPTQ,
 }
 
-HAS_IPEX = False
-try:
-    HAS_IPEX = True
-except Exception:
-    pass
 
 class GPTQModel:
     def __init__(self):

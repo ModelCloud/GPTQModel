@@ -1,12 +1,12 @@
 import copy
 import logging
 
-from ..base import BaseGPTQModel
-import torch
-
 from ...utils.calibration_dataset import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY
+import torch
+
+from ..base import BaseGPTQModel
 
 
 class OvisGPTQ(BaseGPTQModel):

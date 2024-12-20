@@ -25,7 +25,7 @@ class TestsIPEX(ModelTest):
         )
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
         calibration_dataset = self.load_dataset(tokenizer)
-        origin_model.quantize(calibration_dataset)
+        origin_model.quantize(calibration_dataset, backend=BACKEND.IPEX)
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)
 

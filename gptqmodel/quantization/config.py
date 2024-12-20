@@ -11,6 +11,7 @@ from transformers.utils.hub import cached_file
 
 from ..utils.logger import setup_logger
 
+
 logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
