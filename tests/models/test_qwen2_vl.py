@@ -1,4 +1,4 @@
-from qwen_vl_utils import process_vision_info
+
 
 from model_test import ModelTest
 
@@ -33,6 +33,9 @@ class TestQwen2_VL(ModelTest):
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+
+        from qwen_vl_utils import process_vision_info
+        
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = processor(
             text=[text],
