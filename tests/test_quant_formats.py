@@ -8,7 +8,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import json  # noqa: E402
 import logging  # noqa: E402
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -23,9 +22,10 @@ from gptqmodel.quantization.config import (  # noqa: E402
     QuantizeConfig,
 )
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-class TestQuantization(unittest.TestCase):
+class TestQuantization(ModelTest):
 
     @classmethod
     def setUpClass(self):
