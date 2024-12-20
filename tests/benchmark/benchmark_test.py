@@ -1,18 +1,16 @@
 import os
 import time
-import torch
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "11"
 
 import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.progress import ProgressBar
 
 
 class BenchmarkTest(unittest.TestCase):
-    MODEL_id = "/monster/data/lrl/llama3_8B/gptq_4bits_11-21_15-47-09_maxlen2048_ns2048_descFalse_damp0.1"
+    MODEL_id = "/monster/data/model/gptq_4bits_11-21_15-47-09_maxlen2048_ns2048_descFalse_damp0.1"
     MIN_NEW_TOEKNS = 100
     NUM_RUNS = 10
     PROMPTS = [
