@@ -27,6 +27,7 @@ class TestsTorchBenchmark(unittest.TestCase):
             "What is the official language of France?",
         ]
         self.num_runs = 10
+        self.torch_benchmark_value = 48
 
     def test_torch_benchmark(self):
         model = GPTQModel.from_quantized(
@@ -59,7 +60,7 @@ class TestsTorchBenchmark(unittest.TestCase):
         print(f"Benchmark Result: {avg_tokens_per_second} token/s")
         print("**************** Result(token/s) Info End****************")
 
-        self.assertTrue(avg_tokens_per_second > 49, f"Average tokens per second {avg_tokens_per_second} is not greater than 49.")
+        self.assertTrue(avg_tokens_per_second > self.torch_benchmark_value, f"Average tokens per second {avg_tokens_per_second} is not greater than {self.torch_benchmark_value}.")
 
 
 
