@@ -2,7 +2,6 @@ import os
 import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "11"
 
 import unittest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -26,21 +25,18 @@ class BenchmarkTest(unittest.TestCase):
         "Which is the most widely used Internet search engine in the world?",
         "What is the official language of France?",
     ]
-    TOKENS_PER_SECOND = 0
-    DEVICE = 'CUDA'
-    INFERENCE_BACKEND = BACKEND.AUTO
     MAX_DELTA_FLOOR_PERCENT = 0.15
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
-    def benchmark(self):
+    def benchmark(self, backend, device, tokens_per_second):
         model = GPTQModel.from_quantized(
             self.MODEL_id,
-            device=self.DEVICE,
-            backend=self.INFERENCE_BACKEND,
+            device=device,
+            backend=backend,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_id)
-        inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(self.DEVICE)
+        inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(device)
 
         times = []
         pb = ProgressBar(range(self.NUM_RUNS))
@@ -65,5 +61,9 @@ class BenchmarkTest(unittest.TestCase):
         print(f"Benchmark Result: {avg_tokens_per_second} token/s")
         print("**************** Benchmark Result Info End****************")
 
+        diff_pct = (avg_tokens_per_second / tokens_per_second) * 100
+        negative_pct = 100 * (1 - self.MAX_DELTA_FLOOR_PERCENT)
+        positive_pct = 100 * (1 + self.MAX_POSITIVE_DELTA_CEIL_PERCENT)
 
-        diff_pct = (avg_tokens_per_second / self.TOKENS_PER_SECOND) * 100
+        self.assertTrue(negative_pct <= diff_pct <= positive_pct,
+                        f"Tokens Per Second: {avg_tokens_per_second} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
