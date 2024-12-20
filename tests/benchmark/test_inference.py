@@ -7,6 +7,9 @@ class TestInference(BenchmarkTest):
     @parameterized.expand(
         [
             (BACKEND.TORCH, 'cuda', 49.20),
+            (BACKEND.TORCH, 'cpu', 49.20),
+            (BACKEND.TORCH, 'xpu', 49.20),
+            (BACKEND.TORCH, 'mps', 49.20),
         ]
     )
     def test_inference(self, backend, device, tokens_per_second):
