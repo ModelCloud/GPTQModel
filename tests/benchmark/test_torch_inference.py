@@ -11,7 +11,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 class TestsTorchBenchmark(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.model_id = "/monster/data/lrl/llama31/best-8b-it/gptq_4bit_07-29_06-46-12_maxlen2048_ns1024_descFalse_damp0.005/"
+        self.model_id = "/monster/data/model/gptq_4bit_07-29_06-46-12_maxlen2048_ns1024_descFalse_damp0.005/"
         self.device = 'cuda'
         self.min_new_tokens = 100
         self.prompts = [
