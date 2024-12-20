@@ -137,6 +137,10 @@ class ModelTest(unittest.TestCase):
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
         is_quantized = model.quantized
+
+        # ovis cannot load processor
+        is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
+        need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
             model.quantize(calibration_dataset, batch_size=batch_size)
 
@@ -146,20 +150,20 @@ class ModelTest(unittest.TestCase):
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
-                if is_image_to_text_model:
+                if need_create_processor:
                     processor = AutoProcessor.from_pretrained(tmpdirname)
         else:
-            if is_image_to_text_model:
+            if need_create_processor:
                 processor = AutoProcessor.from_pretrained(model_id_or_path)
         if not is_quantized:
             del model
             torch_empty_cache()
-            if is_image_to_text_model:
+            if need_create_processor:
                 return q_model, q_tokenizer, processor
             else:
                 return q_model, q_tokenizer
         else:
-            if is_image_to_text_model:
+            if need_create_processor:
                 return model, tokenizer, processor
             else:
                 return model, tokenizer
