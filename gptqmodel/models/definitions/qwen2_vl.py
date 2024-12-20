@@ -58,7 +58,7 @@ class Qwen2VLGPTQ(BaseGPTQModel):
         }
     }
 
-    def preprocess_inputs(self, sample: Dict) -> Dict:
+    def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 
     def prepare_dataset(
@@ -68,7 +68,7 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             tokenizer=None, ):
         processor = Qwen2VLProcessor.from_pretrained(self.model_id_or_path)
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_inputs):
+        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )

@@ -26,7 +26,7 @@ class OvisGPTQ(BaseGPTQModel):
 
     IGNORE_ID = -100
 
-    def preprocess_inputs(self, sample: Dict) -> Dict:
+    def preprocess_dataset(self, sample: Dict) -> Dict:
         text_max_length = 832
         conversations = copy.deepcopy(sample["conversations"])
         images = [fetch_image(sample)]
@@ -59,7 +59,7 @@ class OvisGPTQ(BaseGPTQModel):
             batch_size: int = 1,
             tokenizer=None, ):
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, self.preprocess_inputs):
+        for batch in batched(calibration_dataset, batch_size, self.preprocess_dataset):
             pixel_values, input_ids, labels = tuple([instance[key] for instance in batch]
                                                     for key in ("pixel_values", "input_ids", "labels"))
             input_ids = torch.nn.utils.rnn.pad_sequence(
