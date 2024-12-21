@@ -98,15 +98,15 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
     ):
-        if device is not None:
-            raise AttributeError("Passing device is not allowed. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
-
-        if device_map is not None:
-            raise AttributeError(
-                "Passing device is not allowed. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
-
         # non-quantized models are always loaded into cpu
         cpu_device_map = {"": "cpu"}
+
+        if quantize_config is None or not isinstance(quantize_config, QuantizeConfig):
+            raise AttributeError("`quantize_config` must be passed and be an instance of QuantizeConfig.")
+
+        if quantize_config.device is not None:
+            if device is not None or device_map is not None:
+                raise AttributeError("Passing device and device_map is not allowed when QuantizeConfig.device is set. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
 
         if quantize_config.desc_act not in cls.supports_desc_act:
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
@@ -128,8 +128,11 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
-        # find quantization device
-        quantize_config.device = auto_select_device(quantize_config.device, None)
+        # normalize and auto select quantization device is not passed
+        if quantize_config.device is None:
+            quantize_config.device = auto_select_device(None, None)
+        else:
+            quantize_config.device = normalize_device(quantize_config.device)
 
         if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype):
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
