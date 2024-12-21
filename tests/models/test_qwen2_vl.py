@@ -33,7 +33,7 @@ class TestQwen2_VL(ModelTest):
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        image_inputs, video_inputs = Qwen2VLGPTQ.process_vision_info(messages)
+        image_inputs = Qwen2VLGPTQ.process_vision_info(messages)
         inputs = processor(
             text=[text],
             images=image_inputs,
