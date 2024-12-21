@@ -6,6 +6,7 @@ from importlib.metadata import version as pkg_version
 from os.path import isdir, join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import torch
 from packaging import version
 from transformers.utils.hub import cached_file
 
@@ -143,6 +144,9 @@ class QuantizeConfig():
     # properties that do not directly contributes to quantization or quant inference should be placed in meta
     # i.e. quantizer tool (producer) + version, timestamp, entity who made the quant, etc
     meta: Optional[Dict] = field(default=None)
+
+    # normalized to DEVICE after passing to load()
+    device: Optional[Union[str, torch.device]] = field(default=None)
 
     def __post_init__(self):
         fields_info = fields(self)

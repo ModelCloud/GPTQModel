@@ -1,10 +1,9 @@
 import sys
 from typing import List, Optional, Tuple, Union
 
-import torch
 import torch.nn as nn
 
-from ...models._const import DEVICE, PLATFORM, normalize_device
+from ...models._const import DEVICE, PLATFORM
 
 
 class BaseQuantLinear(nn.Module):
@@ -158,10 +157,10 @@ class BaseQuantLinear(nn.Module):
         return True, None
 
     @classmethod
-    def validate_device(cls, device: str|DEVICE|int|torch.device):
-        dev = normalize_device(device)
+    def validate_device(cls, device: DEVICE):
+        assert isinstance(device, DEVICE)
 
-        if dev not in cls.SUPPORTS_DEVICES:
+        if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{dev}`")
 
     # override me

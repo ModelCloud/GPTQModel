@@ -106,7 +106,7 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
-        self._quantized = quantized
+        self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.quantize_config = quantize_config
         self.config = self.model.config
@@ -121,10 +121,6 @@ class BaseGPTQModel(nn.Module):
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
             self.monkey_patch()
-
-    @property
-    def quantized(self):
-        return self._quantized
 
     @property
     def hf_device_map(self):
@@ -389,7 +385,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             self.model = model
-            self._quantized = True
+            self.quantized = True
             return
 
         forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
@@ -727,7 +723,7 @@ class BaseGPTQModel(nn.Module):
             self.model = simple_dispatch_model(self.model, device_map)
         self.model.config.use_cache = forward_pass_use_cache
 
-        self._quantized = True
+        self.quantized = True
 
         torch_empty_cache()
 
