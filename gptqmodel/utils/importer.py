@@ -70,8 +70,9 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
             raise ValueError(f"device must be a string or torch.device, got {type(device)}")
 
 
-def auto_select_device(device: Optional[DEVICE], backend) -> DEVICE:
+def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> DEVICE:
     assert device is None or isinstance(device, DEVICE)
+    assert backend is None or isinstance(backend, BACKEND)
 
     if device is None:
         if backend == BACKEND.IPEX:

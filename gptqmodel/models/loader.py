@@ -96,15 +96,14 @@ def ModelLoader(cls):
             torch_dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
-            backend: BACKEND = BACKEND.AUTO,
             **model_init_kwargs,
     ):
-        # normalized device + device_map into single device
-        device = normalize_device_device_map(device, device_map)
-        del device_map
+        if device is not None:
+            raise AttributeError("Passing device is not allowed. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
 
-        # TODO need to normalize backend and others in a unified api
-        device = auto_select_device(device, backend)
+        if device_map is not None:
+            raise AttributeError(
+                "Passing device is not allowed. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
 
         # non-quantized models are always loaded into cpu
         cpu_device_map = {"": "cpu"}
@@ -127,16 +126,19 @@ def ModelLoader(cls):
         torch.nn.init.uniform_ = skip
         torch.nn.init.normal_ = skip
 
-        model_init_kwargs["trust_remote_code"] = trust_remote_code
-        model_init_kwargs["device_map"] = cpu_device_map
-
         config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+
+        # find quantization device
+        quantize_config.device = auto_select_device(quantize_config.device, None)
 
         if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype):
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            torch_dtype = auto_dtype(config=config, device=device, quant_inference=False)
+            torch_dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
 
         # enforce some values despite user specified
+        model_init_kwargs["trust_remote_code"] = trust_remote_code
+        # non-quantized models are always loaded into cpu
+        model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
