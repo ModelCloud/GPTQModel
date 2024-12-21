@@ -16,7 +16,7 @@ from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.importer import select_device, select_quant_linear
+from ..utils.importer import auto_select_device, select_quant_linear, normalize_device_device_map
 from ..utils.logger import setup_logger
 from ..utils.marlin import (
     _validate_marlin_compatibility,
@@ -166,11 +166,12 @@ def ModelLoader(cls):
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
-        if device is not None:
-            device = normalize_device(device)
+        # normalized device + device_map into single device
+        device = normalize_device_device_map(device, device_map)
 
         # TODO need to normalize backend and others in a unified api
-        device = select_device(device, device_map, backend)
+        device = auto_select_device(device, backend)
+        device_map = {"":device}
 
         if backend == BACKEND.VLLM:
             import os
@@ -380,27 +381,6 @@ def ModelLoader(cls):
             if preload_qlinear_kernel == IPEXQuantLinear:
                 quantize_config.runtime_format = FORMAT.IPEX
             model.tie_weights()
-
-        # == step3: load checkpoint and dispatch == #
-        if isinstance(device_map, str) and device_map not in [
-            "auto",
-            "balanced",
-            "balanced_low_0",
-            "sequential",
-        ]:
-            raise ValueError(
-                "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
-                "'sequential'."
-            )
-
-        if not isinstance(device_map, dict):
-            if device is not None:
-                device_map = {"": 0 if device in [DEVICE.CUDA, DEVICE.XPU, DEVICE.MPS] else DEVICE.CPU}
-            else:
-                device_map = accelerate.infer_auto_device_map(
-                    model,
-                    no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
-                )
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
