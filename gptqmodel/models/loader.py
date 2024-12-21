@@ -24,7 +24,7 @@ from ..utils.marlin import (
     prepare_model_for_marlin_load,
 )
 from ..utils.model import (
-    auto_dtype_from_config,
+    auto_dtype,
     convert_gptq_v1_to_v2_format,
     find_layers,
     get_checkpoints,
@@ -94,9 +94,21 @@ def ModelLoader(cls):
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
+            device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+            device: Optional[Union[str, int]] = None,
+            backend: BACKEND = BACKEND.AUTO,
             **model_init_kwargs,
     ):
-        """load un-quantized pretrained model to cpu"""
+        # normalized device + device_map into single device
+        device = normalize_device_device_map(device, device_map)
+        del device_map
+
+        # TODO need to normalize backend and others in a unified api
+        device = auto_select_device(device, backend)
+
+        # non-quantized models are always loaded into cpu
+        cpu_device_map = {"": "cpu"}
+
         if quantize_config.desc_act not in cls.supports_desc_act:
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
@@ -116,13 +128,13 @@ def ModelLoader(cls):
         torch.nn.init.normal_ = skip
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
+        model_init_kwargs["device_map"] = cpu_device_map
 
         config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
 
-        if torch_dtype is None or torch_dtype == "auto":
-            torch_dtype = auto_dtype_from_config(config)
-        elif not isinstance(torch_dtype, torch.dtype):
-            raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
+        if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype):
+            # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
+            torch_dtype = auto_dtype(config=config, device=device, quant_inference=False)
 
         # enforce some values despite user specified
         model_init_kwargs["torch_dtype"] = torch_dtype
@@ -223,11 +235,9 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if torch_dtype is None or torch_dtype == "auto":
+        if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            torch_dtype = auto_dtype_from_config(config=config, device=device, device_map=device_map, quant_inference=True)
-        elif not isinstance(torch_dtype, torch.dtype):
-            raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
+            torch_dtype = auto_dtype(config=config, device=device, quant_inference=True)
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")

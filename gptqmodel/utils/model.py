@@ -684,20 +684,23 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
 
 
 # return the most stable tensor dtype for quantization while minimizing vram
-def auto_dtype_from_config(config: PretrainedConfig,
-                           device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-                           device: Optional[Union[str, int]] = None,
-                           quant_inference: bool = False) -> torch.dtype:
+def auto_dtype(config: PretrainedConfig,
+               device: DEVICE,
+               quant_inference: bool = False) -> torch.dtype:
+
+    assert isinstance(device, DEVICE)
+
+    # for inference, DynamicCuda, Exllama, Triton, and Marlin are all fp16 kernels
     if quant_inference and device != DEVICE.CPU:
         return torch.float16
 
-    # TODO mps has errors with bfloat16, lock to float16 for now
-    if sys.platform == "darwin" or "mps" in [device, device_map] or (
-            isinstance(device_map, Dict) and "mps" in device_map.values()):
-        return torch.float16
-    elif device == DEVICE.XPU:
+    # TODO: both MPS and XPU are locked to float16
+    # XPU stack is missing bfloat16 (hardware supports it)
+    # MPS stack has bfloat16 bugs in pytorch
+    if device in [DEVICE.MPS, DEVICE.XPU]:
         return torch.float16
 
+    # get dtype from config
     dtype = getattr(config, "torch_dtype")
     if not dtype or not isinstance(dtype, torch.dtype):
         raise ValueError("Your model config.json does not have torch_dtype set. Please check for model " "corruption.")
