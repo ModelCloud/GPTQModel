@@ -44,7 +44,7 @@ env:
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
-  TORCH_2_5_TESTS: "test_perplexity,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
+  TORCH_2_5_TESTS: "test_evalplus,test_perplexity,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
