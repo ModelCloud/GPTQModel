@@ -1,7 +1,7 @@
 from typing import Dict, Optional
 from PIL import Image
 
-from transformers import AutoModelForVision2Seq, Qwen2VLProcessor
+from transformers import AutoModelForVision2Seq, AutoProcessor
 
 from ..base import BaseGPTQModel
 from ...utils.calibration import batched
@@ -82,7 +82,7 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             calibration_dataset,
             batch_size: int = 1,
             tokenizer=None, ):
-        processor = Qwen2VLProcessor.from_pretrained(self.model_id_or_path)
+        processor = AutoProcessor.from_pretrained(self.model_id_or_path)
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
