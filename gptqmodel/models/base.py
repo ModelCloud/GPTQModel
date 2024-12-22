@@ -699,32 +699,16 @@ class BaseGPTQModel(nn.Module):
         self.model.config.use_cache = forward_pass_use_cache
 
         self.quantized = True
-
         torch_empty_cache()
 
         return self.quant_log
 
-    # TODO: fix me
-    @property
-    def device(self):
-        if not self.hf_device_map:
-            if hasattr(self.model, "device"):
-                return self.model.device
-            # ipex llm_engine
-            elif hasattr(self.model, "llm_engine"):
-                return self.model.llm_engine.device_config.device_type
-            else:
-                return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            device = [d for d in self.hf_device_map.values() if d not in {"disk"}][0]
-            return torch.device(device)
-
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
-            self.model.to(device)
+            self.model = self.model.to(device)
+            return self
         else:
-            logger.warning(f"{self.model.__class__.__name__} does not support the to() method")
-        return self
+            raise f"{self.model.__class__.__name__} does not support the to() method"
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
