@@ -2,7 +2,7 @@ name: Unit Tests
 
 defaults:
   run:
-    shell: bash -le {0}
+    shell: bash -e {0}
 
 on:
   repository_dispatch:
