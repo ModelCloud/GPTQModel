@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
@@ -36,6 +37,7 @@ from ..utils.model import (
     verify_sharded_model_hashes,
 )
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
+from huggingface_hub import snapshot_download
 
 
 logger = setup_logger()
@@ -85,6 +87,12 @@ def check_versions(model_id_or_path: str, requirements: List[str]):
         except PackageNotFoundError:
             raise ValueError(f"{model_id_or_path} requires version {req}, but {pkg} not installed.")
 
+def get_model_local_path(pretrained_model_id_or_path, **kwargs):
+    is_local = os.path.isdir(pretrained_model_id_or_path)
+    if is_local:
+        return pretrained_model_id_or_path
+    else:
+        return snapshot_download(pretrained_model_id_or_path, **kwargs)
 
 def ModelLoader(cls):
     @classmethod
@@ -108,6 +116,8 @@ def ModelLoader(cls):
 
         check_versions(pretrained_model_id_or_path, cls.require_pkgs_version)
 
+        model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
+
         def skip(*args, **kwargs):
             pass
 
@@ -116,8 +126,8 @@ def ModelLoader(cls):
         torch.nn.init.normal_ = skip
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
-
-        config = AutoConfig.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+        print("model_local_path",model_local_path)
+        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
         if torch_dtype is None or torch_dtype == "auto":
             torch_dtype = auto_dtype_from_config(config)
@@ -130,7 +140,7 @@ def ModelLoader(cls):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        model = cls.loader.from_pretrained(pretrained_model_id_or_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(model_local_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -149,7 +159,8 @@ def ModelLoader(cls):
             quantized=False,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            model_id_or_path=pretrained_model_id_or_path
+            model_id_or_path=pretrained_model_id_or_path,
+            model_local_path=model_local_path,
         )
 
     cls.from_pretrained = from_pretrained
@@ -191,6 +202,8 @@ def ModelLoader(cls):
 
         check_versions(model_id_or_path, cls.require_pkgs_version)
 
+        model_local_path = get_model_local_path(model_id_or_path, **kwargs)
+
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
         force_download = kwargs.pop("force_download", False)
@@ -217,7 +230,7 @@ def ModelLoader(cls):
 
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
-            model_id_or_path,
+            model_local_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
@@ -231,7 +244,7 @@ def ModelLoader(cls):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        quantize_config = QuantizeConfig.from_pretrained(model_id_or_path, **cached_file_kwargs, **kwargs)
+        quantize_config = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
@@ -240,7 +253,7 @@ def ModelLoader(cls):
                 from ..utils.vllm import load_model_by_vllm, vllm_generate
 
                 model = load_model_by_vllm(
-                    model=model_id_or_path,
+                    model=model_local_path,
                     trust_remote_code=trust_remote_code,
                     **kwargs,
                 )
@@ -253,7 +266,7 @@ def ModelLoader(cls):
                 from ..utils.sglang import load_model_by_sglang, sglang_generate
 
                 model, hf_config = load_model_by_sglang(
-                    model=model_id_or_path,
+                    model=model_local_path,
                     trust_remote_code=trust_remote_code,
                     **kwargs,
                 )
@@ -264,6 +277,8 @@ def ModelLoader(cls):
                 quantized=True,
                 quantize_config=quantize_config,
                 qlinear_kernel=None,
+                model_id_or_path=model_id_or_path,
+                model_local_path=model_local_path,
             )
 
         if quantize_config.format == FORMAT.MARLIN:
@@ -299,11 +314,11 @@ def ModelLoader(cls):
 
         extensions = [".safetensors"]
 
-        model_id_or_path = str(model_id_or_path)
+        model_local_path = str(model_local_path)
 
         # Retrieve (and if necessary download) the quantized checkpoint(s).
         is_sharded, resolved_archive_file, true_model_basename = get_checkpoints(
-            model_id_or_path=model_id_or_path,
+            model_id_or_path=model_local_path,
             extensions=extensions,
             possible_model_basenames=possible_model_basenames,
             **cached_file_kwargs,
@@ -530,6 +545,7 @@ def ModelLoader(cls):
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
             model_id_or_path=model_id_or_path,
+            model_local_path=model_local_path,
         )
 
     cls.from_quantized = from_quantized
