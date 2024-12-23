@@ -181,7 +181,6 @@ jobs:
         run: |
           echo "ls /opt"
           ls /opt
-          source /opt/pyenv.sh
           echo "PYENV_ROOT=$PYENV_ROOT"
           echo "== pyenv =="
           pyenv versions
