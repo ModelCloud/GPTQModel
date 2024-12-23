@@ -135,7 +135,7 @@ jobs:
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
           all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
 
-          torch_2_5_test_files = [f for f in all_tests if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
+          torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
 
           torch_2_5_test_files = [test for test in torch_2_5_test_files if re.match(rf'{TEST_REGEX}', test)]
           transformers_test_files = [test for test in transformers_test_files if re.match(rf'{TEST_REGEX}', test)]
