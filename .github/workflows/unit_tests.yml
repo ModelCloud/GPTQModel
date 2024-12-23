@@ -149,7 +149,7 @@ jobs:
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
-          echo "Torch 2.5 Test files: $cpu_test_files"
+          echo "Torch 2.5 Test files: $torch_2_5_test_files"
           echo "Transformers Test files: $transformers_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
@@ -178,9 +178,6 @@ jobs:
 
       - name: Print Env
         run: |
-          echo "ls /opt"
-          ls /opt
-          echo "PYENV_ROOT=$PYENV_ROOT"
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -191,12 +188,6 @@ jobs:
           pip show torch
           echo "##### pip list #####"
           pip list
-
-      - name: Install requirements
-        run: |
-          echo "===== init test env ====="
-          echo "===== install transformers typing-extensions ====="
-          uv pip install transformers typing-extensions -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Compile
         timeout-minutes: 35
@@ -225,6 +216,10 @@ jobs:
         with:
           name: dist
           path: dist
+
+      - name: Clean cache
+        if: always()
+        run: pip cache purge && uv cache clean
 
   transformers_diff:
     needs:
@@ -311,6 +306,7 @@ jobs:
           fi
 
       - name: Find suitable GPU
+        if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
         run: |
           timestamp=$(date +%s%3N)
           gpu_id=-1
@@ -335,8 +331,12 @@ jobs:
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
 
       - name: Release GPU
-        if: always()
+        if: always() && !contains(matrix.test_script, 'ipex')
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+
+      - name: Clean cache
+        if: always()
+        run: pip cache purge && uv cache clean
 
   torch2_5:
     needs:
@@ -407,15 +407,11 @@ jobs:
 
       - name: Install wheel
         run: |
-          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
-           source /etc/profile.d/pyenv.sh && pyenv activate xpu
-          fi
-
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
             echo "===== install auto_round ====="
             uv pip install auto_round
           fi
-            echo "===== install dist/whl ====="
+          echo "===== install dist/whl ====="
           uv pip install dist/*.whl
 
       - name: Find suitable GPU
