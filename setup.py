@@ -17,6 +17,10 @@ CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
+if TORCH_CUDA_ARCH_LIST:
+    arch_list = [arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 6.0]
+    os.environ["TORCH_CUDA_ARCH_LIST"] = " ".join(arch_list)
+
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
@@ -108,6 +112,9 @@ if TORCH_CUDA_ARCH_LIST is None:
     if BUILD_CUDA_EXT and not FORCE_BUILD:
         if got_cuda_between_v6_and_v8:
             FORCE_BUILD = True
+else:
+    arch_list = [arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch) >= 6.0]
+
 
 if BUILD_CUDA_EXT:
     if CUDA_RELEASE == "1":
