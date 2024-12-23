@@ -106,8 +106,6 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         return cls._validate(**args)
 
     def post_init(self):
-        self.validate_device(self.qweight.device.type)
-
         if self.padded_infeatures != self.infeatures:
             self.qweight.resize_(self.padded_infeatures // 32 * self.bits, self.outfeatures)
             self.qzeros.resize_(
