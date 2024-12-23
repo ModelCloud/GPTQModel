@@ -101,7 +101,6 @@ class BaseGPTQModel(nn.Module):
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
-        model_id_or_path: str = None,
         model_local_path: str = None,
     ):
         super().__init__()
@@ -115,7 +114,6 @@ class BaseGPTQModel(nn.Module):
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
-        self.model_id_or_path = model_id_or_path
         self.model_local_path = model_local_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []

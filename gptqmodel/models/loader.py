@@ -75,7 +75,7 @@ def compare_versions(installed_version, required_version, operator):
         raise ValueError(f"Unsupported operator: {operator}")
 
 
-def check_versions(model_id_or_path: str, requirements: List[str]):
+def check_versions(model_class, requirements: List[str]):
     if requirements is None:
         return
     for req in requirements:
@@ -83,9 +83,10 @@ def check_versions(model_id_or_path: str, requirements: List[str]):
         try:
             installed_version = version(pkg)
             if not compare_versions(installed_version, version_required, operator):
-                raise ValueError(f"{model_id_or_path} requires version {req}, but current {pkg} version is {installed_version} ")
+                raise ValueError(f"{model_class} requires version {req}, but current {pkg} version is {installed_version} ")
         except PackageNotFoundError:
-            raise ValueError(f"{model_id_or_path} requires version {req}, but {pkg} not installed.")
+            raise ValueError(f"{model_class} requires version {req}, but {pkg} not installed.")
+
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
@@ -93,6 +94,7 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         return pretrained_model_id_or_path
     else:
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
+
 
 def ModelLoader(cls):
     @classmethod
@@ -114,7 +116,7 @@ def ModelLoader(cls):
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        check_versions(pretrained_model_id_or_path, cls.require_pkgs_version)
+        check_versions(cls, cls.require_pkgs_version)
 
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
 
@@ -159,7 +161,6 @@ def ModelLoader(cls):
             quantized=False,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            model_id_or_path=pretrained_model_id_or_path,
             model_local_path=model_local_path,
         )
 
@@ -200,7 +201,7 @@ def ModelLoader(cls):
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        check_versions(model_id_or_path, cls.require_pkgs_version)
+        check_versions(cls, cls.require_pkgs_version)
 
         model_local_path = get_model_local_path(model_id_or_path, **kwargs)
 
@@ -277,7 +278,6 @@ def ModelLoader(cls):
                 quantized=True,
                 quantize_config=quantize_config,
                 qlinear_kernel=None,
-                model_id_or_path=model_id_or_path,
                 model_local_path=model_local_path,
             )
 
@@ -544,7 +544,6 @@ def ModelLoader(cls):
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
-            model_id_or_path=model_id_or_path,
             model_local_path=model_local_path,
         )
 
