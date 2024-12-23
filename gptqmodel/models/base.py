@@ -466,7 +466,7 @@ class BaseGPTQModel(nn.Module):
                     example[k] = move_to(v, cur_layer_device)
             try:
                 if is_ovis:
-                    self.generate(inputs=example.pop("input_ids"), **example)
+                    self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
                     self.model(**example)
             except ValueError:
