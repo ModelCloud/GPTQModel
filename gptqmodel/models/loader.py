@@ -126,7 +126,7 @@ def ModelLoader(cls):
         torch.nn.init.normal_ = skip
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
-        print("model_local_path",model_local_path)
+
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
         if torch_dtype is None or torch_dtype == "auto":
