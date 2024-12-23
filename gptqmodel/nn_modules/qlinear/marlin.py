@@ -293,6 +293,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         return cls._validate(**args)
 
     def post_init(self):
+        device = self.qweight.device
         # Allocate marlin workspace
         self.workspace = marlin_make_workspace(
             self.outfeatures, device)
