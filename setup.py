@@ -17,6 +17,12 @@ CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
+if TORCH_CUDA_ARCH_LIST:
+    arch_list = " ".join([arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 6.0 or print(f"we do not support this compute arch: {arch}, skipped.") is not None])
+    if arch_list != TORCH_CUDA_ARCH_LIST:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+        print(f"TORCH_CUDA_ARCH_LIST has been updated to '{arch_list}'")
+
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
@@ -108,6 +114,7 @@ if TORCH_CUDA_ARCH_LIST is None:
     if BUILD_CUDA_EXT and not FORCE_BUILD:
         if got_cuda_between_v6_and_v8:
             FORCE_BUILD = True
+
 
 if BUILD_CUDA_EXT:
     if CUDA_RELEASE == "1":
