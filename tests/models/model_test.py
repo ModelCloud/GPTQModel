@@ -187,7 +187,7 @@ class ModelTest(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 if self.USE_VLLM:
-                    model_args = f"pretrained={model.model_id_or_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
+                    model_args = f"pretrained={model.model_local_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
                 else:
                     model_args = ""
                 results = lm_eval(
@@ -216,8 +216,8 @@ class ModelTest(unittest.TestCase):
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
-                if delete_quantized_model and model.model_id_or_path.startswith("/tmp") and os.path.exists(model.model_id_or_path):
-                    shutil.rmtree(model.model_id_or_path)
+                if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(model.model_local_path):
+                    shutil.rmtree(model.model_local_path)
                 return task_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):

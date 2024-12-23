@@ -97,7 +97,7 @@ class BaseGPTQModel(nn.Module):
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
-        model_id_or_path: str = None,
+        model_local_path: str = None,
     ):
         super().__init__()
 
@@ -110,7 +110,7 @@ class BaseGPTQModel(nn.Module):
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
         self.trust_remote_code = trust_remote_code
-        self.model_id_or_path = model_id_or_path
+        self.model_local_path = model_local_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
@@ -440,7 +440,7 @@ class BaseGPTQModel(nn.Module):
                     example[k] = move_to(v, cur_layer_device)
             try:
                 if is_ovis:
-                    self.generate(inputs=example.pop("input_ids"), **example)
+                    self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
                     self.model(**example)
             except ValueError:
@@ -731,7 +731,7 @@ class BaseGPTQModel(nn.Module):
     ):
         extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
         for name in extra_json_file_names:
-            json_path = os.path.join(self.model_id_or_path, name)
+            json_path = os.path.join(self.model_local_path, name)
             if os.path.exists(json_path):
                 os.makedirs(save_dir, exist_ok=True)
 

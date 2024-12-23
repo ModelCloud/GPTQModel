@@ -1,7 +1,9 @@
+import os.path
+import shutil
 from typing import Dict, Optional
 from PIL import Image
 
-from transformers import AutoModelForVision2Seq, Qwen2VLProcessor
+from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
 
 from ..base import BaseGPTQModel
 from ...utils.calibration import batched
@@ -82,7 +84,20 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             calibration_dataset,
             batch_size: int = 1,
             tokenizer=None, ):
-        processor = Qwen2VLProcessor.from_pretrained(self.model_id_or_path)
+        import tempfile
+        import json
+
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(self.model_local_path)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            chat_template_file = os.path.join(self.model_local_path, "chat_template.json")
+            if os.path.exists(chat_template_file):
+                shutil.copyfile(chat_template_file, os.path.join(tmp_dir, "chat_template.json"))
+            tokenizer.save_pretrained(tmp_dir)
+            with open(os.path.join(tmp_dir, "preprocessor_config.json"), "w") as f:
+                f.write(json.dumps(self.quant_override_files["preprocessor_config.json"]))
+            processor = AutoProcessor.from_pretrained(tmp_dir)
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(

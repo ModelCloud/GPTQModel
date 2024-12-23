@@ -47,6 +47,6 @@ def get_calib_dataset(model):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 
     if isinstance(model, Qwen2VLGPTQ):
-        return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
+        return prepare_dataset(format_qwen2_vl_dataset, n_sample=1)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")
