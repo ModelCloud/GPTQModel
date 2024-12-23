@@ -190,6 +190,8 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+          echo "##### pip list #####"
+          pip list
 
       - name: Install requirements
         run: |
