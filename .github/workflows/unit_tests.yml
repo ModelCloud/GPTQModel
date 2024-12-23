@@ -550,6 +550,7 @@ jobs:
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
            source /etc/profile.d/pyenv.sh && pyenv activate xpu
           else
+             echo ""
 #            bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
           fi
 
