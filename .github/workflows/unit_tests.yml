@@ -328,7 +328,12 @@ jobs:
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+        run: |
+          start_time=$(date +%s)
+          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+          execution_time=$(( $(date +%s) - start_time ))
+          echo "$((execution_time / 60))m $((execution_time % 60))s"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/vram?gpu=${{ CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
@@ -444,7 +449,12 @@ jobs:
             pip uninstall vllm -y
             pip list
           fi
-          pytest --durations=0 tests/${{ matrix.test_script }}.py
+
+          start_time=$(date +%s)
+          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+          execution_time=$(( $(date +%s) - start_time ))
+          echo "$((execution_time / 60))m $((execution_time % 60))s"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/vram?gpu=${{ CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
