@@ -161,7 +161,7 @@ class BaseQuantLinear(nn.Module):
         assert isinstance(device, DEVICE)
 
         if device not in cls.SUPPORTS_DEVICES:
-            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{dev}`")
+            raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
     # override me
     def post_init(self):
