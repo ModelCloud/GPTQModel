@@ -18,7 +18,7 @@ CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
 if TORCH_CUDA_ARCH_LIST:
-    arch_list = [arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 6.0]
+    arch_list = [arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 6.0 or print(f"we do not support this compute arch: {arch}, skipped.") is not None]
     os.environ["TORCH_CUDA_ARCH_LIST"] = " ".join(arch_list)
 
 version_vars = {}
