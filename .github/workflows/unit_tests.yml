@@ -95,7 +95,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
-      gpu-files: ${{ steps.files.outputs.gpu-files }}
       transformers-files: ${{ steps.files.outputs.transformers-files }}
 
     steps:
@@ -122,30 +121,31 @@ jobs:
           import os
           import re
 
-          cpu_file_list = [f.strip().removesuffix('.py') for f in '${TORCH_2_5_TESTS}'.split(',') if f.strip()]
-          test_files_list = [f.strip().removesuffix('.py') for f in '${{ github.event.inputs.test_names }}'.split(',') if f.strip()]
-          cpu_test_files = [f for f in cpu_file_list if not test_files_list or f in test_files_list]
-          transformers_diff_list = [f.strip().removesuffix('.py') for f in '${TRANSFORMERS_DIFF_TESTS}'.split(',') if f.strip()]
-          transformers_test_files = [f for f in transformers_diff_list if not test_files_list or f in test_files_list]
+          TRANSFORMERS_DIFF_TESTS = '${TRANSFORMERS_DIFF_TESTS}'
+          IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
 
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
+          TEST_NAMES='${{ github.event.inputs.test_names }}'
+          TEST_REGEX='${{ github.event.inputs.test_regex }}'
 
-          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in '${IGNORED_TEST_FILES}']
-          all_tests = [item for item in all_tests+all_tests_models if item.strip().removesuffix('.py') not in '${TORCH_2_5_TESTS}']
+          input_test_files_list = [f.strip().removesuffix('.py') for f in TEST_NAMES.split(',') if f.strip()]
 
-          gpu_test_files = [f for f in all_tests if f not in cpu_file_list and (not test_files_list or f in test_files_list) and f not in transformers_diff_list]
+          transformers_test_files = [f.strip().removesuffix('.py') for f in f'{TRANSFORMERS_DIFF_TESTS}'.split(',') if f.strip()]
+          transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
 
-          cpu_test_files = [test for test in cpu_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
-          gpu_test_files = [test for test in gpu_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
-          transformers_test_files = [test for test in transformers_test_files if re.match(r'${{ github.event.inputs.test_regex }}', test)]
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
+          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
 
-          print(f'{json.dumps(cpu_test_files)}|{json.dumps(gpu_test_files)}|{json.dumps(transformers_test_files)}')
+          torch_2_5_test_files = [f for f in all_tests if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
+
+          torch_2_5_test_files = [test for test in torch_2_5_test_files if re.match(rf'{TEST_REGEX}', test)]
+          transformers_test_files = [test for test in transformers_test_files if re.match(rf'{TEST_REGEX}', test)]
+
+          print(f'{json.dumps(torch_2_5_test_files)}|{json.dumps(transformers_test_files)}')
           "
 
           test_files=$(python3 -c "$script")
           IFS='|' read -r cpu_test_files gpu_test_files transformers_test_files <<< "$test_files"
           echo "torch-2-5-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
-          echo "gpu-files=$gpu_test_files" >> "$GITHUB_OUTPUT"
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
@@ -226,147 +226,6 @@ jobs:
         with:
           name: dist
           path: dist
-
-  torch2_4:
-    needs:
-      - build
-      - list-test-files
-      - check-vm
-    runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
-    container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
-      volumes:
-        - /home/ci/models:/monster/data/model
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
-      matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.gpu-files) }}
-
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
-
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
-
-      - name: Print Env
-        run: |
-          echo "== pyenv =="
-          pyenv versions
-          echo "== python =="
-          python --version
-          echo "== nvcc =="
-          nvcc --version
-          echo "== torch =="
-          pip show torch
-
-          if [ -n "${{ github.event.inputs.artifact_id }}" ]; then
-            run_id="${{ github.event.inputs.artifact_id }}"
-          else
-            run_id="${{ github.run_id }}"
-          fi
-          echo "RUN_ID=$run_id" >> $GITHUB_ENV
-          echo "RUN_ID=${run_id}"
-
-          if grep -q "bitblas" tests/${{ matrix.test_script }}.py; then
-              echo "BITBLAS=1" >> $GITHUB_ENV
-          fi
-
-      - name: Download wheel
-        continue-on-error: true
-        run: |
-          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
-
-          if echo "$file_name" | grep -q "gptqmodel"; then
-              mkdir dist || true
-              cd dist
-              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
-              ls -ahl .
-              sha256=$(sha256sum $file_name)
-              echo "sha256=$sha256"
-              echo "DOWNLOADED=1" >> $GITHUB_ENV
-          fi
-
-      - name: Download artifact
-        if: env.DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
-      - name: Install wheel
-        run: |
-          echo "===== install optimum bitblas ====="
-          uv pip install optimum bitblas==0.0.1.dev13 uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          echo "===== install dist/whl ====="
-          uv pip install dist/*.whl
-          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
-            echo "===== install auto_round ====="
-            uv pip install auto_round
-          fi
-          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ]; then
-            echo "===== install transformers from git ====="
-            uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
-          else
-            echo "===== install transformers from pypi ====="
-            uv pip install transformers -U
-          fi
-          echo "===== install typing-extensions numpy==1.26.4 ====="
-          uv pip install typing-extensions numpy==1.26.4 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-
-      - name: Check platform
-        run: |
-          ip=${RUNNER}
-          echo "-----------"
-          pip show torch
-          echo "-----------"
-          nvcc --version
-
-      - name: Find suitable GPU
-        run: |
-          timestamp=$(date +%s%3N)
-          gpu_id=-1
-
-          while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
-
-            if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
-              echo "No available GPU, waiting 5 seconds..."
-              sleep 5
-            else
-              echo "Allocated GPU ID: $gpu_id"
-            fi
-          done
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
-          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
-
-      - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
-
-      - name: Clear cache
-        if: failure() && env.BITBLAS == '1' && env.ERROR == '1'
-        run: |
-          rm -rf ~/.cache/bitblas/nvidia/geforce-rtx-4090
-          echo "clear bitblas cache"
-
-      - name: Release GPU
-        if: always()
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   transformers_diff:
     needs:
