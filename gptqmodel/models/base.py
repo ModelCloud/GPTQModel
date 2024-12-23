@@ -402,7 +402,6 @@ class BaseGPTQModel(nn.Module):
         layer_outputs = []
 
         num_batches = len(calibration_dataset)
-        print("num_batches", num_batches)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
         cur_layer_device = get_device(layers[0])
@@ -473,7 +472,7 @@ class BaseGPTQModel(nn.Module):
             except ValueError:
                 pass
         handle.remove()
-        print("input_layers", len(layer_inputs))
+
         move_to(layers[0], CPU)
         for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
@@ -579,7 +578,6 @@ class BaseGPTQModel(nn.Module):
                     handles.append(subset[name].register_forward_hook(add_batch(name)))
                 for j in range(num_batches):
                     layer_input = []
-                    print("jjj", j , len(layer_inputs))
                     for k, layer_inp in enumerate(layer_inputs[j]):
                         layer_input.append(move_to(layer_inp, cur_layer_device))
 
