@@ -159,7 +159,7 @@ jobs:
     needs: check-vm
     if: github.event.inputs.artifact_id == '' && !cancelled()
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
     steps:
 
       - name: Checkout Codes
@@ -191,7 +191,7 @@ jobs:
       - name: Install requirements
         run: |
           echo "===== init test env ====="
-          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
           echo "===== install transformers typing-extensions ====="
           uv pip install transformers typing-extensions -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
@@ -231,7 +231,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
       volumes:
         - /home/ci/models:/monster/data/model
     strategy:
@@ -312,7 +312,7 @@ jobs:
             echo "===== install auto_round ====="
             uv pip install auto_round
           fi
-          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ]; then
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
@@ -373,7 +373,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
       volumes:
         - /home/ci/models:/monster/data/model
     strategy:
@@ -438,7 +438,7 @@ jobs:
           echo "===== install dist/whl ====="
           uv pip install dist/*.whl
           echo "===== init test env ====="
-          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.4.1 3.11
+          bash -c "$(curl -L http://$RUNNER/files/scripts/init_unit_tests.sh)" @ 12.4 2.5.1 3.11
           echo "===== install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 ====="
           uv pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           if [ "${{ matrix.test_script }}" == "models/test_xverse" ]; then
@@ -486,7 +486,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v3-torch2.5.1
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
       options: --device /dev/dri --ipc=host
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
