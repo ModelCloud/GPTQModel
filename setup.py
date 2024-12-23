@@ -112,8 +112,6 @@ if TORCH_CUDA_ARCH_LIST is None:
     if BUILD_CUDA_EXT and not FORCE_BUILD:
         if got_cuda_between_v6_and_v8:
             FORCE_BUILD = True
-else:
-    arch_list = [arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch) >= 6.0]
 
 
 if BUILD_CUDA_EXT:
