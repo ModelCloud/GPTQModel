@@ -408,6 +408,7 @@ class BaseGPTQModel(nn.Module):
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         def store_input_hook(_, args, kwargs):
+            print("store input hook")
             # Positional arguments.
             layer_input = []
             for inp in args:
@@ -466,7 +467,7 @@ class BaseGPTQModel(nn.Module):
                     example[k] = move_to(v, cur_layer_device)
             try:
                 if is_ovis:
-                    self.generate(inputs=example.pop("input_ids"), **example)
+                    self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
                     self.model(**example)
             except ValueError:
