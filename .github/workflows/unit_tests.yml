@@ -144,13 +144,12 @@ jobs:
           "
 
           test_files=$(python3 -c "$script")
-          IFS='|' read -r cpu_test_files gpu_test_files transformers_test_files <<< "$test_files"
-          echo "torch-2-5-files=$cpu_test_files" >> "$GITHUB_OUTPUT"
+          IFS='|' read -r torch_2_5_test_files transformers_test_files <<< "$test_files"
+          echo "torch-2-5-files=$torch_2_5_test_files" >> "$GITHUB_OUTPUT"
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
-          echo "CPU Test files: $cpu_test_files"
-          echo "GPU Test files: $gpu_test_files"
+          echo "Torch 2.5 Test files: $cpu_test_files"
           echo "Transformers Test files: $transformers_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
