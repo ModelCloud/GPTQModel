@@ -420,6 +420,9 @@ jobs:
             echo "===== install auto_round ====="
             uv pip install auto_round
           fi
+          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+            source /etc/profile.d/pyenv.sh && pyenv activate xpu
+          fi
           echo "===== install dist/whl ====="
           uv pip install dist/*.whl
 
