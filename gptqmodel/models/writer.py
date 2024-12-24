@@ -84,7 +84,7 @@ def ModelWriter(cls):
                 w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
                               entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in self.quant_log])
 
-        pre_quantized_size_mb = get_model_files_size(self.model_id_or_path)
+        pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
         quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
@@ -171,7 +171,7 @@ def ModelWriter(cls):
         else:
             model = self.get_model_with_quantize(
                 quantize_config=quantize_config,
-                model_id_or_path=self.model_id_or_path,
+                model_id_or_path=self.model_local_path,
             )
 
         model.to(CPU)
@@ -311,7 +311,7 @@ def ModelWriter(cls):
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
-            copy_py_files(save_dir, model_id_or_path=self.model_id_or_path)
+            copy_py_files(save_dir, model_id_or_path=self.model_local_path)
 
     cls.save_quantized = save_quantized
 

@@ -88,10 +88,10 @@ class Qwen2VLGPTQ(BaseGPTQModel):
         import json
 
         if tokenizer is None:
-            tokenizer = AutoTokenizer.from_pretrained(self.model_id_or_path)
+            tokenizer = AutoTokenizer.from_pretrained(self.model_local_path)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            chat_template_file = os.path.join(self.model_id_or_path, "chat_template.json")
+            chat_template_file = os.path.join(self.model_local_path, "chat_template.json")
             if os.path.exists(chat_template_file):
                 shutil.copyfile(chat_template_file, os.path.join(tmp_dir, "chat_template.json"))
             tokenizer.save_pretrained(tmp_dir)
