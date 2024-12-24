@@ -103,7 +103,7 @@ def hf_select_quant_linear(
         backend = BACKEND(backend.lower())
 
     if device_map is not None:
-        device = auto_select_device(device=None, device_map=device_map, backend=backend)
+        device = normalize_device_device_map(None, device_map)
     else:
         device = DEVICE.CPU
 
