@@ -6,10 +6,8 @@ import os
 import shutil
 from typing import Dict, List, Optional, Union, Any
 
-import accelerate
 import torch
 import torch.nn as nn
-from accelerate.hooks import remove_hook_from_module
 from packaging import version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
@@ -25,12 +23,10 @@ from ..utils.model import (
     find_layers,
     get_device,
     get_module_by_name_prefix,
-    get_module_by_name_suffix,
     get_moe_layer_modules,
     move_to,
     nested_move_to,
     pack_model,
-    simple_dispatch_model,
     MODALITY,
 )
 from ..utils.progress import ProgressBar
@@ -106,7 +102,7 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
-        self._quantized = quantized
+        self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.quantize_config = quantize_config
         self.config = self.model.config
@@ -121,14 +117,6 @@ class BaseGPTQModel(nn.Module):
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
             self.monkey_patch()
-
-    @property
-    def quantized(self):
-        return self._quantized
-
-    @property
-    def hf_device_map(self):
-        return getattr(self.model, "hf_device_map", None)
 
     def prepare_dataset(
         self,
@@ -213,10 +201,6 @@ class BaseGPTQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
 
-        # TODO FIX ME! not best device, but if user pass device/device_map
-        # use it! else, best-device
-        best_device = get_best_device(backend)
-
         if backend == BACKEND.IPEX:
             self.quantize_config.format = FORMAT.IPEX
 
@@ -254,7 +238,7 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
-            device=DEVICE(best_device.type),
+            device=DEVICE(self.quantize_config.device),
             pack=True,
             format=self.quantize_config.format,
         )
@@ -270,16 +254,6 @@ class BaseGPTQModel(nn.Module):
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
-
-
-        device_map = self.hf_device_map
-        if device_map:
-            for name, device in device_map.items():
-                if device == "cpu" and best_device != CPU:
-                    logger.info(f"truly offloading {name} to cpu with hook.")
-                    module = get_module_by_name_suffix(self.model, name)
-                    remove_hook_from_module(module, recurse=True)
-                    accelerate.cpu_offload_with_hook(module, best_device)
 
         calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size, tokenizer,)
 
@@ -389,7 +363,7 @@ class BaseGPTQModel(nn.Module):
             )
 
             self.model = model
-            self._quantized = True
+            self.quantized = True
             return
 
         forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
@@ -437,7 +411,7 @@ class BaseGPTQModel(nn.Module):
             raise ValueError
 
         # move layer to target device
-        layers[0] = layers[0].to(best_device)
+        layers[0] = layers[0].to(self.quantize_config.device)
 
         ori_outside_layer_module_devices = {}
         for module_name in self.base_modules:
@@ -528,8 +502,8 @@ class BaseGPTQModel(nn.Module):
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
 
-            if get_device(layer) == CPU and best_device != CPU:
-                move_to(layer, best_device)
+            if get_device(layer) == CPU and self.quantize_config.device != CPU:
+                move_to(layer, self.quantize_config.device)
 
             cur_layer_device = get_device(layer)
             full = find_layers(layer)
@@ -722,42 +696,25 @@ class BaseGPTQModel(nn.Module):
             parallel_packing=self.quantize_config.parallel_packing,
         )
 
-        if device_map:
-            self.model = remove_hook_from_module(self.model, recurse=True)
-            self.model = simple_dispatch_model(self.model, device_map)
         self.model.config.use_cache = forward_pass_use_cache
 
-        self._quantized = True
-
+        self.quantized = True
         torch_empty_cache()
 
         return self.quant_log
 
-    @property
-    def device(self):
-        if not self.hf_device_map:
-            if hasattr(self.model, "device"):
-                return self.model.device
-            elif hasattr(self.model, "llm_engine"):
-                return self.model.llm_engine.device_config.device_type
-            else:
-                return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            device = [d for d in self.hf_device_map.values() if d not in {"disk"}][0]
-            return torch.device(device)
-
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
-            self.model.to(device)
+            self.model = self.model.to(device)
+            return self
         else:
-            logger.warning(f"{self.model.__class__.__name__} does not support the to() method")
-        return self
+            raise f"{self.model.__class__.__name__} does not support the to() method"
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
     def generate(self, **kwargs):
-        with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
+        with torch.inference_mode():
             return self.model.generate(**kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):

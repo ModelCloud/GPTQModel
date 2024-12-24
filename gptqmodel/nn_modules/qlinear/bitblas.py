@@ -261,7 +261,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.q_params = None
 
     def post_init(self):
-        self.validate_device(self.qweight.device.type)
         # eliminate runtime overhead like exllama state
         param_list = [self.qweight, self.scales, self.zeros]
         if self.bitblas_matmul.config.with_bias:

@@ -7,12 +7,10 @@ import operator
 import os
 import re
 import shutil
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type
 
-import accelerate
 import threadpoolctl as tctl
 import torch
 import torch.nn as nn
@@ -450,33 +448,8 @@ def simple_dispatch_model(model, device_map):
         model = model.to(torch.device(d))
         model.hf_device_map = device_map
         return model
-
-    tied_params = accelerate.utils.modeling.find_tied_parameters(model)
-    if set(device_map.values()) == {"cpu"} or set(device_map.values()) == {
-        "cpu",
-        "disk",
-    }:
-        main_device = "cpu"
     else:
-        main_device = [d for d in device_map.values() if d not in ["cpu", "disk"]][0]
-
-    cpu_offload_group = [(n, d) for n, d in device_map.items() if d == "cpu"]
-    prev_hook = None
-    for idx, (n, d) in enumerate(cpu_offload_group):
-        m = get_module_by_name_suffix(model, n)
-        _, prev_hook = accelerate.cpu_offload_with_hook(m, execution_device=main_device, prev_module_hook=prev_hook)
-    # set first cpu offload module's prev_module_hook to the last cpu offload module's hook
-    if len(cpu_offload_group) > 1:
-        get_module_by_name_suffix(model, cpu_offload_group[0][0])._hf_hook.prev_module_hook = prev_hook
-
-    for n, d in device_map.items():
-        m = get_module_by_name_suffix(model, n)
-        if d != "cpu":
-            d = torch.device(d)
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
-            add_hook_to_module(m, hook)
-    accelerate.utils.modeling.retie_parameters(model, tied_params)
-    model.hf_device_map = device_map
+        raise ValueError("internal device_map must contain an empty string")
 
     return model
 
@@ -684,20 +657,23 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
 
 
 # return the most stable tensor dtype for quantization while minimizing vram
-def auto_dtype_from_config(config: PretrainedConfig,
-                           device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
-                           device: Optional[Union[str, int]] = None,
-                           quant_inference: bool = False) -> torch.dtype:
+def auto_dtype(config: PretrainedConfig,
+               device: DEVICE,
+               quant_inference: bool = False) -> torch.dtype:
+
+    assert isinstance(device, DEVICE)
+
+    # for inference, DynamicCuda, Exllama, Triton, and Marlin are all fp16 kernels
     if quant_inference and device != DEVICE.CPU:
         return torch.float16
 
-    # TODO mps has errors with bfloat16, lock to float16 for now
-    if sys.platform == "darwin" or "mps" in [device, device_map] or (
-            isinstance(device_map, Dict) and "mps" in device_map.values()):
-        return torch.float16
-    elif device == DEVICE.XPU:
+    # TODO: both MPS and XPU are locked to float16
+    # XPU stack is missing bfloat16 (hardware supports it)
+    # MPS stack has bfloat16 bugs in pytorch
+    if device in [DEVICE.MPS, DEVICE.XPU]:
         return torch.float16
 
+    # get dtype from config
     dtype = getattr(config, "torch_dtype")
     if not dtype or not isinstance(dtype, torch.dtype):
         raise ValueError("Your model config.json does not have torch_dtype set. Please check for model " "corruption.")

@@ -122,9 +122,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
         return cls._validate(**args)
 
     def post_init(self):
-        self.validate_device(self.qweight.device.type)
-        assert self.qweight.device.index is not None
-
         # resize due to padding after model weights have been loaded
         if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
             self.qweight.resize_(self.infeatures // 32 * self.bits, self.outfeatures)

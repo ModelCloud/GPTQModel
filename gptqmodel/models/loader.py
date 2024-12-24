@@ -17,7 +17,7 @@ from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.importer import select_device, select_quant_linear
+from ..utils.importer import auto_select_device, select_quant_linear, normalize_device_device_map
 from ..utils.logger import setup_logger
 from ..utils.marlin import (
     _validate_marlin_compatibility,
@@ -25,7 +25,7 @@ from ..utils.marlin import (
     prepare_model_for_marlin_load,
 )
 from ..utils.model import (
-    auto_dtype_from_config,
+    auto_dtype,
     convert_gptq_v1_to_v2_format,
     find_layers,
     get_checkpoints,
@@ -104,9 +104,20 @@ def ModelLoader(cls):
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             torch_dtype: [str | torch.dtype] = "auto",
+            device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
+            device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
     ):
-        """load un-quantized pretrained model to cpu"""
+        # non-quantized models are always loaded into cpu
+        cpu_device_map = {"": "cpu"}
+
+        if quantize_config is None or not isinstance(quantize_config, QuantizeConfig):
+            raise AttributeError("`quantize_config` must be passed and be an instance of QuantizeConfig.")
+
+        if quantize_config.device is not None:
+            if device is not None or device_map is not None:
+                raise AttributeError("Passing device and device_map is not allowed when QuantizeConfig.device is set. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
+
         if quantize_config.desc_act not in cls.supports_desc_act:
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
@@ -131,12 +142,19 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
-        if torch_dtype is None or torch_dtype == "auto":
-            torch_dtype = auto_dtype_from_config(config)
-        elif not isinstance(torch_dtype, torch.dtype):
-            raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
+        # normalize and auto select quantization device is not passed
+        if quantize_config.device is None:
+            quantize_config.device = auto_select_device(None, None)
+        else:
+            quantize_config.device = normalize_device(quantize_config.device)
+
+        if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype):
+            # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
+            torch_dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
 
         # enforce some values despite user specified
+        # non-quantized models are always loaded into cpu
+        model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
@@ -178,11 +196,12 @@ def ModelLoader(cls):
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
-        if device is not None:
-            device = normalize_device(device)
+        # normalized device + device_map into single device
+        device = normalize_device_device_map(device, device_map)
 
         # TODO need to normalize backend and others in a unified api
-        device = select_device(device, device_map, backend)
+        device = auto_select_device(device, backend)
+        device_map = {"":device}
 
         if backend == BACKEND.VLLM:
             import os
@@ -236,11 +255,9 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if torch_dtype is None or torch_dtype == "auto":
+        if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            torch_dtype = auto_dtype_from_config(config=config, device=device, device_map=device_map, quant_inference=True)
-        elif not isinstance(torch_dtype, torch.dtype):
-            raise ValueError(f"torch_dtype value of `{torch_dtype}` is not a torch.dtype instance.")
+            torch_dtype = auto_dtype(config=config, device=device, quant_inference=True)
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
@@ -395,27 +412,6 @@ def ModelLoader(cls):
             if preload_qlinear_kernel == IPEXQuantLinear:
                 quantize_config.runtime_format = FORMAT.IPEX
             model.tie_weights()
-
-        # == step3: load checkpoint and dispatch == #
-        if isinstance(device_map, str) and device_map not in [
-            "auto",
-            "balanced",
-            "balanced_low_0",
-            "sequential",
-        ]:
-            raise ValueError(
-                "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
-                "'sequential'."
-            )
-
-        if not isinstance(device_map, dict):
-            if device is not None:
-                device_map = {"": 0 if device in [DEVICE.CUDA, DEVICE.XPU, DEVICE.MPS] else DEVICE.CPU}
-            else:
-                device_map = accelerate.infer_auto_device_map(
-                    model,
-                    no_split_module_classes=[cls.layer_type] if isinstance(cls.layer_type, str) else cls.layer_type,
-                )
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
