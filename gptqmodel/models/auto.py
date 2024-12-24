@@ -168,10 +168,6 @@ class GPTQModel:
                             is_quantized = True
                             break
 
-        # TODO fix me...unify device + device_map auto logic
-        if not device and not device_map or device_map == "auto":
-            device = get_best_device(backend=backend)
-
         if is_quantized:
             return cls.from_quantized(
                 model_id_or_path=model_id_or_path,
@@ -186,6 +182,8 @@ class GPTQModel:
             return cls.from_pretrained(
                 model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
+                device_map=device_map,
+                device=device,
                 trust_remote_code=trust_remote_code,
                 **kwargs,
             )
@@ -230,14 +228,13 @@ class GPTQModel:
         **kwargs,
     ) -> BaseGPTQModel:
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
-        quant_func = MODEL_MAP[model_type].from_quantized
 
         if backend == BACKEND.AUTO:
             if not torch.cuda.is_available() and HAS_IPEX:
                 logger.warning("No cuda found, use IPEX backend")
                 backend = BACKEND.IPEX
 
-        return quant_func(
+        return MODEL_MAP[model_type].from_quantized(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
             device=device,

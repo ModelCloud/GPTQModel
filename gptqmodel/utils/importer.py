@@ -2,6 +2,8 @@ import os
 from collections import OrderedDict
 from typing import Dict, Optional, Tuple, Type, Union
 
+import torch
+
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -40,30 +42,39 @@ format_dict = {
     FORMAT.IPEX: [BACKEND.IPEX],
 }
 
-def parse_device_map(device, device_map) -> Tuple[Optional[DEVICE], bool]:
-    if device is None and device_map is not None:
-        devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
-        normalized_devices = set()
-        for device in devices:
-            # Returning None means quant linear will be automatically selected.
-            if isinstance(device, str) and device == "auto":
-                return None, True
-            normalized_devices.add(normalize_device(device))
-        if len(normalized_devices) == 1:
-            d = normalized_devices.pop()
-            if d in DEVICE:
-                device = d
-        elif len(normalized_devices) > 1:
-            normalized_devices.discard(DEVICE.CPU)
-            device = normalized_devices.pop()
-    return device, False
+def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
+    if device is None:
+        if device_map is not None:
+            devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
+            normalized_devices = set()
+            for device in devices:
+                # Returning None means quant linear will be automatically selected.
+                if isinstance(device, str) and device == "auto":
+                    return None
+                normalized_devices.add(normalize_device(device))
+            if len(normalized_devices) == 1:
+                d = normalized_devices.pop()
+                if d in DEVICE:
+                    return d
+            elif len(normalized_devices) > 1:
+                normalized_devices.discard(DEVICE.CPU)
+                return normalized_devices.pop()
+
+        return None
+    else:
+        if isinstance(device, str):
+            return DEVICE(device)
+        elif isinstance(device, torch.device):
+            return DEVICE(device.type)
+        else:
+            raise ValueError(f"device must be a string or torch.device, got {type(device)}")
 
 
-def select_device(device, device_map, backend) -> Optional[DEVICE]:
-    device, device_map_is_auto = parse_device_map(device, device_map)
+def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> DEVICE:
+    assert device is None or isinstance(device, DEVICE)
+    assert backend is None or isinstance(backend, BACKEND)
 
-    # auto device if none is passed
-    if device is None and (device_map is None or device_map_is_auto):
+    if device is None:
         if backend == BACKEND.IPEX:
             device = DEVICE.XPU if HAS_XPU else DEVICE.CPU
         elif HAS_CUDA:
@@ -92,7 +103,7 @@ def hf_select_quant_linear(
         backend = BACKEND(backend.lower())
 
     if device_map is not None:
-        device = select_device(device=None, device_map=device_map, backend=backend)
+        device = auto_select_device(device=None, device_map=device_map, backend=backend)
     else:
         device = DEVICE.CPU
 
