@@ -263,6 +263,8 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+          echo "== pip list =="
+          pip list
 
       - name: Download wheel
         continue-on-error: true
@@ -387,6 +389,8 @@ jobs:
           nvcc --version
           echo "== torch =="
           pip show torch
+          echo "== pip list =="
+          pip list
 
       - name: Download wheel
         continue-on-error: true
