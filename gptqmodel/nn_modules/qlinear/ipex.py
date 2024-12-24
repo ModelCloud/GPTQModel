@@ -27,7 +27,7 @@ IPEX_ERROR_LOG = None
 try:
     from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
     HAS_IPEX = True
-except Exception:
+except BaseException:
     HAS_IPEX = False
     IPEX_ERROR_LOG = Exception
 

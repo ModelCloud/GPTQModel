@@ -40,7 +40,6 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  TORCH_CUDA_ARCH_LIST: '8.9'
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
@@ -365,6 +364,10 @@ jobs:
         if: always()
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
+      - name: Clean cache
+        if: always()
+        run: pip cache purge && uv cache clean
+
   transformers_diff:
     needs:
       - build
@@ -477,6 +480,10 @@ jobs:
       - name: Release GPU
         if: always()
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+
+      - name: Clean cache
+        if: always()
+        run: pip cache purge && uv cache clean
 
   torch2_5:
     needs:
@@ -595,3 +602,7 @@ jobs:
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+
+      - name: Clean cache
+        if: always()
+        run: pip cache purge && uv cache clean
