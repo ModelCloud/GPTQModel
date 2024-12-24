@@ -158,7 +158,7 @@ jobs:
     needs: check-vm
     if: github.event.inputs.artifact_id == '' && !cancelled()
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
+      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
 
       - name: Checkout Codes
@@ -229,7 +229,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       volumes:
         - /home/ci/models:/monster/data/model
     strategy:
@@ -353,7 +353,7 @@ jobs:
     runs-on: self-hosted
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v4
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       options: --device /dev/dri --ipc=host
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
