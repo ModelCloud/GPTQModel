@@ -36,6 +36,10 @@ on:
         description: 'max parallel jobs'
         required: false
         default: '10'
+      m4-only:
+        description: 'only run m4(test only)'
+        required: false
+        default: 'true'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -55,6 +59,7 @@ concurrency:
 
 jobs:
   check-vm:
+    if: ${{ github.event.inputs.m4-only  != "true"}}
     runs-on: self-hosted
     container:
       image:  modelcloud/gptqmodel:alpine-ci-v1
@@ -228,7 +233,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.gpu-files != '[]' && ${{ github.event.inputs.m4-only  != "true"}}
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
@@ -374,7 +379,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]' && ${{ github.event.inputs.m4-only  != "true"}}
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
       volumes:
@@ -491,7 +496,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: self-hosted
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]' && ${{ github.event.inputs.m4-only  != "true"}}
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v3-torch2.5.1
       options: --device /dev/dri --ipc=host
