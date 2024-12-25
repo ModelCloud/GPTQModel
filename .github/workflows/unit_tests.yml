@@ -627,12 +627,12 @@ jobs:
           echo "======="
           ls -ahl /Users
           echo "======="
-          ls -ahl /Users/lbx/Desktop/CI/actions-runners/monster/
+          ls -ahl /Users/lbx/Desktop/CI/actions-runner/monster/
 
       - name: Start docker
         run: |
           docker run --rm -it \
-          -v /Users/lbx/Desktop/CI/actions-runners/monster:/monster/data/models \
+          -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/models \
           10.0.14.248:5000/modelcloud/gptqmodel:github-ci-v5 \
           /bin/bash -c "ls /monster/data/models"
 
