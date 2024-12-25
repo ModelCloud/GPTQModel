@@ -616,10 +616,17 @@ jobs:
   m4:
     runs-on: [self-hosted, m4]
     steps:
+      - name: Build docker
+        run: |
+          docker_name=10.0.13.31:5000/modelcloud/gptqmodel:ci-m4
+          wget http://10.0.13.31/files/dockerfile/Ubuntu_Dockrfile.m4
+          docker build -f Ubuntu_Dockrfile.m4 --progress=plain -t $docker_name
+          docker push $docker_name
+
       - name: Start docker
         run: |
           docker run --rm \
           -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/model \
-          ubuntu:24.04 \
+          10.0.13.31:5000/modelcloud/gptqmodel:ci-m4 \
           ls /
 
