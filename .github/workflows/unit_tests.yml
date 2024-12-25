@@ -616,8 +616,18 @@ jobs:
   m4:
     runs-on: [self-hosted, m4]
     steps:
+      - name: print
+        run: pwd
+
       - name: List dir
-        run: ls /Users/lbx/Desktop/CI/actions-runners/monster/
+        run: |
+          ls -ahl
+          echo "======="
+          ls -ahl / || true
+          echo "======="
+          ls -ahl /Users
+          echo "======="
+          ls -ahl /Users/lbx/Desktop/CI/actions-runners/monster/
 
       - name: Start docker
         run: |
