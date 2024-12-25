@@ -95,6 +95,7 @@ def hf_select_quant_linear(
         sym: bool,
         checkpoint_format: str,
         meta: Optional[Dict[str, any]] = None,
+        pack: bool = False,
         device_map: Optional[Union[str, dict]] = None,
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
@@ -115,8 +116,8 @@ def hf_select_quant_linear(
         backend=backend,
         device=device,
         format=FORMAT.GPTQ,
-        pack=True,
-        allow_marlin=False, # TODO: remove this after marlin padding is fixed
+        pack=pack,
+        allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
     )
 
