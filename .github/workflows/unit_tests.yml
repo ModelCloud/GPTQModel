@@ -631,7 +631,7 @@ jobs:
 
       - name: Start docker
         run: |
-          docker run --rm -it \
+          docker run --rm -i \
           -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/models \
           10.0.14.248:5000/modelcloud/gptqmodel:github-ci-v5 \
           /bin/bash -c "ls /monster/data/models"
