@@ -606,3 +606,17 @@ jobs:
       - name: Clean cache
         if: always()
         run: pip cache purge && uv cache clean
+
+  m4:
+    runs-on: [self-hosted, m4]
+    steps:
+      - name: List dir
+        run: ls /Users/lbx/Desktop/CI/actions-runners/monster/
+
+      - name: Start docker
+        run: |
+          docker run --rm -it \
+          -v /Users/lbx/Desktop/CI/actions-runners/monster:/monster/data/models \
+          10.0.14.248:5000/modelcloud/gptqmodel:github-ci-v5 \
+          /bin/bash -c "ls /monster/data/models"
+
