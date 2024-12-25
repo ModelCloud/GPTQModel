@@ -620,5 +620,6 @@ jobs:
         run: |
           docker run --rm \
           -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/model \
-          hello-world
+          ubuntu/python:3.12-24.04_stable \
+          /bin/bash -c "ls /"
 
