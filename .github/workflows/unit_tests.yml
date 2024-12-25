@@ -97,6 +97,7 @@ jobs:
 
   list-test-files:
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.m4-only != 'true'}}
     outputs:
       torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
       gpu-files: ${{ steps.files.outputs.gpu-files }}
@@ -161,7 +162,7 @@ jobs:
   build:
     runs-on: self-hosted
     needs: check-vm
-    if: github.event.inputs.artifact_id == '' && !cancelled()
+    if: github.event.inputs.artifact_id == '' && !cancelled() && ${{ github.event.inputs.m4-only != 'true'}}
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v2-torch2.4.1
     steps:
