@@ -621,5 +621,5 @@ jobs:
           docker run --rm \
           -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/model \
           ubuntu:24.04 \
-          python -V
+          ls /
 
