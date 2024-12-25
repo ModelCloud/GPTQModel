@@ -99,6 +99,7 @@ SUPPORTED_MODELS = [
     "baichuan",
     "internlm",
     "internlm2",
+    "internvl_chat",
     "qwen",
     "xverse",
     "deci",

@@ -21,6 +21,7 @@ from .grinmoe import GrinMOEGPTQ
 from .hymba import HymbaGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
+from .internvl_chat import InternVLChatGPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
 from .minicpm3 import MiniCPM3GPTQ

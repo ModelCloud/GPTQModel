@@ -1,4 +1,4 @@
-from gptqmodel.models import OvisGPTQ, Qwen2VLGPTQ
+from gptqmodel.models import OvisGPTQ, Qwen2VLGPTQ, InternVLChatGPTQ
 
 
 def format_ovis_dataset(image, assistant):
@@ -29,6 +29,12 @@ def format_qwen2_vl_dataset(image, assistant):
         {"role": "assistant", "content": assistant},
     ]
 
+def format_internlm2_vl_dataset(image, assistant):
+    return {
+        "image": image,
+        "question": f"<image>\nDescribe the image in detail.",
+        "answer": assistant,
+    }
 
 def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
     from datasets import load_dataset
@@ -48,5 +54,8 @@ def get_calib_dataset(model):
 
     if isinstance(model, Qwen2VLGPTQ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=1)
+
+    if isinstance(model, InternVLChatGPTQ):
+        return prepare_dataset(format_internlm2_vl_dataset, n_sample=1)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")
