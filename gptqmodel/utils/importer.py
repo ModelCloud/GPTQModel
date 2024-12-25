@@ -63,7 +63,7 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
         return None
     else:
         if isinstance(device, str):
-            return DEVICE(device)
+            return normalize_device(device)
         elif isinstance(device, torch.device):
             return DEVICE(device.type)
         else:
