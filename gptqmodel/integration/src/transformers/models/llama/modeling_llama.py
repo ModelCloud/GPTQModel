@@ -96,6 +96,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     position_embeddings,
                 )
             else:
+                print(f"modeling_llama formawrd index: {index}")
                 # now = time.time()
                 torch.cuda.synchronize()
                 if index < layers_len - 1: # put next layer on cuda
@@ -104,6 +105,13 @@ class LlamaModel(LlamaPreTrainedModel):
                 else: # for last layer, put layer 0 on cpu for next loop
                     decoder_layers[0].to("cuda", non_blocking=True)
                     # print(f"=== move layer 0 to cuda, time: {time.time() - now}")
+                decoder_layer.to("cuda")
+                hidden_states.to("cuda")
+                position_ids.to("cuda")
+                cache_position.to("cuda")
+                position_embeddings[0].to("cuda")
+                position_embeddings[1].to("cuda")
+                decoder_layer.input_layernorm.to("cuda")
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
