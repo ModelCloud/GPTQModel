@@ -12,8 +12,6 @@ LlamaModel.forward = patched_LlamaModel.forward
 # model_id = "/monster/data/lrl/qwq_quant/vortex_v2"
 model_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
 
-cuda = torch.device("cuda")
-
 model = GPTQModel.load(model_id, backend = BACKEND.TORCH, device = "cpu")
 # model.to("cpu")
 
