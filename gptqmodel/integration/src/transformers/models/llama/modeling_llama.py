@@ -9,6 +9,8 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.llama.modeling_llama import LLAMA_START_DOCSTRING, LLAMA_INPUTS_DOCSTRING
 from transformers.utils import add_start_docstrings_to_model_forward
 
+from gptqmodel.utils.model import nested_move_to
+
 
 @add_start_docstrings(
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
@@ -105,13 +107,18 @@ class LlamaModel(LlamaPreTrainedModel):
                 else: # for last layer, put layer 0 on cpu for next loop
                     decoder_layers[0].to("cuda", non_blocking=True)
                     # print(f"=== move layer 0 to cuda, time: {time.time() - now}")
-                decoder_layer.to("cuda")
-                hidden_states.to("cuda")
-                position_ids.to("cuda")
-                cache_position.to("cuda")
-                position_embeddings[0].to("cuda")
-                position_embeddings[1].to("cuda")
-                decoder_layer.input_layernorm.to("cuda")
+                nested_move_to(decoder_layer, "cuda")
+                nested_move_to(hidden_states, "cuda")
+                nested_move_to(position_ids, "cuda")
+                nested_move_to(cache_position, "cuda")
+                nested_move_to(position_embeddings, "cuda")
+                # decoder_layer.to("cuda")
+                # hidden_states.to("cuda")
+                # position_ids.to("cuda")
+                # cache_position.to("cuda")
+                # position_embeddings[0].to("cuda")
+                # position_embeddings[1].to("cuda")
+                # decoder_layer.input_layernorm.to("cuda")
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
