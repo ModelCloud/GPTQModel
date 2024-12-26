@@ -619,7 +619,7 @@ jobs:
       - name: Build docker
         run: |
           docker_name=10.0.13.31:5000/modelcloud/gptqmodel:ci-m4
-          wget http://10.0.13.31/files/dockerfile/Ubuntu_Dockrfile.m4
+          curl -O http://10.0.13.31/files/dockerfile/Ubuntu_Dockrfile.m4
           docker build -f Ubuntu_Dockrfile.m4 --progress=plain -t $docker_name
           docker push $docker_name
 
