@@ -306,7 +306,8 @@ def ModelLoader(cls):
 
         marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
 
-        if backend != BACKEND.MARLIN:
+        # check for marlin compat for cuda device onnly
+        if backend != BACKEND.MARLIN and device == DEVICE.CUDA:
             unsupported = _validate_marlin_compatibility(quantize_config)
             if unsupported is None and marlin_compatible:
                 logger.info(
