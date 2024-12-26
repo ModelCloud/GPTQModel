@@ -622,11 +622,10 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
-      - name: Build docker
+      - name: Run test
         run: |
-          docker_name=10.0.13.31:5000/modelcloud/gptqmodel:ci-m4
-          wget http://10.0.13.31/files/m4/profile.sb
-          wget http://10.0.13.31/files/m4/run.sh
+          curl -O http://10.0.13.31/files/m4/profile.sb
+          curl -O http://10.0.13.31/files/m4/run.sh
           sandbox-exec -f profile.sb /bin/bash ./run.sh
           
       - name: log
