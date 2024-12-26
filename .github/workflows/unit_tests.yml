@@ -616,17 +616,24 @@ jobs:
   m4:
     runs-on: [self-hosted, m4]
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Build docker
         run: |
           docker_name=10.0.13.31:5000/modelcloud/gptqmodel:ci-m4
-          curl -O http://10.0.13.31/files/dockerfile/Ubuntu_Dockrfile.m4
-          docker build -f Ubuntu_Dockrfile.m4 --progress=plain -t $docker_name
-          docker push $docker_name
-
-      - name: Start docker
+          wget http://10.0.13.31/files/m4/profile.sb
+          wget http://10.0.13.31/files/m4/run.sh
+          sandbox-exec -f profile.sb /bin/bash ./run.sh
+          
+      - name: log
         run: |
-          docker run --rm \
-          -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/model \
-          10.0.13.31:5000/modelcloud/gptqmodel:ci-m4 \
-          ls /
+          echo "done"
+          # docker run --rm \
+          # -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/model \
+          # 10.0.13.31:5000/modelcloud/gptqmodel:ci-m4 \
+          # ls /
 
