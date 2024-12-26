@@ -201,10 +201,7 @@ def ModelLoader(cls):
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
-            try:
-                backend = BACKEND(backend)
-            except:
-                raise ValueError(f"GPTQModel does not support backend")
+            backend = BACKEND(backend)
         device = auto_select_device(device, backend)
         device_map = {"":device}
 
