@@ -624,6 +624,8 @@ jobs:
 
       - name: Run test
         run: |
+          whereis python
+          pyenv versions || true
           curl -O http://10.0.13.31/files/m4/profile.sb
           curl -O http://10.0.13.31/files/m4/run.sh
           sandbox-exec -f profile.sb /bin/bash ./run.sh
