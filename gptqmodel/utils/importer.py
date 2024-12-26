@@ -95,7 +95,7 @@ def hf_select_quant_linear(
         sym: bool,
         checkpoint_format: str,
         meta: Optional[Dict[str, any]] = None,
-        pack: Optional[bool] = False,
+        pack: Optional[bool] = True,
         device_map: Optional[Union[str, dict]] = None,
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
