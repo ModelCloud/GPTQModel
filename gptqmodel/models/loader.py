@@ -190,7 +190,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
-            backend: BACKEND = BACKEND.AUTO,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
@@ -200,6 +200,11 @@ def ModelLoader(cls):
         device = normalize_device_device_map(device, device_map)
 
         # TODO need to normalize backend and others in a unified api
+        if isinstance(backend, str):
+            try:
+                backend = BACKEND(backend)
+            except:
+                raise ValueError(f"GPTQModel does not support backend")
         device = auto_select_device(device, backend)
         device_map = {"":device}
 
