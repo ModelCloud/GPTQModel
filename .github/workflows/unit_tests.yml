@@ -634,6 +634,9 @@ jobs:
           eval "$(pyenv virtualenv-init -)"
 
           pyenv versions
+
+          pyenv install 3.11.11
+
           curl -O http://10.0.13.31/files/m4/profile.sb
           curl -O http://10.0.13.31/files/m4/run.sh
           sandbox-exec -f profile.sb /bin/bash ./run.sh
