@@ -624,6 +624,16 @@ jobs:
 
       - name: Run test
         run: |
+          export PYENV_ROOT="/Users/lbx/.pyenv"
+          export PATH="/opt/homebrew/bin:$PATH"
+          export PATH="$PYENV_ROOT/bin:$PATH"
+
+          echo "=== init pyenv"
+          eval "$(pyenv init --path)"
+          eval "$(pyenv init -)"
+          eval "$(pyenv virtualenv-init -)"
+
+          pyenv versions
           curl -O http://10.0.13.31/files/m4/profile.sb
           curl -O http://10.0.13.31/files/m4/run.sh
           sandbox-exec -f profile.sb /bin/bash ./run.sh
