@@ -56,7 +56,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     container:
       image:  modelcloud/gptqmodel:alpine-ci-v1
     outputs:
@@ -154,7 +154,7 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     needs: check-vm
     if: github.event.inputs.artifact_id == '' && !cancelled()
     container:
@@ -226,7 +226,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -350,7 +350,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
