@@ -623,6 +623,7 @@ jobs:
           ref: ${{ env.ref }}
 
       - name: Run test
+        shell: zsh
         run: |
           whereis python
           pyenv versions || true
