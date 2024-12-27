@@ -626,8 +626,8 @@ jobs:
         shell: zsh {0}
         run: |
           whereis python
-          pyenv versions || true
           /opt/homebrew/bin/pyenv versions || true
+          pyenv versions || true
           curl -O http://10.0.13.31/files/m4/profile.sb
           curl -O http://10.0.13.31/files/m4/run.sh
           sandbox-exec -f profile.sb /bin/bash ./run.sh
