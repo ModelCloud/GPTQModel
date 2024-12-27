@@ -633,9 +633,14 @@ jobs:
           eval "$(pyenv init -)"
           eval "$(pyenv virtualenv-init -)"
 
-          pyenv versions
 
           pyenv global 3.11.11
+
+          pyenv versions
+
+          python -V
+
+          python -m venv venv
 
           curl -O http://10.0.13.31/files/m4/profile.sb
           curl -O http://10.0.13.31/files/m4/run.sh
