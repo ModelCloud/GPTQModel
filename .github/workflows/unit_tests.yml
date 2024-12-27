@@ -624,6 +624,9 @@ jobs:
 
       - name: Run test
         run: |
+          pwd
+          ls -ahl .
+          export PATH="/opt/homebrew/bin:$PATH"
           eval "$(pyenv init -)"
 
           pyenv global 3.11.11
