@@ -235,11 +235,6 @@ class GPTQModel:
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
-        if backend == BACKEND.AUTO:
-            if not torch.cuda.is_available() and HAS_IPEX:
-                logger.warning("No cuda found, use IPEX backend")
-                backend = BACKEND.IPEX
-
         return MODEL_MAP[model_type].from_quantized(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
