@@ -628,11 +628,8 @@ jobs:
           export PATH="/opt/homebrew/bin:$PATH"
           export PATH="$PYENV_ROOT/bin:$PATH"
 
-          echo "=== init pyenv"
           eval "$(pyenv init --path)"
           eval "$(pyenv init -)"
-          eval "$(pyenv virtualenv-init -)"
-
 
           pyenv global 3.11.11
 
