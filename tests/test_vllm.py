@@ -48,7 +48,7 @@ class TestLoadVLLM(unittest.TestCase):
     def test_load_vllm(self):
         model = GPTQModel.load(
             self.MODEL_ID,
-            device="cuda:0",
+            device="cuda",
             backend=BACKEND.VLLM,
             gpu_memory_utilization=0.8,
         )
@@ -83,7 +83,7 @@ class TestLoadVLLM(unittest.TestCase):
     def test_load_shared_vllm(self):
         model = GPTQModel.load(
             self.SHARDED_MODEL_ID,
-            device="cuda:0",
+            device="cuda",
             backend=BACKEND.VLLM,
             gpu_memory_utilization=0.8,
         )
@@ -139,7 +139,7 @@ class TestLoadVLLM(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmp_dir,
-                device="cuda:0",
+                device="cuda",
                 backend=BACKEND.VLLM,
                 gpu_memory_utilization=0.8,
             )
