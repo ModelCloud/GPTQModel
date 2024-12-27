@@ -624,11 +624,7 @@ jobs:
 
       - name: Run test
         run: |
-          export PYENV_ROOT="/Users/lbx/.pyenv"
           export PATH="/opt/homebrew/bin:$PATH"
-          export PATH="$PYENV_ROOT/bin:$PATH"
-
-          eval "$(pyenv init --path)"
           eval "$(pyenv init -)"
 
           pyenv global 3.11.11
@@ -642,12 +638,3 @@ jobs:
           curl -O http://10.0.13.31/files/m4/profile.sb
           curl -O http://10.0.13.31/files/m4/run.sh
           sandbox-exec -f profile.sb /bin/bash ./run.sh
-          
-      - name: log
-        run: |
-          echo "done"
-          # docker run --rm \
-          # -v /Users/lbx/Desktop/CI/actions-runner/monster:/monster/data/model \
-          # 10.0.13.31:5000/modelcloud/gptqmodel:ci-m4 \
-          # ls /
-
