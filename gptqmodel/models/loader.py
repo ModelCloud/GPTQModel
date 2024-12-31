@@ -155,6 +155,8 @@ def ModelLoader(cls):
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
+        # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
+        # but device map is cpu, it will trow non-supported device error
         model_init_kwargs["_attn_implementation_autoset"] = True
         model_init_kwargs["torch_dtype"] = torch_dtype
 
