@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Union
 import accelerate
 import torch
 import transformers
+from packaging import version
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
@@ -157,7 +158,8 @@ def ModelLoader(cls):
         model_init_kwargs["device_map"] = cpu_device_map
         # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
         # but device map is cpu, it will trow non-supported device error
-        model_init_kwargs["_attn_implementation_autoset"] = True
+        if version.parse(transformers.__version__) >= version.parse("4.46.0"):
+            model_init_kwargs["_attn_implementation_autoset"] = True
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
