@@ -81,7 +81,7 @@ def check_versions(model_class, requirements: List[str]):
     for req in requirements:
         pkg, operator, version_required = parse_requirement(req)
         try:
-            installed_version = version(pkg)
+            installed_version = Version(pkg)
             if not compare_versions(installed_version, version_required, operator):
                 raise ValueError(f"{model_class} requires version {req}, but current {pkg} version is {installed_version} ")
         except PackageNotFoundError:
@@ -157,7 +157,8 @@ def ModelLoader(cls):
         model_init_kwargs["device_map"] = cpu_device_map
         # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
         # but device map is cpu, it will trow non-supported device error
-        model_init_kwargs["_attn_implementation_autoset"] = True
+        if Version(transformers.__version__) >= Version("4.46.0"):
+            model_init_kwargs["_attn_implementation_autoset"] = True
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
