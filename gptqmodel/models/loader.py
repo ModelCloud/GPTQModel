@@ -155,6 +155,7 @@ def ModelLoader(cls):
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
+        model_init_kwargs["_attn_implementation_autoset"] = True
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
