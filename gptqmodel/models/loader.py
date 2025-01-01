@@ -81,7 +81,7 @@ def check_versions(model_class, requirements: List[str]):
     for req in requirements:
         pkg, operator, version_required = parse_requirement(req)
         try:
-            installed_version = Version(pkg)
+            installed_version = version(pkg)
             if not compare_versions(installed_version, version_required, operator):
                 raise ValueError(f"{model_class} requires version {req}, but current {pkg} version is {installed_version} ")
         except PackageNotFoundError:
