@@ -98,7 +98,7 @@ jobs:
 
   list-test-files:
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.m4-only != 'true'}}
+    if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
       transformers-files: ${{ steps.files.outputs.transformers-files }}
@@ -162,7 +162,7 @@ jobs:
   build:
     runs-on: [self-hosted, Linux]
     needs: check-vm
-    if: github.event.inputs.artifact_id == '' && !cancelled() && ${{ github.event.inputs.m4-only != 'true'}}
+    if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
@@ -233,7 +233,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [self-hosted, Linux]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]' && ${{ github.event.inputs.m4-only != 'true'}}
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       volumes:
@@ -357,7 +357,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [self-hosted, Linux]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]' && ${{ github.event.inputs.m4-only != 'true'}}
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       options: --device /dev/dri --ipc=host
