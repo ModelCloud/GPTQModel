@@ -269,11 +269,12 @@ jobs:
       - name: Waiting for confirmation
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
+          timestamp=$(date +%s%3N)
+
           echo "open http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
           for i in {1..5}; do echo "."; done
           echo "click http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
 
-          timestamp=$(date +%s%3N)
           status=-1
 
           while [ "$status" -lt 0 ]; do
