@@ -483,6 +483,7 @@ jobs:
 
   show-logs:
     runs-on: [ self-hosted, Linux ]
+    if: always() && !cancelled()
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
