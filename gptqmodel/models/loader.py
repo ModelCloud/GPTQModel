@@ -155,6 +155,10 @@ def ModelLoader(cls):
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
+        # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
+        # but device map is cpu, it will trow non-supported device error
+        if Version(transformers.__version__) >= Version("4.46.0"):
+            model_init_kwargs["_attn_implementation_autoset"] = True
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
@@ -190,7 +194,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
-            backend: BACKEND = BACKEND.AUTO,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
@@ -200,6 +204,8 @@ def ModelLoader(cls):
         device = normalize_device_device_map(device, device_map)
 
         # TODO need to normalize backend and others in a unified api
+        if isinstance(backend, str):
+            backend = BACKEND(backend)
         device = auto_select_device(device, backend)
         device_map = {"":device}
 
@@ -306,7 +312,8 @@ def ModelLoader(cls):
 
         marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
 
-        if backend != BACKEND.MARLIN:
+        # check for marlin compat for cuda device onnly
+        if backend != BACKEND.MARLIN and device == DEVICE.CUDA:
             unsupported = _validate_marlin_compatibility(quantize_config)
             if unsupported is None and marlin_compatible:
                 logger.info(
