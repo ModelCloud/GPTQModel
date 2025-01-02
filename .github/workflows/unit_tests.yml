@@ -62,7 +62,6 @@ concurrency:
 jobs:
   check-vm:
     runs-on: [self-hosted, Linux]
-    if: ${{ github.event.inputs.m4-only != 'true'}}
     container:
       image:  modelcloud/gptqmodel:alpine-ci-v1
     outputs:
