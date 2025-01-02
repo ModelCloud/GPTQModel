@@ -48,9 +48,9 @@ env:
   TORCH_CUDA_ARCH_LIST: '8.9'
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
-  TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
-  TORCH_2_5_TESTS: "test_evalplus,test_perplexity,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
-  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral,test_q4_torch_apple"
+  TRANSFORMERS_DIFF_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
+  TORCH_2_5_TESTS: "test_evalplus.py,test_perplexity.py,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model.py,test_quant_formats.py,models/test_hymba.py"
+  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,test_q4_torch_apple.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
@@ -138,8 +138,8 @@ jobs:
           transformers_test_files = [f.strip().removesuffix('.py') for f in f'{TRANSFORMERS_DIFF_TESTS}'.split(',') if f.strip()]
           transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
 
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
-          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
+          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
 
           torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
 
