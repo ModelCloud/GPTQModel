@@ -36,6 +36,11 @@ on:
         description: 'max parallel jobs'
         required: false
         default: '10'
+      m4-only:
+        description: 'only run m4(test only)'
+        type: boolean
+        required: false
+        default: false
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -93,6 +98,7 @@ jobs:
 
   list-test-files:
     runs-on: ubuntu-latest
+    if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
       transformers-files: ${{ steps.files.outputs.transformers-files }}
@@ -156,7 +162,7 @@ jobs:
   build:
     runs-on: [self-hosted, Linux]
     needs: check-vm
-    if: github.event.inputs.artifact_id == '' && !cancelled()
+    if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
@@ -227,7 +233,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [self-hosted, Linux]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       volumes:
@@ -351,7 +357,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [self-hosted, Linux]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-2-5-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       options: --device /dev/dri --ipc=host
@@ -475,3 +481,21 @@ jobs:
         if: always() && !contains(matrix.test_script, 'ipex')
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
+
+  m4:
+    runs-on: [self-hosted, m4]
+    needs: check-vm
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Run test
+        run: |
+          export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
+          pyenv global 3.11.11 && python -m venv venv
+          curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/profile.sb
+          curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/run.sh
+          sandbox-exec -f profile.sb /bin/bash ./run.sh
