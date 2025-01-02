@@ -495,6 +495,7 @@ jobs:
   m4:
     runs-on: [self-hosted, m4]
     needs: check-vm
+    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') )&& !cancelled()
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
