@@ -39,7 +39,7 @@ on:
       m4-only:
         description: 'only run m4(test only)'
         required: false
-        default: 'true'
+        default: 'false'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
