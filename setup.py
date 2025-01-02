@@ -7,6 +7,7 @@ import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup
+from torch.utils.cpp_extension import ROCM_VERSION
 
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
@@ -65,6 +66,7 @@ common_setup_kwargs = {
     ],
 }
 
+ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
 
 def get_version_tag(is_cuda_release: bool = True) -> str:
     import torch
@@ -72,14 +74,19 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
     if not BUILD_CUDA_EXT:
         return common_setup_kwargs["version"]
 
-    CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", torch.version.cuda).split("."))
+    if ROCM_VERSION:
+        common_setup_kwargs['version'] += f"+rocm{ROCM_VERSION}"
+        return common_setup_kwargs['version']
 
-    if not CUDA_VERSION:
+    cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
+    if not cuda_version or not cuda_version.split("."):
         print(
             f"Trying to compile GPTQModel for CUDA, but Pytorch {torch.__version__} "
             "is installed without CUDA support."
         )
         sys.exit(1)
+
+    CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if is_cuda_release:
@@ -104,7 +111,7 @@ if TORCH_CUDA_ARCH_LIST is None:
     got_cuda_between_v6_and_v8 = any(6 <= torch.cuda.get_device_capability(i)[0] < 8 for i in range(torch.cuda.device_count()))
 
     # not validated for compute < 6
-    if not got_cuda_v6:
+    if not got_cuda_v6 and not torch.version.hip:
         BUILD_CUDA_EXT = False
 
         if sys.platform == "win32" and 'cu+' not in torch.__version__:
@@ -161,14 +168,21 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "-diag-suppress=179,39,186",
+        ],
+    }
+
+    if ROCM_VERSION:
+        extra_compile_args["nvcc"] += [
+        ]
+    else:
+        extra_compile_args["nvcc"] += [
             "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
-            "-diag-suppress=179,39,186",
             "--use_fast_math",
-        ],
-    }
+        ]
 
     extensions = [
         cpp_ext.CUDAExtension(
@@ -191,7 +205,7 @@ if BUILD_CUDA_EXT:
         ),
     ]
 
-    if sys.platform != "win32":
+    if sys.platform != "win32" and not ROCM_VERSION:
         extensions += [
             # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
             cpp_ext.CUDAExtension(
