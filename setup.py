@@ -249,7 +249,7 @@ if BUILD_CUDA_EXT:
 
 class CachedWheelsCommand(_bdist_wheel):
     def run(self):
-        if FORCE_BUILD:
+        if FORCE_BUILD or ROCM_VERSION:
             return super().run()
 
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
