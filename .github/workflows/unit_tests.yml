@@ -484,6 +484,7 @@ jobs:
 
   m4:
     runs-on: [self-hosted, m4]
+    needs: check-vm
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
