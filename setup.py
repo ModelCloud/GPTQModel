@@ -17,6 +17,14 @@ CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
+ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
+SKIP_ROCM_VERSION_CHECK = os.environ.get('SKIP_ROCM_VERSION_CHECK', None)
+
+if ROCM_VERSION is not None and float(ROCM_VERSION) < 6.2 and not SKIP_ROCM_VERSION_CHECK:
+    sys.exit(
+        "GPTQModel's compatibility with ROCM versions below 6.2 has not been verified. If you wish to proceed, please set the SKIP_ROCM_VERSION_CHECK environment."
+    )
+
 if TORCH_CUDA_ARCH_LIST:
     arch_list = " ".join([arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 6.0 or print(f"we do not support this compute arch: {arch}, skipped.") is not None])
     if arch_list != TORCH_CUDA_ARCH_LIST:
@@ -65,21 +73,21 @@ common_setup_kwargs = {
     ],
 }
 
-
 def get_version_tag(is_cuda_release: bool = True) -> str:
     import torch
 
     if not BUILD_CUDA_EXT:
         return common_setup_kwargs["version"]
 
-    CUDA_VERSION = "".join(os.environ.get("CUDA_VERSION", torch.version.cuda).split("."))
-
-    if not CUDA_VERSION:
+    cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
+    if not cuda_version or not cuda_version.split("."):
         print(
             f"Trying to compile GPTQModel for CUDA, but Pytorch {torch.__version__} "
             "is installed without CUDA support."
         )
         sys.exit(1)
+
+    CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     if is_cuda_release:
@@ -104,7 +112,7 @@ if TORCH_CUDA_ARCH_LIST is None:
     got_cuda_between_v6_and_v8 = any(6 <= torch.cuda.get_device_capability(i)[0] < 8 for i in range(torch.cuda.device_count()))
 
     # not validated for compute < 6
-    if not got_cuda_v6:
+    if not got_cuda_v6 and not torch.version.hip:
         BUILD_CUDA_EXT = False
 
         if sys.platform == "win32" and 'cu+' not in torch.__version__:
@@ -116,9 +124,10 @@ if TORCH_CUDA_ARCH_LIST is None:
             FORCE_BUILD = True
 
 
-if BUILD_CUDA_EXT:
-    if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
+if ROCM_VERSION and BUILD_CUDA_EXT:
+    common_setup_kwargs["version"] += f"+rocm{ROCM_VERSION}"
+elif BUILD_CUDA_EXT and CUDA_RELEASE == "1":
+    common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
 else:
     common_setup_kwargs["version"] += "+cpu"
 
@@ -161,14 +170,18 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "-diag-suppress=179,39,186",
+        ],
+    }
+
+    if not ROCM_VERSION:
+        extra_compile_args["nvcc"] += [
             "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
-            "-diag-suppress=179,39,186",
             "--use_fast_math",
-        ],
-    }
+        ]
 
     extensions = [
         cpp_ext.CUDAExtension(
@@ -192,18 +205,22 @@ if BUILD_CUDA_EXT:
     ]
 
     if sys.platform != "win32":
+        # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
+        marlin_kernel = cpp_ext.CUDAExtension(
+            "gptqmodel_marlin_kernels",
+            [
+                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                "gptqmodel_ext/marlin/marlin_repack.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        )
+        # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
+        # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
+        if not ROCM_VERSION:
+            extensions.append(marlin_kernel)
         extensions += [
-            # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
-            cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_kernels",
-                [
-                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin/marlin_repack.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            ),
             # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
             cpp_ext.CUDAExtension(
                 "gptqmodel_exllama_kernels",
