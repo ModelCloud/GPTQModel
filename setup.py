@@ -216,7 +216,7 @@ if BUILD_CUDA_EXT:
             extra_compile_args=extra_compile_args,
         )
         # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
-        # nv_bfloat16 has no implementation in rocm
+        # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
         if not ROCM_VERSION:
             extensions.append(marlin_kernel)
         extensions += [
