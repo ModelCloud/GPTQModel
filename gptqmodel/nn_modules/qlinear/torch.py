@@ -7,12 +7,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-
 
 logger = setup_logger()
 
@@ -210,22 +208,25 @@ class TorchQuantLinear(BaseQuantLinear):
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
+        out = self._forward(x, out_shape, x_dtype)
+        return out
+
+    def _forward(self, x, x_dtype, out_shape):
         if self.wf.device != self.qzeros.device:
             self.wf = self.wf.to(self.qzeros.device)
-
         if self.bits in [2, 4, 8]:
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, 32 // self.bits),
                 self.wf.unsqueeze(0),
             ).to(torch.int16 if self.bits == 8 else torch.int8)
-            zeros = torch.bitwise_and(zeros, (2**self.bits) - 1).reshape(self.scales.shape)
+            zeros = torch.bitwise_and(zeros, (2 ** self.bits) - 1).reshape(self.scales.shape)
 
             weight = torch.bitwise_and(
                 torch.bitwise_right_shift(
                     torch.unsqueeze(self.qweight, 1).expand(-1, 32 // self.bits, -1),
                     self.wf.unsqueeze(-1),
                 ).to(torch.int16 if self.bits == 8 else torch.int8),
-                (2**self.bits) - 1
+                (2 ** self.bits) - 1
             )
         elif self.bits == 3:
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
@@ -248,9 +249,7 @@ class TorchQuantLinear(BaseQuantLinear):
             weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
             weight = weight & 0x7
             weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         if num_itr == 1:
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
@@ -258,10 +257,10 @@ class TorchQuantLinear(BaseQuantLinear):
             num_dim = self.g_idx.shape[0] // num_itr
             weights = []
             for i in range(num_itr):
-                scale_i = self.scales[:, i * num_dim : (i + 1) * num_dim]
-                weight_i = weight[:, i * num_dim : (i + 1) * num_dim]
-                zeros_i = zeros[:, i * num_dim : (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim : (i + 1) * num_dim]
+                scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
+                weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
+                zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
+                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim]
                 weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
             weights = torch.cat(weights, dim=1)
         out = torch.matmul(x, weights)
