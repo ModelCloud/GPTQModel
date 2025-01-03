@@ -13,7 +13,7 @@ CUDA_0 = device("cuda:0")
 XPU = device("xpu")
 XPU_0 = device("xpu:0")
 MPS = device("mps")
-ROCM = device("cuda:0")
+ROCM = device("cuda:0") # rocm mappes to fake cuda
 
 class DEVICE(str, Enum):
     ALL = "all" # All device
