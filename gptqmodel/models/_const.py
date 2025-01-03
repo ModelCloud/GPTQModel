@@ -13,15 +13,15 @@ CUDA_0 = device("cuda:0")
 XPU = device("xpu")
 XPU_0 = device("xpu:0")
 MPS = device("mps")
-ROCM = device("cuda:0") # rocm mappes to fake cuda
+ROCM = device("cuda:0") # rocm maps to fake cuda
 
 class DEVICE(str, Enum):
     ALL = "all" # All device
-    CPU = "cpu" # All CPU
-    CUDA = "cuda" # Nvidia GPU
-    XPU = "xpu" # Intel GPU
-    MPS = "mps" # MacOS GPU
-    ROCM = "cuda" # AMD GPU
+    CPU = "cpu" # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
+    CUDA = "cuda" # Nvidia GPU: Optimized for Ampere+
+    XPU = "xpu" # Intel GPU: Datacenter Max + Arc
+    MPS = "mps" # MacOS GPU: Apple Silion/Metal)
+    ROCM = "cuda" # AMD GPU: ROCm maps to fake cuda
 
     @classmethod
     def _missing_(cls, value):
