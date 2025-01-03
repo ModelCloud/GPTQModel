@@ -173,7 +173,7 @@ model.quantize(calibration_dataset, batch_size=2)
 model.save(quant_path)
 
 # test post-quant inference
-model = GPTQModel.load("Llama-3.2-1B-Instruct-gptqmodel-4bit")
+model = GPTQModel.load(quant_path)
 result = model.generate("Uncovering deep insights begins with")[0]
 ```
 
