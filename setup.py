@@ -87,6 +87,9 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
         )
         sys.exit(1)
 
+    if ROCM_VERSION:
+        return f"rocm{ROCM_VERSION}"
+
     CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
@@ -124,10 +127,9 @@ if TORCH_CUDA_ARCH_LIST is None:
             FORCE_BUILD = True
 
 
-if ROCM_VERSION and BUILD_CUDA_EXT:
-    common_setup_kwargs["version"] += f"+rocm{ROCM_VERSION}"
-elif BUILD_CUDA_EXT and CUDA_RELEASE == "1":
-    common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
+if BUILD_CUDA_EXT:
+    if CUDA_RELEASE == "1":
+        common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
 else:
     common_setup_kwargs["version"] += "+cpu"
 
