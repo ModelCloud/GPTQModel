@@ -7,7 +7,6 @@ import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from torch.utils.cpp_extension import ROCM_VERSION # TODO FIXME: this will crash on non-rocm
 
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
@@ -17,6 +16,14 @@ except BaseException:
 CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
+
+ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
+SKIP_ROCM_VERSION_CHECK = os.environ.get('SKIP_ROCM_VERSION_CHECK', None)
+
+if ROCM_VERSION is not None and float(ROCM_VERSION) < 6.2 and not SKIP_ROCM_VERSION_CHECK:
+    sys.exit(
+        "GPTQModel's compatibility with ROCM versions below 6.2 has not been verified. If you wish to proceed, please set the SKIP_ROCM_VERSION_CHECK environment."
+    )
 
 if TORCH_CUDA_ARCH_LIST:
     arch_list = " ".join([arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 6.0 or print(f"we do not support this compute arch: {arch}, skipped.") is not None])
@@ -65,8 +72,6 @@ common_setup_kwargs = {
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 }
-
-ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
 
 def get_version_tag(is_cuda_release: bool = True) -> str:
     import torch
@@ -251,7 +256,7 @@ if BUILD_CUDA_EXT:
 
 class CachedWheelsCommand(_bdist_wheel):
     def run(self):
-        if FORCE_BUILD or ROCM_VERSION:
+        if FORCE_BUILD:
             return super().run()
 
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
