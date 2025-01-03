@@ -41,7 +41,7 @@ class TestBits(unittest.TestCase):
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.025  # -2.5%
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.025  # +2.5%
 
-    TORCH_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
+    CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
         2: {'acc,none': 0.22610921501706485, 'acc_norm,none': 0.2909556313993174},
         3: {'acc,none': 0.21245733788395904, 'acc_norm,none': 0.24744027303754265},
         4: {'acc,none': 0.2738907849829352, 'acc_norm,none': 0.3122866894197952},
@@ -55,7 +55,7 @@ class TestBits(unittest.TestCase):
 
     def check_results(self, bits: int, task_results):
         for filter, value in task_results.items():
-            base_value = self.TORCH_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS[bits][filter]
+            base_value = self.CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS[bits][filter]
             diff_pct = self.calculatorPer(filter=filter, value=value, base_value=base_value)
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)

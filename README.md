@@ -9,6 +9,7 @@
 </p>
 
 ## News
+* 01/03/2025 [1.5.2-dev]: AMD ROCm (6.2+) support added and validated for 7900XT+ GPU.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
 * 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage. 
@@ -16,11 +17,12 @@
 * 12/13/2024 [1.4.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.1): Added Qwen2-VL model support. `mse` quantization control exposed in `QuantizeConfig`. Monkey patch `patch_vllm()` and `patch_hf()` api added to allow Transformers/Optimum/PEFT and vLLM to correctly loaded GPTQModel quantized models while upstream PRs are in pending status. 
 * 12/10/2024 [1.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.0) `EvalPlus` harness integration merged upstream. We now support both `lm-eval` and `EvalPlus`. Added pure torch `Torch` kernel. Refactored `Cuda` kernel to be `DynamicCuda` kernel. `Triton` kernel now auto-padded for max model support. `Dynamic` quantization now supports both positive `+:`:default, and `-:` negative matching which allows matched modules to be skipped entirely for quantization. Fixed auto-`Marlin` kerenl selection. Added auto-kernel fallback for unsupported kernel/module pairs. Lots of internal refractor and cleanup in-preparation for transformers/optimum/peft upstream PR merge. Deprecated the saving of `Marlin` weight format since `Marlin` supports auto conversion of `gptq` format to `Marlin` during runtime. 
 
-* 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton pkg. 
 
 <details>
     
 <summary>Archived News:</summary>
+* 11/29/2024 [1.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.1) Olmo2 model support. Intel XPU acceleration via IPEX. Model sharding Transformer compat fix due to api deprecation in HF. Removed triton dependency. Triton kernel now optionally dependent on triton pkg. 
+
 * 11/26/2024 [1.3.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.3.0) Zero-Day Hymba model support. Removed `tqdm` and `rogue` dependency. 
 * 11/24/2024 [1.2.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.2.3) HF GLM model support. ClearML logging integration. Use `device-smi` and replace `gputil` + `psutil` depends. Fixed model unit tests. 
 
@@ -67,7 +69,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ## Features
 * 🚀 Extensive model support for: `Ovis VL`, `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
-* ✨ Linux, MacOS, Windows platform quantization and accelerated inference support.
+* ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
 * 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 * ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model where format = `FORMAT.GPTQ` 
@@ -106,8 +108,9 @@ GPTQModel is validated for Linux, MacOS, and Windows 11:
 | Platform        | Device        |     |  Optimized Arch              |  Kernels |
 |-----------------|---------------| --- | -------------- | -------------- | 
 | Linux           | Nvidia GPU    | ✅       | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
-| Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
 | Linux | Intel XPU     | ✅             |   Intel Arc + Datacenter Max | IPEX, Torch |
+| Linux | AMD GPU     | ✅             |   7900XT+ with ROCm 6.2+ | Exllama V2, Exallma V1, DyanamicCuda, Torch |
+| Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
 | MacOS | GPU (Metal) / CPU          | ✅             |   M1+ | Torch |
 | Windows 11 | GPU (Nvidia) / CPU       | ✅             |   Nvidia  | DynamicCuda, Torch  |
 
@@ -134,28 +137,31 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 pip install -v . --no-build-isolation
 ```
 
-### Quantization and Inference
+### Inference
+Two line api to use `GPTQModel` for gptq model inference:
 
-Below is a basic sample using `GPTQModel` to quantize a llm model and perform post-quantization inference:
+```py
+from gptqmodel import GPTQModel
+
+model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v2.5")
+result = model.generate("Uncovering deep insights begins with")[0]
+```
+
+### Quantization
+Basic example of using `GPTQModel` to quantize a llm model:
 
 ```py
 from datasets import load_dataset
-from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
 
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-calibration_dataset = [
-  tokenizer(example["text"])
-  for example in load_dataset(
+calibration_dataset = load_dataset(
     "allenai/c4",
     data_files="en/c4-train.00001-of-01024.json.gz",
     split="train"
-  ).select(range(1024))
-]
+  ).select(range(1024))["text"]
 
 quant_config = QuantizeConfig(bits=4, group_size=128)
 
@@ -166,13 +172,9 @@ model.quantize(calibration_dataset, batch_size=2)
 
 model.save(quant_path)
 
+# test post-quant inference
 model = GPTQModel.load(quant_path)
-
-result = model.generate(
-  **tokenizer(
-      "Uncovering deep insights begins with", return_tensors="pt"
-  ).to(model.device)
-)[0]
+result = model.generate("Uncovering deep insights begins with")[0]
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)

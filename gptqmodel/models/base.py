@@ -27,6 +27,7 @@ from ..utils.model import (
     move_to,
     nested_move_to,
     pack_model,
+    normalize_tokenizer,
     MODALITY,
 )
 from ..utils.progress import ProgressBar
@@ -94,6 +95,7 @@ class BaseGPTQModel(nn.Module):
         model: PreTrainedModel,
         quantized: bool,
         quantize_config: QuantizeConfig,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
@@ -104,6 +106,7 @@ class BaseGPTQModel(nn.Module):
         self.model = model
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
+        self.tokenizer = tokenizer
         self.quantize_config = quantize_config
         self.config = self.model.config
 
@@ -120,10 +123,33 @@ class BaseGPTQModel(nn.Module):
 
     def prepare_dataset(
         self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
         batch_size: int = 1,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
+        if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
+            if self.tokenizer is None:
+                raise ValueError(f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
+            
+            # Convert strings/ints to tokenized format
+            new_calibration_dataset = []
+            for data in calibration_dataset:
+                # convert to tensor directly if already in token ids format (ints) 
+                if isinstance(data, list) and all(isinstance(x, int) for x in data):
+                    input_ids = torch.tensor([data], dtype=torch.long)
+                    attention_mask = torch.ones_like(input_ids)
+                    new_calibration_dataset.append({
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask
+                    })
+                # call tokenizer if dataset still string format (str)
+                else:
+                    tokenized = self.tokenizer(data, return_tensors="pt")
+                    new_calibration_dataset.append({
+                        "input_ids": tokenized["input_ids"],
+                        "attention_mask": tokenized["attention_mask"]
+                    })
+            calibration_dataset = new_calibration_dataset
+
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
                 if len(tensor.shape) == 1:
@@ -136,26 +162,18 @@ class BaseGPTQModel(nn.Module):
         for example in calibration_dataset:
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
-            if "labels" in example:
-                labels = _convert_tensor_to_list(example["labels"])
-            elif "label" in example:
-                labels = _convert_tensor_to_list(example["label"])
-            elif "label_ids" in example:
-                labels = _convert_tensor_to_list(example["label_ids"])
-            else:
-                labels = copy.deepcopy(input_ids)
+
             new_calibration_dataset.append(
                 {
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
-                    "labels": labels,
                 }
             )
 
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            if tokenizer:
-                vocab = tokenizer.get_vocab()
+            if self.tokenizer:
+                vocab = self.tokenizer.get_vocab()
 
                 # auto select the best pad token to use
                 for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
@@ -179,14 +197,12 @@ class BaseGPTQModel(nn.Module):
             for start in range(0, len(new_calibration_dataset), batch_size)
         ]
 
-        for new_example in new_calibration_dataset_batched:
-            del new_example["labels"]
 
         return new_calibration_dataset_batched
 
     def quantize(
         self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -243,6 +259,12 @@ class BaseGPTQModel(nn.Module):
             format=self.quantize_config.format,
         )
 
+        # Use the provided tokenizer if one is passed to quantize()
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+            # after tokenizer is reset, need to normalize it again
+            self.tokenizer = normalize_tokenizer(self.config, self.tokenizer)
+
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
 
@@ -255,7 +277,7 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size, tokenizer,)
+        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size,)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -713,9 +735,13 @@ class BaseGPTQModel(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
-    def generate(self, **kwargs):
+    def generate(self, inputs=None, **kwargs):
         with torch.inference_mode():
-            return self.model.generate(**kwargs)
+            if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
+                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.model.device)
+                return self.model.generate(**inputs, **kwargs)
+
+            return self.model.generate(inputs=inputs, **kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
