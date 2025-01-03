@@ -94,6 +94,7 @@ class BaseGPTQModel(nn.Module):
         model: PreTrainedModel,
         quantized: bool,
         quantize_config: QuantizeConfig,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
@@ -104,6 +105,7 @@ class BaseGPTQModel(nn.Module):
         self.model = model
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
+        self.tokenizer = tokenizer
         self.quantize_config = quantize_config
         self.config = self.model.config
 
