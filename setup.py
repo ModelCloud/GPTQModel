@@ -205,19 +205,21 @@ if BUILD_CUDA_EXT:
         ),
     ]
 
-    if sys.platform != "win32" and not ROCM_VERSION:
+    if sys.platform != "win32":
+        # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
+        marlin_kernel = cpp_ext.CUDAExtension(
+            "gptqmodel_marlin_kernels",
+            [
+                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                "gptqmodel_ext/marlin/marlin_repack.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+        )
+        if not ROCM_VERSION:
+            extensions.append(marlin_kernel)
         extensions += [
-            # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
-            cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_kernels",
-                [
-                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin/marlin_repack.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            ),
             # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
             cpp_ext.CUDAExtension(
                 "gptqmodel_exllama_kernels",
