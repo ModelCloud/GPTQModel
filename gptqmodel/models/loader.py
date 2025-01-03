@@ -8,7 +8,7 @@ import accelerate
 import torch
 import transformers
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig, AutoTokenizer
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
 
@@ -35,6 +35,7 @@ from ..utils.model import (
     simple_dispatch_model,
     verify_model_hash,
     verify_sharded_model_hashes,
+    normalize_tokenizer,
 )
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 from huggingface_hub import snapshot_download
@@ -94,6 +95,14 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         return pretrained_model_id_or_path
     else:
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
+    
+def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        return normalize_tokenizer(config, tokenizer)
+    except Exception as e:
+        logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
+        return None
 
 
 def ModelLoader(cls):
@@ -178,10 +187,13 @@ def ModelLoader(cls):
             model.seqlen = 4096
         model.eval()
 
+        tokenizer = get_tokenizer(pretrained_model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+
         return cls(
             model,
             quantized=False,
             quantize_config=quantize_config,
+            tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
         )
@@ -540,10 +552,13 @@ def ModelLoader(cls):
 
         model.eval()
 
+        tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+
         return cls(
             model,
             quantized=True,
             quantize_config=quantize_config,
+            tokenizer=tokenizer,
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
