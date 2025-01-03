@@ -142,11 +142,14 @@ class GPTQModel:
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
-            backend: BACKEND = BACKEND.AUTO,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if isinstance(backend, str):
+            backend = BACKEND(backend)
+
         if backend == BACKEND.VLLM:
             from ..integration.integration_vllm import patch_vllm
             patch_vllm()
@@ -219,7 +222,7 @@ class GPTQModel:
         model_id_or_path: Optional[str],
         device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
         device: Optional[Union[str, int]] = None,
-        backend: BACKEND = BACKEND.AUTO,
+        backend: Union[str, BACKEND] = BACKEND.AUTO,
         trust_remote_code: bool = False,
         # verify weight files matches predefined hash during loading
         # usage: hash_format:hash_value, example: md5:ugkdh232
@@ -229,10 +232,8 @@ class GPTQModel:
     ) -> BaseGPTQModel:
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
 
-        if backend == BACKEND.AUTO:
-            if not torch.cuda.is_available() and HAS_IPEX:
-                logger.warning("No cuda found, use IPEX backend")
-                backend = BACKEND.IPEX
+        if isinstance(backend, str):
+            backend = BACKEND(backend)
 
         return MODEL_MAP[model_type].from_quantized(
             model_id_or_path=model_id_or_path,

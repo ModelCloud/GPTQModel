@@ -1,9 +1,3 @@
-# -- do not touch
-import os
-
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# -- end do not touch
 import sys  # noqa: E402
 import unittest  # noqa: E402
 
@@ -20,11 +14,14 @@ GENERATE_EVAL_SIZE = 100
 class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
+            (torch.float16, "mps"),
             (torch.bfloat16, "cpu"),
-            (torch.float16, "cuda"),
         ]
     )
     def test_generation_desc_act_true(self, torch_dtype, device):
+        if sys.platform != "darwin":
+            self.skipTest(f"This test is macOS only")
+
         prompt = "I am in Paris and"
 
         # CPU implementation is extremely slow.
@@ -63,12 +60,13 @@ class TestsQ4Torch(unittest.TestCase):
     @parameterized.expand(
         [
             (torch.bfloat16, "cpu"),
-            (torch.float16, "cuda"),
-            # TODO: pending pytorch fix https://github.com/pytorch/pytorch/issues/100932
-            # (torch.float16, "cpu"),
+            (torch.float16, "mps"),
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
+        if sys.platform != "darwin":
+            self.skipTest(f"This test is macOS only")
+
         prompt = "I am in Paris and"
 
         # CPU implementation is extremely slow.

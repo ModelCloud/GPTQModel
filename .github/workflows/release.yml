@@ -22,13 +22,13 @@ on:
         required: false
         type: number
       target:
-        description: 'CUDA Torch Python version separated by space, check http://10.0.14.248/gpu/runner/docker to get all supported combinations'
+        description: 'CUDA Torch Python version separated by space, check http://10.0.13.31/gpu/runner/docker to get all supported combinations'
         required: false
         default: ''
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '12'
+        default: '10'
       upload_release:
         description: 'upload to release (it only works with a tag ref)'
         type: boolean
@@ -57,7 +57,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
@@ -82,7 +82,7 @@ jobs:
           echo "ip: $ip"
 
           max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-12}}"
+          max_p="{\"size\": ${max_p:-10}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
@@ -121,10 +121,10 @@ jobs:
   release:
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 12 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         tag: ${{ fromJSON(needs.check-vm.outputs.task_list) }}
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     needs:
       - check-vm
     if: needs.check-vm.outputs.task_list != '' && !cancelled()
@@ -162,7 +162,7 @@ jobs:
           cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
           torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
           python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
-          bash -c "$(curl -L http://${RUNNER}/files/scripts/init_compiler.sh)" @ $cuda_version $torch_version $python_version
+          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
         run: python setup.py bdist_wheel
@@ -204,7 +204,7 @@ jobs:
           overwrite: true
 
   release-source:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     needs: 
       - check-vm
     container:
@@ -269,11 +269,12 @@ jobs:
       - name: Waiting for confirmation
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
+          timestamp=$(date +%s%3N)
+
           echo "open http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
           for i in {1..5}; do echo "."; done
           echo "click http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
 
-          timestamp=$(date +%s%3N)
           status=-1
 
           while [ "$status" -lt 0 ]; do

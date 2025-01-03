@@ -1,7 +1,6 @@
 # License: GPTQModel/licenses/LICENSE.apache
 
 import math
-import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -25,7 +24,8 @@ BITS_DTYPE_MAPPING = {
 HAS_IPEX = False
 IPEX_ERROR_LOG = None
 try:
-    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
+    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear, QuantDtype, QuantMethod
+
     HAS_IPEX = True
 except BaseException:
     HAS_IPEX = False
@@ -148,7 +148,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         if not self.training and HAS_IPEX and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
                                                                     self.infeatures, self.outfeatures, None, self.bias,
-                                                                    self.group_size, self.g_idx, quant_method=0, dtype=0)
+                                                                    self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
