@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from torch.utils.cpp_extension import ROCM_VERSION
+from torch.utils.cpp_extension import ROCM_VERSION # TODO FIXME: this will crash on non-rocm
 
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
