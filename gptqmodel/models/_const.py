@@ -6,39 +6,39 @@ from torch import device
 from ..utils import BACKEND
 from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
-
 CPU = device("cpu")
 CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
 XPU = device("xpu")
 XPU_0 = device("xpu:0")
 MPS = device("mps")
-ROCM = device("cuda:0") # rocm maps to fake cuda
+ROCM = device("cuda:0")  # rocm maps to fake cuda
+
 
 class DEVICE(str, Enum):
-    ALL = "all" # All device
-    CPU = "cpu" # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
-    CUDA = "cuda" # Nvidia GPU: Optimized for Ampere+
-    XPU = "xpu" # Intel GPU: Datacenter Max + Arc
-    MPS = "mps" # MacOS GPU: Apple Silion/Metal)
-    ROCM = "cuda" # AMD GPU: ROCm maps to fake cuda
+    ALL = "all"  # All device
+    CPU = "cpu"  # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
+    CUDA = "cuda"  # Nvidia GPU: Optimized for Ampere+
+    XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
+    MPS = "mps"  # MacOS GPU: Apple Silion/Metal)
+    ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
 
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")
     def _missing_(cls, value):
-        if value is str:
-            value = vaolue.lower()
-            
-        if torch.version.hip is not None and value == "rocm":
+        if torch.version.hip is not None and f"{value}".lower() == "rocm":
             return cls.ROCM
         return super()._missing_(value)
 
+    def to_device_map(self):
+        return {"": DEVICE.CUDA if self == DEVICE.ROCM else self}
+
 
 class PLATFORM(str, Enum):
-    ALL = "all" # All platform
-    LINUX = "linux" # linux
-    WIN32 = "win32" # windows
-    DARWIN = "darwin" # macos
+    ALL = "all"  # All platform
+    LINUX = "linux"  # linux
+    WIN32 = "win32"  # windows
+    DARWIN = "darwin"  # macos
 
 
 def validate_cuda_support(raise_exception: bool = False):
@@ -56,7 +56,8 @@ def validate_cuda_support(raise_exception: bool = False):
 
     return got_cuda
 
-def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
+
+def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
     if isinstance(type_value, int):
         if HAS_CUDA:
             return DEVICE.CUDA
@@ -84,7 +85,7 @@ def normalize_device(type_value: str|DEVICE|int|torch.device) -> DEVICE:
     return DEVICE(type_value.lower())
 
 
-def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
+def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
     if backend == BACKEND.IPEX:
         return XPU_0 if HAS_XPU else CPU
     elif HAS_CUDA:
@@ -95,6 +96,7 @@ def get_best_device(backend: BACKEND=BACKEND.AUTO) -> torch.device:
         return MPS
     else:
         return CPU
+
 
 SUPPORTED_MODELS = [
     "bloom",
@@ -150,5 +152,3 @@ SUPPORTED_MODELS = [
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
 
 EXPERT_INDEX_PLACEHOLDER = "{expert_index}"
-
-
