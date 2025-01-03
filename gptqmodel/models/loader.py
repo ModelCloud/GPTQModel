@@ -181,7 +181,7 @@ def ModelLoader(cls):
         try:
             tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
         except Exception as e:
-            logger.warning(f"Failed to load tokenizer from pretrained_model_id_or_path: {e}")
+            logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `load()` or set model.tokenizer after `load()`.")
             tokenizer = None
 
         return cls(
