@@ -38,6 +38,28 @@ class TestBits(unittest.TestCase):
         BACKEND.MARLIN: MarlinQuantLinear,
     }
 
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.025  # -2.5%
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.025  # +2.5%
+
+    TORCH_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
+        2: {'acc,none': 0.2150170648464164, 'acc_norm,none': 0.25597269624573377},
+        3: {'acc,none': 0.18430034129692832, 'acc_norm,none': 0.22696245733788395},
+        4: {'acc,none': 0.189419795221843, 'acc_norm,none': 0.22098976109215018},
+        8: {'acc,none': 0.181740614334471, 'acc_norm,none': 0.2226962457337884},
+    }
+
+    def calculatorPer(self, filter, value, base_value):
+        diff_pct = (value / base_value) * 100
+        print(f"{filter}: {value} diff {diff_pct:.2f}%")
+        return diff_pct
+
+    def check_results(self, bits: int, task_results):
+        for filter, value in task_results.items():
+            base_value = self.TORCH_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS[bits][filter]
+            diff_pct = self.calculatorPer(filter=filter, value=value, base_value=base_value)
+            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
+            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
 
     @classmethod
     def setUpClass(cls):
@@ -131,3 +153,5 @@ class TestBits(unittest.TestCase):
         print(
             f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")
         del model
+
+        self.check_results(quantize_config.bits, task_results)
