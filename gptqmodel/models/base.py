@@ -122,10 +122,32 @@ class BaseGPTQModel(nn.Module):
 
     def prepare_dataset(
         self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
+        if isinstance(calibration_dataset[0], (str, int)):
+            if tokenizer is None:
+                raise ValueError("tokenizer must be provided when calibration_dataset is List[str] or List[int]")
+            
+            # Convert strings/ints to tokenized format
+            new_calibration_dataset = []
+            for data in calibration_dataset:
+                if isinstance(data, int):
+                    # For ints, treat as input_id directly
+                    new_calibration_dataset.append({
+                        "input_ids": [[data]],
+                        "attention_mask": [[1]]
+                    })
+                else:
+                    # For strings, tokenize normally
+                    tokenized = tokenizer(data, return_tensors="pt") 
+                    new_calibration_dataset.append({
+                        "input_ids": tokenized["input_ids"].tolist(),
+                        "attention_mask": tokenized["attention_mask"].tolist()
+                    })
+            calibration_dataset = new_calibration_dataset
+
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
                 if len(tensor.shape) == 1:
@@ -178,7 +200,7 @@ class BaseGPTQModel(nn.Module):
 
     def quantize(
         self,
-        calibration_dataset: List[Dict[str, Union[List[int], torch.LongTensor]]],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
