@@ -67,6 +67,8 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
             normalized_device = DEVICE(device.type)
         else:
             raise ValueError(f"device must be a string or torch.device, got {type(device)}")
+
+    # map fake cuda to actual rocm
     if normalized_device == DEVICE.CUDA and torch.version.hip is not None:
         normalized_device = DEVICE.ROCM
         DEVICE("rocm")
