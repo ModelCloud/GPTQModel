@@ -125,7 +125,7 @@ if TORCH_CUDA_ARCH_LIST is None:
 
 
 if ROCM_VERSION and BUILD_CUDA_EXT:
-    common_setup_kwargs["version"] += f"rocm{ROCM_VERSION}"
+    common_setup_kwargs["version"] += f"+rocm{ROCM_VERSION}"
 elif BUILD_CUDA_EXT and CUDA_RELEASE == "1":
     common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
 else:
@@ -174,13 +174,9 @@ if BUILD_CUDA_EXT:
         ],
     }
 
-    if ROCM_VERSION:
+    if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
-            "-pthread", # add multi-thread support for runtime
-        ]
-    else:
-        extra_compile_args["nvcc"] += [
-            "--threads", # add multi-thread support for compiletime
+            "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
