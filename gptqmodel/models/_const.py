@@ -21,7 +21,14 @@ class DEVICE(str, Enum):
     CUDA = "cuda" # Nvidia GPU
     XPU = "xpu" # Intel GPU
     MPS = "mps" # MacOS GPU
-    ROCM = "rocm" # AMD GPU
+    ROCM = "cuda" # AMD GPU
+
+    @classmethod
+    def _missing_(cls, value):
+        if torch.version.hip is not None and value == "rocm":
+            return cls.ROCM
+        return super()._missing_(value)
+
 
 class PLATFORM(str, Enum):
     ALL = "all" # All platform
