@@ -137,20 +137,25 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 pip install -v . --no-build-isolation
 ```
 
-### Quantization and Inference
+### Inference
+Two line api to use `GPTQModel` for gptq model inference:
 
-#### Quantization
-Below is a basic sample using `GPTQModel` to quantize a llm model and perform post-quantization inference:
+```py
+from gptqmodel import GPTQModel
+
+model = GPTQModel.load("Llama-3.2-1B-Instruct-gptqmodel-4bit")
+result = model.generate("Uncovering deep insights begins with")[0]
+```
+
+### Quantization
+Basic example of using `GPTQModel` to quantize a llm model:
 
 ```py
 from datasets import load_dataset
-from transformers import AutoTokenizer
 from gptqmodel import GPTQModel, QuantizeConfig
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
-
-tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 calibration_dataset = load_dataset(
     "allenai/c4",
@@ -166,16 +171,9 @@ model = GPTQModel.load(model_id, quant_config)
 model.quantize(calibration_dataset, batch_size=2)
 
 model.save(quant_path)
-```
 
-#### Inference
-Below is a basic sample using `GPTQModel` perform post-quantization inference:
-
-```py
-from gptqmodel import GPTQModel
-
+# test post-quant inference
 model = GPTQModel.load("Llama-3.2-1B-Instruct-gptqmodel-4bit")
-
 result = model.generate("Uncovering deep insights begins with")[0]
 ```
 
