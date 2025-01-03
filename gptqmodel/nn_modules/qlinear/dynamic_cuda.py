@@ -1,13 +1,11 @@
 # License: GPTQModel/licenses/LICENSE.apache
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import torch
-
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-
 
 logger = setup_logger()
 
@@ -31,7 +29,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
 
     # for transformers/optimum tests compat
@@ -84,7 +82,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         if x.shape[0] >= self.kernel_switch_threshold:
             logger.warning_once(
                f"Cannot run on cuda kernel. Using torch forward() that may be slower. Shape: `{x.shape[0]}` >= `{self.kernel_switch_threshold}`")
-            return super().forward(x)
+            return self._forward(x, x_dtype, out_shape)
 
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
         if self.bits == 2:

@@ -219,7 +219,7 @@ def ModelLoader(cls):
         if isinstance(backend, str):
             backend = BACKEND(backend)
         device = auto_select_device(device, backend)
-        device_map = {"":device}
+        device_map = device.to_device_map()
 
         if backend == BACKEND.VLLM:
             import os

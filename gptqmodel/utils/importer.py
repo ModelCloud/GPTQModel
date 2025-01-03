@@ -43,6 +43,7 @@ format_dict = {
 }
 
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
+    normalized_device = None
     if device is None:
         if device_map is not None:
             devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
@@ -55,19 +56,22 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
             if len(normalized_devices) == 1:
                 d = normalized_devices.pop()
                 if d in DEVICE:
-                    return d
+                    normalized_device = d
             elif len(normalized_devices) > 1:
                 normalized_devices.discard(DEVICE.CPU)
-                return normalized_devices.pop()
-
-        return None
+                normalized_device = normalized_devices.pop()
     else:
         if isinstance(device, str):
-            return normalize_device(device)
+            normalized_device = normalize_device(device)
         elif isinstance(device, torch.device):
-            return DEVICE(device.type)
+            normalized_device = DEVICE(device.type)
         else:
             raise ValueError(f"device must be a string or torch.device, got {type(device)}")
+
+    # map fake cuda to actual rocm
+    if normalized_device == DEVICE.CUDA and torch.version.hip is not None:
+        normalized_device = DEVICE.ROCM
+    return normalized_device
 
 
 def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> DEVICE:
