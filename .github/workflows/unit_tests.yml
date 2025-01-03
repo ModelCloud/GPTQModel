@@ -48,9 +48,9 @@ env:
   TORCH_CUDA_ARCH_LIST: '8.9'
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
-  TRANSFORMERS_DIFF_TESTS: "models/test_internlm,models/test_internlm2_5,models/test_xverse"
-  TORCH_2_5_TESTS: "test_evalplus,test_perplexity,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model,test_quant_formats,models/test_hymba"
-  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral,test_q4_torch_apple"
+  TRANSFORMERS_DIFF_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
+  TORCH_2_5_TESTS: "test_evalplus.py,test_perplexity.py,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model.py,test_quant_formats.py,models/test_hymba.py"
+  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,test_q4_torch_apple.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
@@ -61,9 +61,9 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [self-hosted, Linux]
+    runs-on: [ self-hosted, Linux ]
     container:
-      image:  modelcloud/gptqmodel:alpine-ci-v1
+      image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
@@ -138,8 +138,8 @@ jobs:
           transformers_test_files = [f.strip().removesuffix('.py') for f in f'{TRANSFORMERS_DIFF_TESTS}'.split(',') if f.strip()]
           transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
 
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
-          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('.py') not in f'{IGNORED_TEST_FILES}']
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
+          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
 
           torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
 
@@ -160,11 +160,11 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: [self-hosted, Linux]
+    runs-on: [ self-hosted, Linux ]
     needs: check-vm
     if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
-      image:  ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
 
       - name: Checkout Codes
@@ -232,7 +232,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [self-hosted, Linux]
+    runs-on: [ self-hosted, Linux ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -345,7 +345,7 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/vram?gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
@@ -356,7 +356,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [self-hosted, Linux]
+    runs-on: [ self-hosted, Linux ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -368,7 +368,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
-        test_script:  ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -475,16 +475,28 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/vram?gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
+  show-statistics:
+    runs-on: [ self-hosted, Linux ]
+    if: always()
+    container:
+      image: modelcloud/gptqmodel:alpine-ci-v1
+    needs:
+      - transformers_diff
+      - torch2_5
+    steps:
+      - name: Print statistics
+        run: curl "http://10.0.14.248/gpu/get_vram_logs?id=${{ github.run_id }}"
 
   m4:
-    runs-on: [self-hosted, m4]
+    runs-on: [ self-hosted, m4 ]
     needs: check-vm
+    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') )&& !cancelled()
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
