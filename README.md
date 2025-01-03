@@ -143,7 +143,7 @@ Two line api to use `GPTQModel` for gptq model inference:
 ```py
 from gptqmodel import GPTQModel
 
-model = GPTQModel.load("Llama-3.2-1B-Instruct-gptqmodel-4bit")
+model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v2.5")
 result = model.generate("Uncovering deep insights begins with")[0]
 ```
 
