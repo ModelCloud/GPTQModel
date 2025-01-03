@@ -144,26 +144,19 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
 
     input_ids = [LongTensor(block["input_ids"]) for block in batch]
     attention_masks = [LongTensor(block["attention_mask"]) for block in batch]
-    label_blocks = [LongTensor(block["labels"]) for block in batch]
 
     inp_max_len = max([block.size(-1) for block in input_ids])
-    label_max_len = max([block.size(-1) for block in label_blocks])
 
     for i in range(len(batch)):
         block_bsz, block_inp_len = input_ids[i].shape
-        block_label_len = label_blocks[i].shape[-1]
         pad_num = inp_max_len - block_inp_len
         if pad_num > 0:
             input_ids[i] = pad_batch(input_ids[i], torch.ones((block_bsz, pad_num)) * pad_token_id)
             attention_masks[i] = pad_batch(attention_masks[i], torch.zeros((block_bsz, pad_num)))
-        label_pad_num = label_max_len - block_label_len
-        if label_pad_num > 0:
-            label_blocks[i] = pad_batch(label_blocks[i], torch.ones((block_bsz, label_pad_num)) * -100)
 
     return {
         "input_ids": torch.cat(input_ids, dim=0).long(),
         "attention_mask": torch.cat(attention_masks, dim=0).long(),
-        "labels": torch.cat(label_blocks, dim=0).long(),
     }
 
 

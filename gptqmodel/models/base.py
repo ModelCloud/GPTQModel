@@ -138,19 +138,11 @@ class BaseGPTQModel(nn.Module):
         for example in calibration_dataset:
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
-            if "labels" in example:
-                labels = _convert_tensor_to_list(example["labels"])
-            elif "label" in example:
-                labels = _convert_tensor_to_list(example["label"])
-            elif "label_ids" in example:
-                labels = _convert_tensor_to_list(example["label_ids"])
-            else:
-                labels = copy.deepcopy(input_ids)
+
             new_calibration_dataset.append(
                 {
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
-                    "labels": labels,
                 }
             )
 
@@ -181,8 +173,6 @@ class BaseGPTQModel(nn.Module):
             for start in range(0, len(new_calibration_dataset), batch_size)
         ]
 
-        for new_example in new_calibration_dataset_batched:
-            del new_example["labels"]
 
         return new_calibration_dataset_batched
 
