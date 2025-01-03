@@ -42,10 +42,10 @@ class TestBits(unittest.TestCase):
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.025  # +2.5%
 
     TORCH_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
-        2: {'acc,none': 0.2150170648464164, 'acc_norm,none': 0.25597269624573377},
-        3: {'acc,none': 0.18430034129692832, 'acc_norm,none': 0.22696245733788395},
-        4: {'acc,none': 0.189419795221843, 'acc_norm,none': 0.22098976109215018},
-        8: {'acc,none': 0.181740614334471, 'acc_norm,none': 0.2226962457337884},
+        2: {'acc,none': 0.22610921501706485, 'acc_norm,none': 0.2909556313993174},
+        3: {'acc,none': 0.21245733788395904, 'acc_norm,none': 0.24744027303754265},
+        4: {'acc,none': 0.2738907849829352, 'acc_norm,none': 0.3122866894197952},
+        8: {'acc,none': 0.2841296928327645, 'acc_norm,none': 0.302901023890785},
     }
 
     def calculatorPer(self, filter, value, base_value):
@@ -74,8 +74,8 @@ class TestBits(unittest.TestCase):
 
     def test_bits(self):
         # quantize
-        OPT_MODEL_ID = "/monster/data/model/opt-125m"
-        model_id = OPT_MODEL_ID
+        MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
+        model_id = MODEL_ID
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         dataset = [
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
