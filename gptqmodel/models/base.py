@@ -124,27 +124,28 @@ class BaseGPTQModel(nn.Module):
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         batch_size: int = 1,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
         if isinstance(calibration_dataset[0], (str, int)):
-            if tokenizer is None:
-                raise ValueError("tokenizer must be provided when calibration_dataset is List[str] or List[int]")
+            if self.tokenizer is None:
+                raise ValueError(f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
             
             # Convert strings/ints to tokenized format
             new_calibration_dataset = []
             for data in calibration_dataset:
                 if isinstance(data, int):
-                    # For ints, treat as input_id directly
+                    # For ints, convert to tensor directly
+                    input_ids = torch.tensor([[data]], dtype=torch.long)
+                    attention_mask = torch.ones_like(input_ids)
                     new_calibration_dataset.append({
-                        "input_ids": [[data]],
-                        "attention_mask": [[1]]
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask
                     })
                 else:
                     # For strings, tokenize normally
-                    tokenized = tokenizer(data, return_tensors="pt") 
+                    tokenized = self.tokenizer(data, return_tensors="pt")
                     new_calibration_dataset.append({
-                        "input_ids": tokenized["input_ids"].tolist(),
-                        "attention_mask": tokenized["attention_mask"].tolist()
+                        "input_ids": tokenized["input_ids"],
+                        "attention_mask": tokenized["attention_mask"]
                     })
             calibration_dataset = new_calibration_dataset
 
@@ -170,8 +171,8 @@ class BaseGPTQModel(nn.Module):
 
         pad_token_id = self.config.pad_token_id
         if not pad_token_id:
-            if tokenizer:
-                vocab = tokenizer.get_vocab()
+            if self.tokenizer:
+                vocab = self.tokenizer.get_vocab()
 
                 # auto select the best pad token to use
                 for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
@@ -273,7 +274,7 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size, tokenizer,)
+        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size,)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
