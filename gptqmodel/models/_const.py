@@ -24,7 +24,11 @@ class DEVICE(str, Enum):
     ROCM = "cuda" # AMD GPU: ROCm maps to fake cuda
 
     @classmethod
+    # conversion method called for init when string is passed, i.e. Device("CUDA")
     def _missing_(cls, value):
+        if value is str:
+            value = vaolue.lower()
+            
         if torch.version.hip is not None and value == "rocm":
             return cls.ROCM
         return super()._missing_(value)
