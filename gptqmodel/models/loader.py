@@ -35,6 +35,7 @@ from ..utils.model import (
     simple_dispatch_model,
     verify_model_hash,
     verify_sharded_model_hashes,
+    normalize_tokenizer,
 )
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 from huggingface_hub import snapshot_download
@@ -95,9 +96,10 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     else:
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
     
-def get_tokenizer(model_id_or_path, trust_remote_code: bool = False):
+def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
     try:
-        return AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        return normalize_tokenizer(config, tokenizer)
     except Exception as e:
         logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
         return None
@@ -185,7 +187,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
         model.eval()
 
-        tokenizer = get_tokenizer(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = get_tokenizer(pretrained_model_id_or_path, config=config, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
@@ -550,7 +552,7 @@ def ModelLoader(cls):
 
         model.eval()
 
-        tokenizer = get_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
 
         return cls(
             model,

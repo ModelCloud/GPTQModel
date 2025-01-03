@@ -27,6 +27,7 @@ from ..utils.model import (
     move_to,
     nested_move_to,
     pack_model,
+    normalize_tokenizer,
     MODALITY,
 )
 from ..utils.progress import ProgressBar
@@ -261,6 +262,8 @@ class BaseGPTQModel(nn.Module):
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
             self.tokenizer = tokenizer
+            # after tokenizer is reset, need to normalize it again
+            self.tokenizer = normalize_tokenizer(self.config, self.tokenizer)
 
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
