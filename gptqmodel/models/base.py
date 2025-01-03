@@ -133,16 +133,16 @@ class BaseGPTQModel(nn.Module):
             # Convert strings/ints to tokenized format
             new_calibration_dataset = []
             for data in calibration_dataset:
+                 # convert to tensor directly if already in token ids format (ints) 
                 if isinstance(data, int):
-                    # convert to tensor directly if already in token ids format (ints) 
                     input_ids = torch.tensor([[data]], dtype=torch.long)
                     attention_mask = torch.ones_like(input_ids)
                     new_calibration_dataset.append({
                         "input_ids": input_ids,
                         "attention_mask": attention_mask
                     })
-                else:
-                    # call tokenizer if dataset still string format (str)
+                # call tokenizer if dataset still string format (str)
+                else:                  
                     tokenized = self.tokenizer(data, return_tensors="pt")
                     new_calibration_dataset.append({
                         "input_ids": tokenized["input_ids"],
