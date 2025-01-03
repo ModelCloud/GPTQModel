@@ -75,8 +75,7 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
         return common_setup_kwargs["version"]
 
     if ROCM_VERSION:
-        common_setup_kwargs['version'] += f"+rocm{ROCM_VERSION}"
-        return common_setup_kwargs['version']
+        return f"rocm{ROCM_VERSION}"
 
     cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
     if not cuda_version or not cuda_version.split("."):
