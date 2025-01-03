@@ -735,9 +735,13 @@ class BaseGPTQModel(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
-    def generate(self, **kwargs):
+    def generate(self, inputs=None, **kwargs):
         with torch.inference_mode():
-            return self.model.generate(**kwargs)
+            if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
+                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.model.device)
+                return self.model.generate(**inputs, **kwargs)
+
+            return self.model.generate(inputs=inputs, **kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
