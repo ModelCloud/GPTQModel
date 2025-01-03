@@ -123,26 +123,26 @@ class BaseGPTQModel(nn.Module):
 
     def prepare_dataset(
         self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
         batch_size: int = 1,
     ):
-        if isinstance(calibration_dataset[0], (str, int)):
+        if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
             if self.tokenizer is None:
                 raise ValueError(f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
             
             # Convert strings/ints to tokenized format
             new_calibration_dataset = []
             for data in calibration_dataset:
-                 # convert to tensor directly if already in token ids format (ints) 
-                if isinstance(data, int):
-                    input_ids = torch.tensor([[data]], dtype=torch.long)
+                # convert to tensor directly if already in token ids format (ints) 
+                if isinstance(data, list) and all(isinstance(x, int) for x in data):
+                    input_ids = torch.tensor([data], dtype=torch.long)
                     attention_mask = torch.ones_like(input_ids)
                     new_calibration_dataset.append({
                         "input_ids": input_ids,
                         "attention_mask": attention_mask
                     })
                 # call tokenizer if dataset still string format (str)
-                else:                  
+                else:
                     tokenized = self.tokenizer(data, return_tensors="pt")
                     new_calibration_dataset.append({
                         "input_ids": tokenized["input_ids"],
