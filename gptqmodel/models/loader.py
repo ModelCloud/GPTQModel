@@ -99,7 +99,7 @@ def get_tokenizer(model_id_or_path, trust_remote_code: bool = False):
     try:
         return AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
     except Exception as e:
-        logger.warning(f"Failed to load tokenizer from pretrained_model_id_or_path: {e}")
+        logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
         return None
 
 
