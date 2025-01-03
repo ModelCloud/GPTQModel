@@ -94,6 +94,13 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         return pretrained_model_id_or_path
     else:
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
+    
+def get_tokenizer(model_id_or_path, trust_remote_code: bool = False):
+    try:
+        return AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+    except Exception as e:
+        logger.warning(f"Failed to load tokenizer from pretrained_model_id_or_path: {e}")
+        return None
 
 
 def ModelLoader(cls):
@@ -178,11 +185,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
         model.eval()
 
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
-        except Exception as e:
-            logger.warning(f"Failed to load tokenizer from pretrained_model_id_or_path: {e}")
-            tokenizer = None
+        tokenizer = get_tokenizer(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
@@ -547,11 +550,7 @@ def ModelLoader(cls):
 
         model.eval()
 
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        except Exception as e:
-            logger.warning(f"Failed to load tokenizer from pretrained_model_id_or_path: {e}")
-            tokenizer = None
+        tokenizer = get_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
