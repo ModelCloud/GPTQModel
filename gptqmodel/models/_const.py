@@ -13,6 +13,7 @@ CUDA_0 = device("cuda:0")
 XPU = device("xpu")
 XPU_0 = device("xpu:0")
 MPS = device("mps")
+ROCM = device("cuda:0")
 
 class DEVICE(str, Enum):
     ALL = "all" # All device
@@ -20,6 +21,7 @@ class DEVICE(str, Enum):
     CUDA = "cuda" # Nvidia GPU
     XPU = "xpu" # Intel GPU
     MPS = "mps" # MacOS GPU
+    ROCM = "rocm" # AMD GPU
 
 class PLATFORM(str, Enum):
     ALL = "all" # All platform
