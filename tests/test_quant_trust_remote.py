@@ -9,10 +9,12 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
+import transformers  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
+from packaging.version import Version  # noqa: E402
 
 
 class TestQuantWithTrustRemoteTrue(unittest.TestCase):
@@ -33,19 +35,22 @@ class TestQuantWithTrustRemoteTrue(unittest.TestCase):
             group_size=128,
             format=FORMAT.GPTQ,
         )
-
+        args = {}
+        # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
+        # but device map is cpu, it will trow non-supported device error
+        if Version(transformers.__version__) >= Version("4.46.0"):
+            args["_attn_implementation_autoset"] = True
         model = GPTQModel.load(
             self.MODEL_ID,
             quantize_config=quantize_config,
             trust_remote_code=True,
+            **args,
         )
 
         model.quantize(self.calibration_dataset, batch_size=64)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            model.save(
-                tmp_dir,
-            )
+            model.save(tmp_dir)
 
             del model
             py_files = [f for f in os.listdir(tmp_dir) if f.endswith('.py')]

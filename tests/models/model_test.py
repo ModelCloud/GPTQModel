@@ -168,7 +168,7 @@ class ModelTest(unittest.TestCase):
             else:
                 return model, tokenizer
 
-    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
+    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, **args):
         if tokenizer_path is None:
             tokenizer_path = model_id_or_path
         else:
@@ -179,6 +179,7 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            kwargs=args if args else {}
         )
 
         return model, tokenizer

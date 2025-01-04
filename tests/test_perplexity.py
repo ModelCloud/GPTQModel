@@ -21,6 +21,9 @@ class TestPerplexity(unittest.TestCase):
     TINYLLAMA_MODEL_ID = "/monster/data/model/tinyllama-15M-stories" # "ModelCloud/tinyllama-15M-stories"
     OPT_MODEL_ID = "/monster/data/model/opt-125m" # "facebook/opt-125m"
 
+    tinyllama_native_ppl = 54.616613778642396
+    opt_125m_native_ppl = 30.3942897844937
+
     OPT_DATASET_PATH = "wikitext"
     OPT_DATASET_NAME = "wikitext-2-raw-v1"
     OPT_DATASET_SPLIT = "test"
@@ -80,15 +83,20 @@ class TestPerplexity(unittest.TestCase):
             device_map="auto",
         )
 
-        native_ppl = self.calculate_avg_ppl(
-            self,
-            dataset_path,
-            dataset_name,
-            dataset_split,
-            dataset_column,
-            model,
-            tokenizer,
-        )
+        if model_id == self.TINYLLAMA_MODEL_ID:
+            native_ppl = self.tinyllama_native_ppl
+        elif model_id == self.OPT_MODEL_ID:
+            native_ppl = self.opt_125m_native_ppl
+        else:
+            native_ppl = self.calculate_avg_ppl(
+                self,
+                dataset_path,
+                dataset_name,
+                dataset_split,
+                dataset_column,
+                model,
+                tokenizer,
+            )
 
         print(f"{model_id} Native PPL: {native_ppl}")
 
@@ -135,7 +143,7 @@ class TestPerplexity(unittest.TestCase):
         )
 
         dataset = self.opt_calibration_dataset if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration_dataset
-        model.quantize(dataset, batch_size=64)
+        model.quantize(dataset, batch_size=256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
