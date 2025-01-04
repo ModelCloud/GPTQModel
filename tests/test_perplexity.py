@@ -135,7 +135,7 @@ class TestPerplexity(unittest.TestCase):
         )
 
         dataset = self.opt_calibration_dataset if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration_dataset
-        model.quantize(dataset, batch_size=256)
+        model.quantize(dataset, batch_size=64)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
