@@ -329,7 +329,7 @@ def ModelLoader(cls):
             unsupported = _validate_marlin_compatibility(quantize_config)
             if unsupported is None and marlin_compatible:
                 logger.info(
-                    "You passed a model that is compatible with the Marlin kernel. We recommend using `BACKEND.MARLIN` to use the optimized Marlin kernel for Nvidia inference. Example: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
+                    "You passed a model that is compatible with the Marlin kernel. Use `BACKEND.MARLIN` for optimal inference with batching on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
                 )
 
         if quantize_config.format == FORMAT.BITBLAS:
