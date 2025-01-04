@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:true'
+if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:true'
 
 import sys  # noqa: E402
 
