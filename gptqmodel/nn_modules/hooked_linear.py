@@ -1,8 +1,8 @@
 import torch
-import transformers
+from transformers.pytorch_utils import Conv1D
 
 
-class HookedConv1D(torch.nn.Conv1d):
+class HookedConv1D(Conv1D):
     def __init__(self, nf: int, nx: int) -> None:
         torch.nn.Module.__init__(self)
         self.nf = nf
@@ -10,7 +10,7 @@ class HookedConv1D(torch.nn.Conv1d):
         self.forward_hook = None
 
     @staticmethod
-    def from_conv1d(conv1d: torch.nn.Conv1d):
+    def from_conv1d(conv1d: Conv1D):
         custom_conv1d = HookedConv1D(conv1d.nf, conv1d.nx)
         custom_conv1d.weight = conv1d.weight
         custom_conv1d.bias = conv1d.bias
@@ -72,9 +72,9 @@ def replace_linear_with_hooked_linear(module):
     for name, child in module.named_children():
         if isinstance(child, torch.nn.Linear):
             setattr(module, name, HookedLinear.from_linear(child))
-        elif isinstance(child, transformers.pytorch_utils.Conv1D):
+        elif isinstance(child, Conv1D):
             setattr(module, name, HookedConv1D.from_conv1d(child))
         elif isinstance(child, torch.nn.Conv2d):
-            setattr(module, name, HookedLinear.from_linear(child))
+            setattr(module, name, HookedConv2d.from_linear(child))
         else:
             replace_linear_with_hooked_linear(child)
