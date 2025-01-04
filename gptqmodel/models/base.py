@@ -603,6 +603,8 @@ class BaseGPTQModel(nn.Module):
                                 shared_kv_cache_dict[i] = layer_output[-1]
                         else:
                             layer(*layer_input, **additional_layer_inputs)
+                    del layer_input
+                    del additional_layer_inputs
 
                 for name in subset:
                     subset[name].forward_hook = None
