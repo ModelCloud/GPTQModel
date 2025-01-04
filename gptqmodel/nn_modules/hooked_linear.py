@@ -3,6 +3,7 @@ import torch
 
 class HookedLinear(torch.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None) -> None:
+        # avoid calling super().__init__() as it would allocate memory baased on in/out features
         torch.nn.Module.__init__(self)
         self.in_features = in_features
         self.out_features = out_features
