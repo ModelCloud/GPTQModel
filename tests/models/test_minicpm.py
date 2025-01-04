@@ -18,6 +18,4 @@ class TestMiniCpm(ModelTest):
         if Version(transformers.__version__) >= Version("4.46.0"):
             args["_attn_implementation_autoset"] = True
 
-        model = self.loadQuantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, args=args)
-
-        self.quantModel(model)
+        self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, **args)
