@@ -95,7 +95,7 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         return pretrained_model_id_or_path
     else:
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
-    
+
 def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -164,10 +164,6 @@ def ModelLoader(cls):
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
-        # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
-        # but device map is cpu, it will trow non-supported device error
-        if Version(transformers.__version__) >= Version("4.46.0"):
-            model_init_kwargs["_attn_implementation_autoset"] = True
         model_init_kwargs["torch_dtype"] = torch_dtype
 
         if config.model_type not in SUPPORTED_MODELS:
