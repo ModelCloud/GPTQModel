@@ -1,17 +1,11 @@
 import torch
-from torch.nn import Parameter
 
 
 class HookedLinear(torch.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
         torch.nn.Module.__init__(self)
         self.in_features = in_features
         self.out_features = out_features
-        if bias:
-            self.bias = Parameter(torch.empty(out_features, **factory_kwargs))
-        else:
-            self.register_parameter("bias", None)
             
         self.forward_hook = None
 
@@ -28,8 +22,7 @@ class HookedLinear(torch.nn.Linear):
         custom_linear = HookedLinear(linear.in_features, linear.out_features, bias=linear.bias is not None,
                                      device=linear.weight.device, dtype=linear.weight.dtype)
         custom_linear.weight = linear.weight
-        if linear.bias is not None:
-            custom_linear.bias = linear.bias
+        custom_linear.bias = linear.bias
         return custom_linear
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
