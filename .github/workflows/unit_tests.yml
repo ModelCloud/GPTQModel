@@ -46,6 +46,7 @@ env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.6 8.9'
+  PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:true'
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
