@@ -11,6 +11,7 @@ import torch.nn as nn
 from packaging import version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
+from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -499,6 +500,9 @@ class BaseGPTQModel(nn.Module):
         module_names = []
         shared_kv_cache_dict = {}
 
+        # replace linear with hooked linear
+        HookedLinear.replace_linear_with_hooked_linear(self.model)
+
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -569,9 +573,8 @@ class BaseGPTQModel(nn.Module):
 
                     return tmp
 
-                handles = []
                 for name in subset:
-                    handles.append(subset[name].register_forward_hook(add_batch(name)))
+                    subset[name].forward_hook = add_batch(name)
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
@@ -600,9 +603,12 @@ class BaseGPTQModel(nn.Module):
                                 shared_kv_cache_dict[i] = layer_output[-1]
                         else:
                             layer(*layer_input, **additional_layer_inputs)
+                            
+                    del layer_input
+                    del additional_layer_inputs
 
-                for h in handles:
-                    h.remove()
+                for name in subset:
+                    subset[name].forward_hook = None
 
                 for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
@@ -784,7 +790,6 @@ class BaseGPTQModel(nn.Module):
             return super().__getattr__(item)
         except Exception:
             return getattr(self.model, item)
-
 
 __all__ = ["BaseGPTQModel"]
 
