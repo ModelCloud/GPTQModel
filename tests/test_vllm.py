@@ -1,7 +1,6 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -13,11 +12,10 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestLoadVLLM(unittest.TestCase):

@@ -1,7 +1,8 @@
-from PIL import Image
-from io import BytesIO
-import requests
 import base64
+from io import BytesIO
+
+import requests
+from PIL import Image
 
 
 def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:

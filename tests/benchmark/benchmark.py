@@ -14,5 +14,5 @@ class TestInference(BenchmarkTest):
     )
     def test_inference(self, backend, device, tokens_per_second):
         if device == 'mps':
-            self.skipTest(f"MacOS env skip")
+            self.skipTest("MacOS env skip")
         self.benchmark(backend=backend, device=device, tokens_per_second=tokens_per_second)

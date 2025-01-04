@@ -1,14 +1,14 @@
 import os.path
 import shutil
 from typing import Dict, Optional
-from PIL import Image
 
+from PIL import Image
 from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
 
-from ..base import BaseGPTQModel
 from ...utils.calibration import batched
-from ...utils.image import fetch_image, extract_vision_info
+from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
+from ..base import BaseGPTQModel
 
 
 class Qwen2VLGPTQ(BaseGPTQModel):
@@ -84,8 +84,8 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             calibration_dataset,
             batch_size: int = 1,
             tokenizer=None, ):
-        import tempfile
         import json
+        import tempfile
 
         if tokenizer is None:
             tokenizer = AutoTokenizer.from_pretrained(self.model_local_path)

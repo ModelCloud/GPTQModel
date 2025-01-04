@@ -12,7 +12,6 @@ from .model import recurse_getattr, recurse_setattr
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
-
 logger = setup_logger()
 
 def prepare_model_for_bitblas_load(

@@ -14,7 +14,6 @@ from ..utils.logger import setup_logger
 from ..utils.torch import torch_empty_cache, torch_sync
 from .quantizer import Quantizer
 
-
 logger = setup_logger()
 
 # TODO do we really need max precision?
