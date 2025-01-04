@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import shutil
+import time
 from typing import Dict, List, Optional, Union, Any
 
 import torch
@@ -35,7 +36,7 @@ from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
 from ._const import CPU, DEVICE, get_best_device
 from .loader import ModelLoader
-from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter
+from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, QUANT_LOG_FWD_TIME, ModelWriter
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -580,7 +581,9 @@ class BaseGPTQModel(nn.Module):
                     else:
                         handle.append(subset[name].register_forward_hook(add_batch(name)))
 
+                fwd_start = time.time()
                 for j in range(num_batches):
+                    start_time = time.time()
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
                         layer_input.append(move_to(layer_inp, cur_layer_device))
@@ -611,6 +614,9 @@ class BaseGPTQModel(nn.Module):
                             
                     del layer_input
                     del additional_layer_inputs
+
+                fwd_end = time.time()
+                fwd_time = fwd_end - fwd_start
 
                 for h in handle:
                     h.remove()
@@ -654,7 +660,7 @@ class BaseGPTQModel(nn.Module):
                     module_names.append(f"layer-{i}-{name}")
 
                     stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
-                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}"}
+                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}", QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
