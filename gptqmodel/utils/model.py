@@ -796,6 +796,27 @@ def normalize_tokenizer(config, tokenizer):
 
     return tokenizer
 
+
+class HookedLinear(torch.nn.Linear):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None) -> None:
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.forward_hook = None
+
+    @staticmethod
+    def from_linear(linear: torch.nn.Linear):
+        custom_linear = HookedLinear(linear.in_features, linear.out_features, bias=linear.bias is not None,
+                                     device=linear.weight.device, dtype=linear.weight.dtype)
+        custom_linear.weight = linear.weight
+        if linear.bias is not None:
+            custom_linear.bias = linear.bias
+        return custom_linear
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = super().forward(input)
+        if self.forward_hook:
+            self.forward_hook(self, input, output)
+        return output
+
 class MODALITY(str, Enum):
     TEXT = "text"
     IMAGE_TO_TEXT = "image_to_text"
