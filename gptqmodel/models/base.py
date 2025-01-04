@@ -11,7 +11,7 @@ import torch.nn as nn
 from packaging import version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
-from ..nn_modules.hooked_linear import HookedLinear
+from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -501,7 +501,7 @@ class BaseGPTQModel(nn.Module):
         shared_kv_cache_dict = {}
 
         # replace linear with hooked linear
-        HookedLinear.replace_linear_with_hooked_linear(self.model)
+        replace_linear_with_hooked_linear(self.model)
 
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
@@ -573,8 +573,13 @@ class BaseGPTQModel(nn.Module):
 
                     return tmp
 
+                handle = []
                 for name in subset:
-                    subset[name].forward_hook = add_batch(name)
+                    if hasattr(subset[name], 'forward_hook'):
+                        subset[name].forward_hook = add_batch(name)
+                    else:
+                        handle.append(subset[name].register_forward_hook(add_batch(name)))
+
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
@@ -607,8 +612,12 @@ class BaseGPTQModel(nn.Module):
                     del layer_input
                     del additional_layer_inputs
 
+                for h in handle:
+                    h.remove()
+
                 for name in subset:
-                    subset[name].forward_hook = None
+                    if hasattr(subset[name], 'forward_hook'):
+                        subset[name].forward_hook = None
 
                 for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
