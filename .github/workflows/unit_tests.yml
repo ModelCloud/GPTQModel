@@ -61,7 +61,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, xeon5 ]
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
@@ -160,7 +160,7 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, xeon5 ]
     needs: check-vm
     if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
@@ -232,7 +232,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -356,7 +356,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -482,7 +482,7 @@ jobs:
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   show-statistics:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, xeon5 ]
     if: always()
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
