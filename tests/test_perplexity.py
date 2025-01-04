@@ -86,7 +86,7 @@ class TestPerplexity(unittest.TestCase):
         if model_id == self.TINYLLAMA_MODEL_ID:
             native_ppl = self.tinyllama_native_ppl
         elif model_id == self.OPT_MODEL_ID:
-            native_ppl = self.opt_native_ppl
+            native_ppl = self.opt_125m_native_ppl
         else:
             native_ppl = self.calculate_avg_ppl(
                 self,
