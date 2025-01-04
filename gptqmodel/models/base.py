@@ -499,6 +499,15 @@ class BaseGPTQModel(nn.Module):
         module_names = []
         shared_kv_cache_dict = {}
 
+        def replace_linear_with_hooked_linear(module):
+            for name, child in module.named_children():
+                if isinstance(child, torch.nn.Linear):
+                    setattr(module, name, HookedLinear.from_linear(child))
+                else:
+                    replace_linear_with_hooked_linear(child)
+
+        replace_linear_with_hooked_linear(self.model)
+
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
             layer = layers[i]
@@ -569,9 +578,8 @@ class BaseGPTQModel(nn.Module):
 
                     return tmp
 
-                handles = []
                 for name in subset:
-                    handles.append(subset[name].register_forward_hook(add_batch(name)))
+                    subset[name].forward_hook = add_batch(name)
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
@@ -601,8 +609,8 @@ class BaseGPTQModel(nn.Module):
                         else:
                             layer(*layer_input, **additional_layer_inputs)
 
-                for h in handles:
-                    h.remove()
+                for name in subset:
+                    subset[name].forward_hook = None
 
                 for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
@@ -785,6 +793,24 @@ class BaseGPTQModel(nn.Module):
         except Exception:
             return getattr(self.model, item)
 
+class HookedLinear(torch.nn.Linear):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None) -> None:
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.forward_hook = None
+    
+    @staticmethod
+    def from_linear(linear: torch.nn.Linear):
+        custom_linear = HookedLinear(linear.in_features, linear.out_features, bias=linear.bias is not None, device=linear.weight.device, dtype=linear.weight.dtype)
+        custom_linear.weight = linear.weight
+        if linear.bias is not None:
+            custom_linear.bias = linear.bias
+        return custom_linear
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = super().forward(input)
+        if self.forward_hook:
+            self.forward_hook(self, input, output)
+        return output
 
 __all__ = ["BaseGPTQModel"]
 
