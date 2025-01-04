@@ -53,7 +53,7 @@ QUANT_LOG_MODULE = "module"
 QUANT_LOG_LOSS = "loss"
 QUANT_LOG_DAMP = "damp"
 QUANT_LOG_TIME = "time"
-
+QUANT_LOG_FWD_TIME = "fwd_time"
 
 def ModelWriter(cls):
 
