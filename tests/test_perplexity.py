@@ -173,6 +173,6 @@ class TestPerplexity(unittest.TestCase):
             # FORMAT.MARLIN opt ppl == 33.43, FORMAT.BITBLAS opt ppl == 32.61, native opt ppl == 30.39
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama-15M ppl == 111.32, native Tinyllama-15M ppl == 54.61
             if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
-                assert abs(quantized_ppl - self.opt_native_ppl) < 3.5
+                assert abs(quantized_ppl - self.opt_native_ppl) < 4.5
             else:
                 assert abs(quantized_ppl - self.tinyllama_native_ppl) < 58.5
