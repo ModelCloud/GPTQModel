@@ -9,7 +9,7 @@
 </p>
 
 ## News
-* 01/03/2025 [1.5.2-dev]: AMD ROCm (6.2+) support added and validated for 7900XT+ GPU.
+* 01/03/2025 [1.5.2-dev]: AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Decrease memory usage (vram) during quantization.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
 * 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage. 
