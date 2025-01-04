@@ -138,9 +138,8 @@ class ModelTest(unittest.TestCase):
 
         is_quantized = model.quantized
 
-        # ovis cannot load processor
-        is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
-        need_create_processor = is_image_to_text_model and not is_ovis_model
+        is_qwen2vl_model = model.__class__.__name__ == "Qwen2VLGPTQ"
+        need_create_processor = is_image_to_text_model and is_qwen2vl_model
         if not is_quantized:
             model.quantize(calibration_dataset, batch_size=batch_size)
 

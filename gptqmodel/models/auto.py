@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 
+from .definitions.internvl_chat import InternVLChatGPTQ
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -94,6 +95,7 @@ MODEL_MAP = {
     "baichuan": BaiChuanGPTQ,
     "internlm": InternLMGPTQ,
     "internlm2": InternLM2GPTQ,
+    "internvl_chat": InternVLChatGPTQ,
     "qwen": QwenGPTQ,
     "mistral": MistralGPTQ,
     "Yi": YiGPTQ,
