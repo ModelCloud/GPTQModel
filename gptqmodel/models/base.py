@@ -11,6 +11,7 @@ import torch.nn as nn
 from packaging import version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
+from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -28,7 +29,6 @@ from ..utils.model import (
     nested_move_to,
     pack_model,
     normalize_tokenizer,
-    HookedLinear,
     MODALITY,
 )
 from ..utils.progress import ProgressBar
@@ -500,14 +500,8 @@ class BaseGPTQModel(nn.Module):
         module_names = []
         shared_kv_cache_dict = {}
 
-        def replace_linear_with_hooked_linear(module):
-            for name, child in module.named_children():
-                if isinstance(child, torch.nn.Linear):
-                    setattr(module, name, HookedLinear.from_linear(child))
-                else:
-                    replace_linear_with_hooked_linear(child)
-
-        replace_linear_with_hooked_linear(self.model)
+        # replace linear with hooked linear
+        HookedLinear.replace_linear_with_hooked_linear(self.model)
 
         for i in layer_pb:
             layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
