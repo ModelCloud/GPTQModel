@@ -3,7 +3,6 @@ import sys
 import numpy as np
 import torch
 from datasets import load_dataset
-
 from gptqmodel.utils.progress import ProgressBar
 
 

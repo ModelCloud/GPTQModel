@@ -1,6 +1,5 @@
-from model_test import ModelTest
-
 import transformers
+from model_test import ModelTest
 from packaging.version import Version
 
 

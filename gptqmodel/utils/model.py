@@ -34,7 +34,6 @@ from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
-
 logger = setup_logger()
 
 
@@ -441,7 +440,6 @@ def check_and_get_model_type(model_dir, trust_remote_code=False):
 
 
 def simple_dispatch_model(model, device_map):
-    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     if "" in device_map:
         d = device_map[""]
@@ -765,7 +763,7 @@ def check_requires_version(requires_version, current_version):
         return OPERATOR_MAP[op_symbol](current_version, required_version)
     else:
         return None
-    
+
 def normalize_tokenizer(config, tokenizer):
     pad_token_id = config.pad_token_id
     if not pad_token_id:

@@ -2,11 +2,9 @@ import sys  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-
 
 GENERATE_EVAL_SIZE = 100
 
@@ -20,7 +18,7 @@ class TestsQ4Torch(unittest.TestCase):
     )
     def test_generation_desc_act_true(self, torch_dtype, device):
         if sys.platform != "darwin":
-            self.skipTest(f"This test is macOS only")
+            self.skipTest("This test is macOS only")
 
         prompt = "I am in Paris and"
 
@@ -65,7 +63,7 @@ class TestsQ4Torch(unittest.TestCase):
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
         if sys.platform != "darwin":
-            self.skipTest(f"This test is macOS only")
+            self.skipTest("This test is macOS only")
 
         prompt = "I am in Paris and"
 

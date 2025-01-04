@@ -2,11 +2,11 @@ import copy
 import logging
 from typing import Dict
 
+import torch
+
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY
-import torch
-
 from ..base import BaseGPTQModel
 
 

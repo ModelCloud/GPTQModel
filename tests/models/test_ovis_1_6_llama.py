@@ -1,11 +1,8 @@
 import os.path
-import tempfile
 
 import torch
 from model_test import ModelTest
 from PIL import Image
-
-from gptqmodel import GPTQModel
 
 
 class TestOvis1_6_Llama(ModelTest):

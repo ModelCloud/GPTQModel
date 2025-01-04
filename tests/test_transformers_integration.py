@@ -1,9 +1,8 @@
 import tempfile
 
 from gptqmodel.integration import integration
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
-
 from models.model_test import ModelTest
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
 
 
 class TestTransformersIntegration(ModelTest):

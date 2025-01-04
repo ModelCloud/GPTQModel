@@ -1,6 +1,6 @@
 import os
 from collections import OrderedDict
-from typing import Dict, Optional, Tuple, Type, Union
+from typing import Dict, Optional, Type, Union
 
 import torch
 
@@ -18,7 +18,6 @@ from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
-
 
 message_logged = False
 logger = setup_logger()

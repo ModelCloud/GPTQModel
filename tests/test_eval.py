@@ -3,11 +3,9 @@ import tempfile
 import unittest
 from typing import Union
 
-from parameterized import parameterized
-
 from gptqmodel import GPTQModel
 from gptqmodel.utils import EVAL
-
+from parameterized import parameterized
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 

@@ -15,7 +15,6 @@ from ...utils.logger import setup_logger
 from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
 
-
 try:
     from triton import __version__ as triton_version
 

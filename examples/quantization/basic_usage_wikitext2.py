@@ -1,9 +1,7 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer
-
 from gptqmodel import GPTQModel, QuantizeConfig
-
+from transformers import AutoTokenizer
 
 pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0" # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"

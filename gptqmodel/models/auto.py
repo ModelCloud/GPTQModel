@@ -1,78 +1,75 @@
 from __future__ import annotations
 
 import os
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:true'
 
-import sys
-
+import sys  # noqa: E402
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
-import os.path
-from os.path import isdir, join
-from typing import Dict, List, Optional, Union
+import os.path  # noqa: E402
+from os.path import isdir, join  # noqa: E402
+from typing import Dict, List, Optional, Union  # noqa: E402
 
-import torch
-from huggingface_hub import list_repo_files
-from transformers import AutoConfig
+import torch  # noqa: E402
+from huggingface_hub import list_repo_files  # noqa: E402
+from transformers import AutoConfig  # noqa: E402
 
-from ..nn_modules.qlinear.ipex import HAS_IPEX
-from ..quantization import QUANT_CONFIG_FILENAME
-from ..utils import BACKEND, EVAL
-from ..utils.logger import setup_logger
-from ..utils.model import check_and_get_model_type
-from ._const import get_best_device
-from .base import BaseGPTQModel, QuantizeConfig
-from .definitions.baichuan import BaiChuanGPTQ
-from .definitions.bloom import BloomGPTQ
-from .definitions.chatglm import ChatGLM
-from .definitions.codegen import CodeGenGPTQ
-from .definitions.cohere import CohereGPTQ
-from .definitions.cohere2 import Cohere2GPTQ
-from .definitions.dbrx import DbrxGPTQ
-from .definitions.dbrx_converted import DbrxConvertedGPTQ
-from .definitions.decilm import DeciLMGPTQ
-from .definitions.deepseek_v2 import DeepSeekV2GPTQ
-from .definitions.exaone import ExaoneGPTQ
-from .definitions.gemma import GemmaGPTQ
-from .definitions.gemma2 import Gemma2GPTQ
-from .definitions.glm import GLM
-from .definitions.gpt2 import GPT2GPTQ
-from .definitions.gpt_bigcode import GPTBigCodeGPTQ
-from .definitions.gpt_neox import GPTNeoXGPTQ
-from .definitions.gptj import GPTJGPTQ
-from .definitions.granite import GraniteGPTQ
-from .definitions.grinmoe import GrinMOEGPTQ
-from .definitions.hymba import HymbaGPTQ
-from .definitions.internlm import InternLMGPTQ
-from .definitions.internlm2 import InternLM2GPTQ
-from .definitions.llama import LlamaGPTQ
-from .definitions.longllama import LongLlamaGPTQ
-from .definitions.minicpm import MiniCPMGPTQ
-from .definitions.minicpm3 import MiniCPM3GPTQ
-from .definitions.mistral import MistralGPTQ
-from .definitions.mixtral import MixtralGPTQ
-from .definitions.mllama import MLlamaGPTQ
-from .definitions.mobilellm import MobileLLMGPTQ
-from .definitions.moss import MOSSGPTQ
-from .definitions.mpt import MPTGPTQ
-from .definitions.olmo2 import Olmo2GPTQ
-from .definitions.opt import OPTGPTQ
-from .definitions.ovis import OvisGPTQ
-from .definitions.phi import PhiGPTQ
-from .definitions.phi3 import Phi3GPTQ
-from .definitions.qwen import QwenGPTQ
-from .definitions.qwen2 import Qwen2GPTQ
-from .definitions.qwen2_moe import Qwen2MoeGPTQ
-from .definitions.qwen2_vl import Qwen2VLGPTQ
-from .definitions.rw import RWGPTQ
-from .definitions.stablelmepoch import StableLMEpochGPTQ
-from .definitions.starcoder2 import Starcoder2GPTQ
-from .definitions.xverse import XverseGPTQ
-from .definitions.yi import YiGPTQ
-
+from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
+from ..utils import BACKEND, EVAL  # noqa: E402
+from ..utils.logger import setup_logger  # noqa: E402
+from ..utils.model import check_and_get_model_type  # noqa: E402
+from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
+from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
+from .definitions.bloom import BloomGPTQ  # noqa: E402
+from .definitions.chatglm import ChatGLM  # noqa: E402
+from .definitions.codegen import CodeGenGPTQ  # noqa: E402
+from .definitions.cohere import CohereGPTQ  # noqa: E402
+from .definitions.cohere2 import Cohere2GPTQ  # noqa: E402
+from .definitions.dbrx import DbrxGPTQ  # noqa: E402
+from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
+from .definitions.decilm import DeciLMGPTQ  # noqa: E402
+from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
+from .definitions.exaone import ExaoneGPTQ  # noqa: E402
+from .definitions.gemma import GemmaGPTQ  # noqa: E402
+from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
+from .definitions.glm import GLM  # noqa: E402
+from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
+from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
+from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
+from .definitions.gptj import GPTJGPTQ  # noqa: E402
+from .definitions.granite import GraniteGPTQ  # noqa: E402
+from .definitions.grinmoe import GrinMOEGPTQ  # noqa: E402
+from .definitions.hymba import HymbaGPTQ  # noqa: E402
+from .definitions.internlm import InternLMGPTQ  # noqa: E402
+from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
+from .definitions.llama import LlamaGPTQ  # noqa: E402
+from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
+from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
+from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
+from .definitions.mistral import MistralGPTQ  # noqa: E402
+from .definitions.mixtral import MixtralGPTQ  # noqa: E402
+from .definitions.mllama import MLlamaGPTQ  # noqa: E402
+from .definitions.mobilellm import MobileLLMGPTQ  # noqa: E402
+from .definitions.moss import MOSSGPTQ  # noqa: E402
+from .definitions.mpt import MPTGPTQ  # noqa: E402
+from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
+from .definitions.opt import OPTGPTQ  # noqa: E402
+from .definitions.ovis import OvisGPTQ  # noqa: E402
+from .definitions.phi import PhiGPTQ  # noqa: E402
+from .definitions.phi3 import Phi3GPTQ  # noqa: E402
+from .definitions.qwen import QwenGPTQ  # noqa: E402
+from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
+from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
+from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
+from .definitions.rw import RWGPTQ  # noqa: E402
+from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
+from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
+from .definitions.xverse import XverseGPTQ  # noqa: E402
+from .definitions.yi import YiGPTQ  # noqa: E402
 
 logger = setup_logger()
 
@@ -274,10 +271,9 @@ class GPTQModel:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
+            from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
-
-            from gptqmodel.utils.eval import lm_eval
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 

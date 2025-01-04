@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import copy
 import json
 import os
 import shutil
 import time
-from typing import Dict, List, Optional, Union, Any
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -20,23 +19,14 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (
-    check_to_quantized,
-    find_layers,
-    get_device,
-    get_module_by_name_prefix,
-    get_moe_layer_modules,
-    move_to,
-    nested_move_to,
-    pack_model,
-    normalize_tokenizer,
-    MODALITY,
-)
+from ..utils.model import (MODALITY, check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
+                           get_moe_layer_modules, move_to, nested_move_to, normalize_tokenizer, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
-from ._const import CPU, DEVICE, get_best_device
+from ._const import CPU, DEVICE
 from .loader import ModelLoader
-from .writer import QUANT_LOG_DAMP, QUANT_LOG_LAYER, QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, QUANT_LOG_FWD_TIME, ModelWriter
+from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
+                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
@@ -131,11 +121,11 @@ class BaseGPTQModel(nn.Module):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
             if self.tokenizer is None:
                 raise ValueError(f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
-            
+
             # Convert strings/ints to tokenized format
             new_calibration_dataset = []
             for data in calibration_dataset:
-                # convert to tensor directly if already in token ids format (ints) 
+                # convert to tensor directly if already in token ids format (ints)
                 if isinstance(data, list) and all(isinstance(x, int) for x in data):
                     input_ids = torch.tensor([data], dtype=torch.long)
                     attention_mask = torch.ones_like(input_ids)
@@ -583,7 +573,6 @@ class BaseGPTQModel(nn.Module):
 
                 fwd_start = time.time()
                 for j in range(num_batches):
-                    start_time = time.time()
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
                         layer_input.append(move_to(layer_inp, cur_layer_device))
@@ -611,7 +600,7 @@ class BaseGPTQModel(nn.Module):
                                 shared_kv_cache_dict[i] = layer_output[-1]
                         else:
                             layer(*layer_input, **additional_layer_inputs)
-                            
+
                     del layer_input
                     del additional_layer_inputs
 

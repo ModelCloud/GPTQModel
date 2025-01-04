@@ -14,7 +14,7 @@ class HookedConv1D(Conv1D):
         custom_conv1d = HookedConv1D(conv1d.nf, conv1d.nx)
         custom_conv1d.weight = conv1d.weight
         custom_conv1d.bias = conv1d.bias
-        return custom_conv1d    
+        return custom_conv1d
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = super().forward(input)
@@ -37,7 +37,7 @@ class HookedConv2d(torch.nn.Conv2d):
         custom_conv2d.weight = conv2d.weight
         custom_conv2d.bias = conv2d.bias
         return custom_conv2d
-    
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = super().forward(input)
         if self.forward_hook:
@@ -51,7 +51,7 @@ class HookedLinear(torch.nn.Linear):
         torch.nn.Module.__init__(self)
         self.in_features = in_features
         self.out_features = out_features
-            
+
         self.forward_hook = None
 
     @staticmethod
