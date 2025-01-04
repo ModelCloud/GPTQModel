@@ -107,7 +107,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int=4, **kwargs):
+    def quantModel(self, model_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int=4, **kwargs):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -115,17 +115,20 @@ class ModelTest(unittest.TestCase):
             desc_act=self.DESC_ACT,
             sym=self.SYM,
         )
-        model = GPTQModel.load(
-            model_id_or_path,
-            quantize_config=quantize_config,
-            trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype,
-            backend=self.LOAD_BACKEND,
-            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
-            **kwargs,
-        )
-
-        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+        if isinstance(model_or_path, str):
+            model = GPTQModel.load(
+                model_or_path,
+                quantize_config=quantize_config,
+                trust_remote_code=trust_remote_code,
+                torch_dtype=torch_dtype,
+                backend=self.LOAD_BACKEND,
+                device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+                **kwargs,
+            )
+            tokenizer = self.load_tokenizer(model_or_path, trust_remote_code=trust_remote_code)
+        else:
+            model = model_or_path
+            tokenizer = self.load_tokenizer(model.model_local_path, trust_remote_code=trust_remote_code)
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
@@ -168,7 +171,7 @@ class ModelTest(unittest.TestCase):
             else:
                 return model, tokenizer
 
-    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None):
+    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, **args):
         if tokenizer_path is None:
             tokenizer_path = model_id_or_path
         else:
@@ -179,6 +182,7 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            kwargs=args if args else {}
         )
 
         return model, tokenizer
