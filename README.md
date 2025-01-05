@@ -9,7 +9,7 @@
 </p>
 
 ## News
-* 01/05/2025 [1.5.4 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.4): Fix regression where `quantize_config` is not properly read from `config.json` if `quantize_config.json` does not exists. 
+* 01/05/2025 [1.5.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.4): 25% faster quantization. Fixed regression where `quantize_config` is not properly read from `config.json`. 
 * 01/04/2025 [1.5.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.3): AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization. ~25-30% memory reduction in quantization vs previous release. 
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
