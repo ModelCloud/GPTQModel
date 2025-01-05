@@ -1,5 +1,6 @@
 import copy
 import json
+import os.path
 import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
@@ -308,39 +309,13 @@ class QuantizeConfig():
 
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
-        # Parameters related to loading from Hugging Face Hub
-        cache_dir = kwargs.pop("cache_dir", None)
-        force_download = kwargs.pop("force_download", False)
-        resume_download = kwargs.pop("resume_download", False)
-        proxies = kwargs.pop("proxies", None)
-        local_files_only = kwargs.pop("local_files_only", False)
-        use_auth_token = kwargs.pop("use_auth_token", None)
-        revision = kwargs.pop("revision", None)
-        subfolder = kwargs.pop("subfolder", None)
-        commit_hash = kwargs.pop("_commit_hash", None)
         format = kwargs.pop("format", None)
 
         transformers_config = False
+        resolved_config_file = None
         for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
-            if isdir(save_dir):  # Local
-                resolved_config_file = join(save_dir, quantize_config_filename)
-            else:  # Remote
-                resolved_config_file = cached_file(
-                    save_dir,
-                    quantize_config_filename,
-                    cache_dir=cache_dir,
-                    force_download=force_download,
-                    resume_download=resume_download,
-                    proxies=proxies,
-                    use_auth_token=use_auth_token,
-                    revision=revision,
-                    local_files_only=local_files_only,
-                    subfolder=subfolder,
-                    _raise_exceptions_for_missing_entries=False,
-                    _raise_exceptions_for_connection_errors=False,
-                    _commit_hash=commit_hash,
-                )
-            if resolved_config_file is not None:
+            resolved_config_file = join(save_dir, quantize_config_filename)
+            if os.path.exists(resolved_config_file):
                 if quantize_config_filename == "config.json":
                     transformers_config = True
                 break
