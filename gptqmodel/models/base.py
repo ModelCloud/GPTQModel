@@ -558,9 +558,9 @@ class BaseGPTQModel(nn.Module):
                     continue
 
                 def add_batch(name):
-                    def tmp(_, inp, out):
+                    def tmp(_, inputs_tuple, output):
                         # gptq is mutable.
-                        gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
+                        gptq[name].add_batch(inputs_tuple[0].data, output.data)  # noqa: F821
 
                     return tmp
 
