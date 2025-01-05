@@ -19,7 +19,7 @@ class HookedConv1D(Conv1D):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = super().forward(input)
         if self.forward_hook:
-            self.forward_hook(self, input, output)
+            self.forward_hook(self, (input,), output)
         return output
 
 
@@ -41,7 +41,7 @@ class HookedConv2d(torch.nn.Conv2d):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = super().forward(input)
         if self.forward_hook:
-            self.forward_hook(self, input, output)
+            self.forward_hook(self, (input,), output)
         return output
 
 
@@ -64,7 +64,7 @@ class HookedLinear(torch.nn.Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = super().forward(input)
         if self.forward_hook:
-            self.forward_hook(self, input, output)
+            self.forward_hook(self, (input,), output)
         return output
 
 
