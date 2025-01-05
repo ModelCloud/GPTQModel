@@ -86,19 +86,19 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 
 ![image](https://github.com/user-attachments/assets/7b2db012-b8af-4d19-a25d-7023cef19220)
 
-## Model Support:  🚀 (GPTQModel) 
+## Model Support  
 | Model            |    |                |    |                  |    |            |    |    |   |
 |------------------|----|----------------|----|------------------|----|------------|----|----|---|
-| Baichuan         | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | 🚀 | Yi | ✅ |
-| Bloom            | ✅  | Gemma 2        | 🚀 | Llama 3.2 VL | 🚀 | Ovis 1.6   | 🚀 |    |   |
-| ChatGLM          | 🚀 | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | 🚀 |    |   |
+| Baichuan         | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | ✅ | Yi | ✅ |
+| Bloom            | ✅  | Gemma 2        | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6   | ✅ |    |   |
+| ChatGLM          | ✅ | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | ✅ |    |   |
 | CodeGen          | ✅  | GPTNeoX        | ✅  | MiniCPM3         | ✅  | Qwen       | ✅  |    |   |
-| Cohere 1-2       | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | 🚀 |    |   |
-| DBRX Converted   | 🚀 | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2 VL    | 🚀 |    |   |
-| Deci             | ✅  | Granite        | 🚀 | MobileLLM        | 🚀 | RefinedWeb | ✅  |    |   |
-| DeepSeek-V2      | 🚀 | GRIN-MoE       | 🚀 | MOSS             | ✅  | StableLM   | ✅  |    |   |
-| DeepSeek-V2-Lite | 🚀 | Hymba          | 🚀 | MPT              | ✅  | StarCoder2 | ✅  |    |   |
-| EXAONE 3.0       | 🚀 | InternLM 1/2.5 | 🚀 | OPT              | ✅  | XVERSE     | ✅  |    |   |
+| Cohere 1-2       | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | ✅ |    |   |
+| DBRX Converted   | ✅ | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2 VL    | ✅ |    |   |
+| Deci             | ✅  | Granite        | ✅ | MobileLLM        | ✅ | RefinedWeb | ✅  |    |   |
+| DeepSeek-V2      | ✅ | GRIN-MoE       | ✅ | MOSS             | ✅  | StableLM   | ✅  |    |   |
+| DeepSeek-V2-Lite | ✅ | Hymba          | ✅ | MPT              | ✅  | StarCoder2 | ✅  |    |   |
+| EXAONE 3.0       | ✅ | InternLM 1/2.5 | ✅ | OPT              | ✅  | XVERSE     | ✅  |    |   |
 
 ## Platform and HW Support 
 
@@ -106,12 +106,12 @@ GPTQModel is validated for Linux, MacOS, and Windows 11:
 
 | Platform        | Device        |     |  Optimized Arch              |  Kernels |
 |-----------------|---------------| --- | -------------- | -------------- | 
-| Linux           | Nvidia GPU    | ✅       | Ampere or Higher | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
-| Linux | Intel XPU     | ✅             |   Intel Arc + Datacenter Max | IPEX, Torch |
-| Linux | AMD GPU     | ✅             |   7900XT+ with ROCm 6.2+ | Exllama V2, Exallma V1, DyanamicCuda, Torch |
-| Linux           | Intel/AMD CPU | ✅          | `avx512` or `amx` | IPEX, Torch |
-| MacOS | GPU (Metal) / CPU          | ✅             |   M1+ | Torch |
-| Windows 11 | GPU (Nvidia) / CPU       | ✅             |   Nvidia  | DynamicCuda, Torch  |
+| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
+| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | IPEX, Torch |
+| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, DyanamicCuda, Torch |
+| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | IPEX, Torch |
+| 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch |
+| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | DynamicCuda, Torch  |
 
 ## Install
 
