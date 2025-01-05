@@ -25,7 +25,6 @@ class GPTQ:
     def __init__(self, layer):
         self.layer = layer
         self.device = self.layer.weight.device
-
         self.layer_copy = self._clone_layer()
 
         self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
@@ -34,11 +33,7 @@ class GPTQ:
         self.quantizer = Quantizer()
 
     def _clone_layer(self):
-        # mps for m1+ is unified memory
-        if self.device.type not in ["mps", "cpu"]:
-            clone = self.layer.weight.data.cpu()
-        else:
-            clone = self.layer.weight.data.clone()
+        clone = self.layer.weight.data.clone()
 
         if isinstance(self.layer, nn.Conv2d):
             clone = clone.flatten(1)
@@ -46,7 +41,7 @@ class GPTQ:
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
-        return clone.to(device=self.device, dtype=torch.float)
+        return clone.float()
 
     def add_batch(self, inp, out):
         if os.environ.get("DEBUG"):
@@ -116,6 +111,9 @@ class GPTQ:
         static_groups=False,
     ):
         start = time.time()
+        if self.device.type not in ["mps", "cpu"]:
+            self.layer.weight.data = self.layer.weight.data.cpu()
+            
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
