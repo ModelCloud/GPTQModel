@@ -690,7 +690,8 @@ class BaseGPTQModel(nn.Module):
                     )
                     layer_outputs.append([layer_output])
 
-                # TODO: Call torch_empty_cache() based on memory usage
+                del layer_input
+                del additional_layer_inputs
 
 
             layers[i] = move_to(layer, CPU)
