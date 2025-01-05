@@ -558,7 +558,7 @@ class BaseGPTQModel(nn.Module):
                     continue
 
                 def add_batch(name):
-                    def tmp(_, inp: Tuple[torch.Tensor], out: torch.Tensor):  
+                    def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
                         # gptq is mutable.
                         gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
 
