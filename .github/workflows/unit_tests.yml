@@ -325,7 +325,7 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}")
 
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
@@ -350,7 +350,7 @@ jobs:
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}"
 
   torch2_5:
     needs:
@@ -476,7 +476,7 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
