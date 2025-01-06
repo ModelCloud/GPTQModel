@@ -1,5 +1,7 @@
 name: Release
 
+run-name: "${{ github.event.inputs.title }}"
+
 defaults:
   run:
     shell: bash -le {0}
@@ -9,6 +11,10 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
+      title:
+        description: 'set a title for this run'
+        required: false
+        default: ''
       repo:
         description: 'GitHub repo {owner}/{repo}'
         required: false
