@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import functools
 import hashlib
 import json
@@ -106,6 +107,27 @@ def get_module_by_name_suffix(model, module_name: str):
     for name, module in model.named_modules():
         if name.endswith(module_name):
             return module
+
+def get_module(module, key):
+    """Get module from model by key name.
+
+    Args:
+        module (torch.nn.Module): original model
+        key (str): module name to be replaced
+    """
+    name_list = key.split(".")
+    for name in name_list:
+        module = getattr(module, name, None)
+    return module
+
+def collect_best_params(block):
+    params = {}
+    for n, m in block.named_modules():
+        if hasattr(m, "orig_layer"):
+            params[n] = {}
+            for key in m.params.keys():
+                params[n][key] = copy.deepcopy(m.params[key].data)
+    return params
 
 
 def make_quant(
@@ -337,6 +359,65 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
         qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
         pbar.progress()
+
+def pack_module(
+    model,
+    quantizers,
+    bits,
+    group_size,
+    backend: BACKEND,
+    format: str | FORMAT,
+    desc_act=False,
+    sym: bool = True,
+    dynamic=None,
+    parallel_packing: bool = True,
+):
+    QuantLinear = select_quant_linear(
+        bits=bits,
+        dynamic=dynamic,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        backend=backend,
+        format=format,
+        pack=True,
+    )
+
+    model.to(CPU)
+
+    logger.info("Packing model...")
+
+    layers = find_layers(model)
+    layers = {n: layers[n] for n in quantizers}
+    make_quant(
+        model,
+        quantizers,
+        bits,
+        group_size,
+        backend=backend,
+        format=format,
+        desc_act=desc_act,
+        pack=True,
+        dynamic=dynamic,
+    )
+    qlayers = find_layers(model, [QuantLinear])
+    names = list(qlayers.keys())
+
+    if parallel_packing:
+        max_workers = 2
+    else:
+        max_workers = 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ProgressBar(total=len(names)) as pbar:
+            def wrapper(name):
+                pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
+
+            for _ in executor.map(wrapper, names):
+                pass
+
+    logger.info("Model packed.")
+    return QuantLinear
 
 
 def pack_model(
