@@ -1,7 +1,7 @@
 import torch
 from transformers.pytorch_utils import Conv1D
 
-
+# Models using conv1d: gpt2
 class HookedConv1D(Conv1D):
     def __init__(self, nf: int, nx: int) -> None:
         torch.nn.Module.__init__(self)
@@ -22,9 +22,10 @@ class HookedConv1D(Conv1D):
             self.forward_hook(self, (input,), output)
         return output
 
-
+# Models using conv2d: ovis
 class HookedConv2d(torch.nn.Conv2d):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int, padding: int) -> None:
+        # TODO: call super().__init__() is too slow, need to find a better way
         super().__init__(in_channels, out_channels, kernel_size, stride, padding)
         self.forward_hook = None
 
