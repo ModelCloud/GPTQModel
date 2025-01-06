@@ -524,7 +524,7 @@ class BaseGPTQModel(nn.Module):
 
             cur_layer_device = get_device(layer)
             full = find_layers(layer)
-            for names in layer_modules:
+            for index, names in enumerate(layer_modules):
                 subset = {n: full[n] for n in names if n in full}
                 skipped_modules = []
                 gptq = {}
@@ -603,8 +603,6 @@ class BaseGPTQModel(nn.Module):
 
                     del layer_input
                     del additional_layer_inputs
-                    if num_batches > 1 and j == num_batches - 1:
-                        torch_empty_cache()
 
                 fwd_end = time.time()
                 fwd_time = fwd_end - fwd_start
@@ -615,6 +613,9 @@ class BaseGPTQModel(nn.Module):
                 for name in subset:
                     if hasattr(subset[name], 'forward_hook'):
                         subset[name].forward_hook = None
+
+                if index == len(layer_modules) - 1:
+                    torch_empty_cache()
 
                 for name_index, name in enumerate(subset):
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
