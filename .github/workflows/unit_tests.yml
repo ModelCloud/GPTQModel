@@ -1,5 +1,7 @@
 name: Unit Tests
 
+run-name: "${{ github.event.inputs.title }}"
+
 defaults:
   run:
     shell: bash -le {0}
@@ -8,6 +10,10 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
+      title:
+        description: 'set a title for this run'
+        required: false
+        default: ''
       repo:
         description: 'GitHub repo {owner}/{repo}'
         required: false
@@ -37,7 +43,7 @@ on:
         required: false
         default: '10'
       m4-only:
-        description: 'only run m4(test only)'
+        description: 'run only m4 test only'
         type: boolean
         required: false
         default: false
