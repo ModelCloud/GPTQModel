@@ -75,6 +75,6 @@ def replace_linear_with_hooked_linear(module):
         elif isinstance(child, Conv1D):
             setattr(module, name, HookedConv1D.from_conv1d(child))
         elif isinstance(child, torch.nn.Conv2d):
-            setattr(module, name, HookedConv2d.from_linear(child))
+            setattr(module, name, HookedConv2d.from_conv2d(child))
         else:
             replace_linear_with_hooked_linear(child)
