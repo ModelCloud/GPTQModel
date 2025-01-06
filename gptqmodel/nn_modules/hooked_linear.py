@@ -25,15 +25,12 @@ class HookedConv1D(Conv1D):
 
 class HookedConv2d(torch.nn.Conv2d):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int, padding: int) -> None:
-        torch.nn._ConvNd.__init__(self)
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-
+        super().__init__(in_channels, out_channels, kernel_size, stride, padding)
         self.forward_hook = None
 
     @staticmethod
     def from_conv2d(conv2d: torch.nn.Conv2d):
-        custom_conv2d = HookedConv2d(conv2d.in_channels, conv2d.out_channels)
+        custom_conv2d = HookedConv2d(conv2d.in_channels, conv2d.out_channels, conv2d.kernel_size, conv2d.stride, conv2d.padding)
         custom_conv2d.weight = conv2d.weight
         custom_conv2d.bias = conv2d.bias
         return custom_conv2d
