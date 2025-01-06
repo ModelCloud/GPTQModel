@@ -55,7 +55,6 @@ env:
   PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
-  TRANSFORMERS_DIFF_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   TORCH_2_5_TESTS: "test_evalplus.py,test_perplexity.py,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model.py,test_quant_formats.py,models/test_hymba.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,test_q4_torch_apple.py"
   GPTQMODEL_FORCE_BUILD: 1
@@ -108,7 +107,6 @@ jobs:
     if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
-      transformers-files: ${{ steps.files.outputs.transformers-files }}
 
     steps:
       - name: Checkout Codes
@@ -134,7 +132,6 @@ jobs:
           import os
           import re
 
-          TRANSFORMERS_DIFF_TESTS = '${TRANSFORMERS_DIFF_TESTS}'
           IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
 
           TEST_NAMES='${{ github.event.inputs.test_names }}'
@@ -142,28 +139,22 @@ jobs:
 
           input_test_files_list = [f.strip().removesuffix('.py') for f in TEST_NAMES.split(',') if f.strip()]
 
-          transformers_test_files = [f.strip().removesuffix('.py') for f in f'{TRANSFORMERS_DIFF_TESTS}'.split(',') if f.strip()]
-          transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
-
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
           all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
 
-          torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
+          torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list)]
 
           torch_2_5_test_files = [test for test in torch_2_5_test_files if re.match(rf'{TEST_REGEX}', test)]
-          transformers_test_files = [test for test in transformers_test_files if re.match(rf'{TEST_REGEX}', test)]
 
-          print(f'{json.dumps(torch_2_5_test_files)}|{json.dumps(transformers_test_files)}')
+          print(f'{json.dumps(torch_2_5_test_files)}}')
           "
 
           test_files=$(python3 -c "$script")
-          IFS='|' read -r torch_2_5_test_files transformers_test_files <<< "$test_files"
+          IFS='|' read -r torch_2_5_test_files <<< "$test_files"
           echo "torch-2-5-files=$torch_2_5_test_files" >> "$GITHUB_OUTPUT"
-          echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
           echo "Torch 2.5 Test files: $torch_2_5_test_files"
-          echo "Transformers Test files: $transformers_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
@@ -331,7 +322,7 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
 
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
@@ -356,7 +347,7 @@ jobs:
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   torch2_5:
     needs:
@@ -454,7 +445,7 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
 
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
@@ -482,11 +473,11 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
