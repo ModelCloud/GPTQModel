@@ -603,7 +603,7 @@ class BaseGPTQModel(nn.Module):
 
                     del layer_input
                     del additional_layer_inputs
-                    if num_batches > 1 and (j == (num_batches - 1) // 2 or j == num_batches - 1):
+                    if num_batches > 1 and j == num_batches - 1:
                         torch_empty_cache()
 
                 fwd_end = time.time()
@@ -694,7 +694,7 @@ class BaseGPTQModel(nn.Module):
 
                 del layer_input
                 del additional_layer_inputs
-                if num_batches > 1 and (j == (num_batches - 1) // 2 or j == num_batches - 1):
+                if num_batches > 1 and j == num_batches - 1:
                     torch_empty_cache()
 
 
