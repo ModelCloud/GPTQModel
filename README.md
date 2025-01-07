@@ -150,7 +150,7 @@ result = model.generate("Uncovering deep insights begins with")[0]
 ### OpenAI API compatible end-point
 ```py
 # load model using above inference guide first
-model.serve(host="0.0.0.0","12345")
+model.serve(host="0.0.0.0",port="12345")
 ```
 
 ### Quantization
