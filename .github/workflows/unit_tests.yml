@@ -302,7 +302,7 @@ jobs:
           fi
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ]; then
             echo "===== install transformers from git ====="
-            uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
+            uv pip install -U git+https://github.com/huggingface/transformers.git
           fi
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
