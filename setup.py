@@ -296,7 +296,8 @@ setup(
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        'triton': ["triton>=2.0.0"]
+        'triton': ["triton>=2.0.0"],
+        'openai': ["uvicorn", "fastapi", "pydantic"]
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",

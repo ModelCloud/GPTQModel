@@ -82,6 +82,8 @@ class BaseGPTQModel(nn.Module):
 
     quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
 
+    server = None
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -793,6 +795,19 @@ class BaseGPTQModel(nn.Module):
                         f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
+
+    def serve(self,
+               host: str = "0.0.0.0",
+               port: int = 80,
+               async_mode: bool = False):
+        from ..utils.openai_server import OpenAiServer
+        self.server = OpenAiServer(model=self)
+        self.server.start(host=host, port=port, async_mode=async_mode)
+
+
+    def serve_shutdown(self):
+        if self.server is not None:
+            self.server.shutdown()
 
 
 
