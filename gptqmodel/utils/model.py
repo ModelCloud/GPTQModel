@@ -21,7 +21,8 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, \
+    SUPPORTS_MODULE_TYPES
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -87,7 +88,8 @@ def nested_move_to(v, device):
 
 def find_layers(module, layers=None, name=""):
     if not layers:
-        layers = [transformers.pytorch_utils.Conv1D, nn.Conv2d, nn.Linear]
+        layers = SUPPORTS_MODULE_TYPES
+
     for layer in layers:
         if isinstance(module, layer):
             return {name: module}
@@ -180,7 +182,11 @@ def make_quant(
 def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
-    for name, submodule in module.named_modules():
+    named_modules = module.named_modules()
+    if isinstance(module, tuple(SUPPORTS_MODULE_TYPES)):
+        named_modules = [("lm_head", module)]
+
+    for name, submodule in named_modules:
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
             if isinstance(submodule, nn.Linear):
@@ -233,7 +239,10 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             )
             new_layer.device = ori_layer_device
-            recurse_setattr(module, name, new_layer.to(ori_layer_device))
+            if name != "lm_head":
+                recurse_setattr(module, name, new_layer.to(ori_layer_device))
+            else:
+                module = new_layer.to(ori_layer_device)
     return QuantLinear
 
 # public/stable api exposed to transformer/optimum
@@ -362,6 +371,7 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
 
 def pack_module(
     model,
+    module_name,
     quantizers,
     bits,
     group_size,
@@ -385,9 +395,9 @@ def pack_module(
 
     model.to(CPU)
 
-    logger.info("Packing model...")
+    logger.info(f"Packing module... {module_name}")
 
-    layers = find_layers(model)
+    layers = find_layers(model, name=module_name)
     layers = {n: layers[n] for n in quantizers}
     make_quant(
         model,
@@ -400,9 +410,10 @@ def pack_module(
         pack=True,
         dynamic=dynamic,
     )
-    qlayers = find_layers(model, [QuantLinear])
-    names = list(qlayers.keys())
 
+    qlayers = find_layers(model, [QuantLinear], name=module_name)
+    names = list(qlayers.keys())
+    print("names", names, layers)
     if parallel_packing:
         max_workers = 2
     else:
