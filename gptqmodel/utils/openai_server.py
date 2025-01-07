@@ -20,10 +20,10 @@ class OpenAIServer:
             model: str
             messages: list = []
             max_tokens: int = 256
-            temperature: float = 1.0
+            temperature: float = 0.0
             top_p: float = 1.0
             n: int = 1
-            stop: list = []
+            stop: list = None
 
         class OpenAIResponseChoice(BaseModel):
             text: str
@@ -39,9 +39,12 @@ class OpenAIServer:
         @self.app.post("/v1/chat/completions", response_model=OpenAIResponse)
         async def create_completion(request: OpenAIRequest):
             try:
-                inputs = self.tokenizer.apply_chat_template(request.messages, add_generation_prompt=True)
-                inputs_tensor = torch.tensor(inputs).to(self.model.device)
-                do_sample = True if request.temperature != 1.0 else False
+                inputs_tensor = self.tokenizer.apply_chat_template(
+                    request.messages,
+                    add_generation_prompt=True,
+                    return_tensors='pt').to(self.model.device)
+
+                do_sample = True if request.temperature != 0.0 else False
                 with torch.no_grad():
                     outputs = self.model.generate(
                         inputs_tensor,

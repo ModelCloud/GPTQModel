@@ -794,7 +794,7 @@ class BaseGPTQModel(nn.Module):
         else:
             self.save_pretrained(save_dir, **kwargs)
 
-    def server(self,
+    def serve(self,
                host: str = "0.0.0.0",
                port: int = 80,
                async_mode: bool = True):
