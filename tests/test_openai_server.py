@@ -6,6 +6,7 @@ import openai
 import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 class TestOpeniServer(unittest.TestCase):
@@ -18,7 +19,7 @@ class TestOpeniServer(unittest.TestCase):
 
     def test_openai_server(self):
         model = GPTQModel.load(self.MODEL_ID)
-        model.serve(host=self.HOST, port=self.PORT)
+        model.serve(host=self.HOST, port=self.PORT, async_mode=True)
 
         time.sleep(5)
 

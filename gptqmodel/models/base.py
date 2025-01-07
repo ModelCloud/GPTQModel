@@ -797,7 +797,7 @@ class BaseGPTQModel(nn.Module):
     def serve(self,
                host: str = "0.0.0.0",
                port: int = 80,
-               async_mode: bool = True):
+               async_mode: bool = False):
         from ..utils.openai_server import OpenAiServer
         server = OpenAiServer(model=self)
         server.start(host=host, port=port, async_mode=async_mode)

@@ -13,9 +13,9 @@ class OpenAiServer:
         self.model = model
         self.tokenizer = model.tokenizer
         self.model_id_or_path = model.config.name_or_path
-        self._setup_routes()
+        self.setup_routes()
 
-    def _setup_routes(self):
+    def setup_routes(self):
         class OpenAiRequest(BaseModel):
             model: str
             messages: list = []
@@ -70,10 +70,8 @@ class OpenAiServer:
                     for i, gen_text in enumerate(generated_texts)
                 ]
 
-                response_id = f"gptqmodel-{uuid.uuid4()}"
-
                 response = OpenAiResponse(
-                    id=response_id,
+                    id=f"{uuid.uuid4()}",
                     created=int(time.time()),
                     model=self.model_id_or_path,
                     choices=choices
