@@ -31,4 +31,4 @@ class TestOpeniServer(unittest.TestCase):
         )
         result_text = response.choices[0].text
         self.assertEqual(result_text.strip(), "1 + 1 = 2")
-        self.model.server.shutdown()
+        self.model.serve_shutdown()
