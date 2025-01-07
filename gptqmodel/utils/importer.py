@@ -140,9 +140,9 @@ def select_quant_linear(
 ) -> Type[BaseQuantLinear]:
     backend = BACKEND.AUTO if backend is None else backend
 
+    trainable = backend == BACKEND.AUTO_TRAINABLE
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        trainable = backend == BACKEND.AUTO_TRAINABLE
 
         allow_backends = format_dict[format]
 
@@ -182,17 +182,17 @@ def select_quant_linear(
     if backend == BACKEND.TRITON:
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
-        return TritonV2QuantLinear
+        qlinear = TritonV2QuantLinear
     elif backend == BACKEND.BITBLAS:
-        return BitBLASQuantLinear
+        qlinear = BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
-        return MarlinQuantLinear
+        qlinear = MarlinQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
-        return ExllamaV2QuantLinear
+        qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
-        return ExllamaQuantLinear
+        qlinear = ExllamaQuantLinear
     elif backend == BACKEND.CUDA:
-        return DynamicCudaQuantLinear
+        qlinear = DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
@@ -204,8 +204,14 @@ def select_quant_linear(
         if cpu_vendor != "intel":
             logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Running on non-Intel cpu is not guaranteed. Current cpu vendor: `{cpu_vendor}`.")
 
-        return IPEXQuantLinear
+        qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
-        return TorchQuantLinear
+        qlinear = TorchQuantLinear
     else:
-        return TorchQuantLinear
+        qlinear = TorchQuantLinear
+
+    validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+    if not validate:
+        raise ValueError(err)
+    else:
+        return qlinear
