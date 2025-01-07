@@ -413,6 +413,14 @@ class BaseGPTQModel(nn.Module):
             # TODO torch.nn .Linear, transformers.modeling_utils.Conv1D check
             print("lm_head_module", lm_head_module.weight)
 
+            # TODO warning overwrite dynamic
+            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": False}
+            if self.quantize_config.dynamic is None:
+                self.quantize_config.dynamic = {"lm_head": lm_head_quant_config}
+            else:
+                self.quantize_config.dynamic["lm_head"] = lm_head_quant_config
+
+        # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(_, args, kwargs):
             # Positional arguments.
             layer_input = []
@@ -600,7 +608,7 @@ class BaseGPTQModel(nn.Module):
             modules = [[self.lm_head]] if is_lm_head else layer_modules
             for names in modules:
                 subset = {n: full[n] for n in names if n in full}
-                print("subset",subset)
+
                 skipped_modules = []
                 gptq = {}
                 for name in subset:
@@ -608,7 +616,7 @@ class BaseGPTQModel(nn.Module):
                     sym = self.quantize_config.sym
                     mse = self.quantize_config.mse
                     if self.quantize_config.dynamic is not None:
-                        layer_name = f"{self.layers_node}.{i}.{name}"
+                        layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
                             logger.info(f"skip module: {layer_name}")
@@ -625,7 +633,7 @@ class BaseGPTQModel(nn.Module):
                         sym=sym,
                         mse=mse,
                     )
-                print("gptq[name]",gptq[name])
+
                 for name in skipped_modules:
                     subset.pop(name)
 
@@ -690,12 +698,12 @@ class BaseGPTQModel(nn.Module):
                         subset[name].forward_hook = None
 
                 for name_index, name in enumerate(subset):
+                    layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
                     desc_act = self.quantize_config.desc_act
                     if self.quantize_config.dynamic is not None:
-                        layer_name = f"{self.layers_node}.{i}.{name}"
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
 
@@ -731,7 +739,7 @@ class BaseGPTQModel(nn.Module):
                     self.quant_log.append(stat)
                     logger.info(stat)
 
-                    quantizers[self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"] = (
+                    quantizers[layer_name] = (
                         gptq[name].quantizer.to(CPU),
                         move_to(scale, CPU),
                         move_to(zero, CPU),
