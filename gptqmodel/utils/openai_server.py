@@ -86,8 +86,7 @@ class OpenAiServer:
 
         @self.app.get("/shutdown")
         def shutdown():
-            if self.uvicorn_server is not None:
-                self.uvicorn_server.should_exit = True
+            self.shutdown()
             return {"message": "Server is shutting down..."}
 
 
@@ -106,3 +105,7 @@ class OpenAiServer:
             run_server()
             print(f"GPTQModel OpenAI Server has started synchronously at http://{host}:{port}.")
 
+    def shutdown(self):
+        if self.uvicorn_server is not None:
+            self.uvicorn_server.should_exit = True
+            print("Serve is shutting down...")
