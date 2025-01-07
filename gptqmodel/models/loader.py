@@ -374,7 +374,7 @@ def ModelLoader(cls):
 
         with ContextManagers(init_contexts):
             model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
+                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, attn_implementation="flash_attention_2"
             )
             model.checkpoint_file_name = model_save_name
 
