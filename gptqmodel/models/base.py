@@ -219,9 +219,6 @@ class BaseGPTQModel(nn.Module):
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
-        # if self.quantize_config.lm_head and not isinstance(self.quantize_config, AutoRoundQuantizeConfig):
-        #     raise ValueError("`lm_head=True` quantization is only available with AutoRound quantizer. Please use `AutoRoundQuantizeConfig` instead of `QuantizeConfig` and set `lm_head=True` or set `lm_head=False`.")
-
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
@@ -559,7 +556,6 @@ class BaseGPTQModel(nn.Module):
             modules = [[self.lm_head]] if is_lm_head else layer_modules
             for names in modules:
                 subset = {n: full[n] for n in names if n in full}
-
                 skipped_modules = []
                 gptq = {}
                 for name in subset:
