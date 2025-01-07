@@ -374,8 +374,11 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            if is_flash_attn_2_available() and Version(transformers.__version__) >= Version("4.46.0"):
+            is_transformer_version = Version(transformers.__version__) >= Version("4.46.0")
+            if is_flash_attn_2_available() and is_transformer_version:
                 args = {"attn_implementation": "flash_attention_2"}
+            elif is_flash_attn_2_available() and not is_transformer_version:
+                args = {"use_flash_attention_2": True}
             else:
                 args = {}
             model = cls.loader.from_config(
