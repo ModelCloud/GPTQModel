@@ -30,7 +30,8 @@ from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
 logger = setup_logger()
 
-
+ATTN_IMPLEMENTATION = "attn_implementation"
+USE_FLASH_ATTENTION_2 = "use_flash_attention_2"
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -374,18 +375,19 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            if "attn_implementation" in kwargs:
-                args = {"attn_implementation": kwargs.pop("attn_implementation", None)}
-            elif "use_flash_attention_2" in kwargs:
-                args = {"use_flash_attention_2": kwargs.pop("use_flash_attention_2", None)}
-            else:
-                has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-                if is_flash_attn_2_available() and has_attn_implementation:
-                    args = {"attn_implementation": "flash_attention_2"}
-                elif is_flash_attn_2_available() and not has_attn_implementation:
-                    args = {"use_flash_attention_2": True}
+            args = {}
+            if device in [DEVICE.CUDA, DEVICE.ROCM]:
+                if ATTN_IMPLEMENTATION in kwargs:
+                    args = {ATTN_IMPLEMENTATION: kwargs.pop(ATTN_IMPLEMENTATION, None)}
+                elif USE_FLASH_ATTENTION_2 in kwargs:
+                    args = {USE_FLASH_ATTENTION_2: kwargs.pop(USE_FLASH_ATTENTION_2, None)}
                 else:
-                    args = {}
+                    has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
+                    if is_flash_attn_2_available() and has_attn_implementation:
+                        args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
+                    elif is_flash_attn_2_available() and not has_attn_implementation:
+                        args = {USE_FLASH_ATTENTION_2: True}
+
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
             )
