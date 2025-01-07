@@ -146,7 +146,7 @@ jobs:
 
           torch_2_5_test_files = [test for test in torch_2_5_test_files if re.match(rf'{TEST_REGEX}', test)]
 
-          print(f'{json.dumps(torch_2_5_test_files)}}')
+          print(f'{json.dumps(torch_2_5_test_files)}')
           "
 
           test_files=$(python3 -c "$script")
