@@ -6,8 +6,9 @@ import torch
 import time
 import uuid
 
-class OpenAIServer:
+class OpenAiServer:
     def __init__(self, model):
+        self.uvicorn_server = None
         self.app = FastAPI()
         self.model = model
         self.tokenizer = model.tokenizer
@@ -15,7 +16,7 @@ class OpenAIServer:
         self._setup_routes()
 
     def _setup_routes(self):
-        class OpenAIRequest(BaseModel):
+        class OpenAiRequest(BaseModel):
             model: str
             messages: list = []
             max_tokens: int = 256
@@ -24,19 +25,19 @@ class OpenAIServer:
             n: int = 1
             stop: list = None
 
-        class OpenAIResponseChoice(BaseModel):
+        class OpenAiResponseChoice(BaseModel):
             text: str
             index: int = 0
 
-        class OpenAIResponse(BaseModel):
+        class OpenAiResponse(BaseModel):
             id: str = ""
             object: str = "text_completion"
             created: int
             model: str
-            choices: list[OpenAIResponseChoice]
+            choices: list[OpenAiResponseChoice]
 
-        @self.app.post("/v1/chat/completions", response_model=OpenAIResponse)
-        async def create_completion(request: OpenAIRequest):
+        @self.app.post("/v1/chat/completions", response_model=OpenAiResponse)
+        async def create_completion(request: OpenAiRequest):
             try:
                 inputs_tensor = self.tokenizer.apply_chat_template(
                     request.messages,
@@ -62,7 +63,7 @@ class OpenAIServer:
                 )
 
                 choices = [
-                    OpenAIResponseChoice(
+                    OpenAiResponseChoice(
                         text=gen_text,
                         index=i,
                     )
@@ -71,7 +72,7 @@ class OpenAIServer:
 
                 response_id = f"gptqmodel-{uuid.uuid4()}"
 
-                response = OpenAIResponse(
+                response = OpenAiResponse(
                     id=response_id,
                     created=int(time.time()),
                     model=self.model_id_or_path,
@@ -85,17 +86,25 @@ class OpenAIServer:
         def read_root():
             return {"message": "GPTQModel OpenAI Compatible Server is running."}
 
+        @self.app.get("/shutdown")
+        def shutdown():
+            if self.uvicorn_server is not None:
+                self.uvicorn_server.should_exit = True
+            return {"message": "Server is shutting down..."}
+
+
     def start(self, host: str = "0.0.0.0", port: int = 80, async_mode: bool = True):
+        config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
+        self.uvicorn_server = uvicorn.Server(config)
+
+        def run_server():
+            self.uvicorn_server.run()
+
         if async_mode:
-            thread = threading.Thread(
-                target=uvicorn.run,
-                args=(self.app,),
-                kwargs={"host": host, "port": port, "log_level": "info"},
-                daemon=False
-            )
+            thread = threading.Thread(target=run_server, daemon=False)
             thread.start()
             print(f"GPTQModel OpenAI Server has started asynchronously at http://{host}:{port}.")
         else:
-            uvicorn.run(self.app, host=host, port=port, log_level="info")
+            run_server()
             print(f"GPTQModel OpenAI Server has started synchronously at http://{host}:{port}.")
 
