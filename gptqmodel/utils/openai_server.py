@@ -3,7 +3,6 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import torch
-from transformers import AutoTokenizer
 import time
 import uuid
 
