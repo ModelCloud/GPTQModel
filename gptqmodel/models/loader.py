@@ -375,7 +375,7 @@ def ModelLoader(cls):
 
         with ContextManagers(init_contexts):
             args = {}
-            if device == DEVICE.CUDA:
+            if device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if "attn_implementation" in kwargs:
                     args = {"attn_implementation": kwargs.pop("attn_implementation", None)}
                 elif "use_flash_attention_2" in kwargs:
