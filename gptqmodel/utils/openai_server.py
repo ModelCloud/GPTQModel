@@ -94,7 +94,6 @@ class OpenAIServer:
                 daemon=False
             )
             thread.start()
-            thread.join()
             print(f"GPTQModel OpenAI Server has started asynchronously at http://{host}:{port}.")
         else:
             uvicorn.run(self.app, host=host, port=port, log_level="info")
