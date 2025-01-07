@@ -1,10 +1,17 @@
 import threading
-import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 import torch
 import time
 import uuid
+
+try:
+    import uvicorn
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+except ModuleNotFoundError as exception:
+    raise type(exception)(
+        "GPTQModel OpenAi serve required dependencies are not installed.",
+        "Please install via `pip install gptqmodel[openai] --no-build-isolation`.",
+    )
 
 class OpenAiServer:
     def __init__(self, model):
