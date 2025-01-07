@@ -11,6 +11,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
+from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -373,8 +374,12 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            if is_flash_attn_2_available() and Version(transformers.__version__) >= Version("4.46.0"):
+                args = {"attn_implementation": "flash_attention_2"}
+            else:
+                args = {}
             model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, attn_implementation="flash_attention_2"
+                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
             )
             model.checkpoint_file_name = model_save_name
 
