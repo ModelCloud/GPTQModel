@@ -11,6 +11,7 @@ from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
+from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -141,7 +142,7 @@ class TestPerplexity(unittest.TestCase):
         )
 
         dataset = self.opt_calibration_dataset if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration_dataset
-        model.quantize(dataset, batch_size=256)
+        model.quantize(dataset, batch_size=128 if IS_ROCM else 256)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
