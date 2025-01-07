@@ -625,7 +625,7 @@ class BaseGPTQModel(nn.Module):
                         sym=sym,
                         mse=mse,
                     )
-
+                print("gptq[name]",gptq[name])
                 for name in skipped_modules:
                     subset.pop(name)
 
@@ -670,11 +670,11 @@ class BaseGPTQModel(nn.Module):
                             if layer.reuse_kv:
                                 additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
 
-                            layer_output = layer(*layer_input) if self.quantize_config.lm_head else layer(*layer_input, **additional_layer_inputs)
+                            layer_output = layer(*layer_input) if is_lm_head else layer(*layer_input, **additional_layer_inputs)
                             if shared_kv_cache_dict.get(i) is None:
                                 shared_kv_cache_dict[i] = layer_output[-1]
                         else:
-                            layer(*layer_input) if self.quantize_config.lm_head else layer(*layer_input, **additional_layer_inputs)
+                            layer(*layer_input) if is_lm_head else layer(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -731,7 +731,7 @@ class BaseGPTQModel(nn.Module):
                     self.quant_log.append(stat)
                     logger.info(stat)
 
-                    quantizers[f"{self.layers_node}.{i}.{name}"] = (
+                    quantizers[self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"] = (
                         gptq[name].quantizer.to(CPU),
                         move_to(scale, CPU),
                         move_to(zero, CPU),
@@ -760,7 +760,7 @@ class BaseGPTQModel(nn.Module):
 
                 with torch.no_grad():
                     layer_output = move_to(
-                        layer(*layer_input)[0] if self.quantize_config.lm_head else layer(*layer_input, **additional_layer_inputs)[0],
+                        layer(*layer_input)[0] if is_lm_head else layer(*layer_input, **additional_layer_inputs)[0],
                         cur_layer_device if calibration_enable_gpu_cache else CPU,
                     )
                     layer_outputs.append([layer_output])
