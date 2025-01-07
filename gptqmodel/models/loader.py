@@ -92,7 +92,6 @@ def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
 
 
 def ModelLoader(cls):
-    @classmethod
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
@@ -182,7 +181,6 @@ def ModelLoader(cls):
 
     cls.from_pretrained = from_pretrained
 
-    @classmethod
     def from_quantized(
             cls,
             model_id_or_path: Optional[str],
