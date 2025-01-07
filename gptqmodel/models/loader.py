@@ -235,8 +235,6 @@ def ModelLoader(cls):
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
-        attn_implementation = kwargs.pop("attn_implementation", None)
-        use_flash_attention_2 = kwargs.pop("use_flash_attention_2", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -376,10 +374,10 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            if attn_implementation:
-                args = {"attn_implementation": attn_implementation}
-            elif use_flash_attention_2:
-                args = {"use_flash_attention_2": use_flash_attention_2}
+            if "attn_implementation" in kwargs:
+                args = {"attn_implementation": kwargs.pop("attn_implementation", None)}
+            elif "use_flash_attention_2" in kwargs:
+                args = {"use_flash_attention_2": kwargs.pop("use_flash_attention_2", None)}
             else:
                 has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
                 if is_flash_attn_2_available() and has_attn_implementation:
