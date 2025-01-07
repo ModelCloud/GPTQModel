@@ -807,7 +807,7 @@ class BaseGPTQModel(nn.Module):
 
     def serve_shutdown(self):
         if self.server is not None:
-            self.server
+            self.server.shutdown()
 
 
 
