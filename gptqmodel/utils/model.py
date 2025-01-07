@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import functools
 import hashlib
 import json
@@ -122,15 +121,6 @@ def get_module(module, key):
         module = getattr(module, name, None)
     return module
 
-def collect_best_params(block):
-    params = {}
-    for n, m in block.named_modules():
-        if hasattr(m, "orig_layer"):
-            params[n] = {}
-            for key in m.params.keys():
-                params[n][key] = copy.deepcopy(m.params[key].data)
-    return params
-
 
 def make_quant(
     module,
@@ -183,8 +173,6 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
     if isinstance(module, QuantLinear):
         return QuantLinear
     named_modules = module.named_modules()
-    if isinstance(module, tuple(SUPPORTS_MODULE_TYPES)):
-        named_modules = [("lm_head", module)]
 
     for name, submodule in named_modules:
         if name in names:
@@ -239,10 +227,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             )
             new_layer.device = ori_layer_device
-            if name != "lm_head":
-                recurse_setattr(module, name, new_layer.to(ori_layer_device))
-            else:
-                module = new_layer.to(ori_layer_device)
+            recurse_setattr(module, name, new_layer.to(ori_layer_device))
     return QuantLinear
 
 # public/stable api exposed to transformer/optimum
@@ -368,67 +353,6 @@ def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
         qlayers[name].pack(layers[name], scale, zero, g_idx)
         qlayers[name].to(layer_device)
         pbar.progress()
-
-def pack_module(
-    model,
-    module_name,
-    quantizers,
-    bits,
-    group_size,
-    backend: BACKEND,
-    format: str | FORMAT,
-    desc_act=False,
-    sym: bool = True,
-    dynamic=None,
-    parallel_packing: bool = True,
-):
-    QuantLinear = select_quant_linear(
-        bits=bits,
-        dynamic=dynamic,
-        group_size=group_size,
-        desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=True,
-    )
-
-    model.to(CPU)
-
-    logger.info(f"Packing module... {module_name}")
-
-    layers = find_layers(model, name=module_name)
-    layers = {n: layers[n] for n in quantizers}
-    make_quant(
-        model,
-        quantizers,
-        bits,
-        group_size,
-        backend=backend,
-        format=format,
-        desc_act=desc_act,
-        pack=True,
-        dynamic=dynamic,
-    )
-
-    qlayers = find_layers(model, [QuantLinear], name=module_name)
-    names = list(qlayers.keys())
-    print("names", names, layers)
-    if parallel_packing:
-        max_workers = 2
-    else:
-        max_workers = 1
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with ProgressBar(total=len(names)) as pbar:
-            def wrapper(name):
-                pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
-
-            for _ in executor.map(wrapper, names):
-                pass
-
-    logger.info("Model packed.")
-    return QuantLinear
 
 
 def pack_model(
