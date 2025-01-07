@@ -45,7 +45,7 @@ class OpenAIServer:
                 with torch.no_grad():
                     outputs = self.model.generate(
                         inputs_tensor,
-                        max_length=inputs_tensor.shape[1] + request.max_tokens,
+                        max_length=inputs_tensor.shape[0] + request.max_tokens,
                         temperature=request.temperature,
                         top_p=request.top_p,
                         num_return_sequences=request.n,
