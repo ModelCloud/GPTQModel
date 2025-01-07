@@ -311,7 +311,7 @@ jobs:
           uv pip install dist/*.whl
 
       - name: Install special requirements
-        if: ${{ !contains(TRANSFORMERS_DIFF_TESTS, matrix.test_script) && !cancelled() }}
+        if: ${{ !contains(env.TRANSFORMERS_DIFF_TESTS, matrix.test_script) && !cancelled() }}
         run: |
           uv pip install optimum bitblas==0.0.1.dev13 uvicorn transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U
 
