@@ -725,6 +725,9 @@ class BaseGPTQModel(nn.Module):
 
             if not is_lm_head:
                 layers[i] = move_to(layer, CPU)
+            else:
+                move_to(layer, CPU)
+
             del layer
             del gptq
             del layer_inputs
@@ -732,6 +735,13 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
+
+            # if i == layer_count - 1:
+                # print("saved", layer_inputs)
+                # torch.save(layer_inputs, "lm_head_layer_inputs.pt")
+                # layer_inputs = torch.load("lm_head_layer_inputs.pt")
+                # print("loaded", layer_inputs)
+
             torch_empty_cache()
 
         logger.info(f"Quantization summary:\n{self.quant_log}")
