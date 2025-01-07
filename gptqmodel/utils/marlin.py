@@ -3,6 +3,7 @@ import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
+from .rocm import IS_ROCM
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -84,7 +85,7 @@ def _validate_marlin_device_support() -> bool:
     Returns:
         bool: indicates if CUDA device is compatible for Marlin
     """
-    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 and torch.version.hip is None
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 and not IS_ROCM
 
 
 # Adapted from https://github.com/rib-2/marlin/tree/conversion

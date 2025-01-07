@@ -4,6 +4,7 @@ from typing import Dict, Optional, Type, Union
 
 import torch
 
+from .rocm import IS_ROCM
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -68,7 +69,7 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
             raise ValueError(f"device must be a string or torch.device, got {type(device)}")
 
     # map fake cuda to actual rocm
-    if normalized_device == DEVICE.CUDA and torch.version.hip is not None:
+    if normalized_device == DEVICE.CUDA and IS_ROCM:
         normalized_device = DEVICE.ROCM
     return normalized_device
 

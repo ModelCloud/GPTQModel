@@ -4,6 +4,7 @@ import torch
 from torch import device
 
 from ..utils import BACKEND
+from ..utils.rocm import IS_ROCM
 from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
 CPU = device("cpu")
@@ -26,7 +27,7 @@ class DEVICE(str, Enum):
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")
     def _missing_(cls, value):
-        if torch.version.hip is not None and f"{value}".lower() == "rocm":
+        if IS_ROCM and f"{value}".lower() == "rocm":
             return cls.ROCM
         return super()._missing_(value)
 
