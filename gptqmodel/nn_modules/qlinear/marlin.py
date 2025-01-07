@@ -288,6 +288,8 @@ class MarlinQuantLinear(BaseQuantLinear):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
             return False, marlin_import_exception
+        if torch.version.hip is not None:
+            return False, RuntimeError("marlin kernel is not supported by rocm.")
         return cls._validate(**args)
 
     def post_init(self):
