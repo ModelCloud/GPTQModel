@@ -333,10 +333,10 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
