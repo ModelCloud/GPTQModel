@@ -365,7 +365,7 @@ jobs:
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
