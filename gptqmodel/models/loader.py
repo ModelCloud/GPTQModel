@@ -407,6 +407,7 @@ def ModelLoader(cls):
                 backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
                 desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
                 dynamic=quantize_config.dynamic,
                 device=device,
             )
