@@ -794,6 +794,14 @@ class BaseGPTQModel(nn.Module):
         else:
             self.save_pretrained(save_dir, **kwargs)
 
+    def server(self,
+               host: str = "0.0.0.0",
+               port: int = 80,
+               async_mode: bool = True):
+        from ..utils.openai_server import OpenAIServer
+        server = OpenAIServer(model=self)
+        server.start(host=host, port=port, async_mode=async_mode)
+
 
 
     def __getattr__(self, item):

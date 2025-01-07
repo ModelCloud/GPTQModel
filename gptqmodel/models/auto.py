@@ -325,14 +325,3 @@ class GPTQModel:
             return results
         else:
             raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
-
-    @classmethod
-    def server(self,
-               model_id_or_path: str,
-               host: str = "0.0.0.0",
-               port: int = 80,
-               async_mode: bool = True):
-        from ..utils.openai_server import OpenAIServer
-        model = GPTQModel.load(model_id_or_path=model_id_or_path)
-        server = OpenAIServer(model=model)
-        server.start(host=host, port=port, async_mode=async_mode)

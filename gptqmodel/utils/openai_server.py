@@ -12,13 +12,13 @@ class OpenAIServer:
         self.app = FastAPI()
         self.model = model
         self.tokenizer = model.tokenizer
-        self.model_id_or_path = model.model.config.name_or_path
+        self.model_id_or_path = model.config.name_or_path
         self._setup_routes()
 
     def _setup_routes(self):
         class OpenAIRequest(BaseModel):
             model: str
-            prompt: str
+            messages: list = []
             max_tokens: int = 256
             temperature: float = 1.0
             top_p: float = 1.0
@@ -36,15 +36,16 @@ class OpenAIServer:
             model: str
             choices: list[OpenAIResponseChoice]
 
-        @self.app.post("/v1/completions", response_model=OpenAIResponse)
+        @self.app.post("/v1/chat/completions", response_model=OpenAIResponse)
         async def create_completion(request: OpenAIRequest):
             try:
-                input_ids = self.tokenizer.encode(request.prompt, return_tensors='pt')
+                inputs = self.tokenizer.apply_chat_template(request.messages, add_generation_prompt=True)
+                inputs_tensor = torch.tensor(inputs).to(self.model.device)
                 do_sample = True if request.temperature != 1.0 else False
                 with torch.no_grad():
                     outputs = self.model.generate(
-                        input_ids,
-                        max_length=input_ids.shape[1] + request.max_tokens,
+                        inputs_tensor,
+                        max_length=inputs_tensor.shape[1] + request.max_tokens,
                         temperature=request.temperature,
                         top_p=request.top_p,
                         num_return_sequences=request.n,
@@ -53,10 +54,10 @@ class OpenAIServer:
                         do_sample=do_sample
                     )
 
-                generated_texts = [
-                    self.tokenizer.decode(output, skip_special_tokens=True)[len(request.prompt):]
-                    for output in outputs
-                ]
+                generated_texts = self.tokenizer.batch_decode(
+                    outputs[:, inputs_tensor.size(-1):],
+                    skip_special_tokens=True,
+                )
 
                 choices = [
                     OpenAIResponseChoice(
@@ -80,7 +81,7 @@ class OpenAIServer:
 
         @self.app.get("/")
         def read_root():
-            return {"message": "OpenAI Compatible Server is running."}
+            return {"message": "GPTQModel OpenAI Compatible Server is running."}
 
     def start(self, host: str = "0.0.0.0", port: int = 80, async_mode: bool = True):
         if async_mode:
@@ -88,11 +89,12 @@ class OpenAIServer:
                 target=uvicorn.run,
                 args=(self.app,),
                 kwargs={"host": host, "port": port, "log_level": "info"},
-                daemon=True
+                daemon=False
             )
             thread.start()
-            print(f"Server has started asynchronously at http://{host}:{port}.")
+            thread.join()
+            print(f"GPTQModel OpenAI Server has started asynchronously at http://{host}:{port}.")
         else:
             uvicorn.run(self.app, host=host, port=port, log_level="info")
-            print(f"Server is starting in synchronous mode at http://{host}:{port}.")
+            print(f"GPTQModel OpenAI Server has started synchronously at http://{host}:{port}.")
 
