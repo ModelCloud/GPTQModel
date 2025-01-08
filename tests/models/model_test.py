@@ -205,7 +205,10 @@ class ModelTest(unittest.TestCase):
         kargs = args if args else {}
 
         if self.DISABLE_FLASH_ATTN:
-            kargs["attn_implementation"] = None
+            has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
+            if has_attn_implementation:
+                args["attn_implementation"] = None
+            args["use_flash_attention_2"] = False
 
         model = GPTQModel.load(
             model_id_or_path,
