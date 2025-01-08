@@ -433,7 +433,7 @@ jobs:
             echo "===== install auto_round ====="
             uv pip install auto_round
           fi
-          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ]; then
+          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || if [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git
           fi
