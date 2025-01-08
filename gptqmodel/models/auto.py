@@ -325,3 +325,41 @@ class GPTQModel:
             return results
         else:
             raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
+        
+    #TODO format use enum    
+    @staticmethod
+    def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
+        #TODO  check format
+
+        #TODO  check model_id_or_path
+
+        #TODO  check model is quantized, and format is gptq
+
+        # load config
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        # load gptq model
+        gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
+
+        # load mlx model_class
+        model_class, model_args_class = get_model_classes(config=config)
+        model_args = model_args_class.from_dict(config)
+        mlx_model = model_class(model_args)
+
+        weights = {}
+        for name, module in gptq_model.model.named_modules():
+            # TODO check linear/embinding
+            # TODO if embindind, and it already quantized, dequantize it, f not quantized, use mlx quantize it
+
+            # TODO if linear, and it already quantized, dequantize it, f not quantized, raise error
+
+        mlx_model.load_weights(weights)
+
+        mlx_model.save(target_path)
+
+        
+
+
+
+
+
