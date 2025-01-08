@@ -214,7 +214,7 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
-            kwargs=kargs
+            **kargs
         )
 
         return model, tokenizer
