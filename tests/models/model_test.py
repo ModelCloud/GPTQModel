@@ -17,7 +17,6 @@
 import os
 import sys
 
-from gptqmodel.utils.model import MODALITY
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -38,6 +37,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
+from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
@@ -69,6 +69,9 @@ class ModelTest(unittest.TestCase):
     QUANT_FORMAT = FORMAT.GPTQ
     DESC_ACT = True
     SYM = True
+
+    LOAD_QUANTIZED_MODEL = None # loading from a quantized dir instead of using native model id/dir
+    SAVE_QUANTIZED_MODEL = None # if quantize a model, save it to this dir
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -157,7 +160,10 @@ class ModelTest(unittest.TestCase):
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
-            with (contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
+            with (contextlib.nullcontext(self.SAVE_QUANTIZED_MODEL) if self.SAVE_QUANTIZED_MODEL else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
+                os.makedirs(tmpdirname, exist_ok=True)
+                self.clear_directory(tmpdirname)
+
                 model.save(tmpdirname)
                 tokenizer.save_pretrained(tmpdirname)
                 q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
@@ -264,7 +270,14 @@ class ModelTest(unittest.TestCase):
         return diff_pct
 
     def quant_lm_eval(self):
-        self.model, self.tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        self.model = None
+        if self.LOAD_QUANTIZED_MODEL:
+            try:
+                self.model,_ = self.quantModel(self.SAVE_QUANTIZED_MODEL, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+            except BaseException:
+                print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong, use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
+        if not self.model:
+            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
@@ -280,3 +293,11 @@ class ModelTest(unittest.TestCase):
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+    def clear_directory(self, directory_path):
+        for item in os.listdir(directory_path):
+            item_path = os.path.join(directory_path, item)
+            if os.path.isfile(item_path) or os.path.islink(item_path):
+                os.unlink(item_path)
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
