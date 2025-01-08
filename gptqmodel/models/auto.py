@@ -23,6 +23,7 @@ from ..quantization import QUANT_CONFIG_FILENAME, FORMAT  # noqa: E402
 from ..utils import BACKEND, EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type  # noqa: E402
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -344,17 +345,18 @@ class GPTQModel:
         gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
 
         if format == "mlx":
-            # load mlx model_class
-            model_class, model_args_class = get_model_classes(config=config)
+            from mlx_lm.utils import _get_classes
+            model_class, model_args_class = _get_classes(config=config)
             model_args = model_args_class.from_dict(config)
             mlx_model = model_class(model_args)
 
             weights = {}
             for name, module in gptq_model.model.named_modules():
-                # TODO check linear/embinding
-                # TODO if embindind, and it already quantized, dequantize it, f not quantized, use mlx quantize it
+                if isinstance(module, TorchQuantLinear):
+                    weights[name] = nn.Linear(module.infeatures, module.outfeatures, bias=module.bias is not None)
+                    dequantized_weight = module.dequantize()
+                    weights[name].weight.data = mx.array(dequantized_weight[0])
 
-                # TODO if linear, and it already quantized, dequantize it, f not quantized, raise error
 
             mlx_model.load_weights(weights)
 
