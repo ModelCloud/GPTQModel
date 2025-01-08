@@ -11,7 +11,6 @@ from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
-from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -30,8 +29,6 @@ from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
 logger = setup_logger()
 
-ATTN_IMPLEMENTATION = "attn_implementation"
-USE_FLASH_ATTENTION_2 = "use_flash_attention_2"
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -375,22 +372,8 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            args = {}
-            if device in [DEVICE.CUDA, DEVICE.ROCM]:
-                if ATTN_IMPLEMENTATION in kwargs:
-                    args = {ATTN_IMPLEMENTATION: kwargs.pop(ATTN_IMPLEMENTATION, None)}
-                elif USE_FLASH_ATTENTION_2 in kwargs:
-                    args = {USE_FLASH_ATTENTION_2: kwargs.pop(USE_FLASH_ATTENTION_2, None)}
-                # TODO, don't auto enable flash_attn until transformers fix bugs. https://github.com/huggingface/transformers/issues/35547
-                # else:
-                #     has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-                #     if is_flash_attn_2_available() and has_attn_implementation:
-                #         args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
-                #     elif is_flash_attn_2_available() and not has_attn_implementation:
-                #         args = {USE_FLASH_ATTENTION_2: True}
-
             model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
+                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
             )
             model.checkpoint_file_name = model_save_name
 
