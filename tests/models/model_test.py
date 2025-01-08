@@ -130,6 +130,11 @@ class ModelTest(unittest.TestCase):
             desc_act=self.DESC_ACT,
             sym=self.SYM,
         )
+        args = kwargs if kwargs else {}
+
+        if self.DISABLE_FLASH_ATTN:
+            args["attn_implementation"] = None
+
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
@@ -137,7 +142,7 @@ class ModelTest(unittest.TestCase):
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
-            **kwargs,
+            **args,
         )
 
         tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -196,7 +201,7 @@ class ModelTest(unittest.TestCase):
         kargs = args if args else {}
 
         if self.DISABLE_FLASH_ATTN:
-            kargs["attn_implementation"]=None
+            kargs["attn_implementation"] = None
 
         model = GPTQModel.load(
             model_id_or_path,
