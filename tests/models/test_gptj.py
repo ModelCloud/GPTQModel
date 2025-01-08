@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 
 import torch  # noqa: E402
 from model_test import ModelTest
@@ -24,6 +25,9 @@ class TestGptJ(ModelTest):
     TORCH_DTYPE = torch.float16
     INPUTS_MAX_LENGTH = 1024
     DISABLE_FLASH_ATTN = True
+
+    LOAD_QUANTIZED_MODEL = os.path.join(NATIVE_MODEL_ID, "test_quantized")
+    SAVE_QUANTIZED_MODEL = os.path.join(NATIVE_MODEL_ID, "test_quantized")
 
     def test_gptj(self):
         self.quant_lm_eval()
