@@ -105,7 +105,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     def load_dataset(self, tokenizer):
-        traindata = load_dataset("json", data_files="/monster/data/model/huggingface/c4-train.00000-of-01024.json.gz", split="train")
+        traindata = load_dataset("json", data_files="/monster/data/_ci_/huggingface/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
         for index, sample in enumerate(traindata):
@@ -286,8 +286,8 @@ class ModelTest(unittest.TestCase):
         if self.LOAD_QUANTIZED_MODEL:
             try:
                 self.model,_ = self.quantModel(self.SAVE_QUANTIZED_MODEL, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
-            except BaseException:
-                print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong, use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
+            except BaseException as e:
+                print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong {e}\n use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
         if not self.model:
             self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
