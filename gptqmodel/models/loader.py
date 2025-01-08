@@ -393,9 +393,9 @@ def ModelLoader(cls):
             args = {}
             if device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if ATTN_IMPLEMENTATION in kwargs:
-                    args = {ATTN_IMPLEMENTATION: kwargs.pop(ATTN_IMPLEMENTATION, None)}
+                    args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
                 if USE_FLASH_ATTENTION_2 in kwargs:
-                    args = {USE_FLASH_ATTENTION_2: kwargs.pop(USE_FLASH_ATTENTION_2, None)}
+                    args[USE_FLASH_ATTENTION_2] = kwargs.pop(USE_FLASH_ATTENTION_2, None)
                 if not args:
                     has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
                     if is_flash_attn_2_available() and has_attn_implementation:
