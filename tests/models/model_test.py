@@ -17,7 +17,6 @@
 import os
 import sys
 
-
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -31,6 +30,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
+from packaging.version import Version  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -41,10 +41,10 @@ from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
+import transformers  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
-
 
 
 class ModelTest(unittest.TestCase):
@@ -62,8 +62,8 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DELETE_QUANTIZED_MODEL = True
 
-    KERNEL_QUANT = {} # kernel sets
-    KERNEL_INFERENCE = {} # kernel sets
+    KERNEL_QUANT = {}  # kernel sets
+    KERNEL_INFERENCE = {}  # kernel sets
 
     # quant config
     QUANT_FORMAT = FORMAT.GPTQ
@@ -71,8 +71,8 @@ class ModelTest(unittest.TestCase):
     SYM = True
 
     DISABLE_FLASH_ATTN = False
-    LOAD_QUANTIZED_MODEL = None # loading from a quantized dir instead of using native model id/dir
-    SAVE_QUANTIZED_MODEL = None # if quantize a model, save it to this dir
+    LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
+    SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
@@ -123,7 +123,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int=4, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = 4, **kwargs):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
@@ -134,7 +134,10 @@ class ModelTest(unittest.TestCase):
         args = kwargs if kwargs else {}
 
         if self.DISABLE_FLASH_ATTN:
-            args["attn_implementation"] = None
+            has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
+            if has_attn_implementation:
+                args["attn_implementation"] = None
+            args["use_flash_attention_2"] = False
 
         model = GPTQModel.load(
             model_id_or_path,
@@ -230,10 +233,10 @@ class ModelTest(unittest.TestCase):
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
                     gen_kwargs="temperature=0.0,top_k=50",
-                    random_seed = RAND_SEED,
-                    numpy_random_seed = RAND_SEED,
-                    torch_random_seed = RAND_SEED,
-                    fewshot_random_seed = RAND_SEED,
+                    random_seed=RAND_SEED,
+                    numpy_random_seed=RAND_SEED,
+                    torch_random_seed=RAND_SEED,
+                    fewshot_random_seed=RAND_SEED,
                 )
 
                 print('--------Eval Result---------')
@@ -285,7 +288,7 @@ class ModelTest(unittest.TestCase):
         self.model = None
         if self.LOAD_QUANTIZED_MODEL:
             try:
-                self.model,_ = self.quantModel(self.SAVE_QUANTIZED_MODEL, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+                self.model, _ = self.quantModel(self.SAVE_QUANTIZED_MODEL, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
             except BaseException as e:
                 print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong {e}\n use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
         if not self.model:
