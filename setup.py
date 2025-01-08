@@ -13,7 +13,7 @@ try:
 except BaseException:
     from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
-CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
+RELEASE_MODE = os.environ.get("RELEASE_MODE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
@@ -73,11 +73,11 @@ common_setup_kwargs = {
     ],
 }
 
-def get_version_tag(is_cuda_release: bool = True) -> str:
-    import torch
-
+def get_version_tag() -> str:
     if not BUILD_CUDA_EXT:
-        return common_setup_kwargs["version"]
+        return "cpu"
+
+    import torch
 
     cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
     if not cuda_version or not cuda_version.split("."):
@@ -93,10 +93,7 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
     CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    if is_cuda_release:
-        return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
-
-    return common_setup_kwargs["version"]
+    return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 
 with open('requirements.txt') as f:
@@ -126,11 +123,8 @@ if TORCH_CUDA_ARCH_LIST is None:
             FORCE_BUILD = True
 
 
-if BUILD_CUDA_EXT:
-    if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
-else:
-    common_setup_kwargs["version"] += "+cpu"
+if RELEASE_MODE == "1":
+    common_setup_kwargs["version"] += f"+{get_version_tag()}"
 
 additional_setup_kwargs = {}
 
