@@ -96,7 +96,6 @@ class OpenAiServer:
             self.shutdown()
             return {"message": "Server is shutting down..."}
 
-
     def start(self, host: str = "0.0.0.0", port: int = 80, async_mode: bool = True):
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         self.uvicorn_server = uvicorn.Server(config)
@@ -107,12 +106,19 @@ class OpenAiServer:
         if async_mode:
             thread = threading.Thread(target=run_server, daemon=False)
             thread.start()
-            print(f"GPTQModel OpenAI Server has started asynchronously at http://{host}:{port}.")
+            print(f"GPTQModel OpenAi Server has started asynchronously at http://{host}:{port}.")
         else:
             run_server()
-            print(f"GPTQModel OpenAI Server has started synchronously at http://{host}:{port}.")
+            print(f"GPTQModel OpenAi Server has started synchronously at http://{host}:{port}.")
 
     def shutdown(self):
         if self.uvicorn_server is not None:
             self.uvicorn_server.should_exit = True
-            print("Serve is shutting down...")
+            print("GPTQModel OpenAi Server is shutting down...")
+
+    def wait_until_ready(self, timeout: int = 30, check_interval: float = 0.1):
+        start_time = time.time()
+        while not self.uvicorn_server.started:
+            if time.time() - start_time > timeout:
+                raise TimeoutError("GPTQModel OpenAi server failed to start within the specified time.")
+            time.sleep(check_interval)

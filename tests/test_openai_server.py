@@ -6,7 +6,7 @@ import openai
 import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 class TestOpeniServer(unittest.TestCase):
     @classmethod
@@ -19,7 +19,7 @@ class TestOpeniServer(unittest.TestCase):
 
     def test_openai_server(self):
         self.model.serve(host=self.HOST, port=self.PORT, async_mode=True)
-        time.sleep(5)
+        self.model.serve_wait_until_ready()
         client = openai.Client(base_url=f"http://{self.HOST}:{self.PORT}/v1", api_key="None")
         messages = [
             {"role": "user", "content": "1+1=?"},
