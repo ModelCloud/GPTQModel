@@ -147,13 +147,15 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: Optional[DEVICE] = DEVICE.CUDA,
+        device: Optional[DEVICE] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
 ) -> Type[BaseQuantLinear]:
+    if device is None:
+        device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
     backend = BACKEND.AUTO if backend is None else backend
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
