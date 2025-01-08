@@ -56,6 +56,7 @@ env:
   MAX_JOBS: 8
   RUNNER: 10.0.14.248
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
+  TORCH_2_5_TESTS: "test_evalplus.py,test_perplexity.py,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model.py,test_quant_formats.py,models/test_hymba.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,test_q4_torch_apple.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -107,6 +108,7 @@ jobs:
     if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
+      transformers-files: ${{ steps.files.outputs.transformers-files }}
 
     steps:
       - name: Checkout Codes
@@ -132,6 +134,7 @@ jobs:
           import os
           import re
 
+          TRANSFORMERS_DIFF_TESTS = '${TRANSFORMERS_DIFF_TESTS}'
           IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
 
           TEST_NAMES='${{ github.event.inputs.test_names }}'
@@ -139,22 +142,28 @@ jobs:
 
           input_test_files_list = [f.strip().removesuffix('.py') for f in TEST_NAMES.split(',') if f.strip()]
 
+          transformers_test_files = [f.strip().removesuffix('.py') for f in f'{TRANSFORMERS_DIFF_TESTS}'.split(',') if f.strip()]
+          transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
+
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
           all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
 
-          torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list)]
+          torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
 
           torch_2_5_test_files = [test for test in torch_2_5_test_files if re.match(rf'{TEST_REGEX}', test)]
+          transformers_test_files = [test for test in transformers_test_files if re.match(rf'{TEST_REGEX}', test)]
 
-          print(f'{json.dumps(torch_2_5_test_files)}')
+          print(f'{json.dumps(torch_2_5_test_files)}|{json.dumps(transformers_test_files)}')
           "
 
           test_files=$(python3 -c "$script")
-          IFS='|' read -r torch_2_5_test_files <<< "$test_files"
+          IFS='|' read -r torch_2_5_test_files transformers_test_files <<< "$test_files"
           echo "torch-2-5-files=$torch_2_5_test_files" >> "$GITHUB_OUTPUT"
+          echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
           echo "Torch 2.5 Test files: $torch_2_5_test_files"
+          echo "Transformers Test files: $transformers_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
@@ -224,6 +233,130 @@ jobs:
       - name: Clean cache
         if: always()
         run: pip cache purge && uv cache clean
+
+  transformers_diff:
+    needs:
+      - build
+      - list-test-files
+      - check-vm
+    runs-on: [ self-hosted, xeon5 ]
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
+      volumes:
+        - /home/ci/models:/monster/data/model
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.transformers-files) }}
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
+      - name: Print Env
+        run: |
+          echo "== pyenv =="
+          pyenv versions
+          echo "== python =="
+          python --version
+          echo "== nvcc =="
+          nvcc --version
+          echo "== torch =="
+          pip show torch
+          echo "== pip list =="
+          pip list
+
+      - name: Download wheel
+        continue-on-error: true
+        run: |
+          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+
+          if echo "$file_name" | grep -q "gptqmodel"; then
+              mkdir dist || true
+              cd dist
+              curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+              ls -ahl .
+              sha256=$(sha256sum $file_name)
+              echo "sha256=$sha256"
+              echo "DOWNLOADED=1" >> $GITHUB_ENV
+          fi
+
+      - name: Download artifact
+        if: env.DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Install wheel
+        run: |
+          echo "===== install optimum bitblas parameterized uvicorn ====="
+          uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          echo "===== install dist/whl ====="
+          uv pip install dist/*.whl
+          echo "===== init test env ====="
+          echo "===== install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 ====="
+          uv pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          if [ "${{ matrix.test_script }}" == "models/test_xverse" ]; then
+            echo "===== install tokenizers==0.15.2 ====="
+            uv pip install tokenizers==0.15.2 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          fi
+          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+            echo "===== install auto_round ====="
+            uv pip install auto_round
+          fi
+
+      - name: Clean cache
+        if: always()
+        run: pip cache purge && uv cache clean
+
+      - name: Find suitable GPU
+        if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
+        run: |
+          timestamp=$(date +%s%3N)
+          gpu_id=-1
+
+          while [ "$gpu_id" -lt 0 ]; do
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
+
+            if [ "$gpu_id" -lt 0 ]; then
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME} returned $gpu_id"
+              echo "No available GPU, waiting 5 seconds..."
+              sleep 5
+            else
+              echo "Allocated GPU ID: $gpu_id"
+            fi
+          done
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
+          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
+
+      - name: Run tests
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
+        run: |
+          start_time=$(date +%s)
+          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+          execution_time=$(( $(date +%s) - start_time ))
+          echo "$((execution_time / 60))m $((execution_time % 60))s"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
+
+      - name: Release GPU
+        if: always() && !contains(matrix.test_script, 'ipex')
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
   torch2_5:
     needs:
@@ -310,18 +443,6 @@ jobs:
           echo "===== install dist/whl ====="
           uv pip install dist/*.whl
 
-      - name: Install special requirements
-        if: ${{ contains(env.TRANSFORMERS_DIFF_TESTS, matrix.test_script) && !cancelled() }}
-        run: |
-          uv pip install optimum bitblas==0.0.1.dev13 uvicorn transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U
-
-          if [ "${{ matrix.test_script }}" == "models/test_xverse" ]; then
-            uv pip install tokenizers==0.15.2
-          fi
-          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
-            uv pip install auto_round
-          fi
-
       - name: Clean cache
         if: always()
         run: pip cache purge && uv cache clean
@@ -361,7 +482,7 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
@@ -373,6 +494,7 @@ jobs:
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
+      - transformers_diff
       - torch2_5
     steps:
       - name: Print statistics
