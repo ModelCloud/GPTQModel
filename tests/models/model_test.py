@@ -70,6 +70,7 @@ class ModelTest(unittest.TestCase):
     DESC_ACT = True
     SYM = True
 
+    DISABLE_FLASH_ATTN = False
     LOAD_QUANTIZED_MODEL = None # loading from a quantized dir instead of using native model id/dir
     SAVE_QUANTIZED_MODEL = None # if quantize a model, save it to this dir
 
@@ -192,11 +193,16 @@ class ModelTest(unittest.TestCase):
             trust_remote_code = True
         tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
 
+        kargs = args if args else {}
+
+        if self.DISABLE_FLASH_ATTN:
+            kargs["attn_implementation"]=None
+
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
-            kwargs=args if args else {}
+            kwargs=kargs
         )
 
         return model, tokenizer

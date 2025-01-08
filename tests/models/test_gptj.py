@@ -23,6 +23,7 @@ class TestGptJ(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3660
     TORCH_DTYPE = torch.float16
     INPUTS_MAX_LENGTH = 1024
+    DISABLE_FLASH_ATTN = True
 
     def test_gptj(self):
         self.quant_lm_eval()
