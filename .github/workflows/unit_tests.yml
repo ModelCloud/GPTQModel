@@ -178,7 +178,7 @@ jobs:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
       - name: Get runner tags
-        run: echo Runner tags ${{ runner.tags }}
+        run: echo Runner tags ${{ runner.environment }}
 
       - name: Checkout Codes
         uses: actions/checkout@v4
