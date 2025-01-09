@@ -3,7 +3,7 @@ from transformers import PreTrainedModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 import torch
 import mlx.core as mx
-from mlx_lm.utils import _get_classes, load_config, quantize_model, save_weights, save_config, get_model_path
+from mlx_lm.utils import _get_classes, load_config, quantize_model, get_model_path
 
 def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedModel, gptq_config: QuantizeConfig):
     if gptq_config["bits"] not in [2, 3, 4, 8]:
