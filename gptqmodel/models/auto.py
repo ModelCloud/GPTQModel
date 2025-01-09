@@ -345,10 +345,9 @@ class GPTQModel:
 
         if format == "mlx":
             import mlx.core as mx
-            from mlx_lm.utils import _get_classes, load_config, quantize_model, save_weights, save_config
-            from pathlib import Path
+            from mlx_lm.utils import _get_classes, load_config, quantize_model, save_weights, save_config, get_model_path
 
-            config = load_config(Path(model_id_or_path))
+            config = load_config(get_model_path(model_id_or_path))
 
             # Initialize MLX model
             model_class, model_args_class = _get_classes(config=config)
@@ -365,7 +364,7 @@ class GPTQModel:
                         weights[f"{name}.bias"] = mx.array(
                             module.bias.detach().to("cpu", torch.float16).numpy()
                         )
-                elif hasattr(module, "weight") and name != "lm_head":
+                elif hasattr(module, "weight"):
                     weights[f"{name}.weight"] = mx.array(
                         module.weight.detach().to("cpu", torch.float16).numpy()
                     )
@@ -377,7 +376,7 @@ class GPTQModel:
             # Save mlx weights to target path
             save_weights(target_path, weights, donate_weights=True)
 
-            save_config(config, config_path=Path(target_path) / "config.json")
+            save_config(config, config_path=target_path + "/config.json")
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
