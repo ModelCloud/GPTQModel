@@ -297,7 +297,8 @@ setup(
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
         'triton': ["triton>=2.0.0"],
-        'openai': ["uvicorn", "fastapi", "pydantic"]
+        'openai': ["uvicorn", "fastapi", "pydantic"],
+        'mlx': ["mlx_lm>=0.20.6", "mlx>=0.21.1"]
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",
