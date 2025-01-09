@@ -376,4 +376,28 @@ def _get_perms():
     return perm, scale_perm, scale_perm_single
 
 
+def unpack_qzeros(qzeros):
+    unpacked_zeros = torch.zeros(
+        (qzeros.shape[0], qzeros.shape[1] * 8),
+        dtype=torch.int8,
+        device=qzeros.device,
+        requires_grad=False,
+    )
+
+    for col in range(unpacked_zeros.shape[1]):
+        i = col % 8
+        unpacked_zeros[:, col] = (qzeros[:, col // 8] >> (4 * i)) & 0xF
+
+    return unpacked_zeros
+
+
+def dequantize_qzeros(layer):
+    qzeros = layer.qzeros
+    unpacked_qzeros = unpack_qzeros(qzeros)
+    group_size = layer.group_size
+    unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
+
+    return unpacked_qzeros
+
+
 __all__ = ["MarlinQuantLinear"]
