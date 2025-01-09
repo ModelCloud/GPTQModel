@@ -173,7 +173,6 @@ jobs:
   build:
     runs-on: [ self-hosted, Linux ]
     needs: check-vm
-    if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
@@ -215,6 +214,11 @@ jobs:
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
 
+      - name: Upload wheel
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
+        continue-on-error: true
+        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+
       - name: Upload source to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -222,10 +226,12 @@ jobs:
           path: dist/gptqmodel_source.tar.gz
 
       - name: Compile
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
       - name: Test install
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
@@ -239,12 +245,12 @@ jobs:
           uv pip install dist/$whl
 
       - name: Upload wheel
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         continue-on-error: true
-        run: |
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: whl
