@@ -565,9 +565,9 @@ def ModelLoader(cls):
                 save_config(mlx_config, config_path=temp_dir + "/config.json")
                 tokenizer.save_pretrained(temp_dir)
                 
-                model = load(temp_dir)
+                model, _ = load(temp_dir)
 
-                cls.generate = lambda model, tokenizer, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
+                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
 
 
         return cls(
