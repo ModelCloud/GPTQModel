@@ -345,6 +345,17 @@ class GPTQModel:
         
         if gptq_config["desc_act"] == True:
             raise ValueError("desc_act=True is not supported")
+        
+        if gptq_config["dynamic"]:
+            print(gptq_config["dynamic"])
+            for _, config in gptq_config["dynamic"].items():
+                if config != {}:
+                    if config["bits"] not in [2,3,4,8]:
+                        raise ValueError(f"Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]") 
+                    
+                    if config["desc_act"] == True:
+                        raise ValueError("desc_act=True in dynamic, it not supported")
+                    
 
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
