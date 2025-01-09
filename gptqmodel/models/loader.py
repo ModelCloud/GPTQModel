@@ -567,7 +567,7 @@ def ModelLoader(cls):
                 
                 model = load(temp_dir)
 
-                cls.generate = lambda self, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
+                cls.generate = lambda model, tokenizer, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
 
 
         return cls(
