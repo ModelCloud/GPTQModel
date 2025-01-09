@@ -2,10 +2,18 @@ from ..quantization import QuantizeConfig, FORMAT
 from transformers import PreTrainedModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 import torch
-import mlx.core as mx
-from mlx_lm.utils import _get_classes, load_config, quantize_model, get_model_path
+try:
+    import mlx.core as mx
+    from mlx_lm import generate
+    from mlx_lm.utils import _get_classes, load_config, quantize_model, get_model_path
+    MLX_AVAILABLE = True
+except ImportError:
+    MLX_AVAILABLE = False
 
 def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedModel, gptq_config: QuantizeConfig):
+    if not MLX_AVAILABLE:
+        raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+
     if gptq_config["bits"] not in [2, 3, 4, 8]:
         raise ValueError("Model bits is not in [2,3,4,8]")
 
@@ -64,7 +72,9 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
 
 @torch.inference_mode()
 def mlx_generate(model, tokenizer, **kwargs,):
-    from mlx_lm import generate
+    if not MLX_AVAILABLE:
+        raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+
     prompt = kwargs.pop("prompt", None)
     if prompt is None:
         raise ValueError("MLX requires prompts to be provided")

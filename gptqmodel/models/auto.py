@@ -341,8 +341,11 @@ class GPTQModel:
         gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
 
         if format == "mlx":
-            from mlx_lm.utils import save_weights, save_config
-            from ..utils.mlx import convert_gptq_to_mlx_weights
+            try:
+                from mlx_lm.utils import save_weights, save_config
+                from ..utils.mlx import convert_gptq_to_mlx_weights
+            except ImportError:
+                raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
             
             mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model.model, gptq_config)
 
