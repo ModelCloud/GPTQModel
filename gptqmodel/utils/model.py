@@ -129,6 +129,7 @@ def make_quant(
     group_size: int,
     backend: BACKEND,
     format: str | FORMAT,
+    lm_head_name: str,
     desc_act: bool = False,
     sym: bool = True,
     pack: bool = False,
@@ -159,7 +160,8 @@ def make_quant(
             if linear is not QuantLinear:
                 logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device)
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device
+                                        , lm_head_name)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
@@ -169,7 +171,8 @@ def make_quant(
     raise ValueError("no support quant linear was found for this module.")
 
 
-def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device) -> BaseQuantLinear:
+def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device, lm_head_name: str
+                       ) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
     named_modules = module.named_modules()
@@ -225,6 +228,8 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 outfeatures=out_features,
                 bias=bias,
                 weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+                name=name,
+                lm_head_name=lm_head_name,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -362,6 +367,7 @@ def pack_model(
     group_size,
     backend: BACKEND,
     format: str | FORMAT,
+    lm_head_name: str,
     desc_act=False,
     sym: bool = True,
     dynamic=None,
@@ -391,6 +397,7 @@ def pack_model(
         group_size,
         backend=backend,
         format=format,
+        lm_head_name=lm_head_name,
         desc_act=desc_act,
         pack=True,
         dynamic=dynamic,

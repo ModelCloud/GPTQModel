@@ -302,7 +302,7 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(f"AutoRound version must be >= 0.3.0: actual = {auto_round_version}")
 
             if self.quantize_config.lm_head:
-                self.quantize_config.layer_config['lm_head'] = {"data_type": "int"}
+                self.quantize_config.layer_config[self.lm_head] = {"data_type": "int"}
 
             import torch.nn.functional as F
             from torch.utils.data import DataLoader
@@ -372,6 +372,7 @@ class BaseGPTQModel(nn.Module):
                 backend=backend,
                 desc_act=self.quantize_config.desc_act,
                 format=self.quantize_config.format,
+                lm_head_name=self.lm_head,
                 parallel_packing=self.quantize_config.parallel_packing,
             )
 
@@ -789,6 +790,7 @@ class BaseGPTQModel(nn.Module):
             backend=backend,
             desc_act=self.quantize_config.desc_act,
             format=self.quantize_config.format,
+            lm_head_name=self.lm_head,
             dynamic=self.quantize_config.dynamic,
             parallel_packing=self.quantize_config.parallel_packing,
         )
