@@ -336,6 +336,9 @@ class GPTQModel:
             raise ValueError("Model is not quantized")
         
         gptq_config = config.quantization_config
+
+        if gptq_config["bits"] not in [2,3,4,8]:
+            raise ValueError("Model bits is not in [2,3,4,8]")
         
         if gptq_config["checkpoint_format"] not in [FORMAT.GPTQ, FORMAT.GPTQ_V2]:
             raise ValueError("Model checkpoint format is not gptq or gptq_v2")
