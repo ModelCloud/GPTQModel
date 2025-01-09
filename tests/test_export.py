@@ -49,7 +49,7 @@ class TestExport(unittest.TestCase):
                 from mlx_lm import load, generate
                 mlx_model, tokenizer = load(export_dir)
 
-                prompt = "Write a story about Einstein"
+                prompt = "The capital of France is"
 
                 messages = [{"role": "user", "content": prompt}]
                 prompt = tokenizer.apply_chat_template(
@@ -58,7 +58,7 @@ class TestExport(unittest.TestCase):
 
                 text = generate(mlx_model, tokenizer, prompt=prompt, verbose=True)
                 
-                assert text == "Write a story about Einstein"
+                assert "paris" in text.lower()
 
 
             
