@@ -554,7 +554,7 @@ def ModelLoader(cls):
 
         if backend == BACKEND.MLX:
             import tempfile
-            from ..utils.mlx import convert_gptq_to_mlx_weights
+            from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
             from mlx_lm.utils import save_weights, save_config
             from mlx_lm import load
 
@@ -564,8 +564,10 @@ def ModelLoader(cls):
                 save_weights(temp_dir, mlx_weights, donate_weights=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")
                 tokenizer.save_pretrained(temp_dir)
-
+                
                 model = load(temp_dir)
+
+                cls.generate = lambda self, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
 
 
         return cls(
