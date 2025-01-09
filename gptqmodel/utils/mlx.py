@@ -24,6 +24,10 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
 
                 if config["desc_act"] == True:
                     raise ValueError("desc_act=True in dynamic, it not supported")
+                
+    # mlx does not support group_size = -1, 16, so we need to convert it to 64, 64 is the default group_size for mlx
+    if gptq_config["group_size"] in [-1, 16]:
+        gptq_config["group_size"] = 64
 
     config = load_config(get_model_path(model_id_or_path))
 
