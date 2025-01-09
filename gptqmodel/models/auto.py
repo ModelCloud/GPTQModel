@@ -364,7 +364,7 @@ class GPTQModel:
             for name, module in gptq_model.model.named_modules():
                 if isinstance(module, TorchQuantLinear):
                     weights[f"{name}.weight"] = mx.array(
-                        module.dequantize_weight().detach().to("cpu", torch.float16).numpy()
+                        module.dequantize_weight().T.detach().to("cpu", torch.float16).numpy()
                     )
                     if module.bias is not None:
                         weights[f"{name}.bias"] = mx.array(
