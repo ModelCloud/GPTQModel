@@ -68,7 +68,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: [ self-hosted, Linux ]
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
@@ -239,7 +239,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: [ self-hosted, Linux ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -364,7 +364,7 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: [ self-hosted, Linux ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -491,7 +491,7 @@ jobs:
         run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
   show-statistics:
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: [ self-hosted, Linux ]
     if: always()
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
