@@ -177,9 +177,6 @@ jobs:
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
-      - name: Get runner tags
-        run: echo Runner tags ${{ runner.environment }}
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -211,7 +208,9 @@ jobs:
       - name: Compress dir
         run: |
           mkdir dist || true
-          tar -zcf dist/gptqmodel_source.tar.gz ./
+          rm -rf dist/* || true
+          tar -zcf ../gptqmodel_source.tar.gz ./
+          mv ../gptqmodel_source.tar.gz dist/
           sha256=$(sha256sum dist/gptqmodel_source.tar.gz)
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
@@ -301,7 +300,7 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Download source
+      - name: Download source from local
         continue-on-error: true
         run: |
           curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
@@ -310,7 +309,7 @@ jobs:
           echo "sha256=$sha256"
           echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
 
-      - name: Download source
+      - name: Download source from github
         if: env.SOURCE_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
@@ -325,7 +324,7 @@ jobs:
           ls -ahl .
           tar -zxf gptqmodel_source.tar.gz
 
-      - name: Download wheel
+      - name: Download wheel from local
         continue-on-error: true
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
@@ -340,7 +339,7 @@ jobs:
               echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
           fi
 
-      - name: Download artifact
+      - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
@@ -453,7 +452,7 @@ jobs:
           pip list
 
 
-      - name: Download source
+      - name: Download source from local
         continue-on-error: true
         run: |
           curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
@@ -462,7 +461,7 @@ jobs:
           echo "sha256=$sha256"
           echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
 
-      - name: Download source
+      - name: Download source from github
         if: env.SOURCE_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
@@ -477,7 +476,7 @@ jobs:
           ls -ahl .
           tar -zxf gptqmodel_source.tar.gz
 
-      - name: Download wheel
+      - name: Download wheel from local
         continue-on-error: true
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
@@ -492,7 +491,7 @@ jobs:
               echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
           fi
 
-      - name: Download artifact
+      - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
