@@ -518,12 +518,16 @@ class BaseGPTQModel(nn.Module):
         replace_linear_with_hooked_linear(self.model)
 
         only_quant_lm_head = hasattr(self, "only_quant_lm_head") and self.only_quant_lm_head
+        lm_head_layer_inputs_path = "/monster/data/zx/lm_head_layer_inputs.pt"
 
         for i in layer_pb:
             is_lm_head = i >= layer_count
             if is_lm_head:
                 layer_pb.set_description(f"Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
+                if only_quant_lm_head:
+                    layer_inputs = torch.load(lm_head_layer_inputs_path)
+                    print("loaded lm_head_layer_inputs.pt", layer_inputs)
             else:
                 layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
                 layer = layers[i]
@@ -740,11 +744,9 @@ class BaseGPTQModel(nn.Module):
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
 
-            if only_quant_lm_head and i == layer_count - 1:
-                # print("saved lm_head_layer_inputs.pt", layer_inputs)
-                # torch.save(layer_inputs, "/monster/data/zx/lm_head_layer_inputs.pt")
-                layer_inputs = torch.load("/monster/data/zx/lm_head_layer_inputs.pt")
-                print("loaded lm_head_layer_inputs.pt", layer_inputs)
+            if i == layer_count - 1:
+                print("saved lm_head_layer_inputs.pt", layer_inputs)
+                torch.save(layer_inputs, lm_head_layer_inputs_path)
 
             torch_empty_cache()
 
