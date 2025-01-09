@@ -554,9 +554,15 @@ def ModelLoader(cls):
 
         if backend == BACKEND.MLX:
             import tempfile
-            from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
-            from mlx_lm.utils import save_weights, save_config
-            from mlx_lm import load
+            try:
+                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from mlx_lm.utils import save_weights, save_config
+                from mlx_lm import load
+            except ModuleNotFoundError as exception:
+                raise type(exception)(
+                    "GPTQModel load mlx model required dependencies are not installed.",
+                    "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
+                )
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, quantize_config.to_dict())
