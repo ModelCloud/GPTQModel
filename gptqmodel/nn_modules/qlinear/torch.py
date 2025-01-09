@@ -11,6 +11,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+from .marlin import dequantize_weight
 
 logger = setup_logger()
 
@@ -268,6 +269,10 @@ class TorchQuantLinear(BaseQuantLinear):
         out = out.reshape(out_shape)
         out = out + self.bias if self.bias is not None else out
         return out
+
+    def dequantize_weight(self):
+        dequantized_weight, _ = dequantize_weight(self)
+        return dequantized_weight
 
 
 __all__ = ["TorchQuantLinear"]

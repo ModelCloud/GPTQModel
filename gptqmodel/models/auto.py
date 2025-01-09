@@ -327,37 +327,57 @@ class GPTQModel:
         else:
             raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
         
-    #TODO format use enum    
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
-        #TODO  check format
-
         # load config
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if not config.quantization_config:
             raise ValueError("Model is not quantized")
         
-        if config.quantization_config.checkpoint_format != FORMAT.GPTQ:
+        gptq_config = config.quantization_config
+        
+        if gptq_config["checkpoint_format"] != FORMAT.GPTQ:
             raise ValueError("Model checkpoint format is not gptq")
 
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
 
         if format == "mlx":
-            from mlx_lm.utils import _get_classes
-            model_class, model_args_class = _get_classes(config=config)
-            model_args = model_args_class.from_dict(config)
-            mlx_model = model_class(model_args)
+            import mlx.core as mx
+            from mlx_lm.utils import _get_classes, load_config, quantize_model, save_weights, save_config
+            from pathlib import Path
 
+            config = load_config(Path(model_id_or_path))
+
+            # Initialize MLX model
+            model_class, model_args_class = _get_classes(config=config)
+            model = model_class(model_args_class.from_dict(config))
+
+            # Convert weights
             weights = {}
             for name, module in gptq_model.model.named_modules():
                 if isinstance(module, TorchQuantLinear):
-                    weights[name] = nn.Linear(module.infeatures, module.outfeatures, bias=module.bias is not None)
-                    dequantized_weight = module.dequantize()
-                    weights[name].weight.data = mx.array(dequantized_weight[0])
+                    weights[f"{name}.weight"] = mx.array(
+                        module.dequantize_weight().detach().to("cpu", torch.float16).numpy()
+                    )
+                    if module.bias is not None:
+                        weights[f"{name}.bias"] = mx.array(
+                            module.bias.detach().to("cpu", torch.float16).numpy()
+                        )
+                elif hasattr(module, "weight") and name != "lm_head":
+                    weights[f"{name}.weight"] = mx.array(
+                        module.weight.detach().to("cpu", torch.float16).numpy()
+                    )
 
+            # Load and quantize weights
+            model.load_weights(list(weights.items()))
+            weights, config = quantize_model(model, config, q_group_size=gptq_config["group_size"], q_bits=gptq_config["bits"])
 
-            mlx_model.load_weights(weights)
+            # Save mlx weights to target path
+            save_weights(target_path, weights, donate_weights=True)
 
-            mlx_model.save(target_path)
+            save_config(config, config_path=Path(target_path) / "config.json")
+
+        # save tokenizer to target path
+        gptq_model.tokenizer.save_pretrained(target_path)
