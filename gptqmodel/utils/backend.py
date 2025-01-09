@@ -12,6 +12,6 @@ class BACKEND(str, Enum):
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     IPEX = "ipex"
-    VLLM = "vllm" # external inference engine
-    SGLANG = "sglang" # external inference engine
-    MLX = "mlx"
+    VLLM = "vllm" # external inference engine (CUDA + ROCM + IPEX)
+    SGLANG = "sglang" # external inference engine (CUDA + ROCm)
+    MLX = "mlx" # external inference engine (Apple MLX on M1+)
