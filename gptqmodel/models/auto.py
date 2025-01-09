@@ -337,8 +337,8 @@ class GPTQModel:
         
         gptq_config = config.quantization_config
         
-        if gptq_config["checkpoint_format"] != FORMAT.GPTQ:
-            raise ValueError("Model checkpoint format is not gptq")
+        if gptq_config["checkpoint_format"] not in [FORMAT.GPTQ, FORMAT.GPTQ_V2]:
+            raise ValueError("Model checkpoint format is not gptq or gptq_v2")
         
         if gptq_config["desc_act"] == True:
             raise ValueError("desc_act=True is not supported")
