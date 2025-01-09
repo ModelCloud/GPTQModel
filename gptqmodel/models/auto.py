@@ -339,6 +339,9 @@ class GPTQModel:
         
         if gptq_config["checkpoint_format"] != FORMAT.GPTQ:
             raise ValueError("Model checkpoint format is not gptq")
+        
+        if gptq_config["desc_act"] == True:
+            raise ValueError("desc_act=True is not supported")
 
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
