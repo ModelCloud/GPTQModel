@@ -222,7 +222,7 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
-        if logger_board== "clearml":
+        if logger_board == "clearml":
             try:
                 from clearml import Task
                 from random_word import RandomWords
@@ -518,22 +518,14 @@ class BaseGPTQModel(nn.Module):
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
-        only_quant_lm_head = hasattr(self, "only_quant_lm_head") and self.only_quant_lm_head
-        lm_head_layer_inputs_path = "/monster/data/zx/lm_head_layer_inputs.pt"
-
         for i in layer_pb:
             is_lm_head = i >= layer_count
             if is_lm_head:
                 layer_pb.set_description(f"Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
-                if only_quant_lm_head:
-                    layer_inputs = torch.load(lm_head_layer_inputs_path)
-                    print("loaded lm_head_layer_inputs.pt", layer_inputs)
             else:
                 layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
                 layer = layers[i]
-                if only_quant_lm_head:
-                    continue
 
             if layer.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -744,10 +736,6 @@ class BaseGPTQModel(nn.Module):
                 layer_outputs,
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
-
-            if i == layer_count - 1:
-                print("saved lm_head_layer_inputs.pt", layer_inputs)
-                torch.save(layer_inputs, lm_head_layer_inputs_path)
 
             torch_empty_cache()
 

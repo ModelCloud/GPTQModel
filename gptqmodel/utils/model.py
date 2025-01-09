@@ -175,9 +175,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                        ) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
-    named_modules = module.named_modules()
-
-    for name, submodule in named_modules:
+    for name, submodule in module.named_modules():
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
             if isinstance(submodule, nn.Linear):
