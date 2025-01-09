@@ -209,10 +209,16 @@ jobs:
       - name: Compress dir
         run: |
           mkdir dist || true
-          tar -zcf dist/source.tar.gz ./
-          sha256=$(sha256sum dist/source.tar.gz)
+          tar -zcf dist/gptqmodel_source.tar.gz ./
+          sha256=$(sha256sum dist/gptqmodel_source.tar.gz)
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
+
+      - name: Upload source to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: dist/gptqmodel_source.tar.gz
 
       - name: Compile
         timeout-minutes: 35
@@ -235,19 +241,13 @@ jobs:
         continue-on-error: true
         run: |
           curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
           name: whl
           path: dist/${{ env.WHL_NAME }}
-
-      - name: Upload to artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: source
-          path: dist/gptqmodel_source.tar.gz
 
       - name: Clean cache
         if: always()
