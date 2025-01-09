@@ -14,3 +14,4 @@ class BACKEND(str, Enum):
     IPEX = "ipex"
     VLLM = "vllm" # external inference engine
     SGLANG = "sglang" # external inference engine
+    MLX = "mlx"
