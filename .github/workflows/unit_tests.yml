@@ -208,7 +208,8 @@ jobs:
 
       - name: Compress dir
         run: |
-          mkdir dist && tar -zcf dist/source.tar.gz ./
+          mkdir dist || true
+          tar -zcf dist/source.tar.gz ./
           sha256=$(sha256sum dist/$whl)
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
