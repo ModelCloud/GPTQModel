@@ -117,7 +117,7 @@ class BaseGPTQModel(nn.Module):
         self.load_quantized_model = load_quantized_model
         self.tokenizer = tokenizer
         self.quantize_config = quantize_config
-        self.config = self.model.config
+        self.config = self.model.config if hasattr(self.model, "config") else None
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel

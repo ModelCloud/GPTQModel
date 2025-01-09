@@ -311,6 +311,9 @@ def ModelWriter(cls):
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_local_path)
 
+        if self.tokenizer:
+            self.tokenizer.save_pretrained(save_dir)
+
     cls.save_quantized = save_quantized
 
     def get_model_with_quantize(self, quantize_config, model_id_or_path):
