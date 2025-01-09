@@ -215,7 +215,6 @@ jobs:
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
 
       - name: Upload source to local
-        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         continue-on-error: true
         run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
