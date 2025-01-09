@@ -47,6 +47,12 @@ on:
         type: boolean
         required: false
         default: false
+      exclusive-gpu:
+        description: 'one test, one gpu. for collecting statistics'
+        type: boolean
+        required: false
+        default: false
+
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -165,7 +171,7 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: [ self-hosted, zen4, xeon5 ]
+    runs-on: [ self-hosted ]
     needs: check-vm
     if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
@@ -554,7 +560,7 @@ jobs:
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
-    if: always()
+    if: github.event.inputs.exclusive-gpu != 'true'
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
