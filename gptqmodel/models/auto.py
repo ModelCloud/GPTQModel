@@ -367,10 +367,11 @@ class GPTQModel:
                         weights[f"{name}.bias"] = mx.array(
                             module.bias.detach().to("cpu", torch.float16).numpy()
                         )
-                elif hasattr(module, "weight"):
+                elif hasattr(module, "weight") and (name != "lm_head" if config.get("tie_word_embeddings", False) else True):
                     weights[f"{name}.weight"] = mx.array(
                         module.weight.detach().to("cpu", torch.float16).numpy()
                     )
+            
 
             # Load and quantize weights
             model.load_weights(list(weights.items()))
