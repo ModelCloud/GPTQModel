@@ -567,6 +567,30 @@ def ModelLoader(cls):
 
         tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
 
+        if backend == BACKEND.MLX:
+            import tempfile
+            try:
+                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from mlx_lm.utils import save_weights, save_config
+                from mlx_lm import load
+            except ModuleNotFoundError as exception:
+                raise type(exception)(
+                    "GPTQModel load mlx model required dependencies are not installed.",
+                    "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
+                )
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, quantize_config.to_dict())
+
+                save_weights(temp_dir, mlx_weights, donate_weights=True)
+                save_config(mlx_config, config_path=temp_dir + "/config.json")
+                tokenizer.save_pretrained(temp_dir)
+                
+                model, _ = load(temp_dir)
+
+                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
+
+
         return cls(
             model,
             quantized=True,
