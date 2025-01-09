@@ -171,7 +171,7 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: [ self-hosted ]
+    runs-on: [ self-hosted, Linux ]
     needs: check-vm
     if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
