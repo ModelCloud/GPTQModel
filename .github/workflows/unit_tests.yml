@@ -481,6 +481,8 @@ jobs:
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
 
+          echo "file_name=$file_name"
+
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
