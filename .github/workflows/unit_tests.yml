@@ -210,7 +210,7 @@ jobs:
         run: |
           mkdir dist || true
           tar -zcf dist/source.tar.gz ./
-          sha256=$(sha256sum dist/$whl)
+          sha256=$(sha256sum dist/source.tar.gz)
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
 
