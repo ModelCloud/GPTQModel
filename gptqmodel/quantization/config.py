@@ -145,6 +145,7 @@ class QuantizeConfig():
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
     lm_head: bool = field(default=False)
+    lm_head_low_gpu_mem_usage: bool = field(default=False)
     quant_method: str = field(default=QUANT_METHOD.GPTQ)
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
@@ -217,7 +218,8 @@ class QuantizeConfig():
     def meta_get(self, key: str) -> Any:
         return self.meta.get(key)
 
-    def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+    def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool, float] = None
+                    ) -> Union[Dict, int, bool, float]:
         return dynamic_get(self.dynamic, layer_name, key, default_value)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"

@@ -35,7 +35,8 @@ from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
-from ..models._const import CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS
+from ..models._const import CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, \
+    SUPPORTS_MODULE_TYPES
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -101,7 +102,8 @@ def nested_move_to(v, device):
 
 def find_layers(module, layers=None, name=""):
     if not layers:
-        layers = [transformers.pytorch_utils.Conv1D, nn.Conv2d, nn.Linear]
+        layers = SUPPORTS_MODULE_TYPES
+
     for layer in layers:
         if isinstance(module, layer):
             return {name: module}
@@ -122,6 +124,18 @@ def get_module_by_name_suffix(model, module_name: str):
         if name.endswith(module_name):
             return module
 
+def get_module(module, key):
+    """Get module from model by key name.
+
+    Args:
+        module (torch.nn.Module): original model
+        key (str): module name to be replaced
+    """
+    name_list = key.split(".")
+    for name in name_list:
+        module = getattr(module, name, None)
+    return module
+
 
 def make_quant(
     module,
@@ -130,6 +144,7 @@ def make_quant(
     group_size: int,
     backend: BACKEND,
     format: str | FORMAT,
+    lm_head_name: str,
     desc_act: bool = False,
     sym: bool = True,
     pack: bool = False,
@@ -160,7 +175,8 @@ def make_quant(
             if linear is not QuantLinear:
                 logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device)
+            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device
+                                        , lm_head_name)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
@@ -170,7 +186,8 @@ def make_quant(
     raise ValueError("no support quant linear was found for this module.")
 
 
-def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device) -> BaseQuantLinear:
+def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device, lm_head_name: str
+                       ) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
     for name, submodule in module.named_modules():
@@ -224,6 +241,8 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 outfeatures=out_features,
                 bias=bias,
                 weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+                name=name,
+                lm_head_name=lm_head_name,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -361,6 +380,7 @@ def pack_model(
     group_size,
     backend: BACKEND,
     format: str | FORMAT,
+    lm_head_name: str,
     desc_act=False,
     sym: bool = True,
     dynamic=None,
@@ -390,6 +410,7 @@ def pack_model(
         group_size,
         backend=backend,
         format=format,
+        lm_head_name=lm_head_name,
         desc_act=desc_act,
         pack=True,
         dynamic=dynamic,

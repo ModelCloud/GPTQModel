@@ -299,6 +299,10 @@ class MarlinQuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
+        self.is_lm_head = False
+        if kwargs.get("name") is not None and kwargs.get("lm_head_name") is not None:
+            self.is_lm_head = kwargs["name"] == kwargs["lm_head_name"]
+
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if IS_ROCM:
@@ -347,7 +351,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             A = A.half()
 
         return apply_gptq_marlin_linear(
-            input=A,
+            input=A.contiguous() if self.is_lm_head else A,
             weight=self.qweight,
             weight_scale=self.scales,
             weight_zp=self.zp,

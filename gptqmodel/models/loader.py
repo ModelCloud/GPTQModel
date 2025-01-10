@@ -436,6 +436,7 @@ def ModelLoader(cls):
                 quantize_config.group_size,
                 backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
                 format=quantize_config.format,
+                lm_head_name=cls.lm_head,
                 desc_act=quantize_config.desc_act,
                 sym=quantize_config.sym,
                 dynamic=quantize_config.dynamic,

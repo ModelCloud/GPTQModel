@@ -364,6 +364,7 @@ def ModelWriter(cls):
                 quantize_config.group_size,
                 backend=BACKEND.AUTO,
                 format=quantize_config.format,
+                lm_head_name=cls.lm_head,
                 desc_act=quantize_config.desc_act,
                 pack=True,
             )

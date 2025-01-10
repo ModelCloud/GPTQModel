@@ -16,6 +16,8 @@
 from enum import Enum
 
 import torch
+import torch.nn as nn
+import transformers
 from torch import device
 
 from ..utils import BACKEND
@@ -29,6 +31,8 @@ XPU = device("xpu")
 XPU_0 = device("xpu:0")
 MPS = device("mps")
 ROCM = device("cuda:0")  # rocm maps to fake cuda
+
+SUPPORTS_MODULE_TYPES = [transformers.pytorch_utils.Conv1D, nn.Conv2d, nn.Linear]
 
 
 class DEVICE(str, Enum):
