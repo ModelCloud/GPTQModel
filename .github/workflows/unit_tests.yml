@@ -178,7 +178,7 @@ jobs:
   build:
     runs-on: [ self-hosted, Linux ]
     needs: check-vm
-    if: github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]'
+    if: github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.torch-files == '[]' && needs.list-test-files.outputs.transformers-files == '[]')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
