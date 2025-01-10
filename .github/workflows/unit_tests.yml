@@ -523,7 +523,7 @@ jobs:
           fi
           
           if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
-            uv pip install mlx_lm mlx --no-build-isolation
+            uv pip install mlx_lm --no-build-isolation
           fi
 
           echo "===== install dist/whl ====="
