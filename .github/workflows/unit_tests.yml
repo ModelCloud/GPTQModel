@@ -178,7 +178,7 @@ jobs:
   build:
     runs-on: [ self-hosted, Linux ]
     needs: check-vm
-    if: github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.torch-files == '[]' && needs.list-test-files.outputs.transformers-files == '[]')
+    if: github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.mlx-files == '[]' && needs.list-test-files.outputs.mlx-files == '[]')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
@@ -612,5 +612,4 @@ jobs:
           export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
           pyenv global 3.11.11 && python -m venv venv
           curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/profile.sb
-          curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/run.sh
-          sandbox-exec -f profile.sb /bin/bash ./run.sh
+          sandbox-exec -f profile.sb /bin/bash -c "$(curl -L http://${{ needs.check-vm.outputs.ip }}/scripts/m4/run.sh)" ${{ matrix.test_script }}
