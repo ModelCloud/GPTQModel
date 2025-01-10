@@ -602,7 +602,7 @@ class BaseGPTQModel(nn.Module):
             cur_layer_device = get_device(layer)
             full = find_layers(layer, name=self.lm_head if is_lm_head else "")
             modules = [[self.lm_head]] if is_lm_head else layer_modules
-            for names in modules:
+            for index, names in enumerate(modules):
                 subset = {n: full[n] for n in names if n in full}
                 skipped_modules = []
                 gptq = {}
