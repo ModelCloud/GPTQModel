@@ -1,5 +1,7 @@
 name: Unit Tests
 
+run-name: "${{ github.event.inputs.title }}"
+
 defaults:
   run:
     shell: bash -le {0}
@@ -8,6 +10,10 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
+      title:
+        description: 'set a title for this run'
+        required: false
+        default: ''
       repo:
         description: 'GitHub repo {owner}/{repo}'
         required: false
@@ -35,12 +41,18 @@ on:
       max-parallel:
         description: 'max parallel jobs'
         required: false
-        default: '10'
+        default: '20'
       m4-only:
-        description: 'only run m4(test only)'
+        description: 'run only m4 test only'
         type: boolean
         required: false
         default: false
+      exclusive-gpu:
+        description: 'one test, one gpu. for collecting statistics'
+        type: boolean
+        required: false
+        default: false
+
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -62,9 +74,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [ self-hosted, xeon5 ]
-    container:
-      image: modelcloud/gptqmodel:alpine-ci-v1
+    runs-on: ubuntu-latest
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
@@ -93,7 +103,7 @@ jobs:
           echo "artifact_id=$run_id"
 
           max_p=${{ github.event.inputs.max-parallel }}
-          max_p="{\"size\": ${max_p:-10}}"
+          max_p="{\"size\": ${max_p:-20}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
@@ -161,13 +171,11 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: [ self-hosted, zen4 ]
+    runs-on: [ self-hosted, Linux ]
     needs: check-vm
-    if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -196,11 +204,33 @@ jobs:
           echo "##### pip list #####"
           pip list
 
+      - name: Compress dir
+        run: |
+          mkdir dist || true
+          rm -rf dist/* || true
+          tar -zcf ../gptqmodel_source.tar.gz ./
+          mv ../gptqmodel_source.tar.gz dist/
+          sha256=$(sha256sum dist/gptqmodel_source.tar.gz)
+          echo "hash=$sha256"
+          echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
+
+      - name: Upload source to local
+        continue-on-error: true
+        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+
+      - name: Upload source to github artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: dist/gptqmodel_source.tar.gz
+
       - name: Compile
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
       - name: Test install
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
@@ -213,16 +243,17 @@ jobs:
           twine check dist/$whl
           uv pip install dist/$whl
 
-      - name: Upload wheel
+      - name: Upload wheel to local
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         continue-on-error: true
-        run: |
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
-      - name: Upload to artifact
+      - name: Upload wheel to github artifact
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist
+          name: whl
+          path: dist/${{ env.WHL_NAME }}
 
       - name: Clean cache
         if: always()
@@ -233,15 +264,16 @@ jobs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: [ self-hosted, Linux ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       volumes:
         - /home/ci/models:/monster/data/model
+        - /home/ci/models/huggingface:/github/home/.cache/huggingface
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.transformers-files) }}
     steps:
@@ -273,10 +305,36 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Download wheel
+      - name: Download source from local
+        continue-on-error: true
+        run: |
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          ls -ahl .
+          sha256=$(sha256sum $file_name)
+          echo "sha256=$sha256"
+          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+
+      - name: Download source from github
+        if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v4
+        with:
+          name: source
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Uncompress source
+        continue-on-error: true
+        run: |
+          find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+          ls -ahl .
+          tar -zxf gptqmodel_source.tar.gz
+
+      - name: Download wheel from local
         continue-on-error: true
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+
+          echo "file_name=$file_name"
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
@@ -285,14 +343,14 @@ jobs:
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
-              echo "DOWNLOADED=1" >> $GITHUB_ENV
+              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
           fi
 
-      - name: Download artifact
-        if: env.DOWNLOADED == '' && !cancelled()
+      - name: Download artifact from github
+        if: env.WHL_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: whl
           path: dist
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
@@ -325,10 +383,10 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
@@ -350,14 +408,14 @@ jobs:
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
   torch2_5:
     needs:
       - build
       - list-test-files
       - check-vm
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: [ self-hosted, Linux ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
@@ -365,9 +423,10 @@ jobs:
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
+        - /home/ci/models/huggingface:/github/home/.cache/huggingface
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
     steps:
@@ -399,10 +458,38 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Download wheel
+
+      - name: Download source from local
+        continue-on-error: true
+        run: |
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          ls -ahl .
+          sha256=$(sha256sum $file_name)
+          echo "sha256=$sha256"
+          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+
+      - name: Download source from github
+        if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v4
+        with:
+          name: source
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Uncompress source
+        continue-on-error: true
+        run: |
+          find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+          ls -ahl .
+          tar -zxf gptqmodel_source.tar.gz
+
+      - name: Download wheel from local
         continue-on-error: true
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+
+          echo "file_name=$file_name"
+
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
@@ -410,14 +497,14 @@ jobs:
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
-              echo "DOWNLOADED=1" >> $GITHUB_ENV
+              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
           fi
 
-      - name: Download artifact
-        if: env.DOWNLOADED == '' && !cancelled()
+      - name: Download artifact from github
+        if: env.WHL_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: whl
           path: dist
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
@@ -427,13 +514,18 @@ jobs:
             echo "===== install auto_round ====="
             uv pip install auto_round
           fi
-          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ]; then
+          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
-            uv pip install -U git+https://github.com/huggingface/transformers.git@5615a393691c81e00251e420c73e4d04c6fe22e5
+            uv pip install -U git+https://github.com/huggingface/transformers.git
           fi
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
+          
+          if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
+            uv pip install mlx_lm --no-build-isolation
+          fi
+
           echo "===== install dist/whl ====="
           uv pip install dist/*.whl
 
@@ -448,10 +540,10 @@ jobs:
           gpu_id=-1
 
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp")
+            gpu_id=$(curl -s "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp returned $gpu_id"
+              echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               sleep 5
             else
@@ -476,15 +568,15 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
+          curl "http://${{ needs.check-vm.outputs.ip }}/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}"
+        run: curl -X GET "http://${{ needs.check-vm.outputs.ip }}/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
   show-statistics:
-    runs-on: [ self-hosted, xeon5 ]
-    if: always()
+    runs-on: [ self-hosted, Linux ]
+    if: github.event.inputs.exclusive-gpu != 'true'
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:

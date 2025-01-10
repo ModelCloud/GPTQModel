@@ -1,3 +1,18 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import os
@@ -19,10 +34,11 @@ import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
-from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
+from ..quantization import QUANT_CONFIG_FILENAME, FORMAT  # noqa: E402
 from ..utils import BACKEND, EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type  # noqa: E402
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -325,3 +341,32 @@ class GPTQModel:
             return results
         else:
             raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
+        
+    @staticmethod
+    def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
+        # load config
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        if not config.quantization_config:
+            raise ValueError("Model is not quantized")
+        
+        gptq_config = config.quantization_config
+                    
+        # load gptq model
+        gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
+
+        if format == "mlx":
+            try:
+                from mlx_lm.utils import save_weights, save_config
+                from ..utils.mlx import convert_gptq_to_mlx_weights
+            except ImportError:
+                raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+            
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model.model, gptq_config)
+
+            save_weights(target_path, mlx_weights, donate_weights=True)
+
+            save_config(mlx_config, config_path=target_path + "/config.json")
+
+        # save tokenizer to target path
+        gptq_model.tokenizer.save_pretrained(target_path)

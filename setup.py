@@ -1,3 +1,18 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import subprocess
 import sys
@@ -13,7 +28,7 @@ try:
 except BaseException:
     from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
-CUDA_RELEASE = os.environ.get("CUDA_RELEASE", None)
+RELEASE_MODE = os.environ.get("RELEASE_MODE", None)
 
 TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
@@ -73,11 +88,11 @@ common_setup_kwargs = {
     ],
 }
 
-def get_version_tag(is_cuda_release: bool = True) -> str:
-    import torch
-
+def get_version_tag() -> str:
     if not BUILD_CUDA_EXT:
-        return common_setup_kwargs["version"]
+        return "cpu"
+
+    import torch
 
     cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
     if not cuda_version or not cuda_version.split("."):
@@ -93,10 +108,7 @@ def get_version_tag(is_cuda_release: bool = True) -> str:
     CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    if is_cuda_release:
-        return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
-
-    return common_setup_kwargs["version"]
+    return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 
 with open('requirements.txt') as f:
@@ -126,11 +138,8 @@ if TORCH_CUDA_ARCH_LIST is None:
             FORCE_BUILD = True
 
 
-if BUILD_CUDA_EXT:
-    if CUDA_RELEASE == "1":
-        common_setup_kwargs["version"] += f"+{get_version_tag(True)}"
-else:
-    common_setup_kwargs["version"] += "+cpu"
+if RELEASE_MODE == "1":
+    common_setup_kwargs["version"] += f"+{get_version_tag()}"
 
 additional_setup_kwargs = {}
 
@@ -253,7 +262,7 @@ if BUILD_CUDA_EXT:
 
 class CachedWheelsCommand(_bdist_wheel):
     def run(self):
-        if FORCE_BUILD:
+        if FORCE_BUILD or torch.xpu.is_available():
             return super().run()
 
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
@@ -296,7 +305,9 @@ setup(
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        'triton': ["triton>=2.0.0"]
+        'triton': ["triton>=2.0.0"],
+        'openai': ["uvicorn", "fastapi", "pydantic"],
+        'mlx': ["mlx_lm>=0.20.6"]
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",

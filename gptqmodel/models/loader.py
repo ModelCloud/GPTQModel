@@ -1,3 +1,18 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import os
@@ -11,6 +26,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
+from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
 
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -29,7 +45,8 @@ from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
 logger = setup_logger()
 
-
+ATTN_IMPLEMENTATION = "attn_implementation"
+USE_FLASH_ATTENTION_2 = "use_flash_attention_2"
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -373,8 +390,21 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            args = {}
+            if device in [DEVICE.CUDA, DEVICE.ROCM]:
+                if ATTN_IMPLEMENTATION in kwargs:
+                    args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
+                if USE_FLASH_ATTENTION_2 in kwargs:
+                    args[USE_FLASH_ATTENTION_2] = kwargs.pop(USE_FLASH_ATTENTION_2, None)
+                if not args:
+                    has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
+                    if is_flash_attn_2_available() and has_attn_implementation:
+                        args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
+                    elif is_flash_attn_2_available() and not has_attn_implementation:
+                        args = {USE_FLASH_ATTENTION_2: True}
+
             model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype
+                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
             )
             model.checkpoint_file_name = model_save_name
 
@@ -408,6 +438,7 @@ def ModelLoader(cls):
                 format=quantize_config.format,
                 lm_head_name=cls.lm_head,
                 desc_act=quantize_config.desc_act,
+                sym=quantize_config.sym,
                 dynamic=quantize_config.dynamic,
                 device=device,
             )
@@ -536,6 +567,30 @@ def ModelLoader(cls):
         model.eval()
 
         tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+
+        if backend == BACKEND.MLX:
+            import tempfile
+            try:
+                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from mlx_lm.utils import save_weights, save_config
+                from mlx_lm import load
+            except ModuleNotFoundError as exception:
+                raise type(exception)(
+                    "GPTQModel load mlx model required dependencies are not installed.",
+                    "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
+                )
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, quantize_config.to_dict())
+
+                save_weights(temp_dir, mlx_weights, donate_weights=True)
+                save_config(mlx_config, config_path=temp_dir + "/config.json")
+                tokenizer.save_pretrained(temp_dir)
+                
+                model, _ = load(temp_dir)
+
+                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
+
 
         return cls(
             model,

@@ -1,9 +1,25 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 from collections import OrderedDict
 from typing import Dict, Optional, Type, Union
 
 import torch
 
+from .rocm import IS_ROCM
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -68,7 +84,7 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
             raise ValueError(f"device must be a string or torch.device, got {type(device)}")
 
     # map fake cuda to actual rocm
-    if normalized_device == DEVICE.CUDA and torch.version.hip is not None:
+    if normalized_device == DEVICE.CUDA and IS_ROCM:
         normalized_device = DEVICE.ROCM
     return normalized_device
 
@@ -131,18 +147,20 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: Optional[DEVICE] = DEVICE.CUDA,
+        device: Optional[DEVICE] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         pack: bool = False,
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
 ) -> Type[BaseQuantLinear]:
+    if device is None:
+        device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
     backend = BACKEND.AUTO if backend is None else backend
 
+    trainable = backend == BACKEND.AUTO_TRAINABLE
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        trainable = backend == BACKEND.AUTO_TRAINABLE
 
         allow_backends = format_dict[format]
 
@@ -182,17 +200,17 @@ def select_quant_linear(
     if backend == BACKEND.TRITON:
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
-        return TritonV2QuantLinear
+        qlinear = TritonV2QuantLinear
     elif backend == BACKEND.BITBLAS:
-        return BitBLASQuantLinear
+        qlinear = BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
-        return MarlinQuantLinear
+        qlinear = MarlinQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
-        return ExllamaV2QuantLinear
+        qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
-        return ExllamaQuantLinear
+        qlinear = ExllamaQuantLinear
     elif backend == BACKEND.CUDA:
-        return DynamicCudaQuantLinear
+        qlinear = DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
@@ -204,8 +222,14 @@ def select_quant_linear(
         if cpu_vendor != "intel":
             logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Running on non-Intel cpu is not guaranteed. Current cpu vendor: `{cpu_vendor}`.")
 
-        return IPEXQuantLinear
+        qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
-        return TorchQuantLinear
+        qlinear = TorchQuantLinear
     else:
-        return TorchQuantLinear
+        qlinear = TorchQuantLinear
+
+    validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+    if not validate:
+        raise ValueError(err)
+    else:
+        return qlinear

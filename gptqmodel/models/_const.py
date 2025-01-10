@@ -1,3 +1,18 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from enum import Enum
 
 import torch
@@ -6,6 +21,7 @@ import transformers
 from torch import device
 
 from ..utils import BACKEND
+from ..utils.rocm import IS_ROCM
 from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
 CPU = device("cpu")
@@ -30,7 +46,7 @@ class DEVICE(str, Enum):
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")
     def _missing_(cls, value):
-        if torch.version.hip is not None and f"{value}".lower() == "rocm":
+        if IS_ROCM and f"{value}".lower() == "rocm":
             return cls.ROCM
         return super()._missing_(value)
 

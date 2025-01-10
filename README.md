@@ -7,10 +7,10 @@
     <a href="https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/gptqmodel"></a>
     <a href="https://huggingface.co/modelcloud/"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-ModelCloud-%23ff8811.svg"></a>
 </p>
-
+  
 ## News
-* 01/05/2025 [1.5.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.4): 25% faster quantization. Fixed regression where `quantize_config` is not properly read from `config.json` and batch processing not correctly applied in 1.5.3.
-* 01/04/2025 [1.5.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.3): AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization. ~25-30% memory reduction in quantization vs previous release. 
+* 01/07/2025 [1.6.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.1): 🎉 New OpenAI api compatible end-point via `model.serve(host, port)`. Auto-enable flash-attention2 for inference.  Fixed `sym=False` loading regression. 
+* 01/06/2025 [1.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.0): ⚡25% faster quantization. 35% reduction in vram usage vs v1.5. 👀 AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
 * 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage. 
@@ -144,6 +144,13 @@ from gptqmodel import GPTQModel
 
 model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v2.5")
 result = model.generate("Uncovering deep insights begins with")[0]
+```
+
+
+### OpenAI API compatible end-point
+```py
+# load model using above inference guide first
+model.serve(host="0.0.0.0",port="12345")
 ```
 
 ### Quantization

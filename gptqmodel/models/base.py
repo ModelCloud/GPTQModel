@@ -1,3 +1,18 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import copy
@@ -84,6 +99,8 @@ class BaseGPTQModel(nn.Module):
 
     quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
 
+    server = None
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -102,7 +119,7 @@ class BaseGPTQModel(nn.Module):
         self.load_quantized_model = load_quantized_model
         self.tokenizer = tokenizer
         self.quantize_config = quantize_config
-        self.config = self.model.config
+        self.config = self.model.config if hasattr(self.model, "config") else None
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
@@ -676,6 +693,9 @@ class BaseGPTQModel(nn.Module):
                     if hasattr(subset[name], 'forward_hook'):
                         subset[name].forward_hook = None
 
+                if index == len(layer_modules) - 1:
+                    torch_empty_cache()
+
                 for name_index, name in enumerate(subset):
                     layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
                     layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
@@ -758,6 +778,8 @@ class BaseGPTQModel(nn.Module):
 
                 del layer_input
                 del additional_layer_inputs
+                if num_batches > 1 and j == num_batches - 1:
+                    torch_empty_cache()
 
             if not is_lm_head:
                 layers[i] = move_to(layer, CPU)
@@ -859,6 +881,22 @@ class BaseGPTQModel(nn.Module):
                         f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
+
+    def serve(self,
+               host: str = "0.0.0.0",
+               port: int = 80,
+               async_mode: bool = False):
+        from ..utils.openai_server import OpenAiServer
+        self.server = OpenAiServer(model=self)
+        self.server.start(host=host, port=port, async_mode=async_mode)
+
+    def serve_shutdown(self):
+        if self.server is not None:
+            self.server.shutdown()
+
+    def serve_wait_until_ready(self, timeout: int = 30, check_interval: float = 0.1):
+        if self.server is not None:
+            self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
 
 

@@ -1,4 +1,17 @@
-# License: GPTQModel/licenses/LICENSE.apache
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import math
 
@@ -212,6 +225,17 @@ class TorchQuantLinear(BaseQuantLinear):
         return out
 
     def _forward(self, x, x_dtype, out_shape):
+        num_itr = self.g_idx.shape[0] // x.shape[-1]
+        weights = self.dequantize_weight(num_itr=num_itr)
+
+        out = torch.matmul(x, weights)
+        out = out.to(x_dtype)
+        out = out.reshape(out_shape)
+        out = out + self.bias if self.bias is not None else out
+        return out
+
+    @torch.no_grad()
+    def dequantize_weight(self, num_itr=1):
         if self.wf.device != self.qzeros.device:
             self.wf = self.wf.to(self.qzeros.device)
         if self.bits in [2, 4, 8]:
@@ -250,7 +274,7 @@ class TorchQuantLinear(BaseQuantLinear):
             weight = weight & 0x7
             weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
+
         if num_itr == 1:
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
         else:
@@ -263,11 +287,7 @@ class TorchQuantLinear(BaseQuantLinear):
                 g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim]
                 weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
             weights = torch.cat(weights, dim=1)
-        out = torch.matmul(x, weights)
-        out = out.to(x_dtype)
-        out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
-        return out
 
+        return weights
 
 __all__ = ["TorchQuantLinear"]

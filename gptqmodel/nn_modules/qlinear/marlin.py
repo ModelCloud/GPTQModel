@@ -1,4 +1,18 @@
-# License: GPTQModel/licenses/LICENSE.apache
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +23,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
 from ...models._const import DEVICE, PLATFORM
+from ...utils.rocm import IS_ROCM
 
 marlin_import_exception = None
 try:
@@ -290,6 +305,8 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        if IS_ROCM:
+            return False, RuntimeError("marlin kernel is not supported by rocm.")
         if marlin_import_exception is not None:
             return False, marlin_import_exception
         return cls._validate(**args)
@@ -401,46 +418,4 @@ def dequantize_qzeros(layer):
     return unpacked_qzeros
 
 
-# Copied from https://github.com/IST-DASLab/marlin/pull/1
-@torch.no_grad()
-def unpack_4bit_to_32bit_signed(qweight, qzeros):
-    # Unpack 4-bit values and interpret them as signed integers
-    unpacked_weights = torch.zeros(
-        (qweight.shape[0] * 8, qweight.shape[1]),
-        dtype=torch.int8,
-        device=qweight.device,
-        requires_grad=False,
-    )
-
-    unpacked_zeros = torch.zeros(
-        (qzeros.shape[0], qzeros.shape[1] * 8),
-        dtype=torch.int8,
-        device=qzeros.device,
-        requires_grad=False,
-    )
-
-    for row in range(unpacked_weights.shape[0]):
-        i = row % 8
-        unpacked_weights[row, :] = (qweight[row // 8, :] >> (4 * i)) & 0xF
-
-    for col in range(unpacked_zeros.shape[1]):
-        i = col % 8
-        unpacked_zeros[:, col] = (qzeros[:, col // 8] >> (4 * i)) & 0xF
-
-    return unpacked_weights, unpacked_zeros
-
-
-# Copied from https://github.com/IST-DASLab/marlin/pull/1
-@torch.no_grad()
-def dequantize_weight(layer):
-    qweight, qzeros, scales = layer.qweight, layer.qzeros, layer.scales
-    unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)
-    unpacked_qzeros = torch.clamp(unpacked_qzeros, min=0, max=15)
-    group_size = unpacked_qweight.shape[0] // scales.shape[0]
-    scales = scales.repeat_interleave(group_size, dim=0)
-    unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-    unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
-
-    return unpacked_qweight.T, unpacked_qzeros
-
-__all__ = ["MarlinQuantLinear", "dequantize_weight"]
+__all__ = ["MarlinQuantLinear"]
