@@ -633,6 +633,7 @@ jobs:
       - name: Run test
         run: |
           export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
+          rm -rf venv ||true
           pyenv global 3.11.11 && python -m venv venv
           rm profile.sb || true
           rm unit_test.sh || true
