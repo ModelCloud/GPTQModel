@@ -47,6 +47,12 @@ on:
         type: boolean
         required: false
         default: false
+      exclusive-gpu:
+        description: 'one test, one gpu. for collecting statistics'
+        type: boolean
+        required: false
+        default: false
+
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -68,9 +74,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [ self-hosted, Linux ]
-    container:
-      image: modelcloud/gptqmodel:alpine-ci-v1
+    runs-on: ubuntu-latest
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
@@ -167,13 +171,11 @@ jobs:
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
-    runs-on: [ self-hosted, zen4 ]
+    runs-on: [ self-hosted, Linux ]
     needs: check-vm
-    if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
     steps:
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
@@ -202,11 +204,33 @@ jobs:
           echo "##### pip list #####"
           pip list
 
+      - name: Compress dir
+        run: |
+          mkdir dist || true
+          rm -rf dist/* || true
+          tar -zcf ../gptqmodel_source.tar.gz ./
+          mv ../gptqmodel_source.tar.gz dist/
+          sha256=$(sha256sum dist/gptqmodel_source.tar.gz)
+          echo "hash=$sha256"
+          echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
+
+      - name: Upload source to local
+        continue-on-error: true
+        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+
+      - name: Upload source to github artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: dist/gptqmodel_source.tar.gz
+
       - name: Compile
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
       - name: Test install
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
@@ -219,16 +243,17 @@ jobs:
           twine check dist/$whl
           uv pip install dist/$whl
 
-      - name: Upload wheel
+      - name: Upload wheel to local
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         continue-on-error: true
-        run: |
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
+        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
-      - name: Upload to artifact
+      - name: Upload wheel to github artifact
+        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist
+          name: whl
+          path: dist/${{ env.WHL_NAME }}
 
       - name: Clean cache
         if: always()
@@ -280,10 +305,36 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Download wheel
+      - name: Download source from local
+        continue-on-error: true
+        run: |
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          ls -ahl .
+          sha256=$(sha256sum $file_name)
+          echo "sha256=$sha256"
+          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+
+      - name: Download source from github
+        if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v4
+        with:
+          name: source
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Uncompress source
+        continue-on-error: true
+        run: |
+          find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+          ls -ahl .
+          tar -zxf gptqmodel_source.tar.gz
+
+      - name: Download wheel from local
         continue-on-error: true
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+
+          echo "file_name=$file_name"
 
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
@@ -292,14 +343,14 @@ jobs:
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
-              echo "DOWNLOADED=1" >> $GITHUB_ENV
+              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
           fi
 
-      - name: Download artifact
-        if: env.DOWNLOADED == '' && !cancelled()
+      - name: Download artifact from github
+        if: env.WHL_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: whl
           path: dist
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
@@ -407,10 +458,38 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Download wheel
+
+      - name: Download source from local
+        continue-on-error: true
+        run: |
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          ls -ahl .
+          sha256=$(sha256sum $file_name)
+          echo "sha256=$sha256"
+          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+
+      - name: Download source from github
+        if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v4
+        with:
+          name: source
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Uncompress source
+        continue-on-error: true
+        run: |
+          find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+          ls -ahl .
+          tar -zxf gptqmodel_source.tar.gz
+
+      - name: Download wheel from local
         continue-on-error: true
         run: |
           file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://${{ needs.check-vm.outputs.ip }}/gpu/whl/download")
+
+          echo "file_name=$file_name"
+
           if echo "$file_name" | grep -q "gptqmodel"; then
               mkdir dist || true
               cd dist
@@ -418,14 +497,14 @@ jobs:
               ls -ahl .
               sha256=$(sha256sum $file_name)
               echo "sha256=$sha256"
-              echo "DOWNLOADED=1" >> $GITHUB_ENV
+              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
           fi
 
-      - name: Download artifact
-        if: env.DOWNLOADED == '' && !cancelled()
+      - name: Download artifact from github
+        if: env.WHL_DOWNLOADED == '' && !cancelled()
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: whl
           path: dist
           run-id: ${{ needs.check-vm.outputs.run_id }}
 
@@ -492,7 +571,7 @@ jobs:
 
   show-statistics:
     runs-on: [ self-hosted, Linux ]
-    if: always()
+    if: github.event.inputs.exclusive-gpu != 'true'
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
