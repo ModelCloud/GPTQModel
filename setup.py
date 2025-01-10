@@ -54,7 +54,7 @@ BASE_WHEEL_URL = (
     "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
 )
 
-BUILD_CUDA_EXT = True
+BUILD_CUDA_EXT = sys.platform != "darwin"
 
 if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
     FORCE_BUILD = True
