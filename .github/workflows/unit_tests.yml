@@ -635,4 +635,4 @@ jobs:
           export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
           pyenv global 3.11.11 && python -m venv venv
           curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/profile.sb
-          sandbox-exec -f profile.sb /bin/bash -c "$(curl -L http://${{ needs.check-vm.outputs.ip }}/scripts/m4/run.sh)" ${{ matrix.test_script }}
+          sandbox-exec -f profile.sb /bin/bash -c "$(curl -L http://${{ needs.check-vm.outputs.ip }}/scripts/m4/unit_test.sh)" ${{ matrix.test_script }}
