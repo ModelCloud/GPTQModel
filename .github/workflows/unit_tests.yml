@@ -595,7 +595,7 @@ jobs:
   m4:
     runs-on: [ self-hosted, m4 ]
     needs: check-vm
-    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && needs.list-test-files.outputs.mlx-files != '' && needs.list-test-files.outputs.mlx-files != '[]' && !cancelled()
+    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.mlx-files != '' || needs.list-test-files.outputs.mlx-files != '[]') && !cancelled()
     strategy:
       fail-fast: false
       matrix:
