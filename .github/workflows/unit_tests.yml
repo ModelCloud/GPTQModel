@@ -155,8 +155,8 @@ jobs:
 
           torch_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files and 'mlx' not in f]
 
-          torch_test_files = [test for test in torch_test_files if re.match(rf'{TEST_REGEX}', test)]
-          transformers_test_files = [test for test in transformers_test_files if re.match(rf'{TEST_REGEX}', test)]
+          torch_test_files = [test for test in torch_test_files if re.match(f'{TEST_REGEX}', test)]
+          transformers_test_files = [test for test in transformers_test_files if re.match(f'{TEST_REGEX}', test)]
 
           m4_test_files = [f for f in all_tests if ('mlx' in f or 'apple' in f) and (f.strip().removesuffix('.py') in input_test_files_list if input_test_files_list else True)]
 
