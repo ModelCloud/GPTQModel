@@ -165,6 +165,7 @@ jobs:
 
           test_files=$(python3 -c "$script")
           IFS='|' read -r torch_test_files transformers_test_files mlx_files <<< "$test_files"
+
           echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
           echo "mlx-files=$mlx_files" >> "$GITHUB_OUTPUT"
@@ -195,7 +196,9 @@ jobs:
 
   build:
     runs-on: [ self-hosted, Linux ]
-    needs: check-vm
+    needs:
+      - check-vm
+      - list-test-files
     if: github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.mlx-files == '[]' && needs.list-test-files.outputs.mlx-files == '[]')
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
