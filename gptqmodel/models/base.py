@@ -449,7 +449,7 @@ class BaseGPTQModel(nn.Module):
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
 
-            if not self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            if not self.quantize_config.lm_head or self.quantize_config.lm_head_low_gpu_mem_usage:
                 raise ValueError
 
         lm_head_inputs = []
