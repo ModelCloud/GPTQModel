@@ -164,15 +164,15 @@ jobs:
           "
 
           test_files=$(python3 -c "$script")
-          IFS='|' read -r torch_test_files transformers_test_files mlx-files <<< "$test_files"
+          IFS='|' read -r torch_test_files transformers_test_files mlx_files <<< "$test_files"
           echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
-          echo "mlx-files=$mlx-files" >> "$GITHUB_OUTPUT"
+          echo "mlx-files=$mlx_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
           echo "Torch Test files: $torch_test_files"
           echo "Transformers Test files: $transformers_test_files"
-          echo "MLX Test files: $mlx-files"
+          echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
       - name: Print conditions and parameters
