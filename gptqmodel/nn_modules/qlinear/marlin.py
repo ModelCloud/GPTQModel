@@ -417,5 +417,4 @@ def dequantize_qzeros(layer):
 
     return unpacked_qzeros
 
-
 __all__ = ["MarlinQuantLinear"]

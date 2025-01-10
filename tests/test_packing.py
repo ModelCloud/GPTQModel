@@ -26,7 +26,7 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.marlin import dequantize_weight  # noqa: E402
+from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 
 
@@ -91,7 +91,7 @@ class TestRepacking(unittest.TestCase):
 
         exllama_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
-        dequantized_weight, dequantized_qzeros = dequantize_weight(exllama_linear)
+        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(exllama_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
 
         self.assertTrue(torch.equal(dequantized_weight, linear.weight))
@@ -108,7 +108,7 @@ class TestRepacking(unittest.TestCase):
 
         triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
-        dequantized_weight, dequantized_qzeros = dequantize_weight(triton_v2_linear)
+        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_v2_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
 
         self.assertTrue(torch.equal(dequantized_weight, linear.weight))
