@@ -396,7 +396,7 @@ class BaseGPTQModel(nn.Module):
                 raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
-            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": False}
+            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.quantize_config.dynamic is None:
                 self.quantize_config.dynamic = {self.lm_head: lm_head_quant_config}
             elif self.quantize_config.dynamic_get(self.lm_head, default_value=None) is None:
@@ -410,6 +410,9 @@ class BaseGPTQModel(nn.Module):
         position_ids = []
         layer_input_kwargs = []
         layer_outputs = []
+
+        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            self.model.to(self.quantize_config.device)
 
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
@@ -446,7 +449,24 @@ class BaseGPTQModel(nn.Module):
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
 
-            raise ValueError
+            if not self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+                raise ValueError
+
+        lm_head_inputs = []
+        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            def store_lm_head_input_hook(_, args, kwargs):
+                # Positional arguments.
+                lm_head_layer_input = []
+                for inp in args:
+                    lm_head_layer_input.append(move_to(inp, data_device))
+                if len(lm_head_layer_input) == 0:
+                    # Some models put hidden_states in kwargs instead of args.
+                    # For example, gptj ...
+                    if kwargs.get("hidden_states") is not None:
+                        lm_head_layer_input.append(move_to(kwargs["hidden_states"], data_device))
+
+                lm_head_inputs.append(lm_head_layer_input)
+                raise ValueError
 
         # move layer to target device
         layers[0] = layers[0].to(self.quantize_config.device)
@@ -464,6 +484,8 @@ class BaseGPTQModel(nn.Module):
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            lm_head_handle = layers[0].register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
         for example in calibration_dataset:
             for k, v in example.items():
@@ -484,8 +506,14 @@ class BaseGPTQModel(nn.Module):
             except ValueError:
                 pass
         handle.remove()
+        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            lm_head_handle.remove()
 
-        move_to(layers[0], CPU)
+        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            self.model.to(CPU)
+        else:
+            move_to(layers[0], CPU)
+
         for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
@@ -523,6 +551,8 @@ class BaseGPTQModel(nn.Module):
             if is_lm_head:
                 layer_pb.set_description(f"Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
+                if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+                    layer_inputs = lm_head_inputs
             else:
                 layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
                 layer = layers[i]
@@ -574,6 +604,7 @@ class BaseGPTQModel(nn.Module):
 
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
+                        mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
                         bits,
@@ -651,15 +682,19 @@ class BaseGPTQModel(nn.Module):
 
                     group_size = self.quantize_config.group_size
                     desc_act = self.quantize_config.desc_act
+                    damp_percent = self.quantize_config.damp_percent
+                    static_groups = self.quantize_config.static_groups
                     if self.quantize_config.dynamic is not None:
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
+                        damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", damp_percent)
+                        static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
 
                     scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
-                        percdamp=self.quantize_config.damp_percent,
+                        percdamp=damp_percent,
                         group_size=group_size,
                         actorder=desc_act,
-                        static_groups=self.quantize_config.static_groups,
+                        static_groups=static_groups,
                     )
                     if task is not None:
                         task.get_logger().report_scalar(
