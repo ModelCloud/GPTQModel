@@ -653,6 +653,8 @@ jobs:
           echo "=== installing gptqmodel"
           uv pip install . --no-build-isolation
 
+          TEST=${{ matrix.test_script }}
+
           echo "=== running test: $TEST"
           pytest tests/$TEST
 
