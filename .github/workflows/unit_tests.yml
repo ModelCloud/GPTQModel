@@ -111,8 +111,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.m4-only != 'true'
     outputs:
-      torch-2-5-files: ${{ steps.files.outputs.torch-2-5-files }}
+      torch-files: ${{ steps.files.outputs.torch-files }}
       transformers-files: ${{ steps.files.outputs.transformers-files }}
+      mlx-files: ${{ steps.files.outputs.transformers-files }}
 
     steps:
       - name: Checkout Codes
@@ -152,22 +153,26 @@ jobs:
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
           all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
 
-          torch_2_5_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files]
+          torch_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files and 'mlx' not in f]
 
-          torch_2_5_test_files = [test for test in torch_2_5_test_files if re.match(rf'{TEST_REGEX}', test)]
+          torch_test_files = [test for test in torch_test_files if re.match(rf'{TEST_REGEX}', test)]
           transformers_test_files = [test for test in transformers_test_files if re.match(rf'{TEST_REGEX}', test)]
 
-          print(f'{json.dumps(torch_2_5_test_files)}|{json.dumps(transformers_test_files)}')
+          mlx_test_files = [f for f in all_tests if 'mlx' in f and (f.strip().removesuffix('.py') in input_test_files_list if input_test_files_list else True)]
+
+          print(f'{json.dumps(torch_test_files)}|{json.dumps(transformers_test_files)|{json.dumps(mlx_test_files)}')
           "
 
           test_files=$(python3 -c "$script")
-          IFS='|' read -r torch_2_5_test_files transformers_test_files <<< "$test_files"
-          echo "torch-2-5-files=$torch_2_5_test_files" >> "$GITHUB_OUTPUT"
+          IFS='|' read -r torch_test_files transformers_test_files mlx_test_files <<< "$test_files"
+          echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
           echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
+          echo "mlx-files=$mlx_test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
-          echo "Torch 2.5 Test files: $torch_2_5_test_files"
+          echo "Torch 2.5 Test files: $torch_test_files"
           echo "Transformers Test files: $transformers_test_files"
+          echo "MLX Test files: $mlx_test_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
   build:
@@ -416,7 +421,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, Linux ]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-2-5-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
       options: --device /dev/dri --ipc=host
@@ -428,7 +433,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-2-5-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -589,7 +594,11 @@ jobs:
   m4:
     runs-on: [ self-hosted, m4 ]
     needs: check-vm
-    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') )&& !cancelled()
+    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && needs.list-test-files.outputs.mlx-files != '[]' && !cancelled()
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.mlx-files) }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
