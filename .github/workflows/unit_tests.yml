@@ -548,7 +548,7 @@ jobs:
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
-          
+
           if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
             uv pip install mlx_lm --no-build-isolation
           fi
@@ -632,11 +632,29 @@ jobs:
 
       - name: Run test
         run: |
+          ls -ahl .
+
           export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
-          rm -rf venv ||true
+          rm -rf venv || true
+          echo "=== activating venv"
           pyenv global 3.11.11 && python -m venv venv
+          source venv/bin/activate
+
           rm profile.sb || true
-          rm unit_test.sh || true
+
           curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/profile.sb
-          curl -O http://${{ needs.check-vm.outputs.ip }}/scripts/m4/unit_test.sh
-          sandbox-exec -f profile.sb /bin/bash unit_test.sh ${{ matrix.test_script }}
+
+          echo "=== installing uv setuptools build"
+          pip install uv setuptools build -U -i http://${{ needs.check-vm.outputs.ip }}/simple --trusted-host ${{ needs.check-vm.outputs.ip }}
+
+          echo "=== installing test tools"
+          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm
+
+          echo "=== installing gptqmodel"
+          uv pip install . --no-build-isolation
+
+          echo "=== running test: $TEST"
+          pytest tests/$TEST
+
+          pip cache purge
+          uv cache clean
