@@ -654,7 +654,9 @@ jobs:
           uv pip install . --no-build-isolation
 
           TEST=${{ matrix.test_script }}
-
+          if [[ ! "$TEST" == *.py ]]; then
+          TEST="$TEST.py"
+          fi
           echo "=== running test: $TEST"
           pytest tests/$TEST
 
