@@ -1,5 +1,6 @@
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import sys
 
@@ -9,6 +10,7 @@ if sys.platform == "darwin":
 import tempfile  # noqa: E402
 
 from transformers import AutoTokenizer  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
 
@@ -22,6 +24,11 @@ class TestExport(ModelTest):
 
     def test_export_mlx(self):
         with tempfile.TemporaryDirectory() as export_dir:
+            GPTQModel.export(
+                model_id_or_path=self.NATIVE_MODEL_ID,
+                target_path=export_dir,
+                format="mlx"
+            )
             from mlx_lm import load, generate
             mlx_model, tokenizer = load(export_dir)
 
