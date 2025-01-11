@@ -104,6 +104,7 @@ class ModelTest(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 
+    @classmethod
     def load_dataset(self, tokenizer):
         traindata = load_dataset("json", data_files="/monster/data/model/huggingface/c4-train.00000-of-01024.json.gz", split="train")
 

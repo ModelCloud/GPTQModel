@@ -20,7 +20,7 @@ class TestMlxGenerate(unittest.TestCase):
             backend=BACKEND.MLX
         )
 
-        prompt = "The capital of France is"
+        prompt = "Tell me the city name. Which city is the capital of France?"
 
         messages = [{"role": "user", "content": prompt}]
         prompt = mlx_model.tokenizer.apply_chat_template(
