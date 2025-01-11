@@ -8,8 +8,8 @@ if sys.platform == "darwin":
 
 import tempfile  # noqa: E402
 
-from tests.models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
 class TestExport(ModelTest):
