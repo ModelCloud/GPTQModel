@@ -51,7 +51,7 @@ class TestExport(unittest.TestCase):
                 from mlx_lm import load, generate
                 mlx_model, tokenizer = load(export_dir)
 
-                prompt = "The capital of France is"
+                prompt = "Tell me the city name. Which city is the capital of France?"
 
                 messages = [{"role": "user", "content": prompt}]
                 prompt = tokenizer.apply_chat_template(
