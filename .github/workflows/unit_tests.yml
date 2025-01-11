@@ -669,4 +669,6 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./*
+        run: |
+          source venv/bin/activate && pip cache purge && uv cache clean || true
+          rm -rf ./*
