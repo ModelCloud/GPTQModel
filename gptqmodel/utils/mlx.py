@@ -84,23 +84,47 @@ def mlx_generate(model, tokenizer, **kwargs,):
 
     sampling_params = {}
     sampling_params["max_tokens"] = kwargs.pop("max_tokens", 256)
-    sampling_params["sampler"] = kwargs.pop("sampler", None)
-    sampling_params["logits_processors"] = kwargs.pop("logits_processors", None)
-    sampling_params["max_kv_size"] = kwargs.pop("max_kv_size", None)
-    sampling_params["prompt_cache"] = kwargs.pop("prompt_cache", None)
+    if "sampler" in kwargs:
+        sampling_params["sampler"] = kwargs.pop("sampler", None)
+
+    if "logits_processors" in kwargs:
+        sampling_params["logits_processors"] = kwargs.pop("logits_processors", None)
+
+    if "max_kv_size" in kwargs:
+        sampling_params["max_kv_size"] = kwargs.pop("max_kv_size", None)
+
+    if "prompt_cache" in kwargs:
+        sampling_params["prompt_cache"] = kwargs.pop("prompt_cache", None)
+
     sampling_params["prefill_step_size"] = kwargs.pop("prefill_step_size", 512)
-    sampling_params["kv_bits"] = kwargs.pop("kv_bits", None)
+
+    if "kv_bits" in kwargs:
+        sampling_params["kv_bits"] = kwargs.pop("kv_bits", None)
+
     sampling_params["kv_group_size"] = kwargs.pop("kv_group_size", 64)
     sampling_params["quantized_kv_start"] = kwargs.pop("quantized_kv_start", 0)
-    sampling_params["prompt_progress_callback"] = kwargs.pop("prompt_progress_callback", None)
+
+    if "sampler" in kwargs:
+        sampling_params["prompt_progress_callback"] = kwargs.pop("prompt_progress_callback", None)
+
     if kwargs.pop("temp", None) is not None:
         sampling_params["temp"] = kwargs.pop("temp")
     elif kwargs.pop("temperature", None) is not None:
         sampling_params["temp"] = kwargs.pop("temperature")
 
-    sampling_params["repetition_context_size"] = kwargs.pop("repetition_context_size", None)
-    sampling_params["top_p"] = kwargs.pop("top_p", None)
-    sampling_params["min_p"] = kwargs.pop("min_p", None)
-    sampling_params["min_tokens_to_keep"] = kwargs.pop("min_tokens_to_keep", None)
+    if "repetition_penalty" in kwargs:
+        sampling_params["repetition_penalty"] = kwargs.pop("repetition_penalty", None)
+
+    if "repetition_context_size" in kwargs:
+        sampling_params["repetition_context_size"] = kwargs.pop("repetition_context_size", None)
+
+    if "top_p" in kwargs:
+        sampling_params["top_p"] = kwargs.pop("top_p", None)
+
+    if "min_p" in kwargs:
+        sampling_params["min_p"] = kwargs.pop("min_p", None)
+
+    if "min_tokens_to_keep" in kwargs:
+        sampling_params["min_tokens_to_keep"] = kwargs.pop("min_tokens_to_keep", None)
 
     return generate(model=model, tokenizer=tokenizer, prompt=prompt, formatter=formatter ,verbose=verbose, **sampling_params)
