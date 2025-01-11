@@ -652,7 +652,7 @@ jobs:
           pip install uv setuptools build -U -i http://${{ needs.check-vm.outputs.ip }}/simple --trusted-host ${{ needs.check-vm.outputs.ip }}
 
           echo "=== installing test tools"
-          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
           echo "=== installing gptqmodel"
           uv pip install . --no-build-isolation -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
