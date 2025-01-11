@@ -624,6 +624,11 @@ jobs:
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.m4-files) }}
     steps:
+      - name: Print Env
+        run: |
+          echo "repo: ${{ env.repo }}"
+          echo "ref: ${{ env.ref }}"
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
