@@ -284,7 +284,7 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./*
+        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   transformers_diff:
     needs:
@@ -435,7 +435,7 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./*
+        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   torch2_5:
     needs:
@@ -599,7 +599,7 @@ jobs:
   
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./*
+        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   show-statistics:
     runs-on: [ self-hosted, Linux ]
@@ -671,4 +671,4 @@ jobs:
         if: always()
         run: |
           source venv/bin/activate && pip cache purge && uv cache clean || true
-          rm -rf ./*
+          rm -rf ./* ./.*
