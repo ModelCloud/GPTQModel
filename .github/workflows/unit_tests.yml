@@ -654,7 +654,7 @@ jobs:
           uv pip install . --no-build-isolation
 
           echo "replacing model path"
-          find tests -name "*.py" -exec sed -i '' 's/\/monster\/data/..\/..\/monster/g' {} +
+          find tests -name "*.py" -exec sed -i '' 's/\/monster\/data/..\/..\/..\/monster/g' {} +
 
           TEST=${{ matrix.test_script }}
           if [[ ! "$TEST" == *.py ]]; then
