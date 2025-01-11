@@ -386,7 +386,7 @@ jobs:
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           echo "===== install dist/whl ====="
-          uv pip install dist/*.whl
+          uv pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           echo "===== init test env ====="
           echo "===== install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 ====="
           uv pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
@@ -396,7 +396,7 @@ jobs:
           fi
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
             echo "===== install auto_round ====="
-            uv pip install auto_round
+            uv pip install auto_round -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
 
       - name: Find suitable GPU
@@ -539,22 +539,22 @@ jobs:
         run: |
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
             echo "===== install auto_round ====="
-            uv pip install auto_round
+            uv pip install auto_round -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
-            uv pip install -U git+https://github.com/huggingface/transformers.git
+            uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
           if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
           if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
-            uv pip install mlx_lm --no-build-isolation
+            uv pip install mlx_lm --no-build-isolation -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
           fi
 
           echo "===== install dist/whl ====="
-          uv pip install dist/*.whl
+          uv pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
@@ -653,10 +653,10 @@ jobs:
           pip install uv setuptools build -U -i http://${{ needs.check-vm.outputs.ip }}/simple --trusted-host ${{ needs.check-vm.outputs.ip }}
 
           echo "=== installing test tools"
-          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm
+          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
           echo "=== installing gptqmodel"
-          uv pip install . --no-build-isolation
+          uv pip install . --no-build-isolation -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
           echo "replacing model path"
           find tests -name "*.py" -exec sed -i '' 's/\/monster\/data\/model/..\/..\/..\/monster/g' {} +
