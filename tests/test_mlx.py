@@ -12,7 +12,7 @@ import tempfile  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-
+from mlx_lm import load, generate # noqa: E402
 
 class TestExport(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
@@ -29,7 +29,6 @@ class TestExport(ModelTest):
                 target_path=export_dir,
                 format="mlx"
             )
-            from mlx_lm import load, generate
             mlx_model, tokenizer = load(export_dir)
 
             prompt = "Tell me the city name. Which city is the capital of France?"
