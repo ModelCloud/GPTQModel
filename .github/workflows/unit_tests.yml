@@ -628,6 +628,7 @@ jobs:
         run: |
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
+          ls -ahl .
 
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -637,8 +638,6 @@ jobs:
 
       - name: Run test
         run: |
-          ls -ahl .
-
           export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
           rm -rf venv || true
           echo "=== activating venv"
