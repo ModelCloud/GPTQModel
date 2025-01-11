@@ -671,4 +671,4 @@ jobs:
         if: always()
         run: |
           source venv/bin/activate && pip cache purge && uv cache clean || true
-          rm -rf ./* ./.*
+          rm -rf ../GPTQModel
