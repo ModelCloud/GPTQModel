@@ -97,7 +97,7 @@ def mlx_generate(model, tokenizer, **kwargs,):
         sampling_params["temp"] = kwargs.pop("temp")
     elif kwargs.pop("temperature", None) is not None:
         sampling_params["temp"] = kwargs.pop("temperature")
-    sampling_params["repetition_penalty"] = kwargs.pop("repetition_penalty", None)
+
     sampling_params["repetition_context_size"] = kwargs.pop("repetition_context_size", None)
     sampling_params["top_p"] = kwargs.pop("top_p", None)
     sampling_params["min_p"] = kwargs.pop("min_p", None)
