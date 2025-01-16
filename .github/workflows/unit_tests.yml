@@ -642,6 +642,7 @@ jobs:
           rm -rf venv || true
 
           echo "=== checking models dir is mounted"
+          ls ../../..
           ls ../../../monster
 
           echo "=== activating venv"
