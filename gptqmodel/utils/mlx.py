@@ -20,18 +20,12 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
     if gptq_config["checkpoint_format"] not in [FORMAT.GPTQ, FORMAT.GPTQ_V2]:
         raise ValueError("Model checkpoint format is not gptq or gptq_v2")
 
-    if gptq_config["desc_act"] == True:
-        raise ValueError("desc_act=True is not supported")
-
     if gptq_config["dynamic"]:
         print(gptq_config["dynamic"])
         for _, config in gptq_config["dynamic"].items():
             if config != {}:
                 if config["bits"] not in [2, 3, 4, 8]:
                     raise ValueError(f'Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]')
-
-                if config["desc_act"] == True:
-                    raise ValueError("desc_act=True in dynamic, it not supported")
                 
     # mlx does not support group_size = -1, 16, so we need to convert it to 64, 64 is the default group_size for mlx
     if gptq_config["group_size"] in [-1, 16]:
