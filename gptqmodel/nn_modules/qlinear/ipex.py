@@ -64,6 +64,19 @@ def convert_dtype_torch2str(dtype):
     else:
         assert False, "Unsupported pytorch dtype {} to str dtype".format(dtype)
 
+def convert_idx(self, g_idx, k):
+    ret_idx = torch.zeros(k, dtype=int).to(g_idx.device)
+    groups = k // self.blocksize
+    remainder = k % self.blocksize
+    g_idx_2 = g_idx * self.blocksize
+    if remainder > 0:
+        g_idx_2[g_idx == groups] += torch.arange(remainder).to(g_idx.device)
+    arange_tensor = torch.arange(self.blocksize).to(g_idx.device)
+    for i in range(groups):
+        g_idx_2[g_idx == i] += arange_tensor
+    ret_idx[g_idx_2] = torch.arange(k).to(g_idx.device)
+    return ret_idx.to(torch.int32)
+
 
 class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
@@ -157,6 +170,14 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
+            try:
+                # monkey patch GPTQShuffle.convert_idx to use our convert_idx, fix the slow ipex generate issue
+                from intel_extension_for_pytorch.nn.utils._quantize_convert import GPTQShuffle
+                GPTQShuffle.convert_idx = convert_idx
+            except ImportError:
+                # if import GPTQShuffle failed, do nothing
+                pass
+
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
                                                                     self.infeatures, self.outfeatures, None, self.bias,
                                                                     self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
