@@ -176,6 +176,7 @@ class IPEXQuantLinear(BaseQuantLinear):
                 GPTQShuffle.convert_idx = convert_idx
                 print("monkey patch GPTQShuffle.convert_idx to use our convert_idx")
             except ImportError:
+                print("Failed to monkey patch GPTQShuffle.convert_idx to use our convert_idx")
                 # if import GPTQShuffle failed, do nothing
                 pass
 
