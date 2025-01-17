@@ -9,6 +9,7 @@
 </p>
   
 ## News
+* 01/17/2025 [1.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.0): 🎉 `backend.MLX` added for runtime-conversion and execution of GPTQ models on Apple `MLX` framework. Exports of `gptq` models to `mlx` also now possible. We have added `mlx` exported models to [huggingface.co/ModelCloud](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2). `lm_head` quantization now fully support by GPTQModel without external pkg dependency. 
 * 01/07/2025 [1.6.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.1): 🎉 New OpenAI api compatible end-point via `model.serve(host, port)`. Auto-enable flash-attention2 for inference.  Fixed `sym=False` loading regression. 
 * 01/06/2025 [1.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.0): ⚡25% faster quantization. 35% reduction in vram usage vs v1.5. 👀 AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
