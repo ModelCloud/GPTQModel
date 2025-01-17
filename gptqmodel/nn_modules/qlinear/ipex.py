@@ -77,6 +77,15 @@ def convert_idx(self, g_idx, k):
     ret_idx[g_idx_2] = torch.arange(k).to(g_idx.device)
     return ret_idx.to(torch.int32)
 
+if HAS_IPEX:
+    try:
+        # monkey patch GPTQShuffle.convert_idx to use fixed convert_idx, fix the slow ipex generate issue
+        from intel_extension_for_pytorch.nn.utils._quantize_convert import GPTQShuffle
+
+        GPTQShuffle.convert_idx = convert_idx
+    except ImportError:
+        # if import GPTQShuffle failed, do nothing
+        pass
 
 class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
@@ -170,14 +179,6 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
-            try:
-                # monkey patch GPTQShuffle.convert_idx to use fixed convert_idx, fix the slow ipex generate issue
-                from intel_extension_for_pytorch.nn.utils._quantize_convert import GPTQShuffle
-                GPTQShuffle.convert_idx = convert_idx
-            except ImportError:
-                # if import GPTQShuffle failed, do nothing
-                pass
-
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
                                                                     self.infeatures, self.outfeatures, None, self.bias,
                                                                     self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
