@@ -25,7 +25,7 @@ from setuptools import find_packages, setup
 
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
-except BaseException:
+except (BaseException, ModuleNotFoundError):
     from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 RELEASE_MODE = os.environ.get("RELEASE_MODE", None)
