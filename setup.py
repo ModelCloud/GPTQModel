@@ -26,7 +26,10 @@ from setuptools import find_packages, setup
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 except (BaseException, ModuleNotFoundError):
-    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+    try:
+        from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+    except (BaseException, ModuleNotFoundError):
+        sys.exit("setuptools or wheel module are not found, please install latest setuptools `pip install setuptools -U`")
 
 RELEASE_MODE = os.environ.get("RELEASE_MODE", None)
 
