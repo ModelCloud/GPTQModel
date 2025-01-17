@@ -83,8 +83,10 @@ if HAS_IPEX:
         from intel_extension_for_pytorch.nn.utils._quantize_convert import GPTQShuffle
 
         GPTQShuffle.convert_idx = convert_idx
+        print("Patched GPTQShuffle.convert_idx")
     except ImportError:
         # if import GPTQShuffle failed, do nothing
+        print("Failed to patch GPTQShuffle.convert_idx")
         pass
 
 class IPEXQuantLinear(BaseQuantLinear):
