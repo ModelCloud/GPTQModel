@@ -640,6 +640,10 @@ jobs:
         run: |
           export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
           rm -rf venv || true
+
+          echo "=== checking models dir is mounted"
+          ls ../../../monster
+
           echo "=== activating venv"
           pyenv global 3.11.11 && python -m venv venv
           source venv/bin/activate
