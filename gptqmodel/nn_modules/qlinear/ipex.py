@@ -174,9 +174,7 @@ class IPEXQuantLinear(BaseQuantLinear):
                 # monkey patch GPTQShuffle.convert_idx to use our convert_idx, fix the slow ipex generate issue
                 from intel_extension_for_pytorch.nn.utils._quantize_convert import GPTQShuffle
                 GPTQShuffle.convert_idx = convert_idx
-                print("monkey patch GPTQShuffle.convert_idx to use our convert_idx")
             except ImportError:
-                print("Failed to monkey patch GPTQShuffle.convert_idx to use our convert_idx")
                 # if import GPTQShuffle failed, do nothing
                 pass
 
