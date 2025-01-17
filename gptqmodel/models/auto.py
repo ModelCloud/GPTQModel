@@ -66,6 +66,7 @@ from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
+from .definitions.minicpmo import MiniCPMOGPTQ  # noqa: E402
 from .definitions.mistral import MistralGPTQ  # noqa: E402
 from .definitions.mixtral import MixtralGPTQ  # noqa: E402
 from .definitions.mllama import MLlamaGPTQ  # noqa: E402
@@ -126,7 +127,8 @@ MODEL_MAP = {
     "phi3": Phi3GPTQ,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
-    "minicpm3":MiniCPM3GPTQ,
+    "minicpm3": MiniCPM3GPTQ,
+    "minicpmo": MiniCPMOGPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "dbrx": DbrxGPTQ,
