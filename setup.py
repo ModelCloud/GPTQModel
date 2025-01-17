@@ -29,7 +29,7 @@ except (BaseException, ModuleNotFoundError):
     try:
         from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
     except (BaseException, ModuleNotFoundError):
-        sys.exit("setuptools or wheel module are not found, please install latest setuptools `pip install setuptools -U`")
+        sys.exit("Both latest setuptools and wheel package are not found.  Please upgrade to latest setuptools: `pip install -U setuptools`")
 
 RELEASE_MODE = os.environ.get("RELEASE_MODE", None)
 
