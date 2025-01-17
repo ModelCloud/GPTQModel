@@ -171,7 +171,7 @@ class IPEXQuantLinear(BaseQuantLinear):
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
             try:
-                # monkey patch GPTQShuffle.convert_idx to use our convert_idx, fix the slow ipex generate issue
+                # monkey patch GPTQShuffle.convert_idx to use fixed convert_idx, fix the slow ipex generate issue
                 from intel_extension_for_pytorch.nn.utils._quantize_convert import GPTQShuffle
                 GPTQShuffle.convert_idx = convert_idx
             except ImportError:
