@@ -31,6 +31,7 @@ try:
 except ImportError as e:
     marlin_import_exception = e
 
+
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
@@ -307,6 +308,8 @@ class MarlinQuantLinear(BaseQuantLinear):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if IS_ROCM:
             return False, RuntimeError("marlin kernel is not supported by rocm.")
+        if not any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count())):
+            return False, RuntimeError("marlin kernel requires Compute Capability >= 8.0.")
         if marlin_import_exception is not None:
             return False, marlin_import_exception
         return cls._validate(**args)
