@@ -187,6 +187,12 @@ class GPTQModel:
                             is_quantized = True
                             break
 
+        if quantize_config is not None:
+            bit = quantize_config.bits
+            group_size = quantize_config.group_size
+            bpw = ((group_size * bit) + 16 * 2) / group_size
+            logger.info(f"Effective BPW (bits per weight): {bpw} bits")
+
         if is_quantized:
             return cls.from_quantized(
                 model_id_or_path=model_id_or_path,
