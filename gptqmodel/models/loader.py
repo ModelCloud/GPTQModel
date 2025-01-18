@@ -126,8 +126,7 @@ def ModelLoader(cls):
         if quantize_config is None or not isinstance(quantize_config, QuantizeConfig):
             raise AttributeError("`quantize_config` must be passed and be an instance of QuantizeConfig.")
 
-        if quantize_config is not None:
-            quantize_config.calculate_bits_per_weight()
+        quantize_config.calculate_bits_per_weight()
 
         if quantize_config.device is not None:
             if device is not None or device_map is not None:
