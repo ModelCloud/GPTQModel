@@ -319,7 +319,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             if IS_ROCM:
                 raise NotImplementedError("you are passing DEVICE.CUDA to rocm. marlin kernel is not supported by rocm.")
             if CUDA_VISIBLE_DEVICES is None:
-                has_cuda_v8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
+                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
             else:
                 has_cuda_v8 = all(torch.cuda.get_device_capability(int(i))[0] >= 8 for i in CUDA_VISIBLE_DEVICES.split(","))
             if not has_cuda_v8:
