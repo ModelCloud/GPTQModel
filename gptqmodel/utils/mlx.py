@@ -1,23 +1,23 @@
-import gc
-import logging
+import torch
 
-import mlx.core.metal
-
+from ..models import BaseGPTQModel
+from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..quantization import FORMAT, QuantizeConfig
+from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
-from ..quantization import QuantizeConfig, FORMAT
-from transformers import PreTrainedModel
-from ..nn_modules.qlinear.torch import TorchQuantLinear
-import torch
+
 try:
     import mlx.core as mx
     from mlx_lm import generate
-    from mlx_lm.utils import _get_classes, load_config, quantize_model, get_model_path
+    from mlx_lm.utils import _get_classes, get_model_path, load_config, quantize_model
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False
 
-def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedModel, gptq_config: QuantizeConfig):
+logger = setup_logger()
+
+def convert_gptq_to_mlx_weights(model_id_or_path: str, model: BaseGPTQModel, gptq_config: QuantizeConfig):
     if not MLX_AVAILABLE:
         raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
@@ -33,23 +33,19 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
             if config != {}:
                 if config["bits"] not in [2, 3, 4, 8]:
                     raise ValueError(f'Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]')
-                
+
     # mlx does not support group_size = -1, 16, so we need to convert it to 64, 64 is the default group_size for mlx
     if gptq_config["group_size"] in [-1, 16]:
         gptq_config["group_size"] = 64
 
     config = load_config(get_model_path(model_id_or_path))
 
-    # Initialize MLX model
-    model_class, model_args_class = _get_classes(config=config)
-    mlx_model = model_class(model_args_class.from_dict(config))
-
     # Convert weights
     weights = {}
     n = 1
-    pb = ProgressBar(gptq_model.named_modules(), total=len(list(gptq_model.named_modules())))
+    pb = ProgressBar(model.model.named_modules(), prefix="Converting to mlx:", total=len(list(model.model.named_modules())))
     for name, module in pb:
-        pb.set_description(f" Converting to mlx: {name}")
+        pb.set_description(f"{name}")
         if isinstance(module, TorchQuantLinear):
             weights[f"{name}.weight"] = mx.array(
                 module.dequantize_weight().T.detach().to("cpu", torch.float16).numpy()
@@ -57,7 +53,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
 
             module._empty_gptq_only_weights()
 
-            if n % 14 == 0:
+            if n % 10 == 0:
                 # Below saves memory but also make each iter slower: test call every N loop
                 torch_empty_cache()
 
@@ -69,18 +65,27 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
                 module.weight.detach().to("cpu", torch.float16).numpy()
             )
 
+            n += 1
+
         if hasattr(module, "bias"):
             if module.bias is not None:
                 weights[f"{name}.bias"] = mx.array(
                     module.bias.detach().to("cpu", torch.float16).numpy()
                 )
 
+    del model.model
     torch_empty_cache()
 
+    # Initialize MLX model
+    model_class, model_args_class = _get_classes(config=config)
+    mlx_model = model_class(model_args_class.from_dict(config))
+
     # Load and quantize weights
+    logger.info("Starting MLX quantization...")
     mlx_model.load_weights(list(weights.items()))
     weights, mlx_config = quantize_model(mlx_model, config, q_group_size=gptq_config["group_size"],
                                      q_bits=gptq_config["bits"])
+    logger.info("MLX quantization completed")
 
     return weights, mlx_config
 

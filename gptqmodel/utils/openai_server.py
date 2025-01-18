@@ -14,9 +14,10 @@
 # limitations under the License.
 
 import threading
-import torch
 import time
 import uuid
+
+import torch
 
 try:
     import uvicorn

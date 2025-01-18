@@ -470,8 +470,7 @@ def ModelLoader(cls):
                 )
 
             t = time.time()
-            logger.info(
-                f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 quantize_config=quantize_config,
@@ -578,9 +577,10 @@ def ModelLoader(cls):
         if backend == BACKEND.MLX:
             import tempfile
             try:
-                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
-                from mlx_lm.utils import save_weights, save_config
                 from mlx_lm import load
+                from mlx_lm.utils import save_config, save_weights
+
+                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
                     "GPTQModel load mlx model required dependencies are not installed.",
@@ -593,7 +593,7 @@ def ModelLoader(cls):
                 save_weights(temp_dir, mlx_weights, donate_weights=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")
                 tokenizer.save_pretrained(temp_dir)
-                
+
                 model, _ = load(temp_dir)
 
                 cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)

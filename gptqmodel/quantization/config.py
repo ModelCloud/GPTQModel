@@ -19,12 +19,11 @@ import os.path
 import re
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
-from os.path import isdir, join
+from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from packaging import version
-from transformers.utils.hub import cached_file
 
 from ..utils.logger import setup_logger
 
@@ -367,7 +366,7 @@ class QuantizeConfig():
 
     def calculate_bits_per_weight(self):
         bpw = ((self.group_size * self.bits) + 16 * 2) / self.group_size
-        logger.info(f"Effective BPW (bits per weight): {bpw} bits")
+        logger.info(f"Effective Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):

@@ -16,6 +16,7 @@
 import torch
 from transformers.pytorch_utils import Conv1D
 
+
 # Models using conv1d: gpt2
 class HookedConv1D(Conv1D):
     def __init__(self, nf: int, nx: int) -> None:

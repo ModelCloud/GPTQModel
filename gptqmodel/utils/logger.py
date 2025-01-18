@@ -15,7 +15,9 @@
 
 import logging
 
+# global static/shared logger instance
 logger = None
+
 def setup_logger():
     global logger
     if logger is not None:
@@ -27,6 +29,6 @@ def setup_logger():
     handler.setFormatter(formatter)
     logger.propagate = False
     logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     return logger

@@ -19,7 +19,6 @@ from typing import Dict, Optional, Type, Union
 
 import torch
 
-from .rocm import IS_ROCM
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
@@ -33,6 +32,7 @@ from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT,
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from . import BACKEND
+from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
 message_logged = False

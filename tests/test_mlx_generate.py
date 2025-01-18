@@ -7,7 +7,8 @@ if sys.platform == "darwin":
 
 import unittest
 
-from gptqmodel import GPTQModel, BACKEND
+from gptqmodel import BACKEND, GPTQModel
+
 
 class TestMlxGenerate(unittest.TestCase):
     @classmethod

@@ -16,9 +16,8 @@
 import os
 import unittest
 
-from gptqmodel import GPTQModel
 import openai
-import time
+from gptqmodel import GPTQModel
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
