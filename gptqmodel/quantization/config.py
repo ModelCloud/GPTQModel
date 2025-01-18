@@ -365,6 +365,10 @@ class QuantizeConfig():
         dict_scale_dtype_to_str(out)
         return out
 
+    def calculate_bits_per_weight(self):
+        bpw = ((self.group_size * self.bits) + 16 * 2) / self.group_size
+        logger.info(f"Effective BPW (bits per weight): {bpw} bits")
+
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
     layer_config: dict = field(default_factory=dict)
