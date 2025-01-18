@@ -235,6 +235,8 @@ if BUILD_CUDA_EXT:
                 extra_compile_args=extra_compile_args,
             )
             extensions.append(marlin_kernel)
+        elif not HAS_CUDA_V8:
+            print(f"marlin kernel only supports compute capability >= 8.0, there's no such cuda device, skipped.")
         extensions += [
             # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
             cpp_ext.CUDAExtension(
