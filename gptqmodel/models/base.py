@@ -15,17 +15,15 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from packaging import version
-from torch import autocast
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -36,11 +34,12 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, check_to_quantized, find_layers, get_device, get_module_by_name_prefix,
-                           get_moe_layer_modules, move_to, nested_move_to, normalize_tokenizer, pack_model, get_module)
+from ..utils.model import (MODALITY, check_to_quantized, find_layers, get_device,
+                           get_module, get_module_by_name_prefix, get_moe_layer_modules,
+                           move_to, nested_move_to, normalize_tokenizer, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
-from ._const import CPU, DEVICE, CUDA, SUPPORTS_MODULE_TYPES
+from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
@@ -402,8 +401,8 @@ class BaseGPTQModel(nn.Module):
                 tied_keys = self.model._tied_weights_keys
                 for item in tied_keys:
                     if self.lm_head in item:
-                        raise NotImplementedError(f"quantizing lm_head with tied weights has not been supported "
-                                                  f"currently")
+                        raise NotImplementedError("quantizing lm_head with tied weights has not been supported "
+                                                  "currently")
 
             lm_head_module = get_module(self.model, key=self.lm_head)
             if get_module(self.model, key=self.lm_head) is None:
@@ -566,7 +565,7 @@ class BaseGPTQModel(nn.Module):
         for i in layer_pb:
             is_lm_head = i >= layer_count
             if is_lm_head:
-                layer_pb.set_description(f"Quantizing lm_head")
+                layer_pb.set_description("Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
                 if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
                     layer_inputs = lm_head_inputs

@@ -1,14 +1,16 @@
+import torch
+
+from ..models import BaseGPTQModel
+from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..quantization import FORMAT, QuantizeConfig
 from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
-from ..models import BaseGPTQModel
-from ..quantization import QuantizeConfig, FORMAT
-from ..nn_modules.qlinear.torch import TorchQuantLinear
-import torch
+
 try:
     import mlx.core as mx
     from mlx_lm import generate
-    from mlx_lm.utils import _get_classes, load_config, quantize_model, get_model_path
+    from mlx_lm.utils import _get_classes, get_model_path, load_config, quantize_model
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False
@@ -31,7 +33,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: BaseGPTQModel, gpt
             if config != {}:
                 if config["bits"] not in [2, 3, 4, 8]:
                     raise ValueError(f'Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]')
-                
+
     # mlx does not support group_size = -1, 16, so we need to convert it to 64, 64 is the default group_size for mlx
     if gptq_config["group_size"] in [-1, 16]:
         gptq_config["group_size"] = 64

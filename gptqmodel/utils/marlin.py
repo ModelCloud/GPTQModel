@@ -17,12 +17,12 @@ import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
-from .rocm import IS_ROCM
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import recurse_getattr, recurse_setattr
 from .progress import ProgressBar
+from .rocm import IS_ROCM
 from .torch import torch_empty_cache
 
 logger = setup_logger()

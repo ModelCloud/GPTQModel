@@ -127,7 +127,7 @@ class GPTQ:
         start = time.time()
         if self.device.type not in ["mps", "cpu"]:
             self.layer.weight.data = self.layer.weight.data.cpu()
-            
+
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")

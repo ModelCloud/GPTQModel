@@ -16,16 +16,13 @@
 # -- do not touch
 import os
 import tempfile
-import unittest
 
 from datasets import load_dataset
-from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# -- end do not touch
-import vllm
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
+# -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
 
 
