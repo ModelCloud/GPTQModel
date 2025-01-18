@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
@@ -464,6 +465,7 @@ def ModelLoader(cls):
                     f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
+            t = time.time()
             logger.info(
                 f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
@@ -471,6 +473,7 @@ def ModelLoader(cls):
                 quantize_config=quantize_config,
                 qlinear_kernel=preload_qlinear_kernel,
             )
+            logger.info(f"Conversion complete: {time.time()-t}s")
             load_checkpoint_in_model = True
             quantize_config.runtime_format = FORMAT.GPTQ_V2
 

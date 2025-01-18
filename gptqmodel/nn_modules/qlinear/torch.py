@@ -234,6 +234,12 @@ class TorchQuantLinear(BaseQuantLinear):
         out = out + self.bias if self.bias is not None else out
         return out
 
+    def _empty(self):
+        self.qzeros = None
+        self.qweight = None
+        self.scales = None
+        self.bias = None
+
     @torch.no_grad()
     def dequantize_weight(self, num_itr=1):
         if self.wf.device != self.qzeros.device:
