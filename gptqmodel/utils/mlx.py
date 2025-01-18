@@ -73,6 +73,8 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
                     module.bias.detach().to("cpu", torch.float16).numpy()
                 )
 
+    torch_empty_cache()
+
     # Load and quantize weights
     mlx_model.load_weights(list(weights.items()))
     weights, mlx_config = quantize_model(mlx_model, config, q_group_size=gptq_config["group_size"],
