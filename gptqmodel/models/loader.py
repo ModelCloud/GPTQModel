@@ -126,6 +126,9 @@ def ModelLoader(cls):
         if quantize_config is None or not isinstance(quantize_config, QuantizeConfig):
             raise AttributeError("`quantize_config` must be passed and be an instance of QuantizeConfig.")
 
+        if quantize_config is not None:
+            quantize_config.calculate_bits_per_weight()
+
         if quantize_config.device is not None:
             if device is not None or device_map is not None:
                 raise AttributeError("Passing device and device_map is not allowed when QuantizeConfig.device is set. Non-quantized model is always loaded as cpu. Please set QuantizeConfig.device for accelerator used in quantization or do not set for auto-selection.")
@@ -280,6 +283,8 @@ def ModelLoader(cls):
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         quantize_config = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
+
+        quantize_config.calculate_bits_per_weight()
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if quantize_config.format != FORMAT.GPTQ:
