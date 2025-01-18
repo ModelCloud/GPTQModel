@@ -32,7 +32,7 @@ class TestQ4Marlin(unittest.TestCase):
     @parameterized.expand(
         [
             # act_order==False, group_size=128
-            ("TheBloke/Llama-2-7B-GPTQ", "main",
+            ("/monster/data/model/Llama-2-7B-GPTQ", "main",
              "<s> I am in Paris and I am in love. everybody knows that.\n"
              "I am in Paris and I am in love.\n"
              "I am in Paris and I am in love. everybody knows that.\n"
@@ -40,13 +40,13 @@ class TestQ4Marlin(unittest.TestCase):
              "I am in Paris and I am in love"),
 
             # act_order==True, group_size=128
-            ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main",
+            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "main",
              "<s> I am in Paris and I am so excited to be here. I am here for the first time in my life and I am so grateful for this opportunity. I am here to learn and to grow and to meet new people and to experience new things. I am here to see the Eiffel Tower and to walk along"),
             # act_order==True, group_size=64
-            ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-64g-actorder_True",
+            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq-4bit-64g-actorder_True",
              "<s> I am in Paris and I am so happy to be here. I have been here for 10 years and I have never been happier. I have been here for 10 years and I have never been happier. I have been here for 10 years and I have never been happier. I"),
             # act_order==True, group_size=32
-            ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-32g-actorder_True",
+            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq-4bit-32g-actorder_True",
              "<s> I am in Paris and I am in love with you.\n"
              "\n"
              "Scene 2:\n"
@@ -54,17 +54,17 @@ class TestQ4Marlin(unittest.TestCase):
              "(The stage is now dark, with only the sound of the rain falling on the windowpane. The lights come up on a young couple, JESSICA and JASON, sitting on a park ben"),
 
             # # 8-bit, act_order==True, group_size=channelwise
-            ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True",
+            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq-8bit--1g-actorder_True",
              "<s> I am in Paris and I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy"),
             # # 8-bit, act_order==True, group_size=128
-            ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-128g-actorder_True",
+            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq-8bit-128g-actorder_True",
              "<s> I am in Paris and I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy to be here. I am so happy"),
             # # 8-bit, act_order==True, group_size=32
-            ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-32g-actorder_True",
+            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq-8bit-32g-actorder_True",
              "<s> I am in Paris and I am looking for a good restaurant for a special occasion. Can you recommend any restaurants in Paris that are known for their specialties? I am looking for something unique and special. Please let me know if you have any recommendations."),
 
             # # 4-bit, act_order==True, group_size=128
-            ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main",
+            ("/monster/data/model/gemma-1.1-2b-it-GPTQ", "main",
              "<bos>I am in Paris and I am looking for a good bakery with fresh bread.\n"
              "\n"
              "**What are some good bakeries in Paris with fresh bread?**\n"
@@ -76,12 +76,12 @@ class TestQ4Marlin(unittest.TestCase):
              "* I am open to both traditional bakeries and newer, trendy")
         ]
     )
-    def test_generation(self, model_id, revision, reference_output):
+    def test_generation(self, model_id, reference_output):
         prompt = "I am in Paris and"
         device = torch.device("cuda:0")
 
         try:
-            model_q = GPTQModel.load(model_id, revision=revision, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 
