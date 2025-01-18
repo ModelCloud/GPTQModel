@@ -24,8 +24,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from packaging import version
-from transformers.utils.hub import cached_file
-
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
@@ -367,7 +365,7 @@ class QuantizeConfig():
 
     def calculate_bits_per_weight(self):
         bpw = ((self.group_size * self.bits) + 16 * 2) / self.group_size
-        logger.info(f"Effective BPW (bits per weight): {bpw} bits")
+        logger.info(f"Effective Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):

@@ -470,8 +470,7 @@ def ModelLoader(cls):
                 )
 
             t = time.time()
-            logger.info(
-                f"Compatibility: converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 quantize_config=quantize_config,

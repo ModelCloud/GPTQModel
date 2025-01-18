@@ -38,7 +38,6 @@ from ..quantization import QUANT_CONFIG_FILENAME, FORMAT  # noqa: E402
 from ..utils import BACKEND, EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type  # noqa: E402
-from ..nn_modules.qlinear.torch import TorchQuantLinear
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -362,7 +361,7 @@ class GPTQModel:
             except ImportError:
                 raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
             
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model.model, gptq_config)
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config)
 
             save_weights(target_path, mlx_weights, donate_weights=True)
 
