@@ -238,6 +238,7 @@ class TorchQuantLinear(BaseQuantLinear):
     def _empty_gptq_only_weights(self):
         self.qzeros = None
         self.qweight = None
+        self.g_idx = None
         self.scales = None
 
     @torch.no_grad()
