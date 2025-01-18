@@ -142,7 +142,7 @@ if TORCH_CUDA_ARCH_LIST is None:
         if got_cuda_between_v6_and_v8:
             FORCE_BUILD = True
 else:
-    HAS_CUDA_V8 = ROCM_VERSION and len([arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 8]) > 0
+    HAS_CUDA_V8 = not ROCM_VERSION and len([arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 8]) > 0
 
 if RELEASE_MODE == "1":
     common_setup_kwargs["version"] += f"+{get_version_tag()}"
