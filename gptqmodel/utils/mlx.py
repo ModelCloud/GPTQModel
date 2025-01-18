@@ -1,3 +1,10 @@
+import gc
+import logging
+
+import mlx.core.metal
+
+from .progress import ProgressBar
+from .torch import torch_empty_cache
 from ..quantization import QuantizeConfig, FORMAT
 from transformers import PreTrainedModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -39,11 +46,22 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
 
     # Convert weights
     weights = {}
-    for name, module in gptq_model.named_modules():
+    n = 1
+    pb = ProgressBar(gptq_model.named_modules(), total=len(list(gptq_model.named_modules())))
+    for name, module in pb:
+        pb.set_description(f" Converting to mlx: {name}")
         if isinstance(module, TorchQuantLinear):
             weights[f"{name}.weight"] = mx.array(
                 module.dequantize_weight().T.detach().to("cpu", torch.float16).numpy()
             )
+
+            module._empty_gptq_only_weights()
+
+            if n % 14 == 0:
+                # Below saves memory but also make each iter slower: test call every N loop
+                torch_empty_cache()
+
+            n += 1
 
         elif hasattr(module, "weight") and (
                 name != "lm_head" if config.get("tie_word_embeddings", False) else True):
@@ -56,6 +74,8 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
                 weights[f"{name}.bias"] = mx.array(
                     module.bias.detach().to("cpu", torch.float16).numpy()
                 )
+
+    torch_empty_cache()
 
     # Load and quantize weights
     mlx_model.load_weights(list(weights.items()))

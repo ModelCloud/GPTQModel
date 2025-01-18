@@ -20,6 +20,7 @@ import torch
 HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False
+HAS_MLX = False
 
 if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
     HAS_CUDA = True
@@ -30,6 +31,12 @@ if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is
 if hasattr(torch, "mps") and hasattr(torch.mps, "is_available") and torch.mps.is_available():
     HAS_MPS = True
 
+# mlx check
+try:
+    import mlx.core.metal
+    HAS_MLX = True
+except BaseException:
+    pass
 
 def torch_sync(device: torch.device = None):
     # check all backends
@@ -61,6 +68,8 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
             torch.xpu.empty_cache()
         if HAS_MPS:
             torch.mps.empty_cache()
+        if HAS_MLX:
+            mlx.core.metal.clear_cache()
         return
 
     # if device passed, only execute for device backend
@@ -70,3 +79,7 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
         torch.xpu.empty_cache()
     elif device.type == "mps":
         torch.mps.empty_cache()
+
+        # mlx is detached from pytorch
+        if HAS_MLX:
+            mlx.core.metal.clear_cache()
