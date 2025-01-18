@@ -310,7 +310,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         if IS_ROCM:
             return False, RuntimeError("marlin kernel is not supported by rocm.")
         if not HAS_CUDA_V8:
-            return False, RuntimeError("marlin kernel requires CUDA version >= 8.")
+            return False, RuntimeError("marlin kernel requires Compute Capability >= 8.0.")
         if marlin_import_exception is not None:
             return False, marlin_import_exception
         return cls._validate(**args)
