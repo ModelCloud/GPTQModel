@@ -307,10 +307,6 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if IS_ROCM:
-            return False, RuntimeError("marlin kernel is not supported by rocm.")
-        if not any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count())):
-            return False, RuntimeError("marlin kernel requires Compute Capability >= 8.0.")
         if marlin_import_exception is not None:
             return False, marlin_import_exception
         return cls._validate(**args)
@@ -320,6 +316,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         super().validate_device(device)
         CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES")
         if device == DEVICE.CUDA:
+            if IS_ROCM:
+                raise NotImplementedError("you are passing DEVICE.CUDA to rocm. marlin kernel is not supported by rocm.")
             if CUDA_VISIBLE_DEVICES is None:
                 has_cuda_v8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
             else:
