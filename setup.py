@@ -125,6 +125,8 @@ with open('requirements.txt') as f:
 import torch  # noqa: E402
 
 if TORCH_CUDA_ARCH_LIST is None:
+    HAS_CUDA_V8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
+
     got_cuda_v6 = any(torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))
     got_cuda_between_v6_and_v8 = any(6 <= torch.cuda.get_device_capability(i)[0] < 8 for i in range(torch.cuda.device_count()))
 
@@ -139,7 +141,8 @@ if TORCH_CUDA_ARCH_LIST is None:
     if BUILD_CUDA_EXT and not FORCE_BUILD:
         if got_cuda_between_v6_and_v8:
             FORCE_BUILD = True
-
+else:
+    HAS_CUDA_V8 = len([arch for arch in TORCH_CUDA_ARCH_LIST.split() if float(arch.split('+')[0]) >= 8]) > 0
 
 if RELEASE_MODE == "1":
     common_setup_kwargs["version"] += f"+{get_version_tag()}"
@@ -217,21 +220,20 @@ if BUILD_CUDA_EXT:
         ),
     ]
 
-    if sys.platform != "win32":
-        # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
-        marlin_kernel = cpp_ext.CUDAExtension(
-            "gptqmodel_marlin_kernels",
-            [
-                "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                "gptqmodel_ext/marlin/marlin_repack.cu",
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        )
+    if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
         # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
         # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
-        if not ROCM_VERSION:
+        if HAS_CUDA_V8 and not ROCM_VERSION:
+            marlin_kernel = cpp_ext.CUDAExtension(
+                "gptqmodel_marlin_kernels",
+                [
+                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                    "gptqmodel_ext/marlin/marlin_repack.cu",
+                ],
+                extra_link_args=extra_link_args,
+                extra_compile_args=extra_compile_args,
+            )
             extensions.append(marlin_kernel)
         extensions += [
             # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
