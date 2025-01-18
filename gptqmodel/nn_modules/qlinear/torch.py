@@ -238,7 +238,6 @@ class TorchQuantLinear(BaseQuantLinear):
         self.qzeros = None
         self.qweight = None
         self.scales = None
-        self.bias = None
 
     @torch.no_grad()
     def dequantize_weight(self, num_itr=1):
