@@ -234,7 +234,8 @@ class TorchQuantLinear(BaseQuantLinear):
         out = out + self.bias if self.bias is not None else out
         return out
 
-    def _empty(self):
+    # clear gptq only weights: useful in de-quantization
+    def _empty_gptq_only_weights(self):
         self.qzeros = None
         self.qweight = None
         self.scales = None
