@@ -55,7 +55,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, gptq_model: PreTrainedMod
 
             module._empty_gptq_only_weights()
 
-            if n % 4 == 0:
+            if n % 14 == 0:
                 # Below saves memory but also make each iter slower: test call every N loop
                 torch_empty_cache()
 
