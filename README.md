@@ -9,6 +9,7 @@
 </p>
   
 ## News
+* 01/19/2025 [1.7.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.1): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
 * 01/17/2025 [1.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.0): 👀 ✨ `backend.MLX` added for runtime-conversion and execution of GPTQ models on Apple's `MLX` framework on Apple Silicon (M1+). Exports of `gptq` models to `mlx` also now possible. We have added `mlx` exported models to [huggingface.co/ModelCloud](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2). ✨ `lm_head` quantization now fully support by GPTQModel without external pkg dependency. 
 * 01/07/2025 [1.6.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.1): 🎉 New OpenAI api compatible end-point via `model.serve(host, port)`. Auto-enable flash-attention2 for inference.  Fixed `sym=False` loading regression. 
 * 01/06/2025 [1.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.0): ⚡25% faster quantization. 35% reduction in vram usage vs v1.5. 👀 AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization.
@@ -82,10 +83,10 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 * ✨ Model weights sharding support with optional hash check of model weights on load.
 * 🚀 40% faster `packing` stage in quantization (Llama 3.1 8B). 50% faster PPL calculations (OPT).
 
-## Quality: GPTQ 4bit can match BF16:
+## Quality: GPTQ 4bit (5.0 bpw) can match BF16:
 🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
-![image](https://github.com/user-attachments/assets/7b2db012-b8af-4d19-a25d-7023cef19220)
+![image](https://github.com/user-attachments/assets/713e00e4-d991-4917-aca1-0af35fe853c6)
 
 ## Model Support  
 | Model            |    |                |    |                  |    |            |    |    |   |
