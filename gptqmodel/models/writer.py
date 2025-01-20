@@ -38,8 +38,8 @@ from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_
                                    META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
-                           get_model_files_size, get_moe_layer_modules, make_quant, get_state_dict_for_save)
+from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_model_files_size,
+                           get_moe_layer_modules, get_state_dict_for_save, make_quant)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU

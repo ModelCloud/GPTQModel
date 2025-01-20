@@ -1,13 +1,14 @@
 import os
 import sys
+import unittest
+
+from gptqmodel import BACKEND, GPTQModel
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
-import unittest
 
-from gptqmodel import BACKEND, GPTQModel
 
 
 class TestMlxGenerate(unittest.TestCase):

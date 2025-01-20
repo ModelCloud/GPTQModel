@@ -30,13 +30,12 @@ from typing import Dict, List, Optional, Tuple, Type
 import threadpoolctl as tctl
 import torch
 import torch.nn as nn
-from accelerate.utils import find_tied_parameters
-
 import transformers
+from accelerate.utils import find_tied_parameters
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
-from transformers.modeling_utils import _get_tied_weight_keys, _find_disjoint, _find_identical
+from transformers.modeling_utils import _find_disjoint, _find_identical, _get_tied_weight_keys
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
