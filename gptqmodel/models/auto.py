@@ -15,7 +15,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+import struct
+
+import numpy as np
+from huggingface_hub.errors import SafetensorsParsingError
+from huggingface_hub.utils import SafetensorsFileMetadata, hf_raise_for_status
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -31,7 +37,7 @@ from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
 import torch  # noqa: E402
-from huggingface_hub import list_repo_files  # noqa: E402
+from huggingface_hub import list_repo_files, hf_api, hf_hub_download, hf_hub_url, get_session  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
@@ -370,3 +376,18 @@ class GPTQModel:
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
+
+    @classmethod
+    def tensor_parameters(
+            cls,
+            name: str,
+            size: torch.Size,
+            bits: int,
+    ):
+        if name.endswith(".qweight"):
+            origin_infeatures = int(size[0] / bits * 32)
+            origin_size = (origin_infeatures,) + size[1:]
+            return np.prod(origin_size)
+        else:
+            return np.prod(size)
+
