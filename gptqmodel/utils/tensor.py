@@ -1,3 +1,18 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import torch
 import math
 import numpy as np
@@ -7,7 +22,7 @@ def tensor_parameters(
         tensor_name: str,  # name of tensor weight in model
         tensor_shape: torch.Size,  # shape of tensor
         bits: int,  # gptq bits
-):
+) -> int:
     # only .qweight is relevant for `parameters` in gptq model
     if tensor_name.endswith(".qweight"):
         real_infeatures = math.ceil(tensor_shape[0] / bits * 32)
