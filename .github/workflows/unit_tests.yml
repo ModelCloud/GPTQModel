@@ -416,7 +416,9 @@ jobs:
               echo "Allocated GPU ID: $gpu_id"
             fi
           done
-          assert [[ "$gpu_id" =~ ^[0-9]+$ ]]
+          if [[ ! "$gpu_id" =~ ^[0-9]+$ ]]; then
+            echo "gpu_id: $gpu_id is not a number"
+          fi
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
@@ -574,7 +576,9 @@ jobs:
               echo "Allocated GPU ID: $gpu_id"
             fi
           done
-          assert [[ "$gpu_id" =~ ^[0-9]+$ ]]
+          if [[ ! "$gpu_id" =~ ^[0-9]+$ ]]; then
+            echo "gpu_id: $gpu_id is not a number"
+          fi
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
