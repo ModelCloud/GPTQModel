@@ -32,11 +32,9 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from accelerate.utils import find_tied_parameters
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
-from transformers.modeling_utils import _find_disjoint, _find_identical, _get_tied_weight_keys
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
@@ -847,7 +845,7 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
     Filter weight-sharing tensors.
     Referenced from transformers.modeling_utils.PreTrainedModel.save_pretrained.
 
-    See https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_utils.py#L2845
+    See https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L2369
     """
 
     state_dict = model.state_dict()
@@ -864,63 +862,36 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
             # In the non-tensor case, fall back to the pointer of the object itself
             ptrs[id(tensor)].append(name)
 
-    # These are all the pointers of shared tensors
-    if hasattr(model, "hf_device_map"):
-        # if the model has offloaded parameters, we must check using find_tied_parameters()
-        tied_params = find_tied_parameters(model)
-        if tied_params:
-            tied_names = tied_params[0]
-            shared_ptrs = {
-                ptr: names for ptr, names in ptrs.items() if any(name in tied_names for name in names)
-            }
-        else:
-            shared_ptrs = {}
-    else:
-        shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
-
-    # Recursively descend to find tied weight keys
-    _tied_weights_keys = _get_tied_weight_keys(model)
-    error_names = []
-    to_delete_names = set()
+    # These are all the pointers of shared tensors.
+    shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
+    warn_names = set()
     for names in shared_ptrs.values():
         # Removing the keys which are declared as known duplicates on
         # load. This allows to make sure the name which is kept is consistent.
-        if _tied_weights_keys is not None:
+        if model._tied_weights_keys is not None:
             found = 0
             for name in sorted(names):
-                matches_pattern = any(re.search(pat, name) for pat in _tied_weights_keys)
+                matches_pattern = any(re.search(pat, name) for pat in model._tied_weights_keys)
                 if matches_pattern and name in state_dict:
                     found += 1
                     if found < len(names):
-                        to_delete_names.add(name)
-    # We are entering a place where the weights and the transformers configuration do NOT match.
-    shared_names, disjoint_names = _find_disjoint(shared_ptrs.values(), state_dict)
-    # Those are actually tensor sharing but disjoint from each other, we can safely clone them
-    # Reloaded won't have the same property, but it shouldn't matter in any meaningful way.
-    for name in disjoint_names:
-        state_dict[name] = state_dict[name].clone()
+                        del state_dict[name]
 
-    # When not all duplicates have been cleaned, still remove those keys, but put a clear warning.
-    # If the link between tensors was done at runtime then `from_pretrained` will not get
-    # the key back leading to random tensor. A proper warning will be shown
-    # during reload (if applicable), but since the file is not necessarily compatible with
-    # the config, better show a proper warning.
-    shared_names, identical_names = _find_identical(shared_names, state_dict)
-    # delete tensors that have identical storage
-    for inames in identical_names:
-        known = inames.intersection(to_delete_names)
-        for name in known:
-            del state_dict[name]
-        unknown = inames.difference(to_delete_names)
-        if len(unknown) > 1:
-            error_names.append(unknown)
-
-    if shared_names:
-        error_names.append(set(shared_names))
-
-    if len(error_names) > 0:
-        raise RuntimeError(
-            f"The weights trying to be saved contained shared tensors {error_names} that are mismatching the transformers base configuration. Try remove this tensor sharing.",
+        # When not all duplicates have been cleaned, still remove those keys, but put a clear warning.
+        # If the link between tensors was done at runtime then `from_pretrained` will not get
+        # the key back leading to random tensor. A proper warning will be shown
+        # during reload (if applicable), but since the file is not necessarily compatible with
+        # the config, better show a proper warning.
+        found = 0
+        for name in names:
+            if name in state_dict:
+                found += 1
+                if found > 1:
+                    del state_dict[name]
+                    warn_names.add(name)
+    if len(warn_names) > 0:
+        logger.warning_once(
+            f"Removed shared tensor {warn_names} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading",
         )
     return state_dict
 
