@@ -474,6 +474,7 @@ jobs:
 
       - name: Print Env
         run: |
+          nvidia-smi
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
