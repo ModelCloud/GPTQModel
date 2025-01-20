@@ -709,14 +709,15 @@ def auto_dtype(config: PretrainedConfig,
 
     # get dtype from config
     dtype = getattr(config, "torch_dtype")
-    if not dtype or not isinstance(dtype, torch.dtype):
-        raise ValueError("Your model config.json does not have torch_dtype set. Please check for model " "corruption.")
+    if dtype and not isinstance(dtype, torch.dtype):
+        raise ValueError(f"torch_dtype in config must be a torch.dtype, but got {dtype}")
 
     if dtype == torch.float32:
         return torch.bfloat16
     elif dtype == torch.float16:
         return torch.float16
     else:
+        # TODO: extract weights from model file to check their original type, instead of forcing bfloat16
         # up/down-cast everything else to bfloat16 if not already in bfloat16
         return torch.bfloat16
 
