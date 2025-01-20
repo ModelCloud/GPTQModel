@@ -57,6 +57,6 @@ from .qwen2_vl import Qwen2VLGPTQ
 from .rw import RWGPTQ
 from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ
+from .telechat2 import TeleChat2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
-from .telechat2 import TeleChat2GPTQ

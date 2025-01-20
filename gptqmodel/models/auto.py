@@ -88,7 +88,6 @@ from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
 
-
 logger = setup_logger()
 
 MODEL_MAP = {

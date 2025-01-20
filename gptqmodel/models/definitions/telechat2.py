@@ -1,5 +1,6 @@
-from ..base import BaseGPTQModel
 import torch
+
+from ..base import BaseGPTQModel
 
 
 class TeleChat2GPTQ(BaseGPTQModel):
