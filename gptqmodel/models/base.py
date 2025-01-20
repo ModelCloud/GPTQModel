@@ -75,6 +75,8 @@ class BaseGPTQModel(nn.Module):
     require_trust_remote_code = None
     # some models require transformer version(internalm require '<=4.42.2')
     require_pkgs_version: Optional[List[str]] = None
+    # some models require a specific dtype, such as float16
+    require_dtype: Optional[str|torch.dtype] = None
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction

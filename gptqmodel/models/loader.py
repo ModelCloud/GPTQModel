@@ -163,6 +163,9 @@ def ModelLoader(cls):
         else:
             quantize_config.device = normalize_device(quantize_config.device)
 
+        if cls.require_dtype:
+            torch_dtype = cls.require_dtype
+
         if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype):
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             torch_dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
@@ -274,6 +277,9 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
+
+        if cls.require_dtype:
+            torch_dtype = cls.require_dtype
 
         if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
