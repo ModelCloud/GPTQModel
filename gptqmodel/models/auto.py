@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -376,17 +377,17 @@ class GPTQModel:
     @classmethod
     def tensor_parameters(
             cls,
-            tensor_name: str, # name of tensor weight in model
-            tensor_shape: tensor.size, # shape of tensor
-            bits: int, # gptq bits
+            tensor_name: str,  # name of tensor weight in model
+            tensor_shape: torch.Size,  # shape of tensor
+            bits: int,  # gptq bits
     ):
         # only .qweight is relevent for `parameters` in gptq model
         if tensor_name.endswith(".qweight"):
-            origin_infeatures = int(size[0] / bits * 32)
-            origin_size = (origin_infeatures,) + tensor_shape[1:]
-            return np.prod(origin_size)
+            origin_infeatures = math.ceil(tensor_shape[0] / bits * 32)
+            origin_tensor_shape = (origin_infeatures,) + tensor_shape[1:]
+            return np.prod(origin_tensor_shape)
         # .scales and .qzeros are not model parameters but aux data for .qweight
-        elif tensor_name.endswith(".scales") or tensor_name.endswith(".qzeros")
+        elif tensor_name.endswith(".scales") or tensor_name.endswith(".qzeros") or tensor_name.endswith(".g_idx"):
             return 0
         else:
             return np.prod(tensor_shape)
