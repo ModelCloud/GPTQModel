@@ -148,6 +148,7 @@ SUPPORTED_MODELS = [
     "qwen2",
     "phi",
     "phi3",
+    "phimoe",
     "gemma",
     "gemma2",
     "starcoder2",
