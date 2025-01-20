@@ -842,8 +842,14 @@ class MODALITY(str, Enum):
     # TEXT_TO_IMAGE = "text_to_image"
 
 
-# Filter weight-sharing tensors
 def get_state_dict_for_save(model: nn.Module) -> Dict:
+    """
+    Filter weight-sharing tensors.
+    Referenced from transformers.modeling_utils.PreTrainedModel.save_pretrained.
+
+    See https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_utils.py#L2845
+    """
+
     state_dict = model.state_dict()
 
     # Safetensors does not allow tensor aliasing.
