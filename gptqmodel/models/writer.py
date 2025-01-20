@@ -23,7 +23,6 @@ import re
 from os.path import isfile, join
 from typing import Dict, Optional
 
-import accelerate
 import torch
 import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
@@ -39,7 +38,8 @@ from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers, get_model_files_size,
-                           get_moe_layer_modules, get_state_dict_for_save, make_quant)
+                           get_moe_layer_modules, get_state_dict_for_save, make_quant,
+                           load_checkpoint_in_model_then_tie_weights)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU
@@ -368,9 +368,8 @@ def ModelWriter(cls):
                 desc_act=quantize_config.desc_act,
                 pack=True,
             )
-            model.tie_weights()
 
-        accelerate.load_checkpoint_in_model(
+        load_checkpoint_in_model_then_tie_weights(
             model,
             dtype=torch.float16,
             # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292

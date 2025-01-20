@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Type
 
+import accelerate
 import threadpoolctl as tctl
 import torch
 import torch.nn as nn
@@ -922,3 +923,8 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
             f"The weights trying to be saved contained shared tensors {error_names} that are mismatching the transformers base configuration. Try remove this tensor sharing.",
         )
     return state_dict
+
+# Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
+def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
+    accelerate.load_checkpoint_in_model(model, *args, **kwargs)
+    model.tie_weights()

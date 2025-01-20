@@ -20,7 +20,6 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
-import accelerate
 import torch
 import transformers
 from huggingface_hub import snapshot_download
@@ -41,7 +40,8 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_layers, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init, make_quant, normalize_tokenizer,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes,
+                           load_checkpoint_in_model_then_tie_weights)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
 logger = setup_logger()
@@ -455,12 +455,11 @@ def ModelLoader(cls):
             )
             if preload_qlinear_kernel == IPEXQuantLinear:
                 quantize_config.runtime_format = FORMAT.IPEX
-            model.tie_weights()
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if quantize_config.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
-            accelerate.load_checkpoint_in_model(
+            load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
@@ -537,7 +536,7 @@ def ModelLoader(cls):
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
         if not load_checkpoint_in_model and backend != BACKEND.MARLIN and backend != BACKEND.BITBLAS:
-            accelerate.load_checkpoint_in_model(
+            load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292

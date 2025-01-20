@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import accelerate
 import torch
 from accelerate.utils import find_tied_parameters
 
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
-from .model import recurse_getattr, recurse_setattr
+from .model import recurse_getattr, recurse_setattr, load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .rocm import IS_ROCM
 from .torch import torch_empty_cache
@@ -44,7 +43,7 @@ def prepare_model_for_marlin_load(
         model_save_name = current_model_save_name
         logger.info(f"Loading a GPTQ model, detected Marlin serialized format at {model_save_name}.")
         model = convert_to_marlin(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
-        accelerate.utils.modeling.load_checkpoint_in_model(
+        load_checkpoint_in_model_then_tie_weights(
             model,
             dtype=torch_dtype,
             checkpoint=model_save_name,
@@ -58,7 +57,7 @@ def prepare_model_for_marlin_load(
         # Marlin ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
         if not load_checkpoint_in_model:
-            accelerate.load_checkpoint_in_model(
+            load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=current_model_save_name,
