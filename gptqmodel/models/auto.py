@@ -376,15 +376,19 @@ class GPTQModel:
     @classmethod
     def tensor_parameters(
             cls,
-            name: str,
+            name: str, # name of tensor weight in model
             tensor: torch.Tensor,
-            bits: int,
+            bits: int, # gptq bits
     ):
         size = tensor.shape
+        # only .qweight is relevent for `parameters` in gptq model
         if name.endswith(".qweight"):
             origin_infeatures = int(size[0] / bits * 32)
             origin_size = (origin_infeatures,) + size[1:]
             return np.prod(origin_size)
+        # .scales and .qzeros are not model parameters but aux data for .qweight
+        elif name.endswith(".scales") or name.endswith(".qzeros")
+            return 0
         else:
             return np.prod(size)
 
