@@ -15,7 +15,6 @@
 
 import os
 
-import accelerate
 import threadpoolctl as tctl
 import torch
 from accelerate.utils import find_tied_parameters
@@ -23,7 +22,7 @@ from accelerate.utils import find_tied_parameters
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
-from .model import recurse_getattr, recurse_setattr
+from .model import recurse_getattr, recurse_setattr, load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
@@ -45,7 +44,7 @@ def prepare_model_for_bitblas_load(
         # if the checkpoint is already in bitblas format, we can load it directly.
         logger.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
-        accelerate.utils.modeling.load_checkpoint_in_model(
+        load_checkpoint_in_model_then_tie_weights(
             model,
             dtype=torch_dtype,
             checkpoint=model_save_name,
@@ -59,7 +58,7 @@ def prepare_model_for_bitblas_load(
         # BitBLAS ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
         if not load_checkpoint_in_model:
-            accelerate.load_checkpoint_in_model(
+            load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
                 checkpoint=model_save_name,
