@@ -1,9 +1,12 @@
 from ..base import BaseGPTQModel
+import torch
 
 
 class TeleChat2GPTQ(BaseGPTQModel):
     # telechat2 requires custom model code
     require_trust_remote_code = True
+    # telechat2 requires float16
+    require_dtype = torch.float16
 
     layer_type = "TelechatBlock"
     layers_node = "transformer.h"
