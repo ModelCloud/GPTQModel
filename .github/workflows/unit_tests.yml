@@ -416,6 +416,7 @@ jobs:
               echo "Allocated GPU ID: $gpu_id"
             fi
           done
+          assert [[ "$gpu_id" =~ ^[0-9]+$ ]]
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
@@ -446,7 +447,7 @@ jobs:
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v5
-      options: --device /dev/dri --ipc=host
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
@@ -573,6 +574,7 @@ jobs:
               echo "Allocated GPU ID: $gpu_id"
             fi
           done
+          assert [[ "$gpu_id" =~ ^[0-9]+$ ]]
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
