@@ -92,7 +92,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | Model            |    |                |    |                  |    |            |    |    |   |
 |------------------|----|----------------|----|------------------|----|------------|----|----|---|
 | Baichuan         | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | ✅ | Yi | ✅ |
-| Bloom            | ✅  | Gemma 2        | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6   | ✅ |    |   |
+| Bloom            | ✅  | Gemma 2        | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6   | ✅ |   XVERSE | ✅  |
 | ChatGLM          | ✅ | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | ✅ |    |   |
 | CodeGen          | ✅  | GPTNeoX        | ✅  | MiniCPM3         | ✅  | Qwen       | ✅  |    |   |
 | Cohere 1-2       | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | ✅ |    |   |
@@ -100,7 +100,7 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 | Deci             | ✅  | Granite        | ✅ | MobileLLM        | ✅ | RefinedWeb | ✅  |    |   |
 | DeepSeek-V2      | ✅ | GRIN-MoE       | ✅ | MOSS             | ✅  | StableLM   | ✅  |    |   |
 | DeepSeek-V2-Lite | ✅ | Hymba          | ✅ | MPT              | ✅  | StarCoder2 | ✅  |    |   |
-| EXAONE 3.0       | ✅ | InternLM 1/2.5 | ✅ | OPT              | ✅  | XVERSE     | ✅  |    |   |
+| EXAONE 3.0       | ✅ | InternLM 1/2.5 | ✅ | OPT              | ✅  | TeleChat2 | ✅  |    |   |
 
 ## Platform and HW Support 
 
