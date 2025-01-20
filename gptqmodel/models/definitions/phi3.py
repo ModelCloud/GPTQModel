@@ -29,6 +29,8 @@ class Phi3GPTQ(BaseGPTQModel):
     ]
 
 class PhiMoEGPTQForCausalLM(BaseGPTQModel):
+    require_pkgs_version = ["transformers<=4.44.2"]
+
     layer_type = "PhiMoEDecoderLayer"
     layers_block_name = "model.layers"
     base_modules = ["model.embed_tokens", "model.norm"]

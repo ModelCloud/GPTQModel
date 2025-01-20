@@ -76,7 +76,7 @@ from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
 from .definitions.opt import OPTGPTQ  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
 from .definitions.phi import PhiGPTQ  # noqa: E402
-from .definitions.phi3 import Phi3GPTQ  # noqa: E402
+from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
@@ -124,6 +124,7 @@ MODEL_MAP = {
     "gemma2": Gemma2GPTQ,
     "phi": PhiGPTQ,
     "phi3": Phi3GPTQ,
+    "phimoe": PhiMoEGPTQForCausalLM,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
     "minicpm3":MiniCPM3GPTQ,
