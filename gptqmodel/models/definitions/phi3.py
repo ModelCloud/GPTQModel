@@ -32,7 +32,7 @@ class PhiMoEGPTQForCausalLM(BaseGPTQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
     layer_type = "PhiMoEDecoderLayer"
-    layers_block_name = "model.layers"
+    layers_node = "model.layers"
     base_modules = ["model.embed_tokens", "model.norm"]
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
