@@ -382,7 +382,7 @@ class GPTQModel:
             tensor_shape: torch.Size,  # shape of tensor
             bits: int,  # gptq bits
     ):
-        # only .qweight is relevent for `parameters` in gptq model
+        # only .qweight is relevant for `parameters` in gptq model
         if tensor_name.endswith(".qweight"):
             real_infeatures = math.ceil(tensor_shape[0] / bits * 32)
             real_tensor_shape = (real_infeatures,) + tensor_shape[1:]
