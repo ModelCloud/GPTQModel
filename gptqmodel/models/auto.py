@@ -375,6 +375,7 @@ class GPTQModel:
         gptq_model.tokenizer.save_pretrained(target_path)
 
     @classmethod
+    # helper method to get accurate parameter count for a gptq model
     def tensor_parameters(
             cls,
             tensor_name: str,  # name of tensor weight in model
