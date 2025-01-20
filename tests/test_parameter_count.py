@@ -13,7 +13,7 @@ from gptqmodel.utils.tensor import tensor_parameters
 
 class TestsParameterCount(unittest.TestCase):
     LLAMA_3_2_1B_PARAMETER_COUNT = 1235814400
-    
+
     # ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1 incorrectly saves lm_head.weight,
     # and the number of calculated parameters will be larger.
     # The latest code has fixed this bug.
@@ -28,9 +28,13 @@ class TestsParameterCount(unittest.TestCase):
         from gptqmodel import QuantizeConfig
         from gptqmodel.utils.tensor import tensor_parameters
 
-        model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
-        file_path = hf_hub_download(model_id, filename="model.safetensors")
-        config_path = hf_hub_download(model_id, filename="config.json")
+        model_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+        if os.path.isdir(model_id):
+            file_path = os.path.join(model_id, "model.safetensors")
+            config_path = os.path.join(model_id, "config.json")
+        else:
+            file_path = hf_hub_download(model_id, filename="model.safetensors")
+            config_path = hf_hub_download(model_id, filename="config.json")
         safetensors_obj = load_file(file_path)
         quantize_config = QuantizeConfig.from_pretrained(os.path.dirname(config_path))
 
@@ -40,17 +44,12 @@ class TestsParameterCount(unittest.TestCase):
             param_count = tensor_parameters(name, tensor.shape, bits=quantize_config.bits)
             total_params += param_count
 
-        print(f"total_params: {total_params} B")
+        print(f"total_params: {total_params / 1e9} B")
 
         self.assertEqual(total_params, self.LLAMA_3_2_1B_VORTEX_V1_PARAMETER_COUNT)
 
     def test_parameter_count_with_quant(self):
-        model_id = "meta-llama/Llama-3.2-1B-Instruct"
-
-        meta = hf_api.get_safetensors_metadata(model_id)
-        origin_paramete_count = sum(meta.parameter_count.values())
-
-        self.assertEqual(origin_paramete_count, self.LLAMA_3_2_1B_PARAMETER_COUNT)
+        model_id = "/monster/data/model/Llama-3.2-1B-Instruct"  # meta-llama/Llama-3.2-1B-Instruct
 
         calibration_dataset = load_dataset(
             "allenai/c4",
@@ -76,6 +75,6 @@ class TestsParameterCount(unittest.TestCase):
                 param_count = tensor_parameters(name, tensor.shape, bits=quant_config.bits)
                 total_params += param_count
 
-            print(f"total_params: {total_params} B")
+            print(f"total_params: {total_params / 1e9} B")
 
             self.assertEqual(total_params, self.LLAMA_3_2_1B_PARAMETER_COUNT)
