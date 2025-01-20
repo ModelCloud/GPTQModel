@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
 import math
+
 import numpy as np
+import torch
+
 
 # helper method to get accurate parameter count for a gptq model
 def tensor_parameters(
