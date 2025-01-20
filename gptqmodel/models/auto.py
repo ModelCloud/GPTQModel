@@ -86,6 +86,7 @@ from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
 from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.telechat2 import TeleChat2GPTQ
 
 logger = setup_logger()
 
@@ -139,6 +140,7 @@ MODEL_MAP = {
     "hymba": HymbaGPTQ,
     "olmo2": Olmo2GPTQ,
     "ovis": OvisGPTQ,
+    "telechat":TeleChat2GPTQ,
 }
 
 
