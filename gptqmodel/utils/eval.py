@@ -25,6 +25,7 @@ class EVAL:
         MMLU = "mmlu"
         HELLASWAG = "hellaswag"
         GSM8K_COT = "gsm8k_cot"
+        GPQA = "gpqa"
 
     class EVALPLUS(Enum):
         HUMAN = "humaneval"
