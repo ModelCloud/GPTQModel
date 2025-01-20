@@ -12,6 +12,9 @@ from gptqmodel.utils.tensor import tensor_parameters
 
 
 class TestsParameterCount(unittest.TestCase):
+    LLAMA_3_2_1B_PARAMETER_COUNT = 1235814400
+    LLAMA_3_2_1B_VORTEX_V1_PARAMETER_COUNT = 1498482688
+
     def test_parameter_count(self):
         import os.path
 
@@ -35,13 +38,15 @@ class TestsParameterCount(unittest.TestCase):
 
         print(f"total_params: {total_params} B")
 
-        self.assertEqual(total_params, 1498482688)
+        self.assertEqual(total_params, self.LLAMA_3_2_1B_VORTEX_V1_PARAMETER_COUNT)
 
     def test_parameter_count_with_quant(self):
         model_id = "meta-llama/Llama-3.2-1B-Instruct"
 
         meta = hf_api.get_safetensors_metadata(model_id)
         origin_paramete_count = sum(meta.parameter_count.values())
+
+        self.assertEqual(origin_paramete_count, self.LLAMA_3_2_1B_PARAMETER_COUNT)
 
         calibration_dataset = load_dataset(
             "allenai/c4",
@@ -69,4 +74,4 @@ class TestsParameterCount(unittest.TestCase):
 
             print(f"total_params: {total_params} B")
 
-            self.assertEqual(total_params, 1235814400)
+            self.assertEqual(total_params, self.LLAMA_3_2_1B_PARAMETER_COUNT)
