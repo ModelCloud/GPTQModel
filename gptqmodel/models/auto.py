@@ -384,9 +384,9 @@ class GPTQModel:
     ):
         # only .qweight is relevent for `parameters` in gptq model
         if tensor_name.endswith(".qweight"):
-            origin_infeatures = math.ceil(tensor_shape[0] / bits * 32)
-            origin_tensor_shape = (origin_infeatures,) + tensor_shape[1:]
-            return np.prod(origin_tensor_shape)
+            real_infeatures = math.ceil(tensor_shape[0] / bits * 32)
+            real_tensor_shape = (real_infeatures,) + tensor_shape[1:]
+            return np.prod(real_tensor_shape)
         # .scales and .qzeros are not model parameters but aux data for .qweight
         elif tensor_name.endswith(".scales") or tensor_name.endswith(".qzeros") or tensor_name.endswith(".g_idx"):
             return 0
