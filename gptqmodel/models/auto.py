@@ -377,9 +377,10 @@ class GPTQModel:
     def tensor_parameters(
             cls,
             name: str,
-            size: torch.Size,
+            tensor: torch.Tensor,
             bits: int,
     ):
+        size = tensor.shape
         if name.endswith(".qweight"):
             origin_infeatures = int(size[0] / bits * 32)
             origin_size = (origin_infeatures,) + size[1:]
