@@ -167,6 +167,7 @@ SUPPORTED_MODELS = [
     "hymba",
     "olmo2",
     "ovis",
+    "telechat",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
