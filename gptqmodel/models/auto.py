@@ -388,7 +388,7 @@ class GPTQModel:
             real_tensor_shape = (real_infeatures,) + tensor_shape[1:]
             return np.prod(real_tensor_shape)
         # .scales and .qzeros are not model parameters but aux data for .qweight
-        elif tensor_name.endswith(".scales") or tensor_name.endswith(".qzeros") or tensor_name.endswith(".g_idx"):
+        elif tensor_name.endswith((".scales", ".qzeros", ".g_idx")):
             return 0
         else:
             return np.prod(tensor_shape)
