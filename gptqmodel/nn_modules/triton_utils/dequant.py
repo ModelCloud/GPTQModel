@@ -14,22 +14,22 @@
 # limitations under the License.
 
 import itertools
+from typing import List
 
 import torch
 import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
-
-def make_dequant_configs(block_sizes, num_warps):
+def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stages: List[int]):
     configs = []
-    for bs, ws in itertools.product(block_sizes, num_warps):
-        configs.append(triton.Config({"X_BLOCK": bs}, num_warps=ws))
+    for bs, ws, ns in itertools.product(block_sizes, num_warps, num_stages):
+        configs.append(triton.Config({"X_BLOCK": bs}, num_warps=ws, num_stages=ns))
     return configs
 
-
-DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([128, 256, 512, 1024], [4, 8])
-
+# tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128
+DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([512], [1], [1])
+#DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([128, 256, 512, 1024], [4, 8], [2]) <- slower
 
 @triton.autotune(DEFAULT_DEQUANT_CONFIGS, key=["numels"])
 @triton.jit
@@ -63,20 +63,17 @@ def dequant_kernel_248(
     )
 
     wf_weights = (row_idx % elements_per_feature) * bits
-
     wf_zeros = (col_idx % elements_per_feature) * bits
 
     tmp1 = g_idx + num_groups
     tmp2 = g_idx < 0
-    tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
+    # tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
     groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
 
     scales = tl.load(scales_ptr + (col_idx + (outfeatures * groups)), None).to(tl.float32)
 
     # Unpack weights
-    weights = qweights >> wf_weights  # bit shift qweight
-
-    weights = weights & maxq
+    weights = (qweights >> wf_weights) & maxq  # bit shift qweight
 
     # Unpack zeros
     qzero_ncols: tl.constexpr = outfeatures // elements_per_feature
@@ -85,8 +82,7 @@ def dequant_kernel_248(
         None,
         eviction_policy="evict_last",
     )
-    zeros = qzeros >> wf_zeros
-    zeros = zeros & maxq
+    zeros = (qzeros >> wf_zeros) & maxq
 
     # Dequantize
     weights = weights - zeros
