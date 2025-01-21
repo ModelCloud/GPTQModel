@@ -9,9 +9,10 @@ from safetensors.torch import load_file
 
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.utils.tensor import tensor_parameters
+from models.model_test import ModelTest
 
 
-class TestsParameterCount(unittest.TestCase):
+class TestsParameterCount(ModelTest):
     LLAMA_3_2_1B_PARAMETER_COUNT = 1235814400
 
     # ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1 incorrectly saves lm_head.weight,
@@ -51,11 +52,7 @@ class TestsParameterCount(unittest.TestCase):
     def test_parameter_count_with_quant(self):
         model_id = "/monster/data/model/Llama-3.2-1B-Instruct"  # meta-llama/Llama-3.2-1B-Instruct
 
-        calibration_dataset = load_dataset(
-            "allenai/c4",
-            data_files="en/c4-train.00001-of-01024.json.gz",
-            split="train"
-        ).select(range(128))["text"]
+        calibration_dataset = self.load_dataset(self.load_tokenizer(model_id))
 
         quant_config = QuantizeConfig(bits=4, group_size=128)
 
