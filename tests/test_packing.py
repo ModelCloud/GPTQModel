@@ -68,8 +68,7 @@ def gen_quant4(k, n, groupsize=-1):
     linear = nn.Linear(k, n, bias=False)
     linear.weight.data = ref.t()
 
-    g_idx = torch.tensor([i // groupsize for i in range(n)], dtype=torch.int32)
-    return original_w, linear, s, g_idx
+    return original_w, linear, s
 
 
 class TestRepacking(unittest.TestCase):
@@ -78,7 +77,7 @@ class TestRepacking(unittest.TestCase):
         n = 1024
         group_size = 128
 
-        _, linear, s, g_idx = gen_quant4(k, n, group_size)
+        _, linear, s = gen_quant4(k, n, group_size)
         zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
 
         exllama_linear = ExllamaQuantLinear(
@@ -90,7 +89,7 @@ class TestRepacking(unittest.TestCase):
             outfeatures=n,
             bias=False)
 
-        exllama_linear.pack(linear, s.T, zeros.T, g_idx=g_idx)
+        exllama_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(exllama_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
@@ -107,7 +106,7 @@ class TestRepacking(unittest.TestCase):
             outfeatures=n,
             bias=False)
 
-        triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=g_idx)
+        triton_v2_linear.pack(linear, s.T, zeros.T, g_idx=None)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_v2_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
