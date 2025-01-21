@@ -33,10 +33,10 @@ class TestEval(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
-            # (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
-            # (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
-            # (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
+            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
+            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
@@ -54,7 +54,7 @@ class TestEval(unittest.TestCase):
                                      output_file=output_file,
                                      backend=backend,
                                      extra_model_args=extra_model_args,
-                                     task_manager=TaskManager(include_path="tasks", include_defaults=False)
+                                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
                                      )
 
             if eval_backend == EVAL.LM_EVAL:
@@ -76,8 +76,3 @@ class TestEval(unittest.TestCase):
                     result.get("base + extra tests")), result.get("results_path")
                 self.assertGreaterEqual(base_formatted, 0.27, "Base score does not match expected result")
                 self.assertGreaterEqual(plus_formatted, 0.24, "Plus score does not match expected result")
-
-
-
-
-
