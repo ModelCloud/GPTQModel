@@ -160,6 +160,7 @@ SUPPORTED_MODELS = [
     "qwen2_vl",
     "dbrx_converted",
     "deepseek_v2",
+    "deepseek_v3",
     "exaone",
     "grinmoe",
     "mllama",
