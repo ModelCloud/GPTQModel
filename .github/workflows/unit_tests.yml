@@ -335,7 +335,7 @@ jobs:
       - name: Download source from local
         continue-on-error: true
         run: |
-          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
           ls -ahl .
           sha256=$(sha256sum $file_name)
           echo "sha256=$sha256"
@@ -347,7 +347,7 @@ jobs:
         with:
           name: source
           path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
+          run-id: ${{ github.run_id }}
 
       - name: Uncompress source
         continue-on-error: true
@@ -492,7 +492,7 @@ jobs:
       - name: Download source from local
         continue-on-error: true
         run: |
-          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
           ls -ahl .
           sha256=$(sha256sum $file_name)
           echo "sha256=$sha256"
@@ -504,7 +504,7 @@ jobs:
         with:
           name: source
           path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
+          run-id: ${{ github.run_id }}
 
       - name: Uncompress source
         continue-on-error: true
