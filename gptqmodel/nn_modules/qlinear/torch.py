@@ -291,8 +291,8 @@ class TorchQuantLinear(BaseQuantLinear):
                 scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
                 weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
                 zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim]
-                weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
+                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim].long()
+                weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
             weights = torch.cat(weights, dim=1)
 
         return weights
