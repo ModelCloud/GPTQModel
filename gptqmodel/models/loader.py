@@ -174,6 +174,7 @@ def ModelLoader(cls):
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
+        model_init_kwargs["_fast_init"] = cls.require_fast_init
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")

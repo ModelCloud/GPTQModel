@@ -21,6 +21,8 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
     # deepseek_v3 requires custom model code
     require_trust_remote_code = True
 
+    require_fast_init = False
+
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
