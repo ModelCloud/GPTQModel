@@ -63,7 +63,9 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
+    container:
+      image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       task_list: ${{ steps.assign.outputs.task_list }}
