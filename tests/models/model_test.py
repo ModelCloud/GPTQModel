@@ -243,7 +243,7 @@ class ModelTest(unittest.TestCase):
                     numpy_random_seed=RAND_SEED,
                     torch_random_seed=RAND_SEED,
                     fewshot_random_seed=RAND_SEED,
-                    task_manager=TaskManager(include_path="../tasks", include_defaults=False)
+                    task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                 )
 
                 print('--------Eval Result---------')
