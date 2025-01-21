@@ -1,15 +1,11 @@
 import os.path
 import tempfile
-import unittest
 
 import torch.cuda
-from datasets import load_dataset
-from huggingface_hub import hf_api
-from safetensors.torch import load_file
-
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.utils.tensor import tensor_parameters
 from models.model_test import ModelTest
+from safetensors.torch import load_file
 
 
 class TestsParameterCount(ModelTest):
@@ -23,11 +19,10 @@ class TestsParameterCount(ModelTest):
     def test_parameter_count(self):
         import os.path
 
-        from huggingface_hub import hf_hub_download
-        from safetensors.torch import load_file
-
         from gptqmodel import QuantizeConfig
         from gptqmodel.utils.tensor import tensor_parameters
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
 
         model_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
         if os.path.isdir(model_id):

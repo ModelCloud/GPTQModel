@@ -39,9 +39,9 @@ from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_layers, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init, make_quant, normalize_tokenizer,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes,
-                           load_checkpoint_in_model_then_tie_weights)
+                           get_moe_layer_modules, gptqmodel_post_init,
+                           load_checkpoint_in_model_then_tie_weights, make_quant, normalize_tokenizer,
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
 logger = setup_logger()
@@ -174,6 +174,7 @@ def ModelLoader(cls):
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
+        model_init_kwargs["_fast_init"] = cls.require_fast_init
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
