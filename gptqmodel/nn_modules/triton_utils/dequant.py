@@ -105,7 +105,7 @@ def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
     outfeatures = scales.shape[1]
     infeatures = g_idx.shape[0]
 
-    out = torch.empty((infeatures, outfeatures), device="cuda", dtype=torch.float16)
+    out = torch.empty((infeatures, outfeatures), device=qweight.device, dtype=torch.float16)
     numels = out.numel()
     maxq = 2 ** bits - 1 if maxq is None else maxq
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
