@@ -17,6 +17,8 @@
 import os
 import sys
 
+from lm_eval.tasks import TaskManager
+
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -241,6 +243,7 @@ class ModelTest(unittest.TestCase):
                     numpy_random_seed=RAND_SEED,
                     torch_random_seed=RAND_SEED,
                     fewshot_random_seed=RAND_SEED,
+                    task_manager=TaskManager(include_path="../tasks", include_defaults=False)
                 )
 
                 print('--------Eval Result---------')

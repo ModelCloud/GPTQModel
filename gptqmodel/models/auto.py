@@ -275,6 +275,7 @@ class GPTQModel:
             backend: str = 'gptqmodel',
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
+            **args
     ):
         if framework is None:
             raise ValueError("eval parameter: `framework` cannot be set to None")
@@ -313,6 +314,7 @@ class GPTQModel:
                 numpy_random_seed=random_seed,
                 torch_random_seed=random_seed,
                 fewshot_random_seed=random_seed,
+                **args
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))

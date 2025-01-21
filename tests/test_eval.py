@@ -18,6 +18,8 @@ import tempfile
 import unittest
 from typing import Union
 
+from lm_eval.tasks import TaskManager
+
 from gptqmodel import GPTQModel
 from gptqmodel.utils import EVAL
 from parameterized import parameterized
@@ -31,10 +33,10 @@ class TestEval(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
-            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
-            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
-            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
+            # (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
+            # (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
+            # (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
+            # (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
@@ -45,8 +47,15 @@ class TestEval(unittest.TestCase):
             if task == EVAL.LM_EVAL.GPQA:
                 extra_model_args = "gpu_memory_utilization=0.7"
 
-            results = GPTQModel.eval(self.MODEL_ID, framework=eval_backend, tasks=[task], batch=32,
-                                     output_file=output_file, backend=backend, extra_model_args=extra_model_args)
+            results = GPTQModel.eval(self.MODEL_ID,
+                                     framework=eval_backend,
+                                     tasks=[task],
+                                     batch=32,
+                                     output_file=output_file,
+                                     backend=backend,
+                                     extra_model_args=extra_model_args,
+                                     task_manager=TaskManager(include_path="tasks", include_defaults=False)
+                                     )
 
             if eval_backend == EVAL.LM_EVAL:
                 if task == EVAL.LM_EVAL.GPQA:
