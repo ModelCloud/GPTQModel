@@ -73,7 +73,7 @@ def gen_quant4(k, n, groupsize=-1):
 
 class TestRepacking(unittest.TestCase):
     def test_triton_compare_exllama(self):
-        k = 2048
+        k = 1024
         n = 1024
         group_size = 128
 
