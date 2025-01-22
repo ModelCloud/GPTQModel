@@ -249,7 +249,6 @@ def triton_xpu_available():
         add(x, y)
         return True
     except Exception as e:
-        print(f"Error during execution: {e}")
         return False
 
 
