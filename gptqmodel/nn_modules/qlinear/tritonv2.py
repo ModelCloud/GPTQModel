@@ -39,7 +39,7 @@ except ImportError:
     TRITON_AVAILABLE = False
 
 TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
-TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by install [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
+TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
 
 logger = setup_logger()
 
