@@ -120,7 +120,7 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(self, tokenizer):
-        traindata = load_dataset("json", data_files="/monster/data/model/huggingface/c4-train.00000-of-01024.json.gz", split="train")
+        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
         for index, sample in enumerate(traindata):

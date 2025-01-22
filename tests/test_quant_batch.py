@@ -38,8 +38,8 @@ class TestQuantBatch(ModelTest):
         ppl = Perplexity(
             model=model,
             tokenizer=tokenizer,
-            dataset_path="wikitext",
-            dataset_name="wikitext-2-raw-v1",
+            dataset_path="json",
+            dataset_name="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
             split="test",
             text_column="text",
         )

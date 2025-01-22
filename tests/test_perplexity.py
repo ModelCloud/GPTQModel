@@ -23,7 +23,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
+from datasets import load_dataset, load_from_disk  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -40,11 +40,11 @@ class TestPerplexity(unittest.TestCase):
     tinyllama_native_ppl = 54.616613778642396
     opt_125m_native_ppl = 30.3942897844937
 
-    OPT_DATASET_PATH = "wikitext"
-    OPT_DATASET_NAME = "wikitext-2-raw-v1"
-    OPT_DATASET_SPLIT = "test"
+    OPT_DATASET_PATH = "/monster/data/model/dataset/c4-train.00000-of-01024.json.gz"
+    OPT_DATASET_NAME = "json"
+    OPT_DATASET_SPLIT = "train"
     OPT_DATASET_COLUMN = "text"
-    TINYLLAMA_DATASET_PATH = "skeskinen/TinyStories-hf"
+    TINYLLAMA_DATASET_PATH = "/monster/data/model/dataset/skeskinen-TinyStories-hf"
     TINYLLAMA_DATASET_NAME = "default"
     TINYLLAMA_DATASET_SPLIT = "train"
     TINYLLAMA_DATASET_COLUMN = "text"
@@ -52,12 +52,14 @@ class TestPerplexity(unittest.TestCase):
     N_CTX = 512
     N_BATCH = 512
 
-    def get_config_with_format(self, format: FORMAT):
+    @classmethod
+    def get_config_with_format(self, format: FORMAT) -> (str,str,str,str,str,str):
         if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
             return self.OPT_DATASET_PATH, self.OPT_DATASET_NAME, self.OPT_DATASET_SPLIT, self.OPT_DATASET_COLUMN, self.OPT_MODEL_ID, self.opt_tokenizer
         else:
             return self.TINYLLAMA_DATASET_PATH, self.TINYLLAMA_DATASET_NAME, self.TINYLLAMA_DATASET_SPLIT, self.TINYLLAMA_DATASET_COLUMN, self.TINYLLAMA_MODEL_ID, self.tinyllama_tokenizer
 
+    @classmethod
     def calculate_avg_ppl(self, path, name, split, column, model, tokenizer):
         ppl = Perplexity(
             model=model,
@@ -87,12 +89,13 @@ class TestPerplexity(unittest.TestCase):
         if not self.opt_tokenizer.pad_token_id:
             self.opt_tokenizer.pad_token_id = self.opt_tokenizer.eos_token_id
 
-        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(self, FORMAT.GPTQ)
-        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl(self, FORMAT.MARLIN)
+        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(FORMAT.GPTQ)
+        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl( FORMAT.MARLIN)
 
 
+    @classmethod
     def calculate_native_ppl(self, format):
-        dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(self, format)
+        dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(format)
 
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -105,7 +108,6 @@ class TestPerplexity(unittest.TestCase):
             native_ppl = self.opt_125m_native_ppl
         else:
             native_ppl = self.calculate_avg_ppl(
-                self,
                 dataset_path,
                 dataset_name,
                 dataset_split,
@@ -120,8 +122,21 @@ class TestPerplexity(unittest.TestCase):
         # assert self.native_ppl < 30.5
 
         length = 512 if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else 2048
-        traindata = load_dataset(dataset_path, dataset_name, split=dataset_split).filter(lambda x: len(x[dataset_column]) >= length)
-        calibration_dataset = [tokenizer(example[dataset_column]) for example in traindata.select(range(1024))]
+
+        if dataset_path.startswith("/") or dataset_path.startswith("."):
+            if dataset_path.endswith(".gz"):
+                traindata = load_dataset(dataset_name, data_files=dataset_path, split=dataset_split)
+            else:
+                traindata = load_from_disk(dataset_path)[dataset_split]
+        else:
+            traindata = load_dataset(dataset_path, dataset_name, split=dataset_split)
+        calibration_dataset = []
+        for index, sample in enumerate(traindata):
+            text = sample[dataset_column]
+            if len(text) >= length:
+                calibration_dataset.append(tokenizer(text).data['input_ids'])
+                if len(calibration_dataset) >= 1024:
+                    break
         return calibration_dataset, native_ppl
 
     @parameterized.expand(
