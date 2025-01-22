@@ -42,8 +42,8 @@ class TestDynamic(ModelTest):
         ppl = Perplexity(
             model=model,
             tokenizer=tokenizer,
-            dataset_path="json",
-            dataset_name="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
+            dataset_path="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
+            dataset_name="json",
             split="test",
             text_column="text",
         )
