@@ -912,8 +912,10 @@ class BaseGPTQModel(nn.Module):
 
         backends = torch._dynamo.list_backends("experimental")
         if "aot_ts" in backends:
-            logger.info("compiling model with engine aot_ts")
+            logger.info("compiling model with backend: aot_ts")
             self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
+        else:
+            logger.warning("aot_ts was not found in backend list, please check your torch version.")
 
     def serve(self,
                host: str = "0.0.0.0",
