@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from packaging import version
+from packaging.version import Version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -899,6 +900,22 @@ class BaseGPTQModel(nn.Module):
                         f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
+
+    def compile(self):
+        if not self.quantized:
+            logger.warning("model is not quantized, skip compiling...")
+            return
+
+        if Version(torch.__version__) < Version("2.5.1"):
+            logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
+            return
+
+        backends = torch._dynamo.list_backends("experimental")
+        if "aot_ts" in backends:
+            logger.info("compiling model with backend: aot_ts")
+            self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
+        else:
+            logger.warning("aot_ts was not found in backend list, please check your torch version.")
 
     def serve(self,
                host: str = "0.0.0.0",

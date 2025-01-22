@@ -17,12 +17,10 @@ from __future__ import annotations
 
 import os
 
-
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
 
 import sys  # noqa: E402
-
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -30,11 +28,11 @@ if sys.platform == "darwin":
 
 import os.path  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Dict, List, Optional, Union  # noqa: E402
+from typing import Dict, List, Optional, Union, Tuple  # noqa: E402
 
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig  # noqa: E402
+from transformers import AutoConfig, PreTrainedModel  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND, EVAL  # noqa: E402
@@ -90,7 +88,6 @@ from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
 
-
 logger = setup_logger()
 
 MODEL_MAP = {
@@ -130,7 +127,7 @@ MODEL_MAP = {
     "phimoe": PhiMoEGPTQForCausalLM,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
-    "minicpm3":MiniCPM3GPTQ,
+    "minicpm3": MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "dbrx": DbrxGPTQ,
@@ -214,11 +211,11 @@ class GPTQModel:
 
     @classmethod
     def from_pretrained(
-        cls,
-        model_id_or_path: str,
-        quantize_config: QuantizeConfig,
-        trust_remote_code: bool = False,
-        **model_init_kwargs,
+            cls,
+            model_id_or_path: str,
+            quantize_config: QuantizeConfig,
+            trust_remote_code: bool = False,
+            **model_init_kwargs,
     ) -> BaseGPTQModel:
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
@@ -239,17 +236,17 @@ class GPTQModel:
 
     @classmethod
     def from_quantized(
-        cls,
-        model_id_or_path: Optional[str],
-        device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-        device: Optional[Union[str, int]] = None,
-        backend: Union[str, BACKEND] = BACKEND.AUTO,
-        trust_remote_code: bool = False,
-        # verify weight files matches predefined hash during loading
-        # usage: hash_format:hash_value, example: md5:ugkdh232
-        # supports all hashlib hash methods
-        verify_hash: Optional[Union[str, List[str]]] = None,
-        **kwargs,
+            cls,
+            model_id_or_path: Optional[str],
+            device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
+            device: Optional[Union[str, int]] = None,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            trust_remote_code: bool = False,
+            # verify weight files matches predefined hash during loading
+            # usage: hash_format:hash_value, example: md5:ugkdh232
+            # supports all hashlib hash methods
+            verify_hash: Optional[Union[str, List[str]]] = None,
+            **kwargs,
     ) -> BaseGPTQModel:
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
 
@@ -379,3 +376,4 @@ class GPTQModel:
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
+
