@@ -230,7 +230,6 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
     output = x + y
-    tl.store(output_ptr + offsets, output, mask=mask)
 
 
 def add(x: torch.Tensor, y: torch.Tensor):
