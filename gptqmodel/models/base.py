@@ -63,8 +63,6 @@ from .writer import (
     ModelWriter,
 )
 
-SUPRESS_DYNAMO_ERRORS = torch._dynamo.config.suppress_errors
-
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
 
@@ -918,7 +916,6 @@ class BaseGPTQModel(nn.Module):
             logger.info("compiling model with backend: aot_ts")
             self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
         else:
-            torch._dynamo.config.suppress_errors = SUPRESS_DYNAMO_ERRORS
             logger.warning("aot_ts was not found in backend list, please check your torch version.")
         return self
 
