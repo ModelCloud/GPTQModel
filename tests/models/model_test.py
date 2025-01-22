@@ -313,7 +313,7 @@ class ModelTest(unittest.TestCase):
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=self.model,
+        task_results = self.lm_eval(model=self.model.compile(),
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                                     trust_remote_code=self.TRUST_REMOTE_CODE,
                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)

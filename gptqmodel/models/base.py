@@ -904,11 +904,11 @@ class BaseGPTQModel(nn.Module):
     def compile(self):
         if not self.quantized:
             logger.warning("model is not quantized, skip compiling...")
-            return
+            return self
 
         if Version(torch.__version__) < Version("2.5.1"):
             logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
-            return
+            return self
 
         backends = torch._dynamo.list_backends("experimental")
         if "aot_ts" in backends:
@@ -916,6 +916,7 @@ class BaseGPTQModel(nn.Module):
             self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
         else:
             logger.warning("aot_ts was not found in backend list, please check your torch version.")
+        return self
 
     def serve(self,
                host: str = "0.0.0.0",
