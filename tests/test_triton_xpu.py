@@ -39,7 +39,6 @@ class TestTritonXPU(ModelTest):
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
         calibration_dataset = self.load_dataset(tokenizer)
         origin_model.quantize(calibration_dataset, backend=BACKEND.TRITON)
-
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)
 
@@ -48,8 +47,7 @@ class TestTritonXPU(ModelTest):
               backend=BACKEND.TRITON,
               device=DEVICE.XPU,
           )
-
-          generate_str = model.tokenizer.decode(model.generate(**model.tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=2)[0])
+          generate_str = tokenizer.decode(model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=2)[0])
 
           print(f"generate_str: {generate_str}")
 
