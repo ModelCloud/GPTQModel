@@ -378,6 +378,7 @@ class GPTQModel:
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 
+    @classmethod
     def compile(self, model: BaseGPTQModel):
         if Version(torch.__version__) < Version("2.5.1"):
             logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
