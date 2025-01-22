@@ -87,12 +87,13 @@ class ModelTest(unittest.TestCase):
     def assertInference(self, model, tokenizer, keywords="paris", prompt=INFERENCE_PROMPT):
         self.assertIn(keywords, self.generate(model, tokenizer, prompt).lower())
 
+    # note that sampling is disabled for help with deterministic generation for ci tests
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = self.INFERENCE_PROMPT
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, temperature=0, top_p=0.95, top_k=50, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
+        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
         output = tokenizer.decode(res[0])
         print(f"Result is: >>\n{output}\n<<")
         return output
