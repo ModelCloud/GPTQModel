@@ -19,10 +19,11 @@ import unittest
 from typing import Union
 
 from lm_eval.tasks import TaskManager
+from parameterized import parameterized
 
 from gptqmodel import GPTQModel
 from gptqmodel.utils import EVAL
-from parameterized import parameterized
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 

@@ -34,15 +34,32 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, check_to_quantized, find_layers, get_device,
-                           get_module, get_module_by_name_prefix, get_moe_layer_modules,
-                           move_to, nested_move_to, normalize_tokenizer, pack_model)
+from ..utils.model import (
+    MODALITY,
+    check_to_quantized,
+    find_layers,
+    get_device,
+    get_module,
+    get_module_by_name_prefix,
+    get_moe_layer_modules,
+    move_to,
+    nested_move_to,
+    normalize_tokenizer,
+    pack_model,
+)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
 from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
-from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
-                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
+from .writer import (
+    QUANT_LOG_DAMP,
+    QUANT_LOG_FWD_TIME,
+    QUANT_LOG_LAYER,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_MODULE,
+    QUANT_LOG_TIME,
+    ModelWriter,
+)
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):

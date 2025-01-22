@@ -14,12 +14,14 @@
 # limitations under the License.
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 
-from gptqmodel.integration import integration  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
+
+from gptqmodel.integration import integration  # noqa: E402
 
 
 class TestTransformersIntegration(ModelTest):
