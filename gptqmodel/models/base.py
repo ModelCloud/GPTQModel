@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch._dynamo
 import torch.nn as nn
 from packaging import version
 from packaging.version import Version
@@ -61,7 +62,6 @@ from .writer import (
     QUANT_LOG_TIME,
     ModelWriter,
 )
-
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -909,9 +909,10 @@ class BaseGPTQModel(nn.Module):
         if Version(torch.__version__) < Version("2.5.1"):
             logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
             return self
-
         backends = torch._dynamo.list_backends("experimental")
         if "aot_ts" in backends:
+            # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
+            torch._dynamo.config.suppress_errors = True
             logger.info("compiling model with backend: aot_ts")
             self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
         else:
