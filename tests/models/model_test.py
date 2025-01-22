@@ -19,11 +19,13 @@ import sys
 
 from lm_eval.tasks import TaskManager
 
+
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from pathlib import Path  # noqa: E402
+
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402
@@ -34,6 +36,11 @@ import unittest  # noqa: E402
 import torch.cuda  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+from lm_eval.utils import make_table  # noqa: E402
+from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
+from packaging.version import Version  # noqa: E402
+from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
@@ -41,10 +48,7 @@ from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
-from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
-from packaging.version import Version  # noqa: E402
-from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
+
 
 RAND_SEED = 898
 
@@ -76,15 +80,21 @@ class ModelTest(unittest.TestCase):
     LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
+    INFERENCE_PROMPT = "Tell me the city name. Which city is the capital of France?"
+    GENERATE_EVAL_SIZE_MIN = 20
+    GENERATE_EVAL_SIZE_MAX = 50
+
+    def assertInference(self, model, tokenizer, keywords="paris", prompt=INFERENCE_PROMPT):
+        self.assertIn(keywords, self.generate(model, tokenizer, prompt).lower())
+
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
-            prompt = "I am in Paris and"
+            prompt = self.INFERENCE_PROMPT
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE,
-                             max_new_tokens=self.GENERATE_EVAL_SIZE)
+        res = model.generate(**inp, num_beams=1, do_sample=False, temperature=0, top_p=0.95, top_k=50, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
         output = tokenizer.decode(res[0])
-        print(f"Result is: \n{output}")
+        print(f"Result is: >>\n{output}\n<<")
         return output
 
     def generateChat(self, model, tokenizer, prompt=None):
@@ -97,7 +107,7 @@ class ModelTest(unittest.TestCase):
             ]
 
         input_tensor = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_tensors="pt")
-        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE)
+        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE_MAX)
         output = tokenizer.decode(outputs[0][input_tensor.shape[1]:], skip_special_tokens=True)
         print(f"Result is: \n{output}")
         return output

@@ -16,14 +16,16 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 # -- end do not touch
 
 import tempfile  # noqa: E402
 
+from models.model_test import ModelTest  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.models._const import DEVICE  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
 
 
 class TestsIPEX(ModelTest):
@@ -47,8 +49,6 @@ class TestsIPEX(ModelTest):
               backend=BACKEND.IPEX,
               device=DEVICE.XPU,
           )
-          generate_str = tokenizer.decode(model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=2)[0])
 
-          print(f"generate_str: {generate_str}")
+        self.assertInference(model=model,tokenizer=tokenizer)
 
-          self.assertIn("paris", generate_str.lower())

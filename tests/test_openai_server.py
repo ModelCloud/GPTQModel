@@ -17,7 +17,9 @@ import os
 import unittest
 
 import openai
+
 from gptqmodel import GPTQModel
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
