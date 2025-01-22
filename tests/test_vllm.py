@@ -23,7 +23,6 @@ import importlib.util  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from datasets import load_dataset  # noqa: E402
@@ -31,9 +30,10 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-class TestLoadVLLM(unittest.TestCase):
+class TestLoadVLLM(ModelTest):
 
     @classmethod
     def setUpClass(self):
@@ -48,7 +48,7 @@ class TestLoadVLLM(unittest.TestCase):
         self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         self.SHARDED_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
         self.prompts = [
-            "The capital of France is",
+            self.INFERENCE_PROMPT,
         ]
         self.sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16, top_k=1)
 

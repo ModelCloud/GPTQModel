@@ -25,9 +25,10 @@ import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-class TestsQ4CUDA(unittest.TestCase):
+class TestsQ4CUDA(ModelTest):
 
     @classmethod
     def setUpClass(cls):
@@ -48,13 +49,12 @@ class TestsQ4CUDA(unittest.TestCase):
             backend=BACKEND.CUDA,
             torch_dtype=torch_dtype,
         )
-        input = self.tokenizer("The capital of France is is", return_tensors="pt").to(device)
 
         # This one uses Autocast.
-        self.generate(model_q, input)
-
+        self.assertInference(model=model_q,tokenizer=self.tokenizer)
         # This one does not.
-        self.generate(model_q.model, input)
+        self.assertInference(model=model_q.model,tokenizer=self.tokenizer)
+
 
     @parameterized.expand(
         [
@@ -70,15 +70,8 @@ class TestsQ4CUDA(unittest.TestCase):
             torch_dtype=torch_dtype,
         )
 
-        input = self.tokenizer("The capital of France is is", return_tensors="pt").to(device)
-
         # This one uses Autocast.
-        self.generate(model_q, input)
-
+        self.assertInference(model=model_q,tokenizer=self.tokenizer)
         # This one does not.
-        self.generate(model_q.model, input)
+        self.assertInference(model=model_q.model,tokenizer=self.tokenizer)
 
-    def generate(self, model, input):
-        generate_str = self.tokenizer.decode(model.generate(**input, max_new_tokens=2)[0])
-        print(f"generate_str: {generate_str}")
-        self.assertIn("paris", generate_str.lower())

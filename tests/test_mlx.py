@@ -8,10 +8,11 @@ if sys.platform == "darwin":
 
 import tempfile  # noqa: E402
 
+from transformers import AutoTokenizer  # noqa: E402
+
 from gptqmodel import GPTQModel  # noqa: E402
 from mlx_lm import generate, load  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestExport(ModelTest):
@@ -31,9 +32,7 @@ class TestExport(ModelTest):
             )
             mlx_model, tokenizer = load(export_dir)
 
-            prompt = "Tell me the city name. Which city is the capital of France?"
-
-            messages = [{"role": "user", "content": prompt}]
+            messages = [{"role": "user", "content": self.INFERENCE_PROMPT}]
             prompt = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True
             )

@@ -76,13 +76,19 @@ class ModelTest(unittest.TestCase):
     LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
+    INFERENCE_PROMPT = "Tell me the city name. Which city is the capital of France?"
+    GENERATE_EVAL_SIZE_MIN = 20
+    GENERATE_EVAL_SIZE_MAX = 50
+
+    def assertInference(self, model, tokenizer, keywords="paris", prompt=INFERENCE_PROMPT):
+        self.assertIn(keywords, self.generate(model, tokenizer, prompt).lower())
+
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
-            prompt = "I am in Paris and"
+            prompt = self.INFERENCE_PROMPT
         device = model.device
         inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE,
-                             max_new_tokens=self.GENERATE_EVAL_SIZE)
+        res = model.generate(**inp, num_beams=1, do_sample=False, temperature=0, top_p=0.95, top_k=50, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
         output = tokenizer.decode(res[0])
         print(f"Result is: \n{output}")
         return output
@@ -97,7 +103,7 @@ class ModelTest(unittest.TestCase):
             ]
 
         input_tensor = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_tensors="pt")
-        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE)
+        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE_MAX)
         output = tokenizer.decode(outputs[0][input_tensor.shape[1]:], skip_special_tokens=True)
         print(f"Result is: \n{output}")
         return output

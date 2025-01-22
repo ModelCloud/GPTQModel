@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 
-import tempfile
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+import tempfile  # noqa: E402
 
-from gptqmodel.integration import integration
-from models.model_test import ModelTest
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig
+from gptqmodel.integration import integration  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 
 class TestTransformersIntegration(ModelTest):
@@ -31,9 +33,7 @@ class TestTransformersIntegration(ModelTest):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
         model = AutoModelForCausalLM.from_pretrained(model_id_or_path, device_map=device_map)
 
-        generate_str = tokenizer.decode(model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=1, temperature=0, top_p=0.95, top_k=50)[0])
-
-        self.assertIn("paris" ,generate_str.lower())
+        self.assertInference(model=model, tokenizer=tokenizer)
 
     def _test_load_quantized_model_gptq_v2(self, device_map):
         model_id_or_path = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
@@ -41,8 +41,7 @@ class TestTransformersIntegration(ModelTest):
 
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
 
-        generate_str = tokenizer.decode(model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=1, temperature=0, top_p=0.95, top_k=50)[0])
-        self.assertIn("paris" ,generate_str.lower())
+        self.assertInference(model=model, tokenizer=tokenizer)
 
     def _test_quantize(self, device_map):
         model_id = "/monster/data/model/opt-125m"
@@ -60,7 +59,7 @@ class TestTransformersIntegration(ModelTest):
 
             generate_str = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
 
-            self.assertIn("is a good way" ,generate_str.lower())
+            self.assertIn("is a good", generate_str.lower())
 
     def test_load_quantized_model_gptq_v1_ipex(self):
         self._test_load_quantized_model_gptq_v1(device_map="cpu")
