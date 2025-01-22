@@ -90,7 +90,7 @@ class ModelTest(unittest.TestCase):
         inp = tokenizer(prompt, return_tensors="pt").to(device)
         res = model.generate(**inp, num_beams=1, do_sample=False, temperature=0, top_p=0.95, top_k=50, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
         output = tokenizer.decode(res[0])
-        print(f"Result is: \n{output}")
+        print(f"Result is: >>\n{output}\n<<")
         return output
 
     def generateChat(self, model, tokenizer, prompt=None):
