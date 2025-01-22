@@ -40,6 +40,7 @@ except ImportError:
     TRITON_AVAILABLE = False
 
 TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
+TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
 
 logger = setup_logger()
 
@@ -55,7 +56,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
 
     # for transformers/optimum tests compat
@@ -116,6 +117,12 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if not TRITON_AVAILABLE:
             return False, ValueError(TRITON_INSTALL_HINT)
+
+        device = args.get('device')
+
+        if device == DEVICE.XPU and not triton_xpu_available():
+            return False, ValueError(TRITON_XPU_INSTALL_HINT)
+
         return cls._validate(**args)
 
     def post_init(self):
@@ -199,3 +206,44 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
 
 __all__ = ["TritonV2QuantLinear"]
+
+
+import triton
+import triton.language as tl
+
+@triton.jit
+def add_kernel(x_ptr,  # *Pointer* to first input vector.
+               y_ptr,  # *Pointer* to second input vector.
+               output_ptr,  # *Pointer* to output vector.
+               n_elements,  # Size of the vector.
+               BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
+               ):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    output = x + y
+
+
+def add(x: torch.Tensor, y: torch.Tensor):
+    output = torch.empty_like(x)
+    n_elements = output.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    return output
+
+
+def triton_xpu_available():
+    size = 1024
+    x = torch.rand(size, device='xpu:0')
+    y = torch.rand(size, device='xpu:0')
+
+    try:
+        add(x, y)
+        return True
+    except Exception as e:
+        return False
+
+
