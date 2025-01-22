@@ -29,7 +29,6 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union, Tuple  # noqa: E402
-from packaging.version import Version  # noqa: E402
 
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
@@ -378,17 +377,3 @@ class GPTQModel:
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 
-    @classmethod
-    def compile(self, model: BaseGPTQModel):
-        if Version(torch.__version__) < Version("2.5.1"):
-            logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
-            return model
-
-        if not model.quantized:
-            logger.warning("model is not quantized, skip compiling...")
-            return model
-
-        backends = torch._dynamo.list_backends("experimental")
-        if "aot_ts" in backends:
-            model = torch.compile(model, fullgraph=True, backend="aot_ts")
-            return model
