@@ -38,17 +38,17 @@ from gptqmodel.quantization.config import (  # noqa: E402
     QuantizeConfig,
 )
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-class TestQuantization(unittest.TestCase):
+class TestQuantization(ModelTest):
 
     @classmethod
     def setUpClass(self):
         self.pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration_dataset = self.load_dataset(self.tokenizer)
 
     @parameterized.expand(
         [

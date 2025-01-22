@@ -23,15 +23,15 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-class TestQuantBatch(unittest.TestCase):
+class TestQuantBatch(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
 
     def calculate_avg_ppl(self, model, tokenizer):
@@ -58,8 +58,7 @@ class TestQuantBatch(unittest.TestCase):
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration_dataset = self.load_dataset(self.tokenizer)
 
     def test_diff_batch(self):
         quantize_config = QuantizeConfig(

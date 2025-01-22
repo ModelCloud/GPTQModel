@@ -121,8 +121,8 @@ class TestLoadVLLM(ModelTest):
         tokenizer = AutoTokenizer.from_pretrained(NATIVE_MODEL_ID, use_fast=True)
         if not tokenizer.pad_token_id:
             tokenizer.pad_token_id = tokenizer.eos_token_id
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        calibration_dataset = [tokenizer(example["text"]) for example in traindata.select(range(1024))]
+
+        calibration_dataset = self.load_dataset(tokenizer)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         #
