@@ -548,7 +548,7 @@ jobs:
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
-          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
@@ -586,7 +586,7 @@ jobs:
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
-          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
             pip uninstall vllm -y
