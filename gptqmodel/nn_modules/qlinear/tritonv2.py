@@ -38,7 +38,7 @@ try:
     if version.parse(triton_version) < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
     TRITON_AVAILABLE = True
-except ImportError:
+except BaseException:
     TRITON_AVAILABLE = False
     class TritonModuleMixin:
         pass
