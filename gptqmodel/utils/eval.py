@@ -18,9 +18,6 @@ import os
 from enum import Enum
 from typing import List, Optional, Union
 
-from lm_eval.tasks import TaskManager
-
-
 class EVAL:
     class LM_EVAL(Enum):
         ARC_CHALLENGE = "arc_challenge"
@@ -142,7 +139,7 @@ def lm_eval(
         show_config: bool = False,
         trust_remote_code: bool = False,
         device: Optional[str] = None,
-        task_manager: Optional[TaskManager] = None,
+        **args,
 ):
     try:
         from lm_eval import simple_evaluate
@@ -190,7 +187,7 @@ def lm_eval(
         numpy_random_seed=numpy_random_seed,
         torch_random_seed=torch_random_seed,
         fewshot_random_seed=fewshot_random_seed,
-        task_manager=task_manager,
+        **args,
     )
 
     if results is not None:
