@@ -21,19 +21,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
-import triton
-import triton.language as tl
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
-from ..triton_utils.mixin import TritonModuleMixin
 from . import BaseQuantLinear
 
 
 try:
+    import triton
+    import triton.language as tl
     from triton import __version__ as triton_version
-
+    from ..triton_utils.mixin import TritonModuleMixin
     from ..triton_utils.dequant import QuantLinearFunction
     if version.parse(triton_version) < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
