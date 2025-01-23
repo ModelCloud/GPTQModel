@@ -35,7 +35,8 @@ from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig, PreTrainedModel  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
-from ..utils import BACKEND, EVAL  # noqa: E402
+from ..utils import BACKEND  # noqa: E402
+from ..utils.eval import EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
