@@ -213,7 +213,7 @@ Below is a basic sample using `GPTQModel.eval` API
 
 ```py
 from gptqmodel import GPTQModel
-from gptqmodel.utils import EVAL
+from gptqmodel.utils.eval import EVAL
 
 model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
