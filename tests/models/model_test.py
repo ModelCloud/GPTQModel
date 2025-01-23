@@ -23,7 +23,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from pathlib import Path  # noqa: E402
 
-
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402
 import shutil  # noqa: E402
@@ -45,7 +44,6 @@ from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-
 
 RAND_SEED = 898
 
@@ -237,10 +235,9 @@ class ModelTest(unittest.TestCase):
                     model_args = f"pretrained={model.model_local_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
                 else:
                     model_args = ""
-
-            from lm_eval.tasks import TaskManager
-            from lm_eval.utils import make_table
-            results = lm_eval(
+                from lm_eval.tasks import TaskManager
+                from lm_eval.utils import make_table
+                results = lm_eval(
                     model,
                     model_name="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
