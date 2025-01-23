@@ -39,7 +39,7 @@ class TestLoadSglang(ModelTest):
         if importlib.util.find_spec("sglang") is None:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
 
-        self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
     def test_load_sglang(self):
         model = GPTQModel.load(
@@ -47,14 +47,7 @@ class TestLoadSglang(ModelTest):
             device="cuda:0",
             backend=BACKEND.SGLANG,
         )
-        output = model.generate(
-            prompts=self.INFERENCE_PROMPT,
-            temperature=0.8,
-            top_p=0.95,
-        )
-        print(f"Prompt: {self.INFERENCE_PROMPT!r}, Generated text: {output!r}")
-
-        self.assertTrue(len(output)>5)
+        self.assertInference(model, self.load_tokenizer(self.MODEL_ID))
         model.shutdown()
         del model
 
