@@ -28,7 +28,7 @@ from gptqmodel.utils.progress import ProgressBar  # noqa: E402
 
 
 class BenchmarkTest(unittest.TestCase):
-    MODEL_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+    MODEL_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
     MIN_NEW_TOEKNS = 10
     NUM_RUNS = 10
     PROMPTS = [

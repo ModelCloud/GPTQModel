@@ -30,7 +30,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 class TestEval(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
     @parameterized.expand(
         [
