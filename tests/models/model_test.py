@@ -17,9 +17,6 @@
 import os
 import sys
 
-from lm_eval.tasks import TaskManager
-
-
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -36,7 +33,7 @@ import unittest  # noqa: E402
 import torch.cuda  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
+
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
@@ -240,7 +237,10 @@ class ModelTest(unittest.TestCase):
                     model_args = f"pretrained={model.model_local_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
                 else:
                     model_args = ""
-                results = lm_eval(
+
+            from lm_eval.tasks import TaskManager
+            from lm_eval.utils import make_table
+            results = lm_eval(
                     model,
                     model_name="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
