@@ -21,6 +21,7 @@ import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
+
 def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stages: List[int]):
     configs = []
     for bs, ws, ns in itertools.product(block_sizes, num_warps, num_stages):
