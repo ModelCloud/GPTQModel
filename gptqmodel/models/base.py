@@ -138,6 +138,7 @@ class BaseGPTQModel(nn.Module):
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.tokenizer = tokenizer
+        self.model.tokenizer = tokenizer # helpful for CI tests
         self.quantize_config = quantize_config
         self.config = self.model.config if hasattr(self.model, "config") else None
 

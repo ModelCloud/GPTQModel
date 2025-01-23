@@ -79,7 +79,11 @@ class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
 
-    def assertInference(self, model, tokenizer, keywords="paris", prompt=INFERENCE_PROMPT):
+    def assertInference(self, model, tokenizer=None, keywords="paris", prompt=INFERENCE_PROMPT):
+        # gptqmodel can auto init tokenizer internally
+        if tokenizer is None:
+            tokenizer = model.tokenizer
+
         self.assertIn(keywords, self.generate(model, tokenizer, prompt).lower())
 
     # note that sampling is disabled for help with deterministic generation for ci tests

@@ -42,7 +42,7 @@ class TestsQ4Torch(ModelTest):
     def test_generation_desc_act_true(self, torch_dtype, device):
         revision = "desc_act_true"
 
-        model_q = GPTQModel.from_quantized(
+        qmodel = GPTQModel.from_quantized(
             self.model_id,
             revision=revision,
             device=device,
@@ -50,12 +50,11 @@ class TestsQ4Torch(ModelTest):
             torch_dtype=torch_dtype,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        # gptqmodel
+        self.assertInference(model=qmodel)
 
-        # This one uses Autocast.
-        self.assertInference(model=model_q,tokenizer=tokenizer)
-        # This one does not.
-        self.assertInference(model=model_q.model,tokenizer=tokenizer)
+        # hf model
+        self.assertInference(model=qmodel.model)
 
     @parameterized.expand(
         [
@@ -66,15 +65,15 @@ class TestsQ4Torch(ModelTest):
         ]
     )
     def test_generation_desc_act_false(self, torch_dtype, device):
-        model_q = GPTQModel.from_quantized(
+        qmodel = GPTQModel.from_quantized(
             self.model_id,
             device=device,
             backend=BACKEND.TORCH,
             torch_dtype=torch_dtype,
         )
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id)
 
-        # This one uses Autocast.
-        self.assertInference(model=model_q,tokenizer=tokenizer)
-        # This one does not.
-        self.assertInference(model=model_q.model,tokenizer=tokenizer)
+        # gptqmodel
+        self.assertInference(model=qmodel)
+
+        # hf model
+        self.assertInference(model=qmodel.model)
