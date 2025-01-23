@@ -39,6 +39,8 @@ try:
     TRITON_AVAILABLE = True
 except ImportError:
     TRITON_AVAILABLE = False
+    class TritonModuleMixin:
+        pass
 
 TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
 TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
@@ -209,23 +211,22 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 __all__ = ["TritonV2QuantLinear"]
 
 
-@triton.jit
-def add_kernel(x_ptr,  # *Pointer* to first input vector.
-               y_ptr,  # *Pointer* to second input vector.
-               output_ptr,  # *Pointer* to output vector.
-               n_elements,  # Size of the vector.
-               BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
-               ):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask)
-    y = tl.load(y_ptr + offsets, mask=mask)
-    output = x + y  # noqa: F841
-
-
 def add(x: torch.Tensor, y: torch.Tensor):
+    # don't put it on top-level to avoid crash if triton was not installed
+    @triton.jit
+    def add_kernel(x_ptr,  # *Pointer* to first input vector.
+                   y_ptr,  # *Pointer* to second input vector.
+                   output_ptr,  # *Pointer* to output vector.
+                   n_elements,  # Size of the vector.
+                   BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
+                   ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        output = x + y  # noqa: F841
     output = torch.empty_like(x)
     n_elements = output.numel()
     def grid(meta):
@@ -235,6 +236,8 @@ def add(x: torch.Tensor, y: torch.Tensor):
 
 
 def triton_xpu_available():
+    if not TRITON_AVAILABLE:
+        return False
     size = 1024
     x = torch.rand(size, device='xpu:0')
     y = torch.rand(size, device='xpu:0')
