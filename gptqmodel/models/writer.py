@@ -28,9 +28,10 @@ import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
-from transformers import AutoConfig
+from transformers import AutoConfig, PreTrainedTokenizerFast
 from transformers.modeling_utils import no_init_weights
 from transformers.utils.generic import ContextManagers
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..quantization.config import (
     FORMAT,
@@ -331,6 +332,18 @@ def ModelWriter(cls):
 
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
+
+            # fixed this issue: https://github.com/huggingface/transformers/issues/35832
+            saved_tokenizer_config = get_tokenizer_config(save_dir)
+            config_tokenizer_class = saved_tokenizer_config.get("tokenizer_class")
+            # if the tokenizer is fast, but the tokenizer_config.json does not have Fast suffix, add "Fast" suffix
+            if (not config_tokenizer_class.endswith("Fast")) and (
+                isinstance(self.tokenizer, PreTrainedTokenizerFast)
+                ):
+                saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
+                with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+                    json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
+            
 
     cls.save_quantized = save_quantized
 
