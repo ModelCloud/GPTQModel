@@ -366,7 +366,10 @@ class QuantizeConfig():
         return out
 
     def calculate_bits_per_weight(self):
-        bpw = ((self.group_size * self.bits) + 16 * 2) / self.group_size
+        if self.group_size != -1:
+            bpw = ((self.group_size * self.bits) + 16 * 2) / self.group_size
+        else:
+            bpw = self.bits
         logger.info(f"Effective Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
 @dataclass
