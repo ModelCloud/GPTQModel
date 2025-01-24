@@ -18,6 +18,7 @@ import os
 from enum import Enum
 from typing import List, Optional, Union
 
+
 class EVAL:
     class LM_EVAL(Enum):
         ARC_CHALLENGE = "arc_challenge"
