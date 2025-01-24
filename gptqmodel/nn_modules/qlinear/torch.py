@@ -77,7 +77,7 @@ class TorchQuantLinear(BaseQuantLinear):
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
-        self.tensors_per_storage_dtype = 8 // self.bits
+        self.tensors_per_storage_dtype = self.storage_dtype_bits // self.bits
         # Initialize qweight and qzeros based on the chosen dtype
         self.register_buffer(
             "qweight",
@@ -110,7 +110,7 @@ class TorchQuantLinear(BaseQuantLinear):
             self.bias = None
 
         if self.bits in [2, 4, 8]:
-            self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
+            self.wf = torch.tensor(list(range(0, self.storage_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
         elif self.bits == 3:
             self.wf = torch.tensor(
                 [
