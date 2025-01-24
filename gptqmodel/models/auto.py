@@ -359,7 +359,6 @@ class GPTQModel:
         if format == "mlx":
             try:
                 from mlx_lm.utils import save_config, save_weights
-
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
                 raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")

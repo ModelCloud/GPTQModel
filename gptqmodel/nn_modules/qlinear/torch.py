@@ -320,7 +320,8 @@ def dequantize_model(model: nn.Module):
                 module_name = name
 
             setattr(parent, module_name, new_module)
-
+            
+    model.config.__delattr__("quantization_config")
     return model
 
 
