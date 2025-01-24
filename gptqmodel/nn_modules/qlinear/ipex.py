@@ -202,18 +202,14 @@ class IPEXQuantLinear(BaseQuantLinear):
             self.bias = linear.bias.clone().to(dtype=linear.weight.dtype)
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
-
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(np.uint32)
 
-        i = 0
-        row = 0
         qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
-        while row < qweight.shape[0]:
-            for j in range(i, i + (32 // self.bits)):
-                qweight[row] |= intweight[j] << (self.bits * (j - i))
-            i += 32 // self.bits
-            row += 1
+        for row in range(qweight.shape[0]):
+            i = row * (32 // self.bits)
+            for j in range(32 // self.bits):
+                qweight[row] |= intweight[i + j] << (self.bits * j)
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -221,13 +217,10 @@ class IPEXQuantLinear(BaseQuantLinear):
         zeros -= 1
         zeros = zeros.numpy().astype(np.uint32)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
-        i = 0
-        col = 0
-        while col < qzeros.shape[1]:
-            for j in range(i, i + (32 // self.bits)):
-                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-            i += 32 // self.bits
-            col += 1
+        for col in range(qzeros.shape[1]):
+            i = col * (32 // self.bits)
+            for j in range(32 // self.bits):
+                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
