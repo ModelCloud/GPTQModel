@@ -48,7 +48,11 @@ class TestQuantization(ModelTest):
         self.pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
-        self.calibration_dataset = self.load_dataset(self.tokenizer)
+
+        # auto-round can't use self.load_dataset() from ModelTest
+        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+
 
     @parameterized.expand(
         [
