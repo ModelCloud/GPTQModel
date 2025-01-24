@@ -32,8 +32,9 @@ try:
     import triton
     import triton.language as tl
     from triton import __version__ as triton_version
-    from ..triton_utils.mixin import TritonModuleMixin
+
     from ..triton_utils.dequant import QuantLinearFunction
+    from ..triton_utils.mixin import TritonModuleMixin
     if version.parse(triton_version) < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
     TRITON_AVAILABLE = True

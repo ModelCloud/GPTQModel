@@ -16,21 +16,22 @@
 # -- do not touch
 import os
 
-from parameterized import parameterized
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import time  # noqa: E402
-
 import unittest  # noqa: E402
+
+from parameterized import parameterized  # noqa: E402
+
 
 # isort: off
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: E402
 

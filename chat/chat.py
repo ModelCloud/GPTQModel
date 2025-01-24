@@ -1,8 +1,10 @@
 import argparse
 import json
 from datetime import datetime
-from gptqmodel import GPTQModel
+
 from colorama import Fore, init
+from gptqmodel import GPTQModel
+
 init(autoreset=True)
 
 
