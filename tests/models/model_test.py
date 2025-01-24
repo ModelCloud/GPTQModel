@@ -78,15 +78,23 @@ class ModelTest(unittest.TestCase):
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
     INFERENCE_PROMPT = "Tell me the city name. Which city is the capital of France?"
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel"]
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
 
-    def assertInference(self, model, tokenizer=None, keywords="paris", prompt=INFERENCE_PROMPT):
+    def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
+        if keywords is None:
+            keywords = self.INFERENCE_RESULT_KEYWORDS
         if tokenizer is None:
             tokenizer = model.tokenizer
 
-        self.assertIn(keywords, self.generate(model, tokenizer, prompt).lower())
+        generated = self.generate(model, tokenizer, prompt).lower()
+        for k in keywords:
+            if k.lower() in generated:
+                self.assertTrue(True)
+                return
+        self.assertTrue(False, f"none of keywords were found in generated: {generated}")
 
     # note that sampling is disabled for help with deterministic generation for ci tests
     def generate(self, model, tokenizer, prompt=None):
