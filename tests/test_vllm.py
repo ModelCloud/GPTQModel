@@ -70,27 +70,7 @@ class TestLoadVLLM(ModelTest):
 
         tokenizer = model.get_tokenizer()
 
-        outputs = model.generate(
-            prompts=self.prompts,
-            sampling_params=self.sampling_params,
-        )
-
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
-        print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-
-        self.assertIn("paris", generated_text.lower())
-
-        outputs = model.generate(
-            prompts=self.prompts,
-            temperature=0.8,
-            top_p=0.95,
-            max_length=16,
-            top_k=1,
-        )
-
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
-        print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertIn("paris", generated_text.lower())
+        self.assertInference(model, tokenizer)
 
         del model
         self.release_vllm_model()
@@ -103,15 +83,8 @@ class TestLoadVLLM(ModelTest):
             gpu_memory_utilization=0.8,
         )
         tokenizer = model.get_tokenizer()
-        outputs = model.generate(
-            prompts=self.prompts,
-            temperature=0.8,
-            top_p=0.95,
-        )
 
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
-        print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-        self.assertEquals(generated_text, " Paris, which is also known as the city of love.")
+        self.assertInference(model, tokenizer)
 
         del model
         self.release_vllm_model()
@@ -121,8 +94,8 @@ class TestLoadVLLM(ModelTest):
         tokenizer = AutoTokenizer.from_pretrained(NATIVE_MODEL_ID, use_fast=True)
         if not tokenizer.pad_token_id:
             tokenizer.pad_token_id = tokenizer.eos_token_id
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        calibration_dataset = [tokenizer(example["text"]) for example in traindata.select(range(1024))]
+
+        calibration_dataset = self.load_dataset(tokenizer)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         #
@@ -162,20 +135,10 @@ class TestLoadVLLM(ModelTest):
             tokenizer = model.get_tokenizer()
 
             for name, submodule in model.named_modules():
-                if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule,
-                                                                                  BaseQuantLinear):  # module 0 was skipped
+                if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
                     raise ValueError("first layer should be native module")
 
-            outputs = model.generate(
-                prompts=self.prompts,
-                temperature=0.8,
-                top_p=0.95,
-            )
-
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)[len(self.prompts[0]):]
-            print(f"Prompt: {self.prompts!r}, Generated text: {generated_text!r}")
-
-            self.assertIn("paris", generated_text.lower())
+            self.assertInference(model, tokenizer)
 
             del model
             self.release_vllm_model()

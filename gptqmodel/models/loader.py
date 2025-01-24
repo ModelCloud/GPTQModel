@@ -319,6 +319,7 @@ def ModelLoader(cls):
                 )
 
                 model.config = model.llm_engine.model_config
+                model.device = model.llm_engine.device_config.device
 
                 cls.generate = lambda self, **kwargs: vllm_generate(self.model, **kwargs)
 

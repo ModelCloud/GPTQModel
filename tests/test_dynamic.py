@@ -63,8 +63,7 @@ class TestDynamic(ModelTest):
         if not cls.tokenizer.pad_token_id:
             cls.tokenizer.pad_token_id = cls.tokenizer.eos_token_id
 
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        cls.calibration_dataset = [cls.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        cls.calibration_dataset = cls.load_dataset(cls.tokenizer)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         dynamic = {

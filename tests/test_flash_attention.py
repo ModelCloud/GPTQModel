@@ -29,7 +29,7 @@ from gptqmodel import GPTQModel  # noqa: E402
 
 class Test(ModelTest):
 
-    MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+    MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
     def test(self):
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)

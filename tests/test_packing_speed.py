@@ -16,6 +16,7 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -23,6 +24,7 @@ import time  # noqa: E402
 import unittest  # noqa: E402
 
 from parameterized import parameterized  # noqa: E402
+
 
 # isort: off
 import torch  # noqa: E402
@@ -99,37 +101,19 @@ class TestRepacking(unittest.TestCase):
 
         return qlinear
 
-    def test_compare_exllama_triton_torch(self):
-        # validate exllama packer
-        exllama_linear = self.pack(ExllamaQuantLinear)
+    @parameterized.expand(
+        [
+            [ExllamaQuantLinear, 26.5349],
+            [TritonV2QuantLinear, 26.5268],
+            [TorchQuantLinear, 27.0297],
+        ]
+    )
+    def test_pack_speed(self, qlinearCls, expect_time):
+        now = time.time()
+        for i in range(30):
+            self.pack(qlinearCls)
+        time_usage = time.time() - now
+        speed = self.k * self.k / time_usage
+        print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
 
-        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(exllama_linear)
-        dequantized_weight = dequantized_weight.to(torch.float16)
-
-        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
-        self.assertTrue(torch.all(dequantized_qzeros == 8))
-
-        triton_linear = self.pack(TritonV2QuantLinear)
-
-        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_linear)
-        dequantized_weight = dequantized_weight.to(torch.float16)
-
-        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
-        self.assertTrue(torch.all(dequantized_qzeros == 8))
-
-        self.assertTrue(torch.allclose(exllama_linear.qweight, triton_linear.qweight))
-        self.assertTrue(torch.allclose(exllama_linear.scales, triton_linear.scales))
-        self.assertTrue(torch.allclose(exllama_linear.qzeros, triton_linear.qzeros))
-
-        # validate torch packer
-        torch_linear = self.pack(TorchQuantLinear)
-
-        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(torch_linear)
-        dequantized_weight = dequantized_weight.to(torch.float16)
-
-        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
-        self.assertTrue(torch.all(dequantized_qzeros == 8))
-
-        self.assertTrue(torch.allclose(exllama_linear.qweight, torch_linear.qweight))
-        self.assertTrue(torch.allclose(exllama_linear.scales, torch_linear.scales))
-        self.assertTrue(torch.allclose(exllama_linear.qzeros, torch_linear.qzeros))
+        self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025)

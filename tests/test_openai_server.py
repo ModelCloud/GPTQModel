@@ -26,7 +26,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 class TestOpeniServer(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
         self.HOST = "127.0.0.1"
         self.PORT = 23900
         self.model = GPTQModel.load(self.MODEL_ID)
