@@ -369,6 +369,11 @@ class GPTQModel:
             save_weights(target_path, mlx_weights, donate_weights=True)
 
             save_config(mlx_config, config_path=target_path + "/config.json")
+        elif format == "hf":
+            from ..nn_modules.qlinear.torch import dequantize_model
+
+            dequantized_model = dequantize_model(gptq_model.model)
+            dequantized_model.save_pretrained(target_path)
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
