@@ -21,6 +21,7 @@ from inference_speed import InferenceSpeed
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
+
 class TestInferenceSpeed(InferenceSpeed):
     @parameterized.expand(
         [
