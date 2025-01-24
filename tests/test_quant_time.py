@@ -30,9 +30,9 @@ class TestQuantTime(unittest.TestCase):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     INPUTS_MAX_LENGTH = 2048
     DATASETS_MAX_COUNT = 128
-    QUANT_TIME = 100.97
-    MAX_DELTA_FLOOR_PERCENT = 0.25
-    MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.25
+    QUANT_TIME = 94
+    MAX_DELTA_FLOOR_PERCENT = 0.05
+    MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.05
 
     def test_quant_time(self):
         quantize_config = QuantizeConfig(
