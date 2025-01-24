@@ -18,12 +18,12 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-import unittest
-import time
+import unittest  # noqa: E402
+import time  # noqa: E402
 
-from datasets import load_dataset
-from gptqmodel import GPTQModel
-from gptqmodel.quantization.config import QuantizeConfig
+from datasets import load_dataset  # noqa: E402
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 
 
 class TestQuantTime(unittest.TestCase):
