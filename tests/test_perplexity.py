@@ -52,6 +52,7 @@ class TestPerplexity(unittest.TestCase):
     N_CTX = 512
     N_BATCH = 512
 
+    @classmethod
     def get_config_with_format(self, format: FORMAT):
         if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
             return self.OPT_DATASET_PATH, self.OPT_DATASET_NAME, self.OPT_DATASET_SPLIT, self.OPT_DATASET_COLUMN, self.OPT_MODEL_ID, self.opt_tokenizer
