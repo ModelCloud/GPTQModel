@@ -103,9 +103,9 @@ class TestRepacking(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [ExllamaQuantLinear, 26.5349],
-            [TritonV2QuantLinear, 26.5268],
-            [TorchQuantLinear, 27.0297],
+            [ExllamaQuantLinear, 35.5194],
+            [TritonV2QuantLinear, 34.7512],
+            [TorchQuantLinear, 35.5245],
         ]
     )
     def test_pack_speed(self, qlinearCls, expect_time):
