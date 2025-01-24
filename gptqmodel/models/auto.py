@@ -172,10 +172,6 @@ class GPTQModel:
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
-        if backend == BACKEND.VLLM:
-            from ..integration.integration_vllm import patch_vllm
-            patch_vllm()
-
         is_quantized = False
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             is_quantized = True
