@@ -27,5 +27,4 @@ if [[ -z "$MODEL_PATH" ]]; then
   exit 1
 fi
 
-# 执行命令
 env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU_ID" python chat.py --model_path "$MODEL_PATH"
