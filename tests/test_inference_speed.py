@@ -30,6 +30,7 @@ class TestInferenceSpeed(InferenceSpeed):
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 775),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 296),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 295),
+            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 724),
             (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474),
         ]
     )
