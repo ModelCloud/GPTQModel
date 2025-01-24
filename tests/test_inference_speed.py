@@ -30,8 +30,8 @@ class TestInferenceSpeed(InferenceSpeed):
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 775),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 296),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 295),
-            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 724),
-            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474),
+            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 724), # First time running bitblas
+            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474), # Second time running bitblas, there is cache
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second):
