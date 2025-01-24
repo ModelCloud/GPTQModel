@@ -16,6 +16,8 @@
 # -- do not touch
 import os
 
+from parameterized import parameterized
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -79,14 +81,12 @@ class TestRepacking(unittest.TestCase):
     n = 1024 * 100
     group_size = 128
 
-
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
     print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
 
     _, linear, s = gen_quant4(k, n, group_size)
 
     def pack(self, qlinearCls):
-        # validate exllama packer
         qlinear = qlinearCls(
             bits=4,
             group_size=self.group_size,
@@ -96,13 +96,27 @@ class TestRepacking(unittest.TestCase):
             outfeatures=self.n,
             bias=False)
 
-        now = time.time()
-        for i in range(30):
-            qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
-        time_usage = time.time() - now
-        print(f"{qlinearCls.__name__}, time={time_usage}, speed={self.k * self.k / time_usage:.4f}")
+        qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
 
         return qlinear
+
+    @parameterized.expand(
+        [
+            [ExllamaQuantLinear, 26.5349],
+            [TritonV2QuantLinear, 26.5268],
+            [TorchQuantLinear, 27.0297],
+        ]
+    )
+    def test_pack_speed(self, qlinearCls, expect_time):
+        now = time.time()
+        for i in range(30):
+            self.pack(qlinearCls)
+        time_usage = time.time() - now
+        speed = self.k * self.k / time_usage
+        print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
+
+        self.assertTrue(abs(time_usage - expect_time) / expect_time < 0.025)
+
 
     def test_compare_exllama_triton_torch(self):
         # validate exllama packer
