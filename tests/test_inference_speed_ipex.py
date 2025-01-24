@@ -25,7 +25,7 @@ from inference_speed import InferenceSpeed
 class TestInferenceSpeedIpex(InferenceSpeed):
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 48),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 12),
         ]
     )
     def test_inference_speed_ipex(self, model_path, backend, tokens_per_second):

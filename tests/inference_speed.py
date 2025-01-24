@@ -19,6 +19,7 @@ import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
+
 import unittest
 from transformers import AutoTokenizer
 
@@ -27,7 +28,7 @@ from gptqmodel.utils.progress import ProgressBar
 
 
 class InferenceSpeed(unittest.TestCase):
-    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+    NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2"
     BITBLAS_NATIVE_MODEL_ID = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
     MAX_NEW_TOEKNS = 10
     NUM_RUNS = 20
