@@ -86,10 +86,6 @@ class InferenceSpeed(unittest.TestCase):
         print(f"New Token Per Second: {avg_tokens_per_second} token/s")
         print(f"****************  {backend} Result Info End****************")
 
-        # There are differences between the results of the first and second runs of bitblas
-        # (there is a cache when running bitblas for the second time),
-        # so only the results of the second run of bitblas are asserted.
-        # The first run of bitblas only prints relevant information
         if not assert_result:
             return
 

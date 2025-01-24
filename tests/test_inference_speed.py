@@ -34,6 +34,10 @@ class TestInferenceSpeed(InferenceSpeed):
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second):
+        # There are differences between the results of the first and second runs of bitblas
+        # (there is a cache when running bitblas for the second time),
+        # so only the results of the second run of bitblas are asserted.
+        # The first run of bitblas only prints relevant information
         if backend == BACKEND.BITBLAS:
             self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, assert_result=False)
 
