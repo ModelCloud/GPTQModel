@@ -44,7 +44,7 @@ class TestDynamic(ModelTest):
             tokenizer=tokenizer,
             dataset_path="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
             dataset_name="json",
-            split="test",
+            split="train",
             text_column="text",
         )
 
