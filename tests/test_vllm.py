@@ -138,12 +138,6 @@ class TestLoadVLLM(ModelTest):
                 if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
                     raise ValueError("first layer should be native module")
 
-            outputs = model.generate(
-                prompts=self.prompts,
-                temperature=0.8,
-                top_p=0.95,
-            )
-
             self.assertInference(model, tokenizer)
 
             del model

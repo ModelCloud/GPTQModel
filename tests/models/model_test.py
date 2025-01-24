@@ -92,8 +92,7 @@ class ModelTest(unittest.TestCase):
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = self.INFERENCE_PROMPT
-        device = model.device
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
+        inp = tokenizer(prompt, return_tensors="pt").to(model.device)
         res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
         output = tokenizer.decode(res[0])
         print(f"Result is: >>\n{output}\n<<")
