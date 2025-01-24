@@ -31,27 +31,29 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 
 class TestQ4Marlin(ModelTest):
 
+    GENERATE_EVAL_SIZE_MAX = 100
+
     @parameterized.expand(
         [
             # act_order==False, group_size=128
-            ("/monster/data/model/Llama-2-7B-GPTQ"),
+            "/monster/data/model/Llama-2-7B-GPTQ",
 
             # act_order==True, group_size=128
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
             # act_order==True, group_size=64
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-64g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-64g-actorder_True",
             # act_order==True, group_size=32
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-32g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-32g-actorder_True",
 
             # # 8-bit, act_order==True, group_size=channelwise
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit--1g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit--1g-actorder_True",
             # # 8-bit, act_order==True, group_size=128
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-128g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-128g-actorder_True",
             # # 8-bit, act_order==True, group_size=32
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-32g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-32g-actorder_True",
 
             # # 4-bit, act_order==True, group_size=128
-            ("/monster/data/model/gemma-1.1-2b-it-GPTQ")
+            "/monster/data/model/gemma-1.1-2b-it-GPTQ",
         ]
     )
     def test_generation(self, model_id):
