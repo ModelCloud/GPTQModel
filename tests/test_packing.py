@@ -116,7 +116,7 @@ class TestRepacking(unittest.TestCase):
         speed = self.k * self.k / time_usage
         print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
 
-        self.assertTrue(abs(time_usage - expect_time) / expect_time < 0.025)
+        self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025)
 
 
     def test_compare_exllama_triton_torch(self):
