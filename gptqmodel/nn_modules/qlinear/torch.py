@@ -275,4 +275,32 @@ class TorchQuantLinear(BaseQuantLinear):
 
         return weights
 
-__all__ = ["TorchQuantLinear"]
+def dequantize_model(model: nn.Module):
+    for name, module in model.model.named_modules():
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
+            raise ValueError(
+                "Only models loaded using TorchQuantLinear are supported for dequantization. "
+                "Please load model using backend=BACKEND.TORCH."
+            )
+
+        if isinstance(module, TorchQuantLinear):
+            # Create a new Linear layer with dequantized weights
+            new_module = nn.Linear(module.infeatures, module.outfeatures)
+            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
+            new_module.bias = module.bias
+
+            # Replace the module in the model
+            parent = model.model
+            if '.' in name:
+                parent_name, module_name = name.rsplit('.', 1)
+                parent = dict(model.model.named_modules())[parent_name]
+            else:
+                module_name = name
+
+            setattr(parent, module_name, new_module)
+            
+    model.config.__delattr__("quantization_config")
+    return model
+
+
+__all__ = ["TorchQuantLinear", "dequantize_model"]
