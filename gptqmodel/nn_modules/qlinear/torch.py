@@ -78,6 +78,9 @@ class TorchQuantLinear(BaseQuantLinear):
         elif self.storage_dtype == torch.int32:
             self.storage_dtype_bits = 32
             self.storage_np_dtype = np.int32
+        elif self.storage_dtype == torch.int64:
+            self.storage_dtype_bits = 64
+            self.storage_np_dtype = np.int64
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
