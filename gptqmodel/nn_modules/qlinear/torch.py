@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import math
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,7 +24,6 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-
 
 logger = setup_logger()
 
@@ -62,9 +60,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
-
         self.padded_infeatures = infeatures + (-infeatures % group_size)
-
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
@@ -99,7 +95,6 @@ class TorchQuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
-        # is performed by unpacking the weights and using torch.matmul
         if self.bits in [2, 4, 8]:
             self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
         elif self.bits == 3:
@@ -140,77 +135,61 @@ class TorchQuantLinear(BaseQuantLinear):
             self.bias = linear.bias.clone().to(dtype=linear.weight.dtype)
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
-
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(np.uint32)
 
-        i = 0
-        row = 0
         qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
-        while row < qweight.shape[0]:
-            if self.bits in [2, 4, 8]:
-                for j in range(i, i + (32 // self.bits)):
-                    qweight[row] |= intweight[j] << (self.bits * (j - i))
-                i += 32 // self.bits
+        if self.bits in [2, 4, 8]:
+            bits_div = 32 // self.bits
+            for row in range(qweight.shape[0]):
+                for j in range(bits_div):
+                    qweight[row] |= intweight[row * bits_div + j] << (self.bits * j)
+        elif self.bits == 3:
+            for row in range(qweight.shape[0]):
+                row_offset = row * 10  # Cache row * 10
+                row_offset_plus_10 = row_offset + 10  # Cache row * 10 + 10
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j)
+                qweight[row] |= intweight[row_offset_plus_10] << 30
                 row += 1
-            elif self.bits == 3:
-                for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i))
-                i += 10
-                qweight[row] |= intweight[i] << 30
+                qweight[row] |= (intweight[row_offset_plus_10] >> 2) & 1
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j + 1)
+                qweight[row] |= intweight[row_offset_plus_10] << 31
                 row += 1
-                qweight[row] |= (intweight[i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 1)
-                i += 10
-                qweight[row] |= intweight[i] << 31
-                row += 1
-                qweight[row] |= (intweight[i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 2)
-                i += 10
-                row += 1
+                qweight[row] |= (intweight[row_offset_plus_10] >> 1) & 0x3
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j + 2)
 
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
+        self.qweight = torch.from_numpy(qweight.astype(np.int32))
 
         zeros = zeros.numpy().astype(np.uint32)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
-        i = 0
-        col = 0
-        while col < qzeros.shape[1]:
-            if self.bits in [2, 4, 8]:
-                for j in range(i, i + (32 // self.bits)):
-                    qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-                i += 32 // self.bits
+        if self.bits in [2, 4, 8]:
+            bits_div = 32 // self.bits
+            for col in range(qzeros.shape[1]):
+                for j in range(bits_div):
+                    qzeros[:, col] |= zeros[:, col * bits_div + j] << (self.bits * j)
+        elif self.bits == 3:
+            for col in range(qzeros.shape[1]):
+                col_offset = col * 10  # Cache col * 10
+                col_offset_plus_10 = col_offset + 10  # Cache col * 10 + 10
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j)
+                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 30
                 col += 1
-            elif self.bits == 3:
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
-                i += 10
-                qzeros[:, col] |= zeros[:, i] << 30
+                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 2) & 1
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 1)
+                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 31
                 col += 1
-                qzeros[:, col] |= (zeros[:, i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
-                i += 10
-                qzeros[:, col] |= zeros[:, i] << 31
-                col += 1
-                qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
-                i += 10
-                col += 1
+                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 1) & 0x3
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 2)
 
-        qzeros = qzeros.astype(np.int32)
-        self.qzeros = torch.from_numpy(qzeros)
+        self.qzeros = torch.from_numpy(qzeros.astype(np.int32))
 
     def forward(self, x: torch.Tensor):
-        # if infeatures is padded, we need to pad the input as well
         if x.size(-1) != self.padded_infeatures:
             x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
 
@@ -241,6 +220,7 @@ class TorchQuantLinear(BaseQuantLinear):
     def dequantize_weight(self, num_itr=1):
         if self.wf.device != self.qzeros.device:
             self.wf = self.wf.to(self.qzeros.device)
+
         if self.bits in [2, 4, 8]:
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, 32 // self.bits),
