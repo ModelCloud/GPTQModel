@@ -72,7 +72,7 @@ class TorchQuantLinear(BaseQuantLinear):
         if self.storage_dtype == torch.int8:
             self.storage_dtype_bits = 8
             self.storage_np_dtype = np.uint8
-        elif self.storage_dtype == torch.int8:
+        elif self.storage_dtype == torch.int16:
             self.storage_dtype_bits = 16
             self.storage_np_dtype = np.uint16
         elif self.storage_dtype == torch.int32:
