@@ -98,6 +98,9 @@ def get_version_tag() -> str:
 
     import torch
 
+    if ROCM_VERSION:
+        return f"rocm{ROCM_VERSION}"
+
     cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
     if not cuda_version or not cuda_version.split("."):
         print(
@@ -106,8 +109,6 @@ def get_version_tag() -> str:
         )
         sys.exit(1)
 
-    if ROCM_VERSION:
-        return f"rocm{ROCM_VERSION}"
 
     CUDA_VERSION = "".join(cuda_version.split("."))
 
