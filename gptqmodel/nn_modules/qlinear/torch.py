@@ -81,7 +81,7 @@ class TorchQuantLinear(BaseQuantLinear):
         # Initialize qweight and qzeros based on the chosen dtype
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // self.tensors_per_storage_dtype * self.bits, outfeatures), dtype=self.storage_dtype),
+            torch.zeros((infeatures // self.storage_dtype_bits * self.bits, outfeatures), dtype=self.storage_dtype),
         )
         self.register_buffer(
             "qzeros",
