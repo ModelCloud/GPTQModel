@@ -16,13 +16,12 @@
 # -- do not touch
 import os
 
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import unittest  # noqa: E402
+import time  # noqa: E402
 
+import unittest  # noqa: E402
 
 # isort: off
 import torch  # noqa: E402
@@ -35,7 +34,7 @@ from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: 
 
 
 def gen_quant4(k, n, groupsize=-1):
-    maxq = 2**4 - 1
+    maxq = 2 ** 4 - 1
     w = torch.randn((k, n), dtype=torch.half, device="cpu")
 
     original_w = w.clone()
@@ -77,13 +76,16 @@ def gen_quant4(k, n, groupsize=-1):
 
 class TestRepacking(unittest.TestCase):
     k = 2048
-    n = 1024
+    n = 1024 * 100
     group_size = 128
+
+
+    zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
+    print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
+
     _, linear, s = gen_quant4(k, n, group_size)
 
     def pack(self, qlinearCls):
-        zeros = torch.full((self.k // self.group_size, self.n), 8, dtype=torch.int32)
-
         # validate exllama packer
         qlinear = qlinearCls(
             bits=4,
@@ -94,7 +96,12 @@ class TestRepacking(unittest.TestCase):
             outfeatures=self.n,
             bias=False)
 
-        qlinear.pack(self.linear, self.s.T, zeros.T, g_idx=None)
+        now = time.time()
+        for i in range(30):
+            qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
+        time_usage = time.time() - now
+        print(f"{qlinearCls.__name__}, time={time_usage}, speed={self.k * self.k / time_usage:.4f}")
+
         return qlinear
 
     def test_compare_exllama_triton_torch(self):
@@ -131,4 +138,3 @@ class TestRepacking(unittest.TestCase):
         self.assertTrue(torch.allclose(exllama_linear.qweight, torch_linear.qweight))
         self.assertTrue(torch.allclose(exllama_linear.scales, torch_linear.scales))
         self.assertTrue(torch.allclose(exllama_linear.qzeros, torch_linear.qzeros))
-
