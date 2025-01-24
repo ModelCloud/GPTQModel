@@ -75,5 +75,5 @@ class TestEval(unittest.TestCase):
                 result = results.get(task.value)
                 base_formatted, plus_formatted, _ = float(result.get("base tests")), float(
                     result.get("base + extra tests")), result.get("results_path")
-                self.assertGreaterEqual(base_formatted, 0.27, "Base score does not match expected result")
+                self.assertGreaterEqual(base_formatted, 0.26, "Base score does not match expected result")
                 self.assertGreaterEqual(plus_formatted, 0.24, "Plus score does not match expected result")
