@@ -24,9 +24,10 @@ import time  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-class TestQuantTime(unittest.TestCase):
+class TestQuantTime(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     INPUTS_MAX_LENGTH = 2048
     DATASETS_MAX_COUNT = 128
@@ -46,16 +47,7 @@ class TestQuantTime(unittest.TestCase):
         )
         tokenizer = model.tokenizer
 
-        data = load_dataset("json",
-                                 data_files="/monster/data/model/huggingface/c4-train.00000-of-01024.json.gz",
-                                 split="train")
-        datasets = []
-        for index, sample in enumerate(data):
-            tokenized = tokenizer(sample['text'])
-            if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
-                datasets.append(tokenized)
-                if len(datasets) >= self.DATASETS_MAX_COUNT:
-                    break
+        datasets = self.load_dataset(tokenizer)
 
         start_time = time.time()
         model.quantize(datasets, batch_size=4)
