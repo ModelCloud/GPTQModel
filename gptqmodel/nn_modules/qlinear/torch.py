@@ -69,18 +69,20 @@ class TorchQuantLinear(BaseQuantLinear):
         self.maxq = 2**self.bits - 1
         self.storage_dtype = storage_dtype
 
-        # Determine the number of INT4 tensors that can be packed into the chosen dtype
         if self.storage_dtype == torch.int8:
             self.storage_dtype_bits = 8
-            self.storage_np_dtype = np.int8
+            self.storage_np_dtype = np.uint8
+        elif self.storage_dtype == torch.int8:
+            self.storage_dtype_bits = 16
+            self.storage_np_dtype = np.uint16
         elif self.storage_dtype == torch.int32:
             self.storage_dtype_bits = 32
-            self.storage_np_dtype = np.int32
+            self.storage_np_dtype = np.uint32
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
         self.tensors_per_storage_dtype = self.storage_dtype_bits // self.bits
-        # Initialize qweight and qzeros based on the chosen dtype
+
         self.register_buffer(
             "qweight",
             torch.zeros((infeatures // self.storage_dtype_bits * self.bits, outfeatures), dtype=self.storage_dtype),
