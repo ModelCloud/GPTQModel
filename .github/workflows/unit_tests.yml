@@ -74,7 +74,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
@@ -108,7 +108,7 @@ jobs:
           echo "max-parallel=$max_p"
 
   list-test-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
