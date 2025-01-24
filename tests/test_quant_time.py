@@ -17,7 +17,6 @@ import os
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import unittest
 import time
@@ -64,9 +63,9 @@ class TestQuantTime(unittest.TestCase):
 
         quant_time = end_time - start_time
 
-        print("**************** Benchmark Result Info****************")
+        print("**************** Quant Time Result Info****************")
         print(f"Quant Time: {quant_time} s")
-        print("**************** Benchmark Result Info End****************")
+        print("**************** Quant Time Result Info End****************")
 
         diff_pct = (quant_time / self.QUANT_TIME) * 100
         negative_pct = 100 * (1 - self.MAX_DELTA_FLOOR_PERCENT)
