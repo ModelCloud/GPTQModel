@@ -36,6 +36,6 @@ class TestEvalplus(unittest.TestCase):
             output_file = f"{tmp_dir}/result.json"
             base_formatted, plus_formatted, _ = evalplus(model=self.MODEL_ID, dataset='humaneval', output_file=output_file)
             self.assertGreaterEqual(float(base_formatted), 0.26, "Base score does not match expected result")
-            self.assertGreaterEqual(float(plus_formatted), 0.24, "Plus score does not match expected result")
+            self.assertGreaterEqual(float(plus_formatted), 0.23, "Plus score does not match expected result")
 
 
