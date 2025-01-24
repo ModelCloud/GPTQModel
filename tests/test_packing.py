@@ -16,6 +16,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -74,48 +76,43 @@ def gen_quant4(k, n, groupsize=-1):
 
 
 class TestRepacking(unittest.TestCase):
-    def test_compare_exllama_triton_torch(self):
-        k = 2048
-        n = 1024
-        group_size = 128
+    k = 2048
+    n = 1024
+    group_size = 128
+    _, linear, s = gen_quant4(k, n, group_size)
 
-        _, linear, s = gen_quant4(k, n, group_size)
-        zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
+    def pack(self, qlinearCls):
+        zeros = torch.full((self.k // self.group_size, self.n), 8, dtype=torch.int32)
 
         # validate exllama packer
-        exllama_linear = ExllamaQuantLinear(
+        qlinear = qlinearCls(
             bits=4,
-            group_size=group_size,
+            group_size=self.group_size,
             sym=True,
             desc_act=True,
-            infeatures=k,
-            outfeatures=n,
+            infeatures=self.k,
+            outfeatures=self.n,
             bias=False)
 
-        exllama_linear.pack(linear, s.T, zeros.T, g_idx=None)
+        qlinear.pack(self.linear, self.s.T, zeros.T, g_idx=None)
+        return qlinear
+
+    def test_compare_exllama_triton_torch(self):
+        # validate exllama packer
+        exllama_linear = self.pack(ExllamaQuantLinear)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(exllama_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
 
-        self.assertTrue(torch.equal(dequantized_weight, linear.weight))
+        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
         self.assertTrue(torch.all(dequantized_qzeros == 8))
 
-        triton_linear = TritonV2QuantLinear(
-            bits=4,
-            group_size=group_size,
-            sym=True,
-            desc_act=True,
-            infeatures=k,
-            outfeatures=n,
-            bias=False)
-
-        # validate triton packer
-        triton_linear.pack(linear, s.T, zeros.T, g_idx=None)
+        triton_linear = self.pack(TritonV2QuantLinear)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
 
-        self.assertTrue(torch.equal(dequantized_weight, linear.weight))
+        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
         self.assertTrue(torch.all(dequantized_qzeros == 8))
 
         self.assertTrue(torch.allclose(exllama_linear.qweight, triton_linear.qweight))
@@ -123,21 +120,12 @@ class TestRepacking(unittest.TestCase):
         self.assertTrue(torch.allclose(exllama_linear.qzeros, triton_linear.qzeros))
 
         # validate torch packer
-        torch_linear = TorchQuantLinear(
-            bits=4,
-            group_size=group_size,
-            sym=True,
-            desc_act=True,
-            infeatures=k,
-            outfeatures=n,
-            bias=False)
-
-        torch_linear.pack(linear, s.T, zeros.T, g_idx=None)
+        torch_linear = self.pack(TorchQuantLinear)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(torch_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
 
-        self.assertTrue(torch.equal(dequantized_weight, linear.weight))
+        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
         self.assertTrue(torch.all(dequantized_qzeros == 8))
 
         self.assertTrue(torch.allclose(exllama_linear.qweight, torch_linear.qweight))
