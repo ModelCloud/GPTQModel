@@ -39,7 +39,7 @@ def chat_prompt_progress(user_input, tokenizer):
 
 def debug(tokenizer):
     print("********* DEBUG START *********")
-    print("********* Chat Templat info *********")
+    print("********* Chat Template info *********")
     print(tokenizer.apply_chat_template(MESSAGES, return_dict=False, tokenize=False, add_generation_prompt=True))
     print("********* DEBUG END *********")
 
@@ -47,6 +47,7 @@ def debug(tokenizer):
 def get_user_input():
     user_input = input(Fore.GREEN + USER_PROMPT)
     return user_input
+
 
 def print_model_message(message):
     print(Fore.CYAN + f"{ASSISTANT_PROMPT}{message}\n")
