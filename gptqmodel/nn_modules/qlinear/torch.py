@@ -71,13 +71,13 @@ class TorchQuantLinear(BaseQuantLinear):
 
         if self.storage_dtype == torch.int8:
             self.storage_dtype_bits = 8
-            self.storage_np_dtype = np.uint8
+            self.storage_np_dtype = np.int8
         elif self.storage_dtype == torch.int16:
             self.storage_dtype_bits = 16
-            self.storage_np_dtype = np.uint16
+            self.storage_np_dtype = np.int16
         elif self.storage_dtype == torch.int32:
             self.storage_dtype_bits = 32
-            self.storage_np_dtype = np.uint32
+            self.storage_np_dtype = np.int32
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
@@ -239,14 +239,14 @@ class TorchQuantLinear(BaseQuantLinear):
 
         if self.bits in [2, 4, 8]:
             zeros = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, 32 // self.bits),
+                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.tensors_per_storage_dtype),
                 self.wf.unsqueeze(0),
             ).to(torch.int16 if self.bits == 8 else torch.int8)
             zeros = torch.bitwise_and(zeros, (2 ** self.bits) - 1).reshape(self.scales.shape)
 
             weight = torch.bitwise_and(
                 torch.bitwise_right_shift(
-                    torch.unsqueeze(self.qweight, 1).expand(-1, 32 // self.bits, -1),
+                    torch.unsqueeze(self.qweight, 1).expand(-1, self.tensors_per_storage_dtype, -1),
                     self.wf.unsqueeze(-1),
                 ).to(torch.int16 if self.bits == 8 else torch.int8),
                 (2 ** self.bits) - 1
