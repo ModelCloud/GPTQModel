@@ -51,7 +51,7 @@ class TestQuantization(ModelTest):
 
         # auto-round can't use self.load_dataset() from ModelTest
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(128))]
 
 
     @parameterized.expand(
@@ -71,6 +71,7 @@ class TestQuantization(ModelTest):
                 desc_act=False if format == FORMAT.MARLIN else True,
                 sym=sym,
                 format=format,
+                damp_percent=0.05
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
@@ -86,7 +87,7 @@ class TestQuantization(ModelTest):
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=128)
+        model.quantize(self.calibration_dataset, batch_size=32)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save(tmpdirname)
