@@ -365,12 +365,23 @@ class QuantizeConfig():
         dict_scale_dtype_to_str(out)
         return out
 
+     # TODO FIX ME, g_idx int32 per infeature but infeature count is per module
     def calculate_bits_per_weight(self):
         if self.group_size != -1:
-            bpw = ((self.group_size * self.bits) + 16 * 2) / self.group_size
+            # naive bits is
+            #mlp.down_proj.g_idx: I32
+            #mlp.down_proj.qweight: I32
+            #mlp.down_proj.qzeros: I32
+            #mlp.down_proj.scales: F16
+            per_group_bits = self.group_size * self.bits # qweight: packed by group_size
+            per_group_bits += 16 # scales fp16: one per group
+            per_group_bits += self.bits # qzeros: one per group
+            # FIX ME: g_idx is I32, one per infeature
+            per_group_bits += 4  # ESTIMATE for g_idx int32: one per features/group_size item
+            bpw = per_group_bits / self.group_size
         else:
             bpw = self.bits
-        logger.info(f"Effective Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
+        logger.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
