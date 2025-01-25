@@ -222,10 +222,9 @@ class TorchQuantLinear(BaseQuantLinear):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         weights = self.dequantize_weight(num_itr=num_itr)
 
-        out = torch.matmul(x, weights)
-        out = out.to(x_dtype)
-        out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
+        if self.bias:
+            out = out + self.bias
         return out
 
     # clear gptq only weights: useful in de-quantization
