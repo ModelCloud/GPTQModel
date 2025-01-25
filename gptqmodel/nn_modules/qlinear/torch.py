@@ -214,8 +214,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
-        x_dtype = x.dtype
-        out = self._forward(x, x_dtype, out_shape)
+        out = self._forward(x, x.dtype, out_shape)
         return out
 
     def _forward(self, x, x_dtype, out_shape):
