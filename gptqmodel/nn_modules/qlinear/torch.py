@@ -42,7 +42,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
-    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
