@@ -78,7 +78,7 @@ class TorchQuantLinear(BaseQuantLinear):
                     math.ceil(infeatures / self.group_size),
                     outfeatures // self.pack_dtype_bits * self.bits,
                 ),
-                dtype=torch.float16,
+                dtype=self.pack_dtype,
             ),
         )
         self.register_buffer(
