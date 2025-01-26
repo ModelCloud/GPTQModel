@@ -352,7 +352,8 @@ class MarlinQuantLinear(BaseQuantLinear):
             self.g_idx_sort_indices,
             self.infeatures,
             self.outfeatures,
-            self.bits)
+            self.bits,
+            self.pack_dtype_bits)
         replace_tensor(self, "qweight", marlin_qweight)
 
         # Permute scales from autogptq format to marlin format.
