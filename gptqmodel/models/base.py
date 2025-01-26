@@ -286,6 +286,7 @@ class BaseGPTQModel(nn.Module):
             device=DEVICE(self.quantize_config.device),
             pack=True,
             format=self.quantize_config.format,
+            pack_dtype=self.quantize_config.pack_dtype,
         )
 
         # Use the provided tokenizer if one is passed to quantize()
@@ -842,6 +843,7 @@ class BaseGPTQModel(nn.Module):
             lm_head_name=self.lm_head,
             dynamic=self.quantize_config.dynamic,
             parallel_packing=self.quantize_config.parallel_packing,
+            pack_dtype=self.quantize_config.pack_dtype,
         )
 
         self.model.config.use_cache = forward_pass_use_cache

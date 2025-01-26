@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import sys
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
+import numpy as np
+import torch as t # conflict with torch.py
 import torch.nn as nn
 
 from ...models._const import DEVICE, PLATFORM
@@ -32,23 +34,45 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
+    SUPPORTS_PACK_DTYPES: List[t.dtype] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, *args,
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: t.dtype,  *args,
                  **kwargs):
         super().__init__()
-        _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures)
+
+        self.bits = bits
+
+        self.pack_dtype = pack_dtype
+
+        if self.pack_dtype == t.int8:
+            self.pack_dtype_bits = 8
+            self.pack_np_dtype = np.int8
+        elif self.pack_dtype == t.int16:
+            self.pack_dtype_bits = 16
+            self.pack_np_dtype = np.int16
+        elif self.pack_dtype == t.int32:
+            self.pack_dtype_bits = 32
+            self.pack_np_dtype = np.int32
+        elif self.pack_dtype == t.int64:
+            self.pack_dtype_bits = 64
+            self.pack_np_dtype = np.int64
+        else:
+            raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
+
+        self.tensors_per_storage_dtype = self.pack_dtype_bits // self.bits
+        _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures, pack_dtype=pack_dtype)
         if err:
             raise err
 
     @classmethod
     # custom quant linear class can override this and add custom checks
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
-                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
+                  outfeatures:int=None, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
-                                      infeatures=infeatures, outfeatures=outfeatures, dynamic=dynamic,
+                                      infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, dynamic=dynamic,
                                       device=device, trainable=trainable)
         return validate, err
 
@@ -86,9 +110,13 @@ class BaseQuantLinear(nn.Module):
                 raise ValueError(f"{cls.__name__}.{name} cannot be None or an empty list.")
 
     @classmethod
-    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, infeatures:int=None,
-                  outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, infeatures:int=None,
+                  outfeatures:int=None,  device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
+
+        if pack_dtype not in cls.SUPPORTS_PACK_DTYPES:
+            err = f"{cls} does not support `pack_dtype`: {pack_dtype}"
+            return False, NotImplementedError(err)
 
         if PLATFORM.ALL not in cls.SUPPORTS_PLATFORM and sys.platform not in cls.SUPPORTS_PLATFORM:
             err = f"{cls} does not support platform: {sys.platform}"

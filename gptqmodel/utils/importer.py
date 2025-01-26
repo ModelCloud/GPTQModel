@@ -139,6 +139,7 @@ def hf_select_quant_linear(
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
+        pack_dtype=torch.int32,
     )
 
 
@@ -154,6 +155,7 @@ def select_quant_linear(
         pack: bool = False,
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
+        pack_dtype: torch.dtype = None,
 ) -> Type[BaseQuantLinear]:
     if device is None:
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
@@ -229,7 +231,7 @@ def select_quant_linear(
     else:
         qlinear = TorchQuantLinear
 
-    validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+    validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
     if not validate:
         raise ValueError(err)
     else:

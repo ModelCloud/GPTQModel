@@ -72,13 +72,14 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, bias: bool,  **kwargs,):
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: torch.dtype, bias: bool,  **kwargs,):
         if exllama_import_exception is not None:
             raise ValueError(
                 f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
@@ -88,9 +89,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
         self.outfeatures = outfeatures + (-outfeatures % 32)
         self.infeatures = infeatures + (-infeatures % self.group_size)
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures, **kwargs)
-
-        self.bits = bits
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         # backup original values
         self.original_outfeatures = outfeatures

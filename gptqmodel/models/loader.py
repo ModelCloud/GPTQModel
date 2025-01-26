@@ -302,13 +302,13 @@ def ModelLoader(cls):
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
-        quantize_config = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
+        qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
-        quantize_config.calculate_bits_per_weight()
+        qcfg.calculate_bits_per_weight()
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
-            if quantize_config.format != FORMAT.GPTQ:
-                raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {quantize_config.format}")
+            if qcfg.format != FORMAT.GPTQ:
+                raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.format}")
             if backend == BACKEND.VLLM:
                 from ..utils.vllm import load_model_by_vllm, vllm_generate
 
@@ -336,12 +336,12 @@ def ModelLoader(cls):
             return cls(
                 model,
                 quantized=True,
-                quantize_config=quantize_config,
+                quantize_config=qcfg,
                 qlinear_kernel=None,
                 model_local_path=model_local_path,
             )
 
-        if quantize_config.format == FORMAT.MARLIN:
+        if qcfg.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
             if backend != BACKEND.MARLIN and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
@@ -351,13 +351,13 @@ def ModelLoader(cls):
 
         # check for marlin compat for cuda device onnly
         if backend != BACKEND.MARLIN and device == DEVICE.CUDA:
-            unsupported = _validate_marlin_compatibility(quantize_config)
+            unsupported = _validate_marlin_compatibility(qcfg)
             if unsupported is None and marlin_compatible:
                 logger.info(
                     "You passed a model that is compatible with the Marlin kernel. Use `BACKEND.MARLIN` for optimal inference with batching on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
                 )
 
-        if quantize_config.format == FORMAT.BITBLAS:
+        if qcfg.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
             if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
@@ -369,7 +369,7 @@ def ModelLoader(cls):
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
         possible_model_basenames = [
-            f"gptq_model-{quantize_config.bits}bit-{quantize_config.group_size}g",
+            f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
             "model",
         ]
 
@@ -391,7 +391,7 @@ def ModelLoader(cls):
                 "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
             )
 
-        quantize_config.runtime_format = quantize_config.format
+        qcfg.runtime_format = qcfg.format
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
         if verify_hash:
@@ -444,7 +444,7 @@ def ModelLoader(cls):
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == cls.lm_head:
+                if qcfg.lm_head and name == cls.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
@@ -458,22 +458,23 @@ def ModelLoader(cls):
             preload_qlinear_kernel = make_quant(
                 model,
                 layers,
-                quantize_config.bits,
-                quantize_config.group_size,
-                backend=backend.AUTO if (backend == BACKEND.MARLIN and quantize_config.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
-                format=quantize_config.format,
+                qcfg.bits,
+                qcfg.group_size,
+                backend=backend.AUTO if (backend == BACKEND.MARLIN and qcfg.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=quantize_config.desc_act,
-                sym=quantize_config.sym,
-                dynamic=quantize_config.dynamic,
+                desc_act=qcfg.desc_act,
+                sym=qcfg.sym,
+                dynamic=qcfg.dynamic,
                 device=device,
+                pack_dtype=qcfg.pack_dtype,
             )
             if preload_qlinear_kernel == IPEXQuantLinear:
-                quantize_config.runtime_format = FORMAT.IPEX
+                qcfg.runtime_format = FORMAT.IPEX
 
         load_checkpoint_in_model = False
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if quantize_config.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
+        if qcfg.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -484,7 +485,7 @@ def ModelLoader(cls):
                 offload_buffers=True,
             )
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-            if not quantize_config.sym and not quantize_config.is_quantized_by_v2():
+            if not qcfg.sym and not qcfg.is_quantized_by_v2():
                 raise ValueError(
                     f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
@@ -493,15 +494,15 @@ def ModelLoader(cls):
             logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
-                quantize_config=quantize_config,
+                cfg=qcfg,
                 qlinear_kernel=preload_qlinear_kernel,
             )
             logger.info(f"Conversion complete: {time.time()-t}s")
             load_checkpoint_in_model = True
-            quantize_config.runtime_format = FORMAT.GPTQ_V2
+            qcfg.runtime_format = FORMAT.GPTQ_V2
 
         if backend == BACKEND.MARLIN and (
-                preload_qlinear_kernel == ExllamaV2QuantLinear or quantize_config.format == FORMAT.MARLIN):
+                preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "The loading of sharded checkpoints with Marlin is currently not supported."
@@ -515,19 +516,19 @@ def ModelLoader(cls):
             if torch_dtype != torch.float16:
                 raise ValueError("Marlin kernel requires torch_dtype=torch.float16.")
 
-            _validate_marlin_compatibility(quantize_config, throw_error=True)
+            _validate_marlin_compatibility(qcfg, throw_error=True)
 
             # Prepare model for marlin load.
             # If is marlin serialized load then load directly. Otherwise, convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
-                quantize_config=quantize_config,
+                quantize_config=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
                 device_map=device_map,
-                desc_act=quantize_config.desc_act,
-                sym=quantize_config.sym,
+                desc_act=qcfg.desc_act,
+                sym=qcfg.sym,
                 load_checkpoint_in_model=load_checkpoint_in_model,
             )
 
@@ -538,13 +539,13 @@ def ModelLoader(cls):
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
                 model=model,
-                quantize_config=quantize_config,
+                quantize_config=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 model_save_name=model_save_name,
                 device_map=device_map,
-                desc_act=quantize_config.desc_act,
-                sym=quantize_config.sym,
+                desc_act=qcfg.desc_act,
+                sym=qcfg.sym,
                 load_checkpoint_in_model=load_checkpoint_in_model,
             )
 
@@ -565,14 +566,15 @@ def ModelLoader(cls):
         model = simple_dispatch_model(model, device_map)
 
         qlinear_kernel = select_quant_linear(
-            bits=quantize_config.bits,
-            dynamic=quantize_config.dynamic,
-            group_size=quantize_config.group_size,
-            desc_act=quantize_config.desc_act,
-            sym=quantize_config.sym,
+            bits=qcfg.bits,
+            dynamic=qcfg.dynamic,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
             backend=backend,
-            format=quantize_config.format,
+            format=qcfg.format,
             device=device,
+            pack_dtype=qcfg.pack_dtype,
         )
 
         # == step4: set seqlen == #
@@ -588,7 +590,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
 
         # Any post-initialization that require device information, for example buffers initialization on device.
-        model = gptqmodel_post_init(model, use_act_order=quantize_config.desc_act, quantize_config=quantize_config)
+        model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
 
         model.eval()
 
@@ -608,7 +610,7 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, quantize_config.to_dict())
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict())
 
                 save_weights(temp_dir, mlx_weights, donate_weights=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")
@@ -622,7 +624,7 @@ def ModelLoader(cls):
         return cls(
             model,
             quantized=True,
-            quantize_config=quantize_config,
+            quantize_config=qcfg,
             tokenizer=tokenizer,
             qlinear_kernel=qlinear_kernel,
             load_quantized_model=True,
