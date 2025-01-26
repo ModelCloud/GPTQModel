@@ -62,6 +62,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
@@ -74,16 +75,15 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, bias, **kwargs,):
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, pack_dtype, bias, **kwargs,):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
         self.infeatures = infeatures
         self.outfeatures = outfeatures
 
         self.padded_infeatures = infeatures + (-infeatures % group_size)
 
-        self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
 

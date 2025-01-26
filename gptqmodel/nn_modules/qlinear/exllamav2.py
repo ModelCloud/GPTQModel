@@ -133,13 +133,14 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int,
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: torch.dtype,
                  bias: bool,  **kwargs,):
 
         if exllama_v2_import_exception is not None:
@@ -152,12 +153,10 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         self.outfeatures = outfeatures + (-outfeatures % 32)
         self.infeatures = infeatures + (-infeatures % self.group_size)
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures, pack_dtype=pack_dtype, **kwargs)
 
         self.q_handle = None
         self.q_tensors = None
-
-        self.bits = bits
 
         # backup original values
         self.original_outfeatures = outfeatures

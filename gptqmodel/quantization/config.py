@@ -34,6 +34,7 @@ FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_JSON = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
+PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
 QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
 
@@ -55,6 +56,7 @@ META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
+
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -133,24 +135,34 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], layer_name: str
 @dataclass
 class QuantizeConfig():
     bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
+
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
     dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
-    # 128 offer good balance between inference speed and quantization quality
+
+    # 128 offer good balance between inference speed, vram usage (bpw), and quality
+    # use 32 for highest quality with slower inference and higher vram usage
     group_size: int = field(default=128)
+
     # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
     damp_percent: float = field(default=0.01)
     damp_auto_increment: float = field(default=0.0025)
+
     desc_act: bool = field(default=True)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
+
     lm_head: bool = field(default=False)
-    lm_head_low_gpu_mem_usage: bool = field(default=False)
+    # there are 2 methods for lm_head quantization: high/low gpu vram modes where high will result in lower error loss
+    lm_head_low_gpu_mem_usage: bool = field(default=True)
+
     quant_method: str = field(default=QUANT_METHOD.GPTQ)
+
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
 
+    # mean square error calculation: may reduce error loss for some models
     mse: float = field(default=0.0)
 
     # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
@@ -164,8 +176,28 @@ class QuantizeConfig():
     # normalized to DEVICE after passing to load()
     device: Optional[Union[str, torch.device]] = field(default=None)
 
+    # gptq was originally designed to pack quantized weights inside INT32 dtypes
+    # allowing using different dtypes used for packing quantized weights
+    # affects [`qweights`, `qzeros`]
+    pack_dtype: Optional[Union[str, torch.int64, torch.int32, torch.int16, torch.int8]] = field(default=torch.int32)
+
     def __post_init__(self):
         fields_info = fields(self)
+
+        # validate/normalizes pack_dtype from string and dtype to valid dtype
+        if self.pack_dtype is None:
+            self.pack_dtype = torch.int32
+        else:
+            if isinstance(self.pack_dtype, str):
+                self.pack_dtype = self.pack_dtype.lower()
+                if not self.pack_dtype in ["int64", "int32", "int16", "int8"]:
+                    raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
+                self.pack_dtype = getattr(torch, self.pack_dtype)
+            elif isinstance(self.pack_dtype, torch.dtype):
+                if not self.pack_dtype in [torch.int64, torch.int32, torch.int16, torch.int8]:
+                    raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
+            else:
+                raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
 
         # validate quant method and format is matched
         valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
@@ -360,6 +392,7 @@ class QuantizeConfig():
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_JSON: self.format,
+            PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
         }
         dict_scale_dtype_to_str(out)

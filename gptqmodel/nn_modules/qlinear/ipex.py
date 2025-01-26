@@ -102,6 +102,7 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
@@ -114,20 +115,20 @@ class IPEXQuantLinear(BaseQuantLinear):
         sym: bool,
         infeatures: int,
         outfeatures: int,
+        pack_dtype: torch.dtype,
         bias: bool,
         kernel_switch_threshold=128,
         training=False,
         weight_dtype=None,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
         if weight_dtype is None:
             weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
-        self.bits = bits
         self.group_size = group_size
         self.maxq = 2**self.bits - 1
         self.weight_dtype = weight_dtype

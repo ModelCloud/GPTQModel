@@ -42,6 +42,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
@@ -55,47 +56,27 @@ class TorchQuantLinear(BaseQuantLinear):
         infeatures: int,
         outfeatures: int,
         bias: bool,
-        weight_dtype=torch.float16,
-        storage_dtype=torch.int32,
+        pack_dtype: torch.dtype,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
         self.infeatures = infeatures
         self.outfeatures = outfeatures
         self.padded_infeatures = infeatures + (-infeatures % group_size)
-        self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
-        self.storage_dtype = storage_dtype
-
-        if self.storage_dtype == torch.int8:
-            self.storage_dtype_bits = 8
-            self.storage_np_dtype = np.int8
-        elif self.storage_dtype == torch.int16:
-            self.storage_dtype_bits = 16
-            self.storage_np_dtype = np.int16
-        elif self.storage_dtype == torch.int32:
-            self.storage_dtype_bits = 32
-            self.storage_np_dtype = np.int32
-        elif self.storage_dtype == torch.int64:
-            self.storage_dtype_bits = 64
-            self.storage_np_dtype = np.int64
-        else:
-            raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
-
-        self.tensors_per_storage_dtype = self.storage_dtype_bits // self.bits
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // self.storage_dtype_bits * self.bits, outfeatures), dtype=self.storage_dtype),
+            torch.zeros((infeatures // self.pack_dtype_bits * self.bits, outfeatures), dtype=self.pack_dtype),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(infeatures / self.group_size),
-                    outfeatures // self.storage_dtype_bits * self.bits,
+                    outfeatures // self.pack_dtype_bits * self.bits,
                 ),
                 dtype=torch.float16,
             ),
@@ -117,7 +98,7 @@ class TorchQuantLinear(BaseQuantLinear):
             self.bias = None
 
         if self.bits in [2, 4, 8]:
-            self.wf = torch.tensor(list(range(0, self.storage_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
+            self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
         elif self.bits == 3:
             self.wf = torch.tensor(
                 [
@@ -130,10 +111,10 @@ class TorchQuantLinear(BaseQuantLinear):
 
     def post_init(self):
         if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // self.storage_dtype_bits * self.bits, self.outfeatures)
+            self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.outfeatures)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // self.storage_dtype_bits * self.bits
+                self.outfeatures // self.pack_dtype_bits * self.bits
             )
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
@@ -157,9 +138,9 @@ class TorchQuantLinear(BaseQuantLinear):
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
         intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.storage_np_dtype)
+        intweight = intweight.numpy().astype(self.pack_np_dtype)
 
-        qweight = np.zeros((intweight.shape[0] // self.storage_dtype_bits * self.bits, intweight.shape[1]), dtype=self.storage_np_dtype)
+        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=self.pack_np_dtype)
         if self.bits in [2, 4, 8]:
             for row in range(qweight.shape[0]):
                 for j in range(self.tensors_per_storage_dtype):
@@ -181,10 +162,10 @@ class TorchQuantLinear(BaseQuantLinear):
                 for j in range(10):
                     qweight[row] |= intweight[row_offset + j] << (3 * j + 2)
 
-        self.qweight = torch.from_numpy(qweight.astype(self.storage_np_dtype))
+        self.qweight = torch.from_numpy(qweight.astype(self.pack_np_dtype))
 
-        zeros = zeros.numpy().astype(self.storage_np_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.storage_dtype_bits * self.bits), dtype=self.storage_np_dtype)
+        zeros = zeros.numpy().astype(self.pack_np_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_dtype)
         if self.bits in [2, 4, 8]:
             for col in range(qzeros.shape[1]):
                 for j in range(self.tensors_per_storage_dtype):
@@ -206,7 +187,7 @@ class TorchQuantLinear(BaseQuantLinear):
                 for j in range(10):
                     qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 2)
 
-        self.qzeros = torch.from_numpy(qzeros.astype(self.storage_np_dtype))
+        self.qzeros = torch.from_numpy(qzeros.astype(self.pack_np_dtype))
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
@@ -222,7 +203,7 @@ class TorchQuantLinear(BaseQuantLinear):
         weights = self.dequantize_weight(num_itr=num_itr)
 
         out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
-        if self.bias:
+        if self.bias is not None:
             out = out + self.bias
         return out
 
@@ -314,7 +295,7 @@ def dequantize_model(model: nn.Module):
 
             setattr(parent, module_name, new_module)
             
-    model.config.__delattr__("quantization_config")
+    del model.config.quantization_config
     return model
 
 

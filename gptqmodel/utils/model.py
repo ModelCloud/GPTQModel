@@ -161,6 +161,7 @@ def make_quant(
     dynamic=None,
     device: DEVICE = None,
     from_quantized: bool = False,
+    pack_dtype: torch.dtype = None,
 ) -> BaseQuantLinear:
     QuantLinear = select_quant_linear(
         bits=bits,
@@ -172,6 +173,7 @@ def make_quant(
         pack=pack,
         dynamic=dynamic,
         device=device,
+        pack_dtype=pack_dtype,
     )
 
     if pack:
@@ -186,7 +188,7 @@ def make_quant(
                 logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
 
             result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device
-                                        , lm_head_name)
+                                        , lm_head_name, pack_dtype=pack_dtype)
             return result
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
@@ -196,7 +198,7 @@ def make_quant(
     raise ValueError("no support quant linear was found for this module.")
 
 
-def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module, names, sym, device, lm_head_name: str
+def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_size: int, module, names, sym: bool, device: DEVICE, lm_head_name: str, pack_dtype: torch.dtype,
                        ) -> BaseQuantLinear:
     if isinstance(module, QuantLinear):
         return QuantLinear
@@ -221,7 +223,7 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
 
             # when load a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
-            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, device=device)
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, pack_dtype=pack_dtype, device=device)
             if err is not None:
                 raise err
 
@@ -249,8 +251,9 @@ def create_quant_layer(QuantLinear, bits, desc_act, dynamic, group_size, module,
                 sym=d_sym,
                 infeatures=in_features,
                 outfeatures=out_features,
+                pack_dtype=pack_dtype,
                 bias=bias,
-                weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+                #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
                 name=name,
                 lm_head_name=lm_head_name,
             )
@@ -267,15 +270,15 @@ def hf_convert_gptq_v1_to_v2_format(
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
-        quantize_config = QuantizeConfig(bits=bits)
-        return convert_gptq_v1_to_v2_format(model, quantize_config, qlinear_kernel), True
+        cfg = QuantizeConfig(bits=bits)
+        return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
     else:
         return model, False
 
-
+# TODO: FIXME: the v1 -> v2 zeropoint offsets are assuming INT32 pack_dtype
 def convert_gptq_v1_to_v2_format(
     model,
-    quantize_config: QuantizeConfig,
+    cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v1 to v2 conversion for ipex
@@ -290,9 +293,17 @@ def convert_gptq_v1_to_v2_format(
             # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
             # overflow ~<=13% based on testing
             if isinstance(submodule, qlinear_kernel):
-                if quantize_config.bits == 2:
-                    submodule.qzeros.data += 0b01010101010101010101010101010101
-                elif quantize_config.bits == 3:
+                if cfg.bits == 2:
+                    if cfg.pack_dtype == torch.int64:
+                        submodule.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
+                    elif cfg.pack_dtype == torch.int32:
+                        submodule.qzeros.data += 0b01010101010101010101010101010101
+                    elif cfg.pack_dtype == torch.int16:
+                        submodule.qzeros.data += 0b0101010101010101
+                    elif cfg.pack_dtype == torch.int8:
+                        submodule.qzeros.data += 0b01010101
+                elif cfg.bits == 3:
+                    raise Exception("FIX ME")
                     submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] += (
                         0b00100100100100100100100100100100
                     )
@@ -302,10 +313,24 @@ def convert_gptq_v1_to_v2_format(
                     submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] += (
                         0b01001001001001001001001001001001
                     )
-                elif quantize_config.bits == 4:
-                    submodule.qzeros.data += 0b00010001000100010001000100010001
-                elif quantize_config.bits == 8:
-                    submodule.qzeros.data += 0b00000001000000010000000100000001
+                elif cfg.bits == 4:
+                    if cfg.pack_dtype == torch.int64:
+                        submodule.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
+                    elif cfg.pack_dtype == torch.int32:
+                        submodule.qzeros.data += 0b00010001000100010001000100010001
+                    elif cfg.pack_dtype == torch.int16:
+                        submodule.qzeros.data += 0b0001000100010001
+                    elif cfg.pack_dtype == torch.int8:
+                        submodule.qzeros.data += 0b00010001
+                elif cfg.bits == 8:
+                    if cfg.pack_dtype == torch.int64:
+                        submodule.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
+                    elif cfg.pack_dtype == torch.int32:
+                        submodule.qzeros.data += 0b00000001000000010000000100000001
+                    elif cfg.pack_dtype == torch.int16:
+                        submodule.qzeros.data += 0b0000000100000001
+                    elif cfg.pack_dtype == torch.int8:
+                        submodule.qzeros.data += 0b00000001
                 else:
                     raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
@@ -395,6 +420,7 @@ def pack_model(
     sym: bool = True,
     dynamic=None,
     parallel_packing: bool = True,
+    pack_dtype: torch.dtype = None,
 ):
     QuantLinear = select_quant_linear(
         bits=bits,
@@ -405,6 +431,7 @@ def pack_model(
         backend=backend,
         format=format,
         pack=True,
+        pack_dtype=pack_dtype,
     )
 
     model.to(CPU)
@@ -424,6 +451,7 @@ def pack_model(
         desc_act=desc_act,
         pack=True,
         dynamic=dynamic,
+        pack_dtype=pack_dtype,
     )
     qlayers = find_layers(model, [QuantLinear])
     names = list(qlayers.keys())

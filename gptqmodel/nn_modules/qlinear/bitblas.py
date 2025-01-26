@@ -102,6 +102,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -125,6 +126,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         sym: bool,
         infeatures: int,
         outfeatures: int,
+        pack_dtype: torch.dtype,
         bias: bool,
         enable_tuning: bool = True,
         fast_decoding: bool = True,
@@ -133,13 +135,12 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         import_bitblas()
 
         self._validate_parameters(group_size, infeatures, outfeatures)
 
-        self.bits = bits
         self.infeatures = infeatures
         self.outfeatures = outfeatures
         self.group_size = self._set_group_size(group_size, infeatures)
