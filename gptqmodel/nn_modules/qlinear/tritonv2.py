@@ -62,7 +62,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
-    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
@@ -89,16 +89,16 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32),
+            torch.zeros((infeatures // self.tensors_per_storage_dtype, outfeatures), dtype=self.pack_dtype),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(infeatures / self.group_size),
-                    outfeatures // 32 * self.bits,
+                    outfeatures // self.tensors_per_storage_dtype,
                 ),
-                dtype=torch.int32,
+                dtype=self.pack_dtype,
             ),
         )
         self.register_buffer(
@@ -131,10 +131,10 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
     def post_init(self):
         if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // 32 * self.bits, self.outfeatures)
+            self.qweight.resize_(self.padded_infeatures // self.tensors_per_storage_dtype, self.outfeatures)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // 32 * self.bits
+                self.outfeatures // self.tensors_per_storage_dtype
             )
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
@@ -156,27 +156,27 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         if linear.bias is not None:
             self.bias = linear.bias.clone().half()
 
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
+        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
         intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
+        intweight = intweight.numpy().astype(self.pack_np_dtype)
 
-        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
+        qweight = np.zeros((intweight.shape[0] // self.tensors_per_storage_dtype, intweight.shape[1]), dtype=self.pack_np_dtype)
         for row in range(qweight.shape[0]):
-            i = row * (32 // self.bits)
-            for j in range(32 // self.bits):
+            i = row * self.tensors_per_storage_dtype
+            for j in range(self.tensors_per_storage_dtype):
                 qweight[row] |= intweight[i + j] << (self.bits * j)
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
 
         zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.tensors_per_storage_dtype), dtype=self.pack_np_dtype)
         for col in range(qzeros.shape[1]):
-            i = col * (32 // self.bits)
-            for j in range(32 // self.bits):
+            i = col * self.tensors_per_storage_dtype
+            for j in range(self.tensors_per_storage_dtype):
                 qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
-        qzeros = qzeros.astype(np.int32)
+        qzeros = qzeros.astype(self.pack_np_dtype)
         self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x):
@@ -194,6 +194,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             self.qzeros,
             self.g_idx,
             self.bits,
+            self.pack_dtype_bits,
             self.maxq,
         )
         out = out.half().reshape(out_shape)

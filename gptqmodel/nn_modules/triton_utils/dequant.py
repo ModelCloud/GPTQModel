@@ -34,13 +34,14 @@ DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([512], [1], [1])
 
 @triton.autotune(DEFAULT_DEQUANT_CONFIGS, key=["numels"])
 @triton.jit
-def dequant_kernel_248(
+def dequant_kernel(
     g_idx_ptr,
     scales_ptr,
     qweight_ptr,
     qzeros_ptr,
     out_ptr,
     numels,
+    pack_bits: tl.constexpr,
     maxq: tl.constexpr,
     bits: tl.constexpr,
     outfeatures: tl.constexpr,
@@ -54,7 +55,7 @@ def dequant_kernel_248(
     row_idx = x_index // outfeatures
     col_idx = x_index % outfeatures
 
-    elements_per_feature: tl.constexpr = 32 // bits
+    elements_per_feature: tl.constexpr = pack_bits // bits
 
     # Load parameters
     g_idx = tl.load(g_idx_ptr + (row_idx), None, eviction_policy="evict_last")
@@ -71,7 +72,8 @@ def dequant_kernel_248(
     # tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
     groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
 
-    scales = tl.load(scales_ptr + (col_idx + (outfeatures * groups)), None).to(tl.float32)
+    # TODO: why is triton upscaling dequantized weights to fp32?
+    scales = tl.load(scales_ptr + (col_idx + (outfeatures * groups)), None).to(tl.float16)
 
     # Unpack weights
     weights = (qweights >> wf_weights) & maxq  # bit shift qweight
@@ -87,13 +89,14 @@ def dequant_kernel_248(
 
     # Dequantize
     weights = weights - zeros
-    weights = weights.to(tl.float32)
+    # TODO: why is triton upscaling dequantized weights to fp32?
+    weights = weights.to(tl.float16)
     weights = scales * weights
 
     tl.store(out_ptr + (x_index), weights, mask=xmask)
 
 
-def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
+def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None):
     """
     Launcher for triton dequant kernel.  Only valid for bits = 2, 4, 8
     """
@@ -107,13 +110,14 @@ def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
     maxq = 2 ** bits - 1 if maxq is None else maxq
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
-    dequant_kernel_248[grid](
+    dequant_kernel[grid](
         g_idx,
         scales,
         qweight,
         qzeros,
         out,
         numels,
+        pack_bits=pack_bits,
         maxq=maxq,
         bits=bits,
         outfeatures=outfeatures,
@@ -122,8 +126,8 @@ def dequant248(qweight, scales, qzeros, g_idx, bits, maxq=None):
     return out
 
 
-def quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq=None, transpose=False):
-    W = dequant248(qweight, scales, qzeros, g_idx, bits, maxq=maxq)
+def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None, transpose=False):
+    W = dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=maxq)
     if transpose:
         return input @ W.t()
     return input @ W
@@ -132,19 +136,19 @@ def quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq=None, tra
 class QuantLinearFunction(torch.autograd.Function):
     @staticmethod
     @custom_fwd(device_type="cuda")
-    def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, maxq):
-        output = quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq)
+    def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
+        output = quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
         ctx.save_for_backward(qweight, scales, qzeros, g_idx)
-        ctx.bits, ctx.maxq = bits, maxq
+        ctx.bits, ctx.maxq, ctx.pack_bits = bits, maxq, pack_bits
         return output
 
     @staticmethod
     @custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         qweight, scales, qzeros, g_idx = ctx.saved_tensors
-        bits, maxq = ctx.bits, ctx.maxq
+        bits, maxq, pack_bits = ctx.bits, ctx.maxq, ctx.pack_bits
         grad_input = None
 
         if ctx.needs_input_grad[0]:
-            grad_input = quant_matmul_248(grad_output, qweight, scales, qzeros, g_idx, bits, maxq, transpose=True)
+            grad_input = quant_matmul(grad_output, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=True)
         return grad_input, None, None, None, None, None, None

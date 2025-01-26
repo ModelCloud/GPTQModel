@@ -136,7 +136,7 @@ class TorchQuantLinear(BaseQuantLinear):
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=torch.float16)
 
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
+        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(self.pack_np_dtype)
 
