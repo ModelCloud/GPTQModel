@@ -23,7 +23,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import json  # noqa: E402
 import logging  # noqa: E402
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -56,10 +55,7 @@ class TestQuantization(ModelTest):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, BACKEND.IPEX, False, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
