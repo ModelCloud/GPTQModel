@@ -167,14 +167,14 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         # I need to register the tensors, otherwise, we won't be able to load them easily using transformers ...
         self.register_buffer(
             "qweight",
-            torch.zeros((self.original_infeatures // 32 * self.bits, self.original_outfeatures), dtype=torch.int32),
+            torch.zeros((self.original_infeatures // self.pack_dtype_bits * self.bits, self.original_outfeatures), dtype=torch.int32),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(self.original_infeatures / self.group_size),
-                    self.original_outfeatures // 32 * self.bits,
+                    self.original_outfeatures // self.pack_dtype_bits * self.bits,
                 ),
                 dtype=torch.int32,
             ),
@@ -205,10 +205,10 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     def post_init(self, temp_dq):
         # resize due to padding after model weights have been loaded
         if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
-            self.qweight.resize_(self.infeatures // 32 * self.bits, self.outfeatures)
+            self.qweight.resize_(self.infeatures // self.pack_dtype_bits * self.bits, self.outfeatures)
             self.qzeros.resize_(
                 math.ceil(self.infeatures / self.group_size),
-                self.outfeatures // 32 * self.bits
+                self.outfeatures // self.pack_dtype_bits * self.bits
             )
             self.scales.resize_(math.ceil(self.infeatures / self.group_size), self.outfeatures)
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32, device=self.g_idx.device)
