@@ -79,6 +79,7 @@ class TestRepacking(unittest.TestCase):
     k = 2048
     n = 1024 * 100
     group_size = 128
+    pack_dtype = torch.int32
 
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
     print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
@@ -93,6 +94,7 @@ class TestRepacking(unittest.TestCase):
             desc_act=True,
             infeatures=self.k,
             outfeatures=self.n,
+            pack_dtype=self.pack_dtype,
             bias=False)
 
         qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
