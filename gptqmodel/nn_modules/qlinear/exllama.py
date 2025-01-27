@@ -84,29 +84,30 @@ class ExllamaQuantLinear(BaseQuantLinear):
             raise ValueError(
                 f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
             )
-        self.group_size = group_size if group_size != -1 else infeatures
-        # auto pad
-        self.outfeatures = outfeatures + (-outfeatures % 32)
-        self.infeatures = infeatures + (-infeatures % self.group_size)
-
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         # backup original values
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
 
+        # auto pad
+        group_size = group_size if group_size != -1 else infeatures
+        outfeatures = outfeatures + (-outfeatures % 32)
+        infeatures = infeatures + (-infeatures % group_size)
+
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures,  pack_dtype=pack_dtype, **kwargs)
+
         self.maxq = 2**self.bits - 1
 
         self.register_buffer(
             "qweight",
-            torch.zeros((self.original_infeatures // 32 * self.bits, self.original_outfeatures), dtype=torch.int32),
+            torch.zeros((self.original_infeatures // self.pack_dtype_bits * self.bits, self.original_outfeatures), dtype=torch.int32),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(self.original_infeatures / self.group_size),
-                    self.original_outfeatures // 32 * self.bits,
+                    self.original_outfeatures // self.pack_dtype_bits * self.bits,
                 ),
                 dtype=torch.int32,
             ),
@@ -137,10 +138,10 @@ class ExllamaQuantLinear(BaseQuantLinear):
     def post_init(self):
         # resize due to padding after model weights have been loaded
         if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
-            self.qweight.resize_(self.infeatures // 32 * self.bits, self.outfeatures)
+            self.qweight.resize_(self.infeatures // self.pack_dtype_bits * self.bits, self.outfeatures)
             self.qzeros.resize_(
                 math.ceil(self.infeatures / self.group_size),
-                self.outfeatures // 32 * self.bits
+                self.outfeatures // self.pack_dtype_bits * self.bits
             )
             self.scales.resize_((math.ceil(self.infeatures / self.group_size), self.outfeatures),)
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32, device=self.g_idx.device)
@@ -179,20 +180,20 @@ class ExllamaQuantLinear(BaseQuantLinear):
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(np.uint32)
 
-        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
+        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=np.uint32)
         for row in range(qweight.shape[0]):
-            i = row * (32 // self.bits)
-            for j in range(32 // self.bits):
+            i = row * (self.pack_factor)
+            for j in range(self.pack_factor):
                 qweight[row] |= intweight[i + j] << (self.bits * j)
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
 
         zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=np.uint32)
         for col in range(qzeros.shape[1]):
-            i = col * (32 // self.bits)
-            for j in range(32 // self.bits):
+            i = col * (self.pack_factor)
+            for j in range(self.pack_factor):
                 qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
         qzeros = qzeros.astype(np.int32)

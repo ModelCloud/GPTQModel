@@ -61,10 +61,11 @@ class TorchQuantLinear(BaseQuantLinear):
     ):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.padded_infeatures = infeatures + (-infeatures % group_size)
-        self.group_size = group_size if group_size != -1 else infeatures
+        if self.group_size != self.infeatures:
+            self.padded_infeatures = self.infeatures + (-self.infeatures % self.group_size)
+        else:
+            self.padded_infeatures = self.padded_infeatures
+
         self.maxq = 2**self.bits - 1
 
         self.register_buffer(
@@ -143,8 +144,8 @@ class TorchQuantLinear(BaseQuantLinear):
         qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=self.pack_np_dtype)
         if self.bits in [2, 4, 8]:
             for row in range(qweight.shape[0]):
-                for j in range(self.tensors_per_storage_dtype):
-                    qweight[row] |= intweight[row * self.tensors_per_storage_dtype + j] << (self.bits * j)
+                for j in range(self.pack_factor):
+                    qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
             for row in range(qweight.shape[0]):
                 row_offset = row * 10  # Cache row * 10
@@ -168,8 +169,8 @@ class TorchQuantLinear(BaseQuantLinear):
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_dtype)
         if self.bits in [2, 4, 8]:
             for col in range(qzeros.shape[1]):
-                for j in range(self.tensors_per_storage_dtype):
-                    qzeros[:, col] |= zeros[:, col * self.tensors_per_storage_dtype + j] << (self.bits * j)
+                for j in range(self.pack_factor):
+                    qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
             for col in range(qzeros.shape[1]):
                 col_offset = col * 10  # Cache col * 10
@@ -221,14 +222,14 @@ class TorchQuantLinear(BaseQuantLinear):
 
         if self.bits in [2, 4, 8]:
             zeros = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.tensors_per_storage_dtype),
+                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf.unsqueeze(0),
             ).to(torch.int16 if self.bits == 8 else torch.int8)
             zeros = torch.bitwise_and(zeros, (2 ** self.bits) - 1).reshape(self.scales.shape)
 
             weight = torch.bitwise_and(
                 torch.bitwise_right_shift(
-                    torch.unsqueeze(self.qweight, 1).expand(-1, self.tensors_per_storage_dtype, -1),
+                    torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
                     self.wf.unsqueeze(-1),
                 ).to(torch.int16 if self.bits == 8 else torch.int8),
                 (2 ** self.bits) - 1

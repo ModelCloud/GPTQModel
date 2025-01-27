@@ -187,7 +187,7 @@ def ModelWriter(cls):
                 )
         else:
             model = self.get_model_with_quantize(
-                quantize_config=quantize_config,
+                qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
 
@@ -347,7 +347,7 @@ def ModelWriter(cls):
 
     cls.save_quantized = save_quantized
 
-    def get_model_with_quantize(self, quantize_config, model_id_or_path):
+    def get_model_with_quantize(self, qcfg, model_id_or_path):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -377,7 +377,7 @@ def ModelWriter(cls):
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == self.lm_head:
+                if qcfg.lm_head and name == self.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
@@ -391,13 +391,14 @@ def ModelWriter(cls):
             make_quant(
                 model,
                 layers,
-                quantize_config.bits,
-                quantize_config.group_size,
+                qcfg.bits,
+                qcfg.group_size,
                 backend=BACKEND.AUTO,
-                format=quantize_config.format,
+                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=quantize_config.desc_act,
+                desc_act=qcfg.desc_act,
                 pack=True,
+                pack_dtype=qcfg.pack_dtype,
             )
 
         load_checkpoint_in_model_then_tie_weights(
