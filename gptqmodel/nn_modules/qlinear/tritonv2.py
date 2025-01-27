@@ -85,8 +85,6 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         else:
             self.padded_infeatures = self.padded_infeatures
 
-        self.maxq = 2**self.bits - 1
-
         self.register_buffer(
             "qweight",
             torch.zeros((infeatures // self.pack_factor, outfeatures), dtype=self.pack_dtype),

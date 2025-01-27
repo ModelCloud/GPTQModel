@@ -66,7 +66,7 @@ class TorchQuantLinear(BaseQuantLinear):
         else:
             self.padded_infeatures = self.padded_infeatures
 
-        self.maxq = 2**self.bits - 1
+
 
         self.register_buffer(
             "qweight",
