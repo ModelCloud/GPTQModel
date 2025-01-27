@@ -1080,6 +1080,8 @@ class TestsQ4ExllamaV1(ModelTest):
         n = 1024
         device = torch.device("cuda:0")
 
+        pack_dtype = torch.int32
+
         linear_class = select_quant_linear(
             bits=4,
             group_size=group_size,
@@ -1087,6 +1089,7 @@ class TestsQ4ExllamaV1(ModelTest):
             sym=True,
             backend=BACKEND.EXLLAMA_V1,
             format=FORMAT.GPTQ,
+            pack_dtype=pack_dtype,
         )
 
         linear = linear_class(
@@ -1097,6 +1100,7 @@ class TestsQ4ExllamaV1(ModelTest):
             infeatures=k,
             outfeatures=n,
             bias=False,
+            pack_dtype=pack_dtype,
         )
         self.assertTrue(isinstance(linear, ExllamaQuantLinear))
 
