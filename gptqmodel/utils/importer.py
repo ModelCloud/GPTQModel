@@ -179,7 +179,7 @@ def select_quant_linear(
         # Suppose all quant linears in the model should have the same backend.
         for k, v in allow_quant_linears.items():
             in_allow_backends = k in allow_backends
-            validate, err = v.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+            validate, err = v.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
             if os.environ.get("DEBUG") and in_allow_backends and not validate:
                 logger.info(f"skip {k} for {str(err)}")
             if in_allow_backends and validate:
