@@ -185,36 +185,34 @@ class MarlinQuantLinear(BaseQuantLinear):
         self.original_infeatures = infeatures
         self.original_outfeatures = outfeatures
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
-
-        self.pack_factor = self.pack_dtype_bits // bits  # packed into int32
-
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
 
-        self.desc_act = desc_act
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+
+        self.pack_factor = self.pack_dtype_bits // bits  # packed into int32
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
-                                             group_size,
+                                             self.group_size,
                                              is_row_parallel=False):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
             scales_and_zp_input_dim = None
-            scales_and_zp_size = infeatures // group_size
+            scales_and_zp_size = self.infeatures // self.group_size
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
             scales_and_zp_input_dim = 0
-            scales_and_zp_size = infeatures // group_size
+            scales_and_zp_size = self.infeatures // self.group_size
 
         # Quantized weights
         qweight = Parameter(
             torch.empty(
-                infeatures // self.pack_factor,
-                outfeatures,
+                self.infeatures // self.pack_factor,
+                self.outfeatures,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -232,7 +230,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         # Activation order
         g_idx = Parameter(
             torch.empty(
-                infeatures,
+                self.infeatures,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -250,7 +248,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         scales = Parameter(
             torch.empty(
                 scales_and_zp_size,
-                outfeatures,
+                self.outfeatures,
                 dtype=torch.float16,
             ),
             requires_grad=False,
@@ -267,9 +265,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         qzeros = Parameter(
             torch.empty(
                 scales_and_zp_size,
-                outfeatures // self.pack_factor,
+                self.outfeatures // self.pack_factor,
                 dtype=torch.int32,
-                # device="meta",
             ),
             requires_grad=False,
         )
@@ -287,9 +284,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         self.register_parameter("g_idx", g_idx)
         self.register_parameter("scales", scales)
         self.register_parameter("qzeros", qzeros)
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.is_k_full = marlin_is_k_full(desc_act, is_row_parallel=False)
+
+        self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
         if bias:
             self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))

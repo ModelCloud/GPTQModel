@@ -45,9 +45,8 @@ class BaseQuantLinear(nn.Module):
         self.infeatures = infeatures
         self.outfeatures = outfeatures
         self.group_size = group_size if group_size != -1 else infeatures
-
         self.bits = bits
-
+        self.desc_act = desc_act
         self.pack_dtype = pack_dtype
 
         if self.pack_dtype == t.int8:
