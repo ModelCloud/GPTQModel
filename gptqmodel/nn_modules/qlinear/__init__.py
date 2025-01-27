@@ -64,7 +64,7 @@ class BaseQuantLinear(nn.Module):
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
-        self.tensors_per_storage_dtype = self.pack_dtype_bits // self.bits
+        self.pack_factor = self.pack_dtype_bits // self.bits
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures, pack_dtype=pack_dtype)
         if err:
             raise err

@@ -192,8 +192,6 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
-        self.pack_factor = self.pack_dtype_bits // bits  # packed into int32
-
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
                                              self.group_size,

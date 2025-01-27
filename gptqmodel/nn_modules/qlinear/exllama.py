@@ -182,8 +182,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=np.uint32)
         for row in range(qweight.shape[0]):
-            i = row * (self.tensors_per_storage_dtype)
-            for j in range(self.tensors_per_storage_dtype):
+            i = row * (self.pack_factor)
+            for j in range(self.pack_factor):
                 qweight[row] |= intweight[i + j] << (self.bits * j)
 
         qweight = qweight.astype(np.int32)
@@ -192,8 +192,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
         zeros = zeros.numpy().astype(np.uint32)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=np.uint32)
         for col in range(qzeros.shape[1]):
-            i = col * (self.tensors_per_storage_dtype)
-            for j in range(self.tensors_per_storage_dtype):
+            i = col * (self.pack_factor)
+            for j in range(self.pack_factor):
                 qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
         qzeros = qzeros.astype(np.int32)

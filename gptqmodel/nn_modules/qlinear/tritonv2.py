@@ -89,14 +89,14 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // self.tensors_per_storage_dtype, outfeatures), dtype=self.pack_dtype),
+            torch.zeros((infeatures // self.pack_factor, outfeatures), dtype=self.pack_dtype),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(infeatures / self.group_size),
-                    outfeatures // self.tensors_per_storage_dtype,
+                    outfeatures // self.pack_factor,
                 ),
                 dtype=self.pack_dtype,
             ),
@@ -131,10 +131,10 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
     def post_init(self):
         if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // self.tensors_per_storage_dtype, self.outfeatures)
+            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.outfeatures)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // self.tensors_per_storage_dtype
+                self.outfeatures // self.pack_factor
             )
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
@@ -160,20 +160,20 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(self.pack_np_dtype)
 
-        qweight = np.zeros((intweight.shape[0] // self.tensors_per_storage_dtype, intweight.shape[1]), dtype=self.pack_np_dtype)
+        qweight = np.zeros((intweight.shape[0] // self.pack_factor, intweight.shape[1]), dtype=self.pack_np_dtype)
         for row in range(qweight.shape[0]):
-            i = row * self.tensors_per_storage_dtype
-            for j in range(self.tensors_per_storage_dtype):
+            i = row * self.pack_factor
+            for j in range(self.pack_factor):
                 qweight[row] |= intweight[i + j] << (self.bits * j)
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
 
         zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.tensors_per_storage_dtype), dtype=self.pack_np_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_factor), dtype=self.pack_np_dtype)
         for col in range(qzeros.shape[1]):
-            i = col * self.tensors_per_storage_dtype
-            for j in range(self.tensors_per_storage_dtype):
+            i = col * self.pack_factor
+            for j in range(self.pack_factor):
                 qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
         qzeros = qzeros.astype(self.pack_np_dtype)
