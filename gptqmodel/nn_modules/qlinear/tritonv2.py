@@ -79,12 +79,8 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
 
         self.padded_infeatures = infeatures + (-infeatures % group_size)
-
-        self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2**self.bits - 1
 
         self.register_buffer(

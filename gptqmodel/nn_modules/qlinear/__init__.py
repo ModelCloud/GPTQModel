@@ -42,6 +42,10 @@ class BaseQuantLinear(nn.Module):
                  **kwargs):
         super().__init__()
 
+        self.infeatures = infeatures
+        self.outfeatures = outfeatures
+        self.group_size = group_size if group_size != -1 else infeatures
+
         self.bits = bits
 
         self.pack_dtype = pack_dtype

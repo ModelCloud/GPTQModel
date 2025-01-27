@@ -84,16 +84,17 @@ class ExllamaQuantLinear(BaseQuantLinear):
             raise ValueError(
                 f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
             )
-        self.group_size = group_size if group_size != -1 else infeatures
-        # auto pad
-        self.outfeatures = outfeatures + (-outfeatures % 32)
-        self.infeatures = infeatures + (-infeatures % self.group_size)
-
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         # backup original values
         self.original_outfeatures = outfeatures
         self.original_infeatures = infeatures
+
+        # auto pad
+        group_size = group_size if group_size != -1 else infeatures
+        outfeatures = outfeatures + (-outfeatures % 32)
+        infeatures = infeatures + (-infeatures % group_size)
+
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         self.maxq = 2**self.bits - 1
 

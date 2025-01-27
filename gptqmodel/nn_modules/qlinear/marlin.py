@@ -182,25 +182,18 @@ class MarlinQuantLinear(BaseQuantLinear):
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
             )
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
-
         self.original_infeatures = infeatures
         self.original_outfeatures = outfeatures
 
-        self.pack_factor = 32 // bits  # packed into int32
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+
+        self.pack_factor = self.pack_dtype_bits // bits  # packed into int32
 
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
 
-        # Normalize group_size
-        if group_size != -1:
-            group_size = group_size
-        else:
-            group_size = infeatures
-
-        self.group_size = group_size
         self.desc_act = desc_act
 
         # Determine sharding

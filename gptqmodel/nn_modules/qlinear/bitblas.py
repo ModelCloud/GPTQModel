@@ -141,9 +141,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
 
         self._validate_parameters(group_size, infeatures, outfeatures)
 
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.group_size = self._set_group_size(group_size, infeatures)
         self.opt_features = opt_features
         self.target = BITBLAS_TARGET
         self._configure_bitblas_matmul(
@@ -163,9 +160,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
     ):
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
-
-    def _set_group_size(self, group_size: int, infeatures: int):
-        return infeatures if group_size == -1 else group_size
 
     def _initialize_buffers(self, infeatures: int, outfeatures: int, bias: bool):
         self.register_buffer(
