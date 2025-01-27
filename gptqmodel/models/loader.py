@@ -522,7 +522,7 @@ def ModelLoader(cls):
             # If is marlin serialized load then load directly. Otherwise, convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
-                quantize_config=qcfg,
+                qcfg=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
@@ -539,7 +539,7 @@ def ModelLoader(cls):
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
                 model=model,
-                quantize_config=qcfg,
+                qcfg=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 model_save_name=model_save_name,
