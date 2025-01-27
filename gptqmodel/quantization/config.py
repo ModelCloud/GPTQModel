@@ -354,6 +354,10 @@ class QuantizeConfig():
                 "This may result in silent errors. Defaulting to `sym=True`."
             )
 
+        # default to pack_dtype = torch.int32 for compat
+        if normalized.get(PACK_DTYPE_FIELD, None) not in [torch.int32, torch.int16, torch.int8]:
+            normalized[PACK_DTYPE_FIELD] = torch.int32
+
         return cls(**normalized)
 
     @classmethod
