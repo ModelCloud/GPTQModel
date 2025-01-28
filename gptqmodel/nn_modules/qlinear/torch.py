@@ -137,7 +137,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
         intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_dtype)
+        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
 
         qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=self.pack_np_dtype)
         if self.bits in [2, 4, 8]:
@@ -163,8 +163,8 @@ class TorchQuantLinear(BaseQuantLinear):
 
         self.qweight = torch.from_numpy(qweight.astype(self.pack_np_dtype))
 
-        zeros = zeros.numpy().astype(self.pack_np_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_dtype)
+        zeros = zeros.numpy().astype(self.pack_np_math_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for col in range(qzeros.shape[1]):
                 for j in range(self.pack_factor):
