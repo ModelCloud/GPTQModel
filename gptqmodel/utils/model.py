@@ -628,7 +628,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             prepare_buffers(device, buffers["temp_state"], buffers["temp_dq"])
 
         # Using the default from exllama repo here.
-        matmul_recons_thd = 8
+        matmul_recons_thd = 16
         matmul_fused_remap = False
         matmul_no_half2 = False
         set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
