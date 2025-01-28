@@ -123,7 +123,6 @@ class IPEXQuantLinear(BaseQuantLinear):
     ):
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
-        self.maxq = 2**self.bits - 1
         # FIX ME IPEX CPU has no float16 support
         self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
         self.init_ipex = False

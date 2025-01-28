@@ -162,8 +162,6 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         self.q_handle = None
         self.q_tensors = None
 
-        self.maxq = 2**self.bits - 1
-
         # I need to register the tensors, otherwise, we won't be able to load them easily using transformers ...
         self.register_buffer(
             "qweight",

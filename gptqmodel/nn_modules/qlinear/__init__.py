@@ -48,19 +48,24 @@ class BaseQuantLinear(nn.Module):
         self.bits = bits
         self.desc_act = desc_act
         self.pack_dtype = pack_dtype
+        self.maxq = 2 ** self.bits - 1
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
-            self.pack_np_dtype = np.int8
+            self.pack_np_dtype = np.int8 # qweight saved dtype
+            self.pack_np_math_dtype = np.uint8 # pre-save math dtype
         elif self.pack_dtype == t.int16:
             self.pack_dtype_bits = 16
             self.pack_np_dtype = np.int16
+            self.pack_np_math_dtype = np.uint16
         elif self.pack_dtype == t.int32:
             self.pack_dtype_bits = 32
             self.pack_np_dtype = np.int32
+            self.pack_np_math_dtype = np.uint32
         elif self.pack_dtype == t.int64:
             self.pack_dtype_bits = 64
             self.pack_np_dtype = np.int64
+            self.pack_np_math_dtype = np.uint64
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 

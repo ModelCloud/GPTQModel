@@ -85,8 +85,6 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         else:
             self.padded_infeatures = self.padded_infeatures
 
-        self.maxq = 2**self.bits - 1
-
         self.register_buffer(
             "qweight",
             torch.zeros((infeatures // self.pack_factor, outfeatures), dtype=self.pack_dtype),
@@ -158,7 +156,7 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
         intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_dtype)
+        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
 
         qweight = np.zeros((intweight.shape[0] // self.pack_factor, intweight.shape[1]), dtype=self.pack_np_dtype)
         for row in range(qweight.shape[0]):
@@ -166,18 +164,16 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             for j in range(self.pack_factor):
                 qweight[row] |= intweight[i + j] << (self.bits * j)
 
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
+        self.qweight = torch.from_numpy(qweight.astype(self.pack_np_dtype))
 
         zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_factor), dtype=self.pack_np_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_factor), dtype=self.self.pack_np_math_dtype)
         for col in range(qzeros.shape[1]):
             i = col * self.pack_factor
             for j in range(self.pack_factor):
                 qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
-        qzeros = qzeros.astype(self.pack_np_dtype)
-        self.qzeros = torch.from_numpy(qzeros)
+        self.qzeros = torch.from_numpy(qzeros.astype(self.pack_np_dtype))
 
     def forward(self, x):
         # if infeatures is padded, we need to pad the input as well

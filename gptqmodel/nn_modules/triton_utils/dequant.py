@@ -96,7 +96,7 @@ def dequant_kernel(
     tl.store(out_ptr + (x_index), weights, mask=xmask)
 
 
-def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None):
+def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     """
     Launcher for triton dequant kernel.  Only valid for bits = 2, 4, 8
     """
@@ -107,7 +107,6 @@ def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None):
 
     out = torch.empty((infeatures, outfeatures), device=qweight.device, dtype=torch.float16)
     numels = out.numel()
-    maxq = 2 ** bits - 1 if maxq is None else maxq
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
     dequant_kernel[grid](
@@ -126,8 +125,8 @@ def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None):
     return out
 
 
-def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None, transpose=False):
-    W = dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=maxq)
+def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False):
+    W = dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
     if transpose:
         return input @ W.t()
     return input @ W

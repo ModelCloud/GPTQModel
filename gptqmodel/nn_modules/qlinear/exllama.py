@@ -96,8 +96,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
-        self.maxq = 2**self.bits - 1
-
         self.register_buffer(
             "qweight",
             torch.zeros((self.original_infeatures // self.pack_dtype_bits * self.bits, self.original_outfeatures), dtype=torch.int32),

@@ -66,18 +66,16 @@ class TorchQuantLinear(BaseQuantLinear):
         else:
             self.padded_infeatures = self.padded_infeatures
 
-        self.maxq = 2**self.bits - 1
-
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // self.pack_dtype_bits * self.bits, outfeatures), dtype=self.pack_dtype),
+            torch.zeros((self.infeatures // self.pack_dtype_bits * self.bits, self.outfeatures), dtype=self.pack_dtype),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // self.pack_dtype_bits * self.bits,
+                    math.ceil(self.infeatures / self.group_size),
+                    self.outfeatures // self.pack_dtype_bits * self.bits,
                 ),
                 dtype=self.pack_dtype,
             ),
@@ -85,16 +83,16 @@ class TorchQuantLinear(BaseQuantLinear):
         self.register_buffer(
             "scales",
             torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
+                (math.ceil(self.infeatures / self.group_size), self.outfeatures),
                 dtype=torch.float16,  # Scales are always float16
             ),
         )
         self.register_buffer(
             "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
+            torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32),
         )
         if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
+            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.float16))
         else:
             self.bias = None
 
@@ -139,7 +137,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
         intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_dtype)
+        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
 
         qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=self.pack_np_dtype)
         if self.bits in [2, 4, 8]:
@@ -165,8 +163,8 @@ class TorchQuantLinear(BaseQuantLinear):
 
         self.qweight = torch.from_numpy(qweight.astype(self.pack_np_dtype))
 
-        zeros = zeros.numpy().astype(self.pack_np_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_dtype)
+        zeros = zeros.numpy().astype(self.pack_np_math_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for col in range(qzeros.shape[1]):
                 for j in range(self.pack_factor):
@@ -215,24 +213,24 @@ class TorchQuantLinear(BaseQuantLinear):
         self.g_idx = None
         self.scales = None
 
-    @torch.no_grad()
     def dequantize_weight(self, num_itr=1):
         if self.wf.device != self.qzeros.device:
             self.wf = self.wf.to(self.qzeros.device)
 
         if self.bits in [2, 4, 8]:
+            dtype = torch.int16 if self.bits == 8 else torch.int8
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf.unsqueeze(0),
-            ).to(torch.int16 if self.bits == 8 else torch.int8)
-            zeros = torch.bitwise_and(zeros, (2 ** self.bits) - 1).reshape(self.scales.shape)
+            ).to(dtype)
+            zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
 
             weight = torch.bitwise_and(
                 torch.bitwise_right_shift(
                     torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
                     self.wf.unsqueeze(-1),
-                ).to(torch.int16 if self.bits == 8 else torch.int8),
-                (2 ** self.bits) - 1
+                ).to(dtype),
+                self.maxq
             )
         elif self.bits == 3:
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
