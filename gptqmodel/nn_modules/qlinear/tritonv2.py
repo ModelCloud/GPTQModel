@@ -18,15 +18,12 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
-from . import BaseQuantLinear
-
+from . import BaseQuantLinear, Packer
 
 try:
     import triton
@@ -49,7 +46,7 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 logger = setup_logger()
 
 
-class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin, Packer):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -137,43 +134,6 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
-
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().half()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().half()
-
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
-
-        qweight = np.zeros((intweight.shape[0] // self.pack_factor, intweight.shape[1]), dtype=self.pack_np_dtype)
-        for row in range(qweight.shape[0]):
-            i = row * self.pack_factor
-            for j in range(self.pack_factor):
-                qweight[row] |= intweight[i + j] << (self.bits * j)
-
-        self.qweight = torch.from_numpy(qweight.astype(self.pack_np_dtype))
-
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_factor), dtype=self.self.pack_np_math_dtype)
-        for col in range(qzeros.shape[1]):
-            i = col * self.pack_factor
-            for j in range(self.pack_factor):
-                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
-
-        self.qzeros = torch.from_numpy(qzeros.astype(self.pack_np_dtype))
 
     def forward(self, x):
         # if infeatures is padded, we need to pad the input as well

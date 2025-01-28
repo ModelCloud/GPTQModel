@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear, Packer
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -59,7 +59,7 @@ def ext_q4_matmul(x, q4, q4_width):
     return output.view(outshape)
 
 
-class ExllamaQuantLinear(BaseQuantLinear):
+class ExllamaQuantLinear(BaseQuantLinear, Packer):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -158,44 +158,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
             self.qweight.device.index,
         )
 
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().half()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().half()
-
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
-
-        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=np.uint32)
-        for row in range(qweight.shape[0]):
-            i = row * (self.pack_factor)
-            for j in range(self.pack_factor):
-                qweight[row] |= intweight[i + j] << (self.bits * j)
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
-
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=np.uint32)
-        for col in range(qzeros.shape[1]):
-            i = col * (self.pack_factor)
-            for j in range(self.pack_factor):
-                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
-
-        qzeros = qzeros.astype(np.int32)
-        self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x):
         if x.dtype != torch.float16:

@@ -2,7 +2,6 @@ import torch
 
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
-@torch.no_grad()
 def unpack_4bit_to_32bit_signed(qweight, qzeros):
     # Unpack 4-bit values and interpret them as signed integers
     unpacked_weights = torch.zeros(
@@ -27,7 +26,6 @@ def unpack_4bit_to_32bit_signed(qweight, qzeros):
 
 
 # Copied from https://github.com/IST-DASLab/marlin/pull/1
-@torch.no_grad()
 def dequantize_4bits_weight(layer):
     qweight, qzeros, scales = layer.qweight, layer.qzeros, layer.scales
     unpacked_qweight, unpacked_qzeros = unpack_4bit_to_32bit_signed(qweight, qzeros)

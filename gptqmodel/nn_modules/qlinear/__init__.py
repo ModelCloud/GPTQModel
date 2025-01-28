@@ -19,9 +19,81 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch as t # conflict with torch.py
 import torch.nn as nn
+import transformers
 
 from ...models._const import DEVICE, PLATFORM
 
+class Packer():
+    def pack(self, linear, scales, zeros, g_idx=None):
+        W = linear.weight.data.clone()
+        if isinstance(linear, nn.Conv2d):
+            W = W.flatten(1)
+        if isinstance(linear, transformers.pytorch_utils.Conv1D):
+            W = W.t()
+
+        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+
+        scales = scales.t().contiguous()
+        zeros = zeros.t().contiguous()
+        scale_zeros = zeros * scales
+        self.scales = scales.clone().to(dtype=t.float16)
+        if linear.bias is not None:
+            self.bias = linear.bias.clone().to(dtype=t.float16)
+
+        intweight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
+        intweight = intweight.t().contiguous()
+        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
+
+        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
+                           dtype=self.pack_np_dtype)
+        if self.bits in [2, 4, 8]:
+            for row in range(qweight.shape[0]):
+                for j in range(self.pack_factor):
+                    qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
+        elif self.bits == 3:
+            for row in range(qweight.shape[0]):
+                row_offset = row * 10  # Cache row * 10
+                row_offset_plus_10 = row_offset + 10  # Cache row * 10 + 10
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j)
+                qweight[row] |= intweight[row_offset_plus_10] << 30
+                row += 1
+                qweight[row] |= (intweight[row_offset_plus_10] >> 2) & 1
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j + 1)
+                qweight[row] |= intweight[row_offset_plus_10] << 31
+                row += 1
+                qweight[row] |= (intweight[row_offset_plus_10] >> 1) & 0x3
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j + 2)
+
+        self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+
+        zeros = zeros.numpy().astype(self.pack_np_math_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits),
+                          dtype=self.pack_np_math_dtype)
+        if self.bits in [2, 4, 8]:
+            for col in range(qzeros.shape[1]):
+                for j in range(self.pack_factor):
+                    qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
+        elif self.bits == 3:
+            for col in range(qzeros.shape[1]):
+                col_offset = col * 10  # Cache col * 10
+                col_offset_plus_10 = col_offset + 10  # Cache col * 10 + 10
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j)
+                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 30
+                col += 1
+                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 2) & 1
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 1)
+                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 31
+                col += 1
+                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 1) & 0x3
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 2)
+
+        self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
