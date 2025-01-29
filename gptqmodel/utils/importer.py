@@ -20,7 +20,7 @@ from typing import Dict, Optional, Type, Union
 import torch
 
 from ..models._const import DEVICE, normalize_device
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
@@ -164,7 +164,6 @@ def select_quant_linear(
     trainable = backend == BACKEND.AUTO_TRAINABLE
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-
         allow_backends = format_dict[format]
 
         # TODO: fix marlin padding
@@ -184,7 +183,7 @@ def select_quant_linear(
                 logger.info(f"skip {k} for {str(err)}")
             if in_allow_backends and validate:
                 if pack:
-                    check_pack_func = hasattr(v, "pack")
+                    check_pack_func = isinstance(v, PackableQuantLinear)
                     if check_pack_func:
                         if not message_logged:
                             logger.info(f"Auto pick kernel based on compatibility: {v}")
