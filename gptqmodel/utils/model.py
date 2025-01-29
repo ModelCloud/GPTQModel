@@ -221,29 +221,32 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
-            # when load a quantized model, device is target device passed in GPTQModel.load()
+            bias = submodule.bias is not None
+
+            # dynamic bits, group_size, sym, pack_dtype for each layer/module
+            if dynamic is not None:
+                # negative module match, skip this module
+                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
+                    continue
+
+                # positive module match
+                for pattern, pattern_dict in dynamic.items():
+                    # override base QuantizeConfig values
+                    if re.match(pattern, name):
+                        bits = pattern_dict.get("bits", bits)
+                        group_size = pattern_dict.get("group_size", group_size)
+                        sym = pattern_dict.get("sym", sym)
+                        pack_dtype = pattern_dict.get("pack_dtype", pack_dtype)
+                        break
+
+            # when loading a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
-            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, pack_dtype=pack_dtype, device=device)
+            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
+                                          infeatures=in_features, outfeatures=out_features,
+                                          pack_dtype=pack_dtype, device=device)
             if err is not None:
                 raise err
 
-            bias = submodule.bias is not None
-
-            d_bits = bits
-            d_group_size = group_size
-            d_sym = sym
-            # dynamic bits, group_size, sym for each layer/module
-            if dynamic is not None:
-                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
-                    # skip create this quant linear
-                    continue
-
-                for pattern, pattern_dict in dynamic.items():
-                    if re.match(pattern, name):
-                        d_bits = pattern_dict.get("bits", bits)
-                        d_group_size = pattern_dict.get("group_size", group_size)
-                        d_sym = pattern_dict.get("sym", sym)
-                        break
             new_layer = QuantLinear(
                 bits=d_bits,
                 group_size=d_group_size,
