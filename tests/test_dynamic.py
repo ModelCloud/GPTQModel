@@ -119,7 +119,7 @@ class TestDynamic(ModelTest):
             (BACKEND.MARLIN, MarlinQuantLinear, 15.7545),
         ]
     )
-    def test_dynamic_bits(self, backend, backendQLinear):
+    def test_dynamic_bits(self, backend, backendQLinear, ppl):
         model = GPTQModel.load(
             self.tmp_quant_path.name,
             backend=backend,
@@ -135,7 +135,7 @@ class TestDynamic(ModelTest):
 
         del model
         print(f"Backend: {backend}, PPL: {dynamic_bits_ppl}")
-        assert dynamic_bits_ppl <= 15.756
+        assert dynamic_bits_ppl <= ppl
 
     def test_skip_module(self):
         dynamic = {
