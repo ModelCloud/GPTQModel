@@ -15,13 +15,11 @@
 
 import math
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear, Packer
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
@@ -29,7 +27,7 @@ from ...models._const import DEVICE, PLATFORM
 
 logger = setup_logger()
 
-class TorchQuantLinear(BaseQuantLinear, Packer):
+class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

@@ -16,14 +16,13 @@
 import math
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
-from . import BaseQuantLinear, Packer
+from . import PackableQuantLinear
 
 try:
     import triton
@@ -46,7 +45,7 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 logger = setup_logger()
 
 
-class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin, Packer):
+class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
