@@ -248,10 +248,10 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
                 raise err
 
             new_layer = QuantLinear(
-                bits=d_bits,
-                group_size=d_group_size,
+                bits=bits,
+                group_size=group_size,
                 desc_act=desc_act,
-                sym=d_sym,
+                sym=sym,
                 infeatures=in_features,
                 outfeatures=out_features,
                 pack_dtype=pack_dtype,
