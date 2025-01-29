@@ -61,7 +61,6 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             infeatures: int,
             outfeatures: int,
             bias: bool,
-            weight_dtype=torch.float16,
             kernel_switch_threshold=128,
             **kwargs,
     ):
@@ -70,7 +69,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
                 f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {gptqmodel_cuda_import_exception}"
             )
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,
-                         outfeatures=outfeatures, bias=bias, weight_dtype=weight_dtype, **kwargs)
+                         outfeatures=outfeatures, bias=bias, **kwargs)
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
@@ -104,43 +103,43 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
         if self.bits == 2:
             self.gptqmodel_cuda.vecquant2matmul(
-                x.float(),
+                x.float32(),
                 self.qweight,
                 out,
-                self.scales.float(),
+                self.scales.float32(),
                 self.qzeros,
                 self.g_idx,
             )
         elif self.bits == 3:
             self.gptqmodel_cuda.vecquant3matmul(
-                x.float(),
+                x.float32(),
                 self.qweight,
                 out,
-                self.scales.float(),
+                self.scales.float32(),
                 self.qzeros,
                 self.g_idx,
             )
         elif self.bits == 4:
             self.gptqmodel_cuda.vecquant4matmul(
-                x.float(),
+                x.float32(),
                 self.qweight,
                 out,
-                self.scales.float(),
+                self.scales.float32(),
                 self.qzeros,
                 self.g_idx,
             )
         elif self.bits == 8:
             self.gptqmodel_cuda.vecquant8matmul(
-                x.float(),
+                x.float32(),
                 self.qweight,
                 out,
-                self.scales.float(),
+                self.scales.float32(),
                 self.qzeros,
                 self.g_idx,
             )
-        out = out.to(x_dtype)
-        out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        out = out.to(x_dtype).reshape(out_shape)
+        if self.bias is not None:
+            out = out + self.bias
         return out
 
 

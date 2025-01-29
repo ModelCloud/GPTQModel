@@ -72,8 +72,7 @@ def dequant_kernel(
     # tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
     groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
 
-    # TODO: why is triton upscaling dequantized weights to fp32?
-    scales = tl.load(scales_ptr + (col_idx + (outfeatures * groups)), None).to(tl.float16)
+    scales = tl.load(scales_ptr + (col_idx + (outfeatures * groups)), None).to(tl.float32)
 
     # Unpack weights
     weights = (qweights >> wf_weights) & maxq  # bit shift qweight
@@ -88,10 +87,7 @@ def dequant_kernel(
     zeros = (qzeros >> wf_zeros) & maxq
 
     # Dequantize
-    weights = weights - zeros
-    # TODO: why is triton upscaling dequantized weights to fp32?
-    weights = weights.to(tl.float16)
-    weights = scales * weights
+    weights = (weights - zeros).to(tl.float32) * scales
 
     tl.store(out_ptr + (x_index), weights, mask=xmask)
 

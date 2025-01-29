@@ -140,9 +140,8 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
 
         out_shape = x.shape[:-1] + (self.outfeatures,)
-        quant_linear_fn = QuantLinearFunction
 
-        out = quant_linear_fn.apply(
+        out = QuantLinearFunction.apply(
             x.reshape(-1, x.shape[-1]),
             self.qweight,
             self.scales,
@@ -152,8 +151,9 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.pack_dtype_bits,
             self.maxq,
         )
-        out = out.half().reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        out = out.to(dtype=x.dtype).reshape(out_shape)
+        if self.bias is not None:
+            out = out + self.bias
         return out
 
 
