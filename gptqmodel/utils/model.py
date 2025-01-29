@@ -235,6 +235,7 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
                     if re.match(pattern, name):
                         bits = pattern_dict.get("bits", bits)
                         group_size = pattern_dict.get("group_size", group_size)
+                        desc_act = pattern_dict.get("desc_act", desc_act)
                         sym = pattern_dict.get("sym", sym)
                         pack_dtype = pattern_dict.get("pack_dtype", pack_dtype)
                         break
