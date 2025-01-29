@@ -20,6 +20,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import tempfile  # noqa: E402
+import json
 
 from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
@@ -31,11 +32,11 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
-from gptqmodel.utils import Perplexity  # noqa: E402
+from gptqmodel.utils import Perplexity, safetensor  # noqa: E402
 
 
 class TestDynamic(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     tmp_quant_path = None
 
     def calculate_avg_ppl(self, model, tokenizer):
@@ -69,10 +70,10 @@ class TestDynamic(ModelTest):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
-            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
-            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
-            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 21 gate module
+            r".*\.0\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
+            r".*\.1\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 2 gate module
+            r".*\.2\..*gate.*": {"bits": 4, "group_size": 64},  # match layer 20 gate module
+            r".*\.3\..*gate.*": {"bits": 4, "group_size": 32},  # match layer 21 gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
@@ -85,7 +86,16 @@ class TestDynamic(ModelTest):
         )
         model.quantize(cls.calibration, batch_size=4)
 
+        print(f"Model: {model.model}")
+
         model.save(cls.tmp_quant_path.name)
+
+        # print quant config
+        with open(cls.tmp_quant_path.name + "/quantize_config.json", 'r') as file:
+            config_data = json.load(file)
+            print(f"quantize_config.json: {config_data}")
+
+        safetensor.inspect_safetensors(cls.tmp_quant_path.name)
 
     @classmethod
     def tearDownClass(cls):
