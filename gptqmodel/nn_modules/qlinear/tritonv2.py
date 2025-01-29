@@ -159,8 +159,8 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
 
 __all__ = ["TritonV2QuantLinear"]
 
-
-def add(x: torch.Tensor, y: torch.Tensor):
+# test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data
+def triton_test_add(x: torch.Tensor, y: torch.Tensor):
     # don't put it on top-level to avoid crash if triton was not installed
     @triton.jit
     def add_kernel(x_ptr,  # *Pointer* to first input vector.
@@ -192,7 +192,7 @@ def triton_xpu_available():
     y = torch.rand(size, device='xpu:0')
 
     try:
-        add(x, y)
+        triton_test_add(x, y)
         return True
     except Exception:
         return False
