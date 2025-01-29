@@ -36,7 +36,7 @@ from gptqmodel.utils import Perplexity  # noqa: E402
 
 class TestDynamic(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-    tmp_dir = None
+    tmp_quant_path = None
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
@@ -57,13 +57,13 @@ class TestDynamic(ModelTest):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp_dir = tempfile.TemporaryDirectory()
+        cls.tmp_quant_path = tempfile.TemporaryDirectory()
         cls.tokenizer = AutoTokenizer.from_pretrained(cls.NATIVE_MODEL_ID, use_fast=True)
 
         if not cls.tokenizer.pad_token_id:
             cls.tokenizer.pad_token_id = cls.tokenizer.eos_token_id
 
-        cls.calibration_dataset = cls.load_dataset(cls.tokenizer)
+        cls.calibration = cls.load_dataset(cls.tokenizer, rows=32)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         dynamic = {
@@ -83,14 +83,14 @@ class TestDynamic(ModelTest):
             cls.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        model.quantize(cls.calibration_dataset, batch_size=4)
+        model.quantize(cls.calibration, batch_size=4)
 
-        model.save(cls.tmp_dir.name)
+        model.save(cls.tmp_quant_path.name)
 
     @classmethod
     def tearDownClass(cls):
-        cls.tmp_dir.cleanup()
-        assert not os.path.exists(cls.tmp_dir.name)
+        cls.tmp_quant_path.cleanup()
+        assert not os.path.exists(cls.tmp_quant_path.name)
 
     @parameterized.expand(
         [
@@ -100,7 +100,7 @@ class TestDynamic(ModelTest):
     )
     def test_dynamic_bits(self, backend):
         model = GPTQModel.load(
-            self.tmp_dir.name,
+            self.tmp_quant_path.name,
             backend=backend,
         )
 
@@ -123,7 +123,7 @@ class TestDynamic(ModelTest):
             self.NATIVE_MODEL_ID,
             quantize_config=QuantizeConfig(dynamic=dynamic),
         )
-        model.quantize(self.calibration_dataset, batch_size=4)
+        model.quantize(self.calibration, batch_size=4)
 
         for name, submodule in model.named_modules():
             if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
