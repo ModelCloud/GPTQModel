@@ -16,6 +16,9 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -70,10 +73,15 @@ class TestDynamic(ModelTest):
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r".*\.0\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
-            r".*\.1\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 2 gate module
-            r".*\.2\..*gate.*": {"bits": 4, "group_size": 64},  # match layer 20 gate module
-            r".*\.3\..*gate.*": {"bits": 4, "group_size": 32},  # match layer 21 gate module
+            r".*\.up_proj.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
+            r".*\.gate_proj.*": {"bits": 8, "group_size": 128},  # match layer 2 gate module
+            r".*\.down_proj.*": {"bits": 4, "group_size": 32},
+
+
+            # r".*\.0\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
+            # r".*\.1\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 2 gate module
+            # r".*\.2\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 20 gate module
+            # r".*\.3\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 21 gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
@@ -104,8 +112,11 @@ class TestDynamic(ModelTest):
 
     @parameterized.expand(
         [
-            (BACKEND.TRITON, TritonV2QuantLinear),
-            (BACKEND.MARLIN, MarlinQuantLinear),
+            # exllama v1/v2 only supports 4bit so does not support dynamic bits control
+            (BACKEND.TORCH, TorchQuantLinear, 15.7372),
+            (BACKEND.CUDA, DynamicCudaQuantLinear, 15.7372),
+            (BACKEND.TRITON, TritonV2QuantLinear, 15.7372),
+            (BACKEND.MARLIN, MarlinQuantLinear, 15.7545),
         ]
     )
     def test_dynamic_bits(self, backend, backendQLinear):
@@ -124,7 +135,7 @@ class TestDynamic(ModelTest):
 
         del model
         print(f"Backend: {backend}, PPL: {dynamic_bits_ppl}")
-        #assert dynamic_bits_ppl < 10
+        assert dynamic_bits_ppl <= 15.756
 
     def test_skip_module(self):
         dynamic = {

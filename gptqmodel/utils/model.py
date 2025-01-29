@@ -265,13 +265,13 @@ def create_quant_layer(linear: nn.Module, bits: int, desc_act: bool, dynamic, gr
                 raise err
 
             new_layer = linear(
-                bits=bits,
-                group_size=group_size,
-                desc_act=desc_act,
-                sym=sym,
+                bits=tmp_bits,
+                group_size=tmp_group_size,
+                desc_act=tmp_desc_act,
+                sym=tmp_sym,
                 infeatures=in_features,
                 outfeatures=out_features,
-                pack_dtype=pack_dtype,
+                pack_dtype=tmp_pack_dtype,
                 bias=bias,
                 #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
                 name=name,
