@@ -163,7 +163,7 @@ def make_quant(
     from_quantized: bool = False,
     pack_dtype: torch.dtype = None,
 ) -> BaseQuantLinear:
-    QuantLinear = select_quant_linear(
+    selectedQLinear = select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -176,32 +176,41 @@ def make_quant(
         pack_dtype=pack_dtype,
     )
 
+    # selected quant linear may fail on init due to missing ctx information in selection stage such as as special ratios
+    # for infeatures, outfeatures, group_size or misc that the selectin stage cannot detect until init stage
+    # to prevent failure, add Exllama and Torch linear as fallbacks
+    fallback_quant_linears = [selectedQLinear]
+
     if pack:
-        reserve_quant_linear = ExllamaQuantLinear
+        fallback_quant_linears.append(ExllamaQuantLinear)
     else:
-        reserve_quant_linear = ExllamaV2QuantLinear
+        fallback_quant_linears.append(ExllamaV2QuantLinear)
 
-    # TODO, we need fix here. if select other linears
-    for linear in list(dict.fromkeys([QuantLinear, reserve_quant_linear, TorchQuantLinear])):
+    fallback_quant_linears.append(TorchQuantLinear)
+
+    # loop over actual QLinear init, catch errors and use fallbacks if applicable
+    for linear in fallback_quant_linears:
         try:
-            if linear is not QuantLinear:
-                logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
+            if linear is not selectedQLinear:
+                logger.info(f"Use {selectedQLinear} failed, trying to use fallback: `{linear}`")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device
-                                        , lm_head_name, pack_dtype=pack_dtype)
-            return result
+            working_linear = create_quant_layer(linear=linear, bits=bits, desc_act=desc_act, dynamic=dynamic, group_size=group_size,
+                                        module=module, names=names, sym=sym, device=device, lm_head_name=lm_head_name,
+                                        pack_dtype=pack_dtype)
+            return working_linear
         except NotImplementedError as e:
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
 
-    raise ValueError("no support quant linear was found for this module.")
+    raise ValueError("No compatible quant linear was found for this module: {module}")
 
 
-def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_size: int, module, names, sym: bool, device: DEVICE, lm_head_name: str, pack_dtype: torch.dtype,
+def create_quant_layer(linear: nn.Module, bits: int, desc_act: bool, dynamic, group_size: int, module, names, sym: bool,
+                       device: DEVICE, lm_head_name: str, pack_dtype: torch.dtype,
                        ) -> BaseQuantLinear:
-    if isinstance(module, QuantLinear):
-        return QuantLinear
+    if isinstance(module, linear):
+        return linear
     for name, submodule in module.named_modules():
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
@@ -221,37 +230,48 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
-            # when load a quantized model, device is target device passed in GPTQModel.load()
+            bias = submodule.bias is not None
+
+            # need copies as dynamic config may override these in for loop
+            tmp_bits = bits
+            tmp_group_size = group_size
+            tmp_desc_act = desc_act
+            tmp_sym = sym
+            tmp_pack_dtype = pack_dtype
+
+            # dynamic bits, group_size, sym, pack_dtype for each layer/module
+            if dynamic is not None:
+                # negative module match, skip this module
+                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
+                    continue
+
+                # positive module match
+                for pattern, pattern_dict in dynamic.items():
+                    # override base QuantizeConfig for every quant config key/value
+                    if re.match(pattern, name):
+                        tmp_bits = pattern_dict.get("bits", bits)
+                        tmp_group_size = pattern_dict.get("group_size", group_size)
+                        tmp_desc_act = pattern_dict.get("desc_act", desc_act)
+                        tmp_sym = pattern_dict.get("sym", sym)
+                        tmp_pack_dtype = pattern_dict.get("pack_dtype", pack_dtype)
+                        break
+
+            # when loading a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
-            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, pack_dtype=pack_dtype, device=device)
+            _, err = linear.validate(bits=tmp_bits, group_size=tmp_group_size, desc_act=tmp_desc_act, sym=tmp_sym,
+                                     pack_dtype=tmp_pack_dtype, infeatures=in_features, outfeatures=out_features,
+                                     device=device)
             if err is not None:
                 raise err
 
-            bias = submodule.bias is not None
-
-            d_bits = bits
-            d_group_size = group_size
-            d_sym = sym
-            # dynamic bits, group_size, sym for each layer/module
-            if dynamic is not None:
-                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
-                    # skip create this quant linear
-                    continue
-
-                for pattern, pattern_dict in dynamic.items():
-                    if re.match(pattern, name):
-                        d_bits = pattern_dict.get("bits", bits)
-                        d_group_size = pattern_dict.get("group_size", group_size)
-                        d_sym = pattern_dict.get("sym", sym)
-                        break
-            new_layer = QuantLinear(
-                bits=d_bits,
-                group_size=d_group_size,
-                desc_act=desc_act,
-                sym=d_sym,
+            new_layer = linear(
+                bits=tmp_bits,
+                group_size=tmp_group_size,
+                desc_act=tmp_desc_act,
+                sym=tmp_sym,
                 infeatures=in_features,
                 outfeatures=out_features,
-                pack_dtype=pack_dtype,
+                pack_dtype=tmp_pack_dtype,
                 bias=bias,
                 #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
                 name=name,
@@ -259,7 +279,7 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
-    return QuantLinear
+    return linear
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(

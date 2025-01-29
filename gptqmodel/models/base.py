@@ -632,6 +632,8 @@ class BaseGPTQModel(nn.Module):
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
                     mse = self.quantize_config.mse
+
+                    # dynamic overrides
                     if self.quantize_config.dynamic is not None:
                         layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
 
@@ -644,6 +646,7 @@ class BaseGPTQModel(nn.Module):
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                         mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
+
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
                         bits,
@@ -726,6 +729,8 @@ class BaseGPTQModel(nn.Module):
                     desc_act = self.quantize_config.desc_act
                     damp_percent = self.quantize_config.damp_percent
                     static_groups = self.quantize_config.static_groups
+
+                    # dynamic overrides
                     if self.quantize_config.dynamic is not None:
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
