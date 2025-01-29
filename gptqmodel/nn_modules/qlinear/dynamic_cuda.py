@@ -103,37 +103,37 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
         if self.bits == 2:
             self.gptqmodel_cuda.vecquant2matmul(
-                x.float32(),
+                x.to(dtype=torch.float32),
                 self.qweight,
                 out,
-                self.scales.float32(),
+                self.scales.to(dtype=torch.float32),
                 self.qzeros,
                 self.g_idx,
             )
         elif self.bits == 3:
             self.gptqmodel_cuda.vecquant3matmul(
-                x.float32(),
+                x.to(dtype=torch.float32),
                 self.qweight,
                 out,
-                self.scales.float32(),
+                self.scales.to(dtype=torch.float32),
                 self.qzeros,
                 self.g_idx,
             )
         elif self.bits == 4:
             self.gptqmodel_cuda.vecquant4matmul(
-                x.float32(),
+                x.to(dtype=torch.float32),
                 self.qweight,
                 out,
-                self.scales.float32(),
+                self.scales.to(dtype=torch.float32),
                 self.qzeros,
                 self.g_idx,
             )
         elif self.bits == 8:
             self.gptqmodel_cuda.vecquant8matmul(
-                x.float32(),
+                x.to(dtype=torch.float32),
                 self.qweight,
                 out,
-                self.scales.float32(),
+                self.scales.to(dtype=torch.float32),
                 self.qzeros,
                 self.g_idx,
             )
