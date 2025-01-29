@@ -231,21 +231,21 @@ or have a unique `[bits, group_size, sym, desc_act, mse, pack_dtype]` property o
 Sample `QuantizerConfig.dynamic` usage:
 
 ```py
- dynamic = { 
-     # `.*\.` matches the layers_node prefix 
-     # layer index start at 0 
+dynamic = { 
+    # `.*\.` matches the layers_node prefix 
+    # layer index start at 0 
     
-    # positive match: layer 18, gate module 
-     r"+:.*\.18\..*gate.*": {"bits": 8, "group_size": 64},  
+    # positive match: layer 19, gate module 
+    r"+:.*\.18\..*gate.*": {"bits": 8, "group_size": 64},  
     
-    # positgive match: layer 19, gate module (prefix defaults to positive if missing)
-     r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  
+    # positgive match: layer 20, gate module (prefix defaults to positive if missing)
+    r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  
     
-     # negative match: skip layer 20, gate module
-     r"-:.*\.20\..*gate.*": {"bits": 8, "group_size": 64}, 
+    # negative match: skip layer 21, gate module
+    r"-:.*\.20\..*gate.*": {"bits": 8, "group_size": 64}, 
     
     # negative match: skip all down modules for all layers
-     r"-:.*down.*": {},  
+    r"-:.*down.*": {},  
  } 
 
 ```
