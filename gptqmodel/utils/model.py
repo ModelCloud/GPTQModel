@@ -179,26 +179,36 @@ def make_quant(
     # selected quant linear may fail on init due to missing ctx information in selection stage such as as special ratios
     # for infeatures, outfeatures, group_size or misc that the selectin stage cannot detect until init stage
     # to prevent failure, add Exllama and Torch linear as fallbacks
-    fallback_quant_linears = [selectedQLinear]
+    quant_linear_candidates = []
 
     if pack:
-        fallback_quant_linears.append(ExllamaQuantLinear)
+        if ExllamaQuantLinear not in quant_linear_candidates:
+            quant_linear_candidates.append(ExllamaQuantLinear)
     else:
-        fallback_quant_linears.append(ExllamaV2QuantLinear)
+        if ExllamaV2QuantLinear not in quant_linear_candidates:
+            quant_linear_candidates.append(ExllamaV2QuantLinear)
 
-    fallback_quant_linears.append(TorchQuantLinear)
+    # final fallback
+    if TorchQuantLinear not in quant_linear_candidates:
+        quant_linear_candidates.append(TorchQuantLinear)
+
+    logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
 
     # loop over actual QLinear init, catch errors and use fallbacks if applicable
-    for linear in fallback_quant_linears:
+    for linear in quant_linear_candidates:
         try:
-            if linear is not selectedQLinear:
-                logger.info(f"Use {selectedQLinear} failed, trying to use fallback: `{linear}`")
+            # if linear is not selectedQLinear:
+            #     logger.info(f"make_quant: Faild linear: `{selectedQLinear}` failed, trying to use fallback: `{linear}`")
+            # else:
+            #     logger.info("make_quant: Testing linear: {linear}")
 
-            working_linear = create_quant_layer(linear=linear, bits=bits, desc_act=desc_act, dynamic=dynamic, group_size=group_size,
+            linear_instance = create_quant_layer(linear=linear, bits=bits, desc_act=desc_act, dynamic=dynamic, group_size=group_size,
                                         module=module, names=names, sym=sym, device=device, lm_head_name=lm_head_name,
                                         pack_dtype=pack_dtype)
-            return working_linear
+            logger.info(f"make_quant: Selected linear: `{linear}`.")
+            return linear_instance
         except NotImplementedError as e:
+            logger.info(f"make_quant: Skipped linear: `{linear}`.")
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e

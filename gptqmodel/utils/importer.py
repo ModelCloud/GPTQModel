@@ -176,24 +176,24 @@ def select_quant_linear(
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
-        for k, v in allow_quant_linears.items():
+        for k, linearCls in allow_quant_linears.items():
             in_allow_backends = k in allow_backends
-            validate, err = v.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
+            validate, err = linearCls.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
             if os.environ.get("DEBUG") and in_allow_backends and not validate:
                 logger.info(f"skip {k} for {str(err)}")
             if in_allow_backends and validate:
                 if pack:
-                    check_pack_func = isinstance(v, PackableQuantLinear)
+                    check_pack_func = issubclass(linearCls, PackableQuantLinear)
                     if check_pack_func:
                         if not message_logged:
-                            logger.info(f"Auto pick kernel based on compatibility: {v}")
+                            logger.info(f"Auto pick kernel based on compatibility: {linearCls}")
                             message_logged = True
-                        return v
+                        return linearCls
                 else:
                     if not message_logged:
-                        logger.info(f"Auto pick kernel based on compatibility: {v}")
+                        logger.info(f"Auto pick kernel based on compatibility: {linearCls}")
                         message_logged = True
-                    return v
+                    return linearCls
 
         if err:
             raise err
