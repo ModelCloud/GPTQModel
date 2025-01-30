@@ -163,7 +163,8 @@ def make_quant(
     from_quantized: bool = False,
     pack_dtype: torch.dtype = None,
 ) -> BaseQuantLinear:
-    selectedQLinear = select_quant_linear(
+    # returns multiple validated kernels
+    quant_linear_candidates = select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -174,23 +175,8 @@ def make_quant(
         dynamic=dynamic,
         device=device,
         pack_dtype=pack_dtype,
+        multi_select=True,
     )
-
-    # selected quant linear may fail on init due to missing ctx information in selection stage such as as special ratios
-    # for infeatures, outfeatures, group_size or misc that the selectin stage cannot detect until init stage
-    # to prevent failure, add Exllama and Torch linear as fallbacks
-    quant_linear_candidates = []
-
-    if pack:
-        if ExllamaQuantLinear not in quant_linear_candidates:
-            quant_linear_candidates.append(ExllamaQuantLinear)
-    else:
-        if ExllamaV2QuantLinear not in quant_linear_candidates:
-            quant_linear_candidates.append(ExllamaV2QuantLinear)
-
-    # final fallback
-    if TorchQuantLinear not in quant_linear_candidates:
-        quant_linear_candidates.append(TorchQuantLinear)
 
     logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
 
