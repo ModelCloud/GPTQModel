@@ -116,7 +116,7 @@ class TestDynamic(ModelTest):
             (BACKEND.TORCH, TorchQuantLinear, 15.7372),
             (BACKEND.CUDA, DynamicCudaQuantLinear, 15.7372),
             (BACKEND.TRITON, TritonV2QuantLinear, 15.7372),
-            (BACKEND.MARLIN, MarlinQuantLinear, 15.7545),
+            (BACKEND.MARLIN, MarlinQuantLinear, 15.8582), # A100: 15.7545
         ]
     )
     def test_dynamic_bits(self, backend, backendQLinear, ppl):
