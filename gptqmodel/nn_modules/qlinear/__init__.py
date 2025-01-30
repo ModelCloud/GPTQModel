@@ -50,6 +50,8 @@ class BaseQuantLinear(nn.Module):
         self.desc_act = desc_act
         self.pack_dtype = pack_dtype
         self.maxq = 2 ** self.bits - 1
+        self.pack_dtype = pack_dtype
+
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
