@@ -29,109 +29,6 @@ from .torch import torch_empty_cache
 
 logger = setup_logger()
 
-def unpack_qzeros(qzeros, bits):
-    qzeros = qzeros.view(torch.int32)
-    elems_per_int32 = 32 // bits
-    unpacked_zeros = torch.zeros(
-        (qzeros.shape[0], qzeros.shape[1] * elems_per_int32),
-        dtype=torch.int8,
-        device=qzeros.device,
-        requires_grad=False,
-    )
-    for col in range(unpacked_zeros.shape[1]):
-        i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i))
-
-    # Follow the instruction in AutoGPTQ qlinear_cuda_old.py line 303
-    # NOTE: It appears that casting after the `unpacked_zeros  + 1` is important.
-    return torch.bitwise_and(unpacked_zeros + 1, 2**bits - 1)
-
-# For gptqv2 from gptqmodel
-def unpack_qzeros_v2(qzeros, bits):
-    qzeros = qzeros.view(torch.int32)
-    elems_per_int32 = 32 // bits
-    unpacked_zeros = torch.zeros(
-        (qzeros.shape[0], qzeros.shape[1] * elems_per_int32),
-        dtype=torch.int8,
-        device=qzeros.device,
-        requires_grad=False,
-    )
-    for col in range(unpacked_zeros.shape[1]):
-        i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i))
-
-    # Follow the instruction in AutoGPTQ qlinear_cuda_old.py line 303
-    # NOTE: It appears that casting after the `unpacked_zeros  + 1` is important.
-    return torch.bitwise_and(unpacked_zeros, 2**bits - 1)
-
-def unpack_qweight(qweight, bits):
-    qweight = qweight.view(torch.int8)
-    elems_per_int8 = 8 // bits
-    unpacked_weight = torch.zeros(
-        (qweight.shape[0], qweight.shape[1] * elems_per_int8),
-        dtype=torch.int8,
-        device=qweight.device,
-        requires_grad=False,
-    )
-    for col in range(unpacked_weight.shape[1]):
-        i = col % elems_per_int8
-        unpacked_weight[:, col] = (qweight[:, col // elems_per_int8] >> (bits * i))
-
-    return torch.bitwise_and(unpacked_weight, 2**bits - 1)
-
-
-def repack_from_gptq(self, gptq_module, device="cuda"):
-    # qweight in gptq old quant linear stored with (out_features, in_features), should be transposed.
-    qweight = gptq_module.qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
-    intweight = unpack_qweight(qweight, self.bits).contiguous()
-    if self.bitblas_matmul.weight_transform is not None:
-        qweight = self.bitblas_matmul.weight_transform(intweight.cpu()).to(device)
-    self.qweight = qweight
-    # scales in gptq old quant linear stored with (in_features // group_size, out_features), should be transposed.
-    scales = gptq_module.scales.T.contiguous().view(self.TORCH_DTYPE)
-    self.scales = scales
-    # qzeros should be dequantized to int zeros.
-    intzeros = unpack_qzeros(gptq_module.qzeros, self.bits).T.contiguous()
-    if self.bitblas_matmul.config.zeros_mode == "original":
-        self.zeros = intzeros.to(torch.float16).contiguous()
-    elif self.bitblas_matmul.config.zeros_mode == "rescale":
-        self.zeros[:, :] = intzeros.to(torch.float16)[:, :] * self.scales[:, :]
-    elif self.bitblas_matmul.config.zeros_mode == "quantized":
-        self.zeros = (
-            torch.Tensor(general_compress(intzeros.T.contiguous().cpu().numpy(), self.bits)).to(
-                self.qweight.device).to(self.zeros.dtype).contiguous())
-    else:
-        raise ValueError(f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}")
-    if self.bias is not None:
-        self.bias = gptq_module.bias.data.to(torch.float16).contiguous()
-
-
-def repack_from_gptq_v2(self, gptq_module):
-    # qweight in gptq old quant linear stored with (out_features, in_features), should be transposed.
-    qweight = gptq_module.qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
-    intweight = unpack_qweight(qweight, self.bits).contiguous()
-    if self.bitblas_matmul.weight_transform is not None:
-        qweight = self.bitblas_matmul.weight_transform(intweight.cpu()).cuda()
-    self.qweight = qweight
-    # scales in gptq old quant linear stored with (in_features // group_size, out_features), should be transposed.
-    scales = gptq_module.scales.T.contiguous().view(self.TORCH_DTYPE)
-    self.scales = scales
-    # qzeros should be dequantized to int zeros.
-    intzeros = unpack_qzeros_v2(gptq_module.qzeros, self.bits).T.contiguous()
-    if self.bitblas_matmul.config.zeros_mode == "original":
-        self.zeros = intzeros.to(torch.float16).contiguous()
-    elif self.bitblas_matmul.config.zeros_mode == "rescale":
-        self.zeros[:, :] = intzeros.to(torch.float16)[:, :] * self.scales[:, :]
-    elif self.bitblas_matmul.config.zeros_mode == "quantized":
-        self.zeros = (
-            torch.Tensor(general_compress(intzeros.T.contiguous().cpu().numpy(), self.bits)).to(
-                self.qweight.device).to(self.zeros.dtype).contiguous())
-    else:
-        raise ValueError(f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}")
-    if self.bias is not None:
-        self.bias = gptq_module.bias.data.to(torch.float16).contiguous()
-
-
 def prepare_model_for_bitblas_load(
         model,
         qcfg: QuantizeConfig,
@@ -220,7 +117,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
             # convert to bitblas format
             if repack:
-                repack_from_gptq(bitblas_module, gptq_module=module)
+                bitblas_module.repack_from_gptq(module)
 
             # Save to parent.
             parent_module = model.get_submodule(parent_name)
