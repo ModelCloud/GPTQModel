@@ -474,9 +474,9 @@ def ModelLoader(cls):
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
 
-        load_checkpoint_in_model = False
+        load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
+        if qcfg.format == FORMAT.GPTQ and backend not in [BACKEND.IPEX, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -499,8 +499,9 @@ def ModelLoader(cls):
                 cfg=qcfg,
                 qlinear_kernel=preload_qlinear_kernel,
             )
-            logger.info(f"Conversion complete: {time.time()-t}s")
-            load_checkpoint_in_model = True
+            logger.info(f"Conversion complete: {time.time() - t}s")
+
+            load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
 
         if backend == BACKEND.MARLIN and (
@@ -553,7 +554,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if not load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,

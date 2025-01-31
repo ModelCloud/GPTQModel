@@ -316,7 +316,7 @@ setup(
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
         'vllm': ["vllm>=0.6.4", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
-        'bitblas': ["bitblas==0.1.0"],
+        'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],

@@ -15,14 +15,10 @@
 
 import os
 
-import bitblas
 import threadpoolctl as tctl
 import torch
-from accelerate.utils import find_tied_parameters
 from bitblas.quantization import general_compress
 
-from .safetensor import untie_weights
-from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -165,7 +161,7 @@ def prepare_model_for_bitblas_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # BitBLAS ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        if not load_checkpoint_in_model:
+        if load_checkpoint_in_model:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -176,9 +172,6 @@ def prepare_model_for_bitblas_load(
             )
         # Convert model to bitblas, repacking weights into BitBLAS format.
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
-
-        # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-        untie_weights(model)
     return model
 
 
@@ -227,7 +220,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
             # convert to bitblas format
             if repack:
-                repack_from_gptq_v2(bitblas_module, gptq_module=module)
+                repack_from_gptq(bitblas_module, gptq_module=module)
 
             # Save to parent.
             parent_module = model.get_submodule(parent_name)
