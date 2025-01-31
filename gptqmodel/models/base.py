@@ -63,6 +63,8 @@ from .writer import (
     ModelWriter,
 )
 
+# pytorch 2.6.0 fixes many compilation errors
+PYTORCH_MIN_VERFSION_WITH_COMPILE = Version("2.6.0")
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -915,7 +917,7 @@ class BaseGPTQModel(nn.Module):
             logger.warning("model is not quantized, skip compiling...")
             return self
 
-        if Version(torch.__version__) < Version("2.5.1"):
+        if Version(torch.__version__) < PYTORCH_MIN_VERFSION_WITH_COMPILE:
             logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
             return self
         backends = torch._dynamo.list_backends("experimental")
@@ -923,7 +925,13 @@ class BaseGPTQModel(nn.Module):
             # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
             torch._dynamo.config.suppress_errors = True
             logger.info("compiling model with backend: aot_ts")
-            self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
+
+            try:
+                self.model = torch.compile(self.model, fullgraph=True, backend="aot_ts")
+            except Exception as e:
+                # fallback to aot_eager
+                logger.info("compiling model with fallback backend: aot_eager")
+                self.model = torch.compile(self.model, fullgraph=True, backend="aot_eager")
         else:
             logger.warning("aot_ts was not found in backend list, please check your torch version.")
         return self

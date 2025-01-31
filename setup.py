@@ -175,23 +175,20 @@ if BUILD_CUDA_EXT:
             "-std=c++17",
             "-fopenmp",
             "-lgomp",
-            "-DENABLE_BF16"
             "-Wno-switch-bool",
         ],
         "nvcc": [
             "-O3",
             "-std=c++17",
-            "-DENABLE_BF16",
-            "-U__CUDA_NO_HALF_OPERATORS__",
-            "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_HALF2_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
             "-diag-suppress=179,39,186",
         ],
     }
+
+    # torch >= 2.6.0 may require extensions to be build with CX11_ABI=1
+    CXX11_ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
+
+    extra_compile_args["cxx"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
+    extra_compile_args["nvcc"] += [ f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}" ]
 
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
