@@ -1,11 +1,9 @@
 import os
+
 import torch
-
 from accelerate.utils import find_tied_parameters
-from safetensors import safe_open
-
-
 from gptqmodel.utils.model import recurse_getattr, recurse_setattr
+from safetensors import safe_open
 
 
 # debug print all safetensor files in a directory and print its properties

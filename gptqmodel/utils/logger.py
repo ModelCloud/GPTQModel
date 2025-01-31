@@ -15,7 +15,6 @@
 
 import logging
 
-
 # global static/shared logger instance
 logger = None
 

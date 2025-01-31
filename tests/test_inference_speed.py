@@ -14,10 +14,10 @@
 # limitations under the License.
 
 import os
-from parameterized import parameterized
 
 from gptqmodel.utils import BACKEND
 from inference_speed import InferenceSpeed
+from parameterized import parameterized
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 

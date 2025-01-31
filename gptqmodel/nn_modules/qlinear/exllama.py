@@ -21,11 +21,9 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
-
 
 exllama_import_exception = None
 try:

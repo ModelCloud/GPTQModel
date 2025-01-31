@@ -17,7 +17,7 @@ import sys
 from typing import List, Optional, Tuple
 
 import numpy as np
-import torch as t # conflict with torch.py
+import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
 

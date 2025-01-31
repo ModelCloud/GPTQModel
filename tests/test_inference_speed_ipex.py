@@ -18,8 +18,8 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 from gptqmodel.utils import BACKEND
-from parameterized import parameterized
 from inference_speed import InferenceSpeed
+from parameterized import parameterized
 
 
 class TestInferenceSpeedIpex(InferenceSpeed):

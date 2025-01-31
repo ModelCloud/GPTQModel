@@ -38,19 +38,12 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from ..models._const import (
-    CPU,
-    DEVICE,
-    EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
-    EXPERT_INDEX_PLACEHOLDER,
-    SUPPORTED_MODELS,
-    SUPPORTS_MODULE_TYPES,
-)
+from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
+                             EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import dynamic_get
 from .backend import BACKEND
@@ -58,7 +51,6 @@ from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
-
 
 logger = setup_logger()
 
