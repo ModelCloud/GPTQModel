@@ -901,7 +901,7 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantized:
             # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-            untie_weights(model)
+            #untie_weights(self.model)
 
             self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
 
