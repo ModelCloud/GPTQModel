@@ -16,6 +16,7 @@
 import torch
 from accelerate.utils import find_tied_parameters
 
+from .safetensor import untie_weights
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
@@ -66,27 +67,12 @@ def prepare_model_for_marlin_load(
                 offload_state_dict=True,
                 offload_buffers=True,
             )
+
         # Convert model to marlin, repacking weights into Marlin format.
         model = convert_to_marlin(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
 
         # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-        tied_params = find_tied_parameters(model)
-
-        for weight_group in tied_params:
-            for param_name in weight_group:
-                if isinstance(recurse_getattr(model, param_name), torch.nn.Parameter):
-                    recurse_setattr(
-                        model,
-                        param_name,
-                        torch.nn.Parameter(recurse_getattr(model, param_name).clone()),
-                    )
-                else:
-                    recurse_setattr(
-                        model,
-                        param_name,
-                        recurse_getattr(model, param_name).clone(),
-                    )
-
+        untie_weights(model)
     return model
 
 
@@ -112,7 +98,7 @@ def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = Fals
 
 @torch.no_grad()
 def convert_to_marlin(
-    model, model_quantlinear, qcfg: QuantizeConfig, sym: bool, desc_act: bool, repack: bool, strict: bool = False
+    model, model_quantlinear, qcfg: QuantizeConfig, sym: bool, desc_act: bool, repack: bool
 ):
     """
     Converts GPTQ-packed weights to the Marlin format. This assumes that the model already meets Marlin kernel constraints.
@@ -144,11 +130,12 @@ def convert_to_marlin(
                 desc_act=desc_act,
                 infeatures=module.original_infeatures,
                 outfeatures=module.original_outfeatures,
+                pack_dtype=module.pack_dtype,
                 bias=module.bias is not None,
             )
 
         # workspace is never in the state_dict, thus we need to allocate it manually.
-        new_module.workspace = torch.zeros(new_module.outfeatures // 128 * 16, dtype=torch.int, device=module.device)
+        new_module.workspace = torch.zeros(new_module.outfeatures // 128 * 16, dtype=module.pack_dtype, device=module.device)
 
         # Dequantize the weight.
         if repack:
@@ -162,14 +149,14 @@ def convert_to_marlin(
 
             marlin_repacked_weight = gptqmodel_marlin_cuda.gptq_repack(qweight)
 
-            if strict:
-                dequantized_qzeros = unpack_qzeros(module.qzeros)
-
-                if not torch.all(dequantized_qzeros == 8):
-                    raise ValueError(
-                        "Marlin kernel is compatible only with checkpoints using symmetric quantization."
-                        "Found non-symmetric quantization for the weight {name}."
-                    )
+            # if strict:
+            #     dequantized_qzeros = unpack_qzeros(module.qzeros)
+            #
+            #     if not torch.all(dequantized_qzeros == 8):
+            #         raise ValueError(
+            #             "Marlin kernel is compatible only with checkpoints using symmetric quantization."
+            #             "Found non-symmetric quantization for the weight {name}."
+            #         )
 
             _, _scale_perm, _scale_perm_single = _get_perms()
 

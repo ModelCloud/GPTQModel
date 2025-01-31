@@ -354,7 +354,7 @@ def ModelLoader(cls):
             unsupported = _validate_marlin_compatibility(qcfg)
             if unsupported is None and marlin_compatible:
                 logger.info(
-                    "You passed a model that is compatible with the Marlin kernel. Use `BACKEND.MARLIN` for optimal inference with batching on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
+                    "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
                 )
 
         if qcfg.format == FORMAT.BITBLAS:
@@ -429,6 +429,8 @@ def ModelLoader(cls):
                     elif is_flash_attn_2_available() and not has_attn_implementation:
                         args = {USE_FLASH_ATTENTION_2: True}
 
+                    logger.info("Auto enabling flash attention2")
+
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
             )
@@ -491,7 +493,7 @@ def ModelLoader(cls):
                 )
 
             t = time.time()
-            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 cfg=qcfg,
