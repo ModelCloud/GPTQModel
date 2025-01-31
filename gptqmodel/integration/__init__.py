@@ -13,5 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .integration import patch_hf
 from .integration_vllm import patch_vllm
