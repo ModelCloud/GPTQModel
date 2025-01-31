@@ -66,15 +66,9 @@ def import_bitblas():
         print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
-        # from importlib.metadata import version
-
         from bitblas.cache import get_database_path
-
-        # bitblas_version = version(distribution_name="bitblas")
-        # gptqmodel_version = version(distribution_name="gptqmodel")
-
-        BITBLAS_DATABASE_PATH = get_database_path()
-
+        BITBLAS_DATABASE_PATH = f"{get_database_path()}_{bitblas.__version__}"
+        print(f"BITBLAS_DATABASE_PATH: {BITBLAS_DATABASE_PATH}")
 
 def unpack_qzeros(qzeros, bits):
     qzeros = qzeros.view(torch.int32)
@@ -109,7 +103,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
-    zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
+    ZEROS_MODE = "quantized"  # "original" or "rescale" or "quantized"
     TORCH_DTYPE = torch.float16
     STORAGE_DTYPE = "int8"  # assume int8 storage
     TORCH_STORAGE_DTYPE = getattr(torch, STORAGE_DTYPE)
@@ -179,7 +173,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
                 (outfeatures, infeatures // self.group_size), dtype=self.TORCH_DTYPE
             ),
         )
-        if self.zeros_mode == "quantized":
+        if self.ZEROS_MODE == "quantized":
             storage_nbit = int("".join(c for c in self.STORAGE_DTYPE if c.isdigit()))
             self.register_buffer(
                 "zeros",
@@ -224,7 +218,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             group_size=self.group_size,
             with_bias=bias,
             layout=layout,
-            zeros_mode=self.zeros_mode,
+            zeros_mode=self.ZEROS_MODE,
         )
         self.bitblas_matmul = self._get_or_create_bitblas_operator(
             matmul_config, enable_tuning
@@ -360,7 +354,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         A_void = ctypes.c_void_p(A.data_ptr())
         # m is the product of the last n - 1 dimensions of A
         m = ctypes.c_int32(reduce(operator.mul, A.shape[:-1], 1))
-        self.bitblas_matmul.lib.call(
+        self.bitblas_matmul.call_lib(
             A_void , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
         )
         return C
