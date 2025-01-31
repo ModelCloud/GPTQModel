@@ -477,7 +477,6 @@ jobs:
 
       - name: Print Env
         run: |
-          pip install -U torch torchvision torchaudio
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
