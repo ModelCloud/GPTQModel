@@ -395,6 +395,10 @@ class QuantizeConfig():
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
         }
+
+        # simplify: clean keys where the value is None
+        out = {k: v for k, v in out.items() if v is not None}
+
         dict_scale_dtype_to_str(out)
         return out
 
