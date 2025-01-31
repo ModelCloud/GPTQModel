@@ -15,7 +15,7 @@
 
 import os
 from collections import OrderedDict
-from typing import Dict, Optional, Type, Union
+from typing import Dict, Optional, Type, Union, List
 
 import torch
 
@@ -157,11 +157,18 @@ def select_quant_linear(
         dynamic=None,
         pack_dtype: torch.dtype = None,
         multi_select: bool = False, # return all valid kernels
-) -> Type[BaseQuantLinear]:
+) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if device is None:
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
 
     backend = BACKEND.AUTO if backend is None else backend
+
+    # Bitblas needs conversion, not direct quant linear load, return generic Torch linear
+    if backend == BACKEND.BITBLAS and format != FORMAT.BITBLAS:
+        if multi_select:
+            return [TorchQuantLinear]
+        else:
+            return TorchQuantLinear
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
 

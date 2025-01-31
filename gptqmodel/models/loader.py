@@ -462,7 +462,7 @@ def ModelLoader(cls):
                 layers,
                 qcfg.bits,
                 qcfg.group_size,
-                backend=backend.AUTO if (backend == BACKEND.MARLIN and qcfg.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                backend=backend,
                 format=qcfg.format,
                 lm_head_name=cls.lm_head,
                 desc_act=qcfg.desc_act,
