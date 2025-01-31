@@ -40,12 +40,12 @@ class TestInferenceSpeed(InferenceSpeed):
 
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 262),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 48),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 186),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 188),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 141),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 48),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 219.87),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 50.46),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 218.35),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 222.24),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 163.94),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 50.65),
             # (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474), # Second time running bitblas, there is cache
         ]
     )
