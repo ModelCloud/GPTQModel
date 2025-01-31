@@ -102,10 +102,11 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
         assert x.device.type == "cuda"
 
-        # cuda is only optimized for input shape < 128. will run but super slow
+        # switch to torch kernel when input shape is >= kernel_switch_threshold
+        # cuda is only optimized for < kernel_switch_threshold and will run slower than torch otherwise
         if x.shape[0] >= self.kernel_switch_threshold:
-            # logger.warning_once(
-            #   f"Input shape `{x.shape[0]}` >= `{self.kernel_switch_threshold}` is not optimized for cuda kernel: dynamic switching to torch kernel.")
+            logger.warning_once(
+              f"Input shape `{x.shape[0]}` >= `{self.kernel_switch_threshold}` is not optimized for cuda kernel: dynamic switching to torch kernel.")
             return self._forward(x, x.dtype, out_shape)
 
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
