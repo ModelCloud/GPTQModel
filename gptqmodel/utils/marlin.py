@@ -14,10 +14,8 @@
 # limitations under the License.
 
 import torch
-from accelerate.utils import find_tied_parameters
 
-from .safetensor import untie_weights
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights, recurse_getattr, recurse_setattr
@@ -58,7 +56,7 @@ def prepare_model_for_marlin_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # Marlin ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        if not load_checkpoint_in_model:
+        if load_checkpoint_in_model:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
@@ -71,8 +69,7 @@ def prepare_model_for_marlin_load(
         # Convert model to marlin, repacking weights into Marlin format.
         model = convert_to_marlin(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
 
-        # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-        untie_weights(model)
+
     return model
 
 

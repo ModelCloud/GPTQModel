@@ -36,12 +36,9 @@ BITBLAS_DATABASE_PATH = None
 BITBLAS_PROPAGATE_WEIGHTS = False
 
 try:
-    # bitblas requires CUDA_BUS_ORDER=PCI_BUS_ID
     import bitblas  # noqa: F401
-    from bitblas.quantization.utils import general_compress  # noqa: F401
     BITBLAS_AVAILABLE = True
-except Exception as e:
-    logger.warn(f"bitlbas exception: {e}")
+except Exception:
     BITBLAS_AVAILABLE = False
 
 BITBLAS_INSTALL_HINT = "bitblas not installed. Please install via `pip install bitblas`."
@@ -54,7 +51,6 @@ def import_bitblas():
     # guard against bitblas pip whl incompatible env`
     import bitblas
 
-
     bitblas.set_log_level("INFO")
 
     if BITBLAS_TARGET is None:
@@ -66,15 +62,9 @@ def import_bitblas():
         print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
-        # from importlib.metadata import version
-
         from bitblas.cache import get_database_path
-
-        # bitblas_version = version(distribution_name="bitblas")
-        # gptqmodel_version = version(distribution_name="gptqmodel")
-
-        BITBLAS_DATABASE_PATH = get_database_path()
-
+        BITBLAS_DATABASE_PATH = f"{get_database_path()}_{bitblas.__version__}"
+        print(f"BITBLAS_DATABASE_PATH: {BITBLAS_DATABASE_PATH}")
 
 def unpack_qzeros(qzeros, bits):
     qzeros = qzeros.view(torch.int32)
@@ -350,6 +340,39 @@ class BitBLASQuantLinear(BaseQuantLinear):
         if self.bias is not None:
             self.bias = self.bias.data.to(torch.float16).contiguous()
 
+    def repack_from_gptq(self, gptq_module):
+        from bitblas.quantization.utils import general_compress
+
+        # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
+        qweight = gptq_module.qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
+        if self.bitblas_matmul.weight_transform is not None:
+            qweight = self.bitblas_matmul.weight_transform(qweight.cpu()).cuda()
+        self.qweight = qweight
+        # scales in gptq old quant linear stored with (infeatures // group_size, outfeatures), should be transposed.
+        scales = gptq_module.scales.T.contiguous().view(self.TORCH_DTYPE)
+        self.scales = scales
+        # qzeros should be de-quantized to int zeros.
+        intzeros = unpack_qzeros(gptq_module.qzeros, self.bits).T.contiguous()
+        if self.bitblas_matmul.config.zeros_mode == "original":
+            self.zeros = intzeros.to(torch.float16).contiguous()
+        elif self.bitblas_matmul.config.zeros_mode == "rescale":
+            self.zeros[:, :] = intzeros.to(torch.float16)[:, :] * self.scales[:, :]
+        elif self.bitblas_matmul.config.zeros_mode == "quantized":
+            self.zeros = (
+                torch.Tensor(
+                    general_compress(intzeros.T.contiguous().cpu().numpy(), self.bits)
+                )
+                .to(self.qweight.device)
+                .to(self.zeros.dtype)
+                .contiguous()
+            )
+        else:
+            raise ValueError(
+                f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
+            )
+        if self.bias is not None:
+            self.bias = gptq_module.bias.data.to(torch.float16).contiguous()
+
     def forward(self, A):
         if A.dtype != torch.float16:
             A = A.half()
@@ -357,11 +380,11 @@ class BitBLASQuantLinear(BaseQuantLinear):
         C = torch.empty(
             A.shape[:-1] + (self.scales.shape[0],), dtype=A.dtype, device=A.device
         )
-        A_void = ctypes.c_void_p(A.data_ptr())
+
         # m is the product of the last n - 1 dimensions of A
         m = ctypes.c_int32(reduce(operator.mul, A.shape[:-1], 1))
-        self.bitblas_matmul.lib.call(
-            A_void , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
+        self.bitblas_matmul.call_lib(
+            ctypes.c_void_p(A.data_ptr()) , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
         )
         return C
 

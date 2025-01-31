@@ -50,6 +50,7 @@ from ..utils.model import (
     pack_model,
 )
 from ..utils.progress import ProgressBar
+from ..utils.safetensor import untie_weights
 from ..utils.torch import torch_empty_cache
 from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -899,6 +900,9 @@ class BaseGPTQModel(nn.Module):
                 shutil.copyfile(json_path, os.path.join(save_dir, name))
 
         if self.quantized:
+            # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
+            #untie_weights(self.model)
+
             self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
 
             # overwrite quant_override_files
