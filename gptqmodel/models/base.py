@@ -50,6 +50,7 @@ from ..utils.model import (
     pack_model,
 )
 from ..utils.progress import ProgressBar
+from ..utils.safetensor import untie_weights
 from ..utils.torch import torch_empty_cache
 from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader

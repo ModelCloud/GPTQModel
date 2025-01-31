@@ -62,15 +62,9 @@ def import_bitblas():
         print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
-        # from importlib.metadata import version
-
         from bitblas.cache import get_database_path
-
-        # bitblas_version = version(distribution_name="bitblas")
-        # gptqmodel_version = version(distribution_name="gptqmodel")
-
-        BITBLAS_DATABASE_PATH = get_database_path()
-
+        BITBLAS_DATABASE_PATH = f"{get_database_path()}_{bitblas.__version__}"
+        print(f"BITBLAS_DATABASE_PATH: {BITBLAS_DATABASE_PATH}")
 
 def unpack_qzeros(qzeros, bits):
     qzeros = qzeros.view(torch.int32)
