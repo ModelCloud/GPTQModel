@@ -17,15 +17,13 @@ import os
 
 import threadpoolctl as tctl
 import torch
-from bitblas.quantization import general_compress
 
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
-from .model import load_checkpoint_in_model_then_tie_weights, recurse_getattr, recurse_setattr
+from .model import load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .torch import torch_empty_cache
-
 
 logger = setup_logger()
 

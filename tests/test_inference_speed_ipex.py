@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# -- do not touch
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
 
 from gptqmodel.utils import BACKEND
-from parameterized import parameterized
 from inference_speed import InferenceSpeed
+from parameterized import parameterized
 
 
 class TestInferenceSpeedIpex(InferenceSpeed):

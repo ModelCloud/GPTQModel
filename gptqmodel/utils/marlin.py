@@ -18,11 +18,10 @@ import torch
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
-from .model import load_checkpoint_in_model_then_tie_weights, recurse_getattr, recurse_setattr
+from .model import load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .rocm import IS_ROCM
 from .torch import torch_empty_cache
-
 
 logger = setup_logger()
 
