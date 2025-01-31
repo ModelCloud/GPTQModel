@@ -2,10 +2,8 @@
 
 cd "$(dirname "$0")" || exit
 
-pip install -U uv
-
 # force ruff/isort to be same version as setup.py
-uv pip install -U ruff==0.4.9 isort==5.13.2
+pip install -U ruff==0.4.9 isort==5.13.2
 
 ruff check ../gptqmodel/models ../gptqmodel/nn_modules ../gptqmodel/quantization ../gptqmodel/utils ../gptqmodel/__init__.py ../examples ../tests ../setup.py --fix
 ruff_status=$?
