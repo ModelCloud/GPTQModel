@@ -2,6 +2,8 @@
 
 cd "$(dirname "$0")" || exit
 
+pip install -U uv
+
 # force ruff/isort to be same version as setup.py
 uv pip install -U ruff==0.4.9 isort==5.13.2
 
