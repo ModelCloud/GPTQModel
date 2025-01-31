@@ -17,12 +17,10 @@ from __future__ import annotations
 
 import os
 
-
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
 
 import sys  # noqa: E402
-
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -90,7 +88,6 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
-
 
 logger = setup_logger()
 
@@ -295,10 +292,9 @@ class GPTQModel:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
+            from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
-
-            from gptqmodel.utils.eval import lm_eval
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
@@ -367,6 +363,7 @@ class GPTQModel:
         if format == "mlx":
             try:
                 from mlx_lm.utils import save_config, save_weights
+
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
                 raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")

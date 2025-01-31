@@ -14,10 +14,10 @@
 # limitations under the License.
 
 import os
-from parameterized import parameterized
 
 from gptqmodel.utils import BACKEND
 from inference_speed import InferenceSpeed
+from parameterized import parameterized
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
@@ -46,7 +46,7 @@ class TestInferenceSpeed(InferenceSpeed):
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 188),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 141),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 48),
-            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474), # Second time running bitblas, there is cache
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474), # Second time running bitblas, there is cache
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second):

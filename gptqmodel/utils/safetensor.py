@@ -1,5 +1,7 @@
 import os
+
 from safetensors import safe_open
+
 
 # debug print all safetensor files in a directory and print its properties
 def inspect_safetensors(directory):

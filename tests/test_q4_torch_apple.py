@@ -16,11 +16,10 @@
 import sys  # noqa: E402
 
 import torch  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
-
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 
 class TestsQ4Torch(ModelTest):

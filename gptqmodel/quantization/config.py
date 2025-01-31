@@ -27,7 +27,6 @@ from packaging import version
 
 from ..utils.logger import setup_logger
 
-
 logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
@@ -190,11 +189,11 @@ class QuantizeConfig():
         else:
             if isinstance(self.pack_dtype, str):
                 self.pack_dtype = self.pack_dtype.lower()
-                if not self.pack_dtype in ["int64", "int32", "int16", "int8"]:
+                if self.pack_dtype not in ["int64", "int32", "int16", "int8"]:
                     raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
                 self.pack_dtype = getattr(torch, self.pack_dtype)
             elif isinstance(self.pack_dtype, torch.dtype):
-                if not self.pack_dtype in [torch.int64, torch.int32, torch.int16, torch.int8]:
+                if self.pack_dtype not in [torch.int64, torch.int32, torch.int16, torch.int8]:
                     raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
             else:
                 raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")

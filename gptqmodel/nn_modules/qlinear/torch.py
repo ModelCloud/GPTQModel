@@ -18,12 +18,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-
 
 logger = setup_logger()
 
@@ -118,7 +116,6 @@ class TorchQuantLinear(PackableQuantLinear):
                                       device=self.g_idx.device)
 
 
-
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
             x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
@@ -148,7 +145,7 @@ class TorchQuantLinear(PackableQuantLinear):
         if self.wf.device != self.qzeros.device:
             self.wf = self.wf.to(self.qzeros.device)
 
-        if self.bits in [2, 4, 8]:
+        if self.bits in [4, 8, 2]:
             dtype = torch.int16 if self.bits == 8 else torch.int8
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
@@ -224,7 +221,7 @@ def dequantize_model(model: nn.Module):
                 module_name = name
 
             setattr(parent, module_name, new_module)
-            
+
     del model.config.quantization_config
     return model
 

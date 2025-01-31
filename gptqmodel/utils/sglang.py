@@ -18,7 +18,6 @@ import multiprocessing as mp
 import torch
 from transformers import AutoConfig
 
-
 try:
     import sglang as sgl
     SGLANG_AVAILABLE = True

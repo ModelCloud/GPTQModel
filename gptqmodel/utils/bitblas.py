@@ -26,7 +26,6 @@ from .model import load_checkpoint_in_model_then_tie_weights, recurse_getattr, r
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
-
 logger = setup_logger()
 
 def prepare_model_for_bitblas_load(
@@ -135,7 +134,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
             # Dequantize the weight.
             if repack:
-                bitblas_module.repack_from_gptq(module)
+                bitblas_module.repack_from_gptq_v2(module)
 
             # Save to parent.
             parent_module = model.get_submodule(parent_name)

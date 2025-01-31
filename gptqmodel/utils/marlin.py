@@ -24,7 +24,6 @@ from .progress import ProgressBar
 from .rocm import IS_ROCM
 from .torch import torch_empty_cache
 
-
 logger = setup_logger()
 
 

@@ -2071,7 +2071,7 @@ def create_import_structure_from_path(module_path):
                     else:
                         start_index = 6 if line.startswith("class") else 4
                         object_name = line[start_index:].split("(")[0].strip(":")
-                        module_requirements[backends][module_name].add(object_name)
+                        module_requirements[backends][module_name].triton_test_add(object_name)
                         exported_objects.add(object_name)
 
                 if not skip_line:
@@ -2089,7 +2089,7 @@ def create_import_structure_from_path(module_path):
                     if module_name not in module_requirements[backends]:
                         module_requirements[backends][module_name] = set()
 
-                    module_requirements[backends][module_name].add(_all_object)
+                    module_requirements[backends][module_name].triton_test_add(_all_object)
 
     import_structure = {**module_requirements, **import_structure}
     return import_structure

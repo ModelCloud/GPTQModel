@@ -22,12 +22,10 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
-
 
 logger = setup_logger()
 
@@ -240,7 +238,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             bitblas_matmul = Matmul(config, target=self.target)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
-                global_operator_cache.add(config, bitblas_matmul)
+                global_operator_cache.triton_test_add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
                     BITBLAS_DATABASE_PATH, BITBLAS_TARGET
                 )
