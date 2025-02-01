@@ -116,7 +116,7 @@ class GPTQ:
 
 
     def _add_batch(self, inp, out):
-        inp = inp.to(device=torch.device("cpu"))
+        #inp = inp.to(device=torch.device("cpu"))
 
         # if os.environ.get("DEBUG"):
         #     self.inp1 = inp
