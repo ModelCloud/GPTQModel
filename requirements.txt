@@ -10,3 +10,4 @@ device-smi==0.3.3
 sentencepiece>=0.2.0
 protobuf>=5.29.1
 pillow>=10.4.0
+hf_transfer>=0.1.9
