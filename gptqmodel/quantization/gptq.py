@@ -114,7 +114,15 @@ class GPTQ:
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         # inp = inp.float()
-        inp = math.sqrt(2 / self.nsamples) * inp.to(device=self.device_partner, dtype=torch.float32)
+        try:
+            inp = math.sqrt(2 / self.nsamples) * inp.to(device=self.device_partner, dtype=torch.float32)
+        except torch.cuda.OutOfMemoryError:
+            self.device_partner = torch.device("cpu")
+            self.H = self.H.to(self.device_partner)
+            inp = math.sqrt(2 / self.nsamples) * inp.to(device=self.device_partner, dtype=torch.float32)
+            logger.info(
+                f"self.H: math.sqrt oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         try:
             self.H += inp.matmul(inp.t())
