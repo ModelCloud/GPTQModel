@@ -42,7 +42,10 @@ class GPTQ:
         self.layer_copy = self._clone_layer()
 
         self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
-        self.H = torch.zeros((self.columns, self.columns), device=self.device)
+
+        # large models such as DeepSeek requires too much memory even for A100
+        # move H to second cuda device until we actually need it quantization stage
+        self.H = torch.zeros((self.columns, self.columns), device="cuda:1")
         self.nsamples = 0
         self.quantizer = Quantizer()
 
@@ -58,6 +61,8 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp, out):
+        inp = inp.to("cuda:1")
+
         if os.environ.get("DEBUG"):
             self.inp1 = inp
             self.out1 = out
@@ -141,7 +146,8 @@ class GPTQ:
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
 
-        H = self.H
+        # move H back to self.device
+        H = self.H.to(self.device)
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
