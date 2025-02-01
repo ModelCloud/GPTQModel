@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -111,49 +110,29 @@ class IPEXQuantLinear(BaseQuantLinear):
         group_size: int,
         desc_act: bool,
         sym: bool,
-        infeatures: int,
-        outfeatures: int,
+        in_features: int,
+        out_features: int,
         pack_dtype: torch.dtype,
         bias: bool,
         kernel_switch_threshold=128,
         training=False,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            **kwargs)
 
         # FIX ME IPEX CPU has no float16 support
         self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
         self.init_ipex = False
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((infeatures // self.pack_dtype_bits * self.bits, outfeatures), dtype=torch.int32),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // self.pack_dtype_bits * self.bits,
-                ),
-                dtype=torch.int32,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
-                dtype=self.weight_dtype,
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=self.weight_dtype))
-        else:
-            self.bias = None
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
@@ -174,8 +153,8 @@ class IPEXQuantLinear(BaseQuantLinear):
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
-                                                                    self.infeatures, self.outfeatures, None, self.bias,
-                                                                    self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
+                                                                         self.in_features, self.out_features, None, self.bias,
+                                                                         self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
@@ -229,7 +208,7 @@ class IPEXQuantLinear(BaseQuantLinear):
 
         if self.wf.device != x.device:
             self.wf = self.wf.to(x.device)
-        out_shape = x.shape[:-1] + (self.outfeatures,)
+        out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
         zeros = torch.bitwise_right_shift(
@@ -264,7 +243,8 @@ class IPEXQuantLinear(BaseQuantLinear):
         out = torch.matmul(x, weights)
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            out.add_(self.bias)
 
         return out
 

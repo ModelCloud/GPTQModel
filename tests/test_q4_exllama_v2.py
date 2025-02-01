@@ -57,8 +57,8 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            infeatures=k,
-            outfeatures=n,
+            in_features=k,
+            out_features=n,
             bias=False,
             pack_dtype=pack_dtype,
         )

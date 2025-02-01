@@ -180,9 +180,18 @@ def make_quant(
             # else:
             #     logger.info("make_quant: Testing linear: {linear}")
 
-            linear_instance = create_quant_layer(linear=linear, bits=bits, desc_act=desc_act, dynamic=dynamic, group_size=group_size,
-                                        module=module, names=names, sym=sym, device=device, lm_head_name=lm_head_name,
-                                        pack_dtype=pack_dtype)
+            linear_instance = create_quant_layer(
+                linear=linear,
+                bits=bits,
+                desc_act=desc_act,
+                dynamic=dynamic,
+                group_size=group_size,
+                module=module,
+                names=names,
+                sym=sym,
+                device=device,
+                lm_head_name=lm_head_name,
+                pack_dtype=pack_dtype)
             logger.info(f"make_quant: Selected linear: `{linear}`.")
             return linear_instance
         except NotImplementedError as e:
@@ -194,8 +203,18 @@ def make_quant(
     raise ValueError("No compatible quant linear was found for this module: {module}")
 
 
-def create_quant_layer(linear: nn.Module, bits: int, desc_act: bool, dynamic, group_size: int, module, names, sym: bool,
-                       device: DEVICE, lm_head_name: str, pack_dtype: torch.dtype,
+def create_quant_layer(
+        linear: nn.Module,
+        bits: int,
+        desc_act: bool,
+        dynamic,
+        group_size: int,
+        module,
+        names,
+        sym: bool,
+        device: DEVICE,
+        lm_head_name: str,
+        pack_dtype: torch.dtype,
                        ) -> BaseQuantLinear:
     if isinstance(module, linear):
         return linear
@@ -213,8 +232,8 @@ def create_quant_layer(linear: nn.Module, bits: int, desc_act: bool, dynamic, gr
                 out_features = submodule.weight.shape[1]
             elif isinstance(submodule, BaseQuantLinear):
                 # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
-                in_features = submodule.infeatures
-                out_features = submodule.outfeatures
+                in_features = submodule.in_features
+                out_features = submodule.out_features
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
@@ -246,9 +265,15 @@ def create_quant_layer(linear: nn.Module, bits: int, desc_act: bool, dynamic, gr
 
             # when loading a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
-            _, err = linear.validate(bits=tmp_bits, group_size=tmp_group_size, desc_act=tmp_desc_act, sym=tmp_sym,
-                                     pack_dtype=tmp_pack_dtype, infeatures=in_features, outfeatures=out_features,
-                                     device=device)
+            _, err = linear.validate(
+                bits=tmp_bits,
+                group_size=tmp_group_size,
+                desc_act=tmp_desc_act,
+                sym=tmp_sym,
+                pack_dtype=tmp_pack_dtype,
+                in_features=in_features,
+                out_features=out_features,
+                device=device)
             if err is not None:
                 raise err
 
@@ -257,8 +282,8 @@ def create_quant_layer(linear: nn.Module, bits: int, desc_act: bool, dynamic, gr
                 group_size=tmp_group_size,
                 desc_act=tmp_desc_act,
                 sym=tmp_sym,
-                infeatures=in_features,
-                outfeatures=out_features,
+                in_features=in_features,
+                out_features=out_features,
                 pack_dtype=tmp_pack_dtype,
                 bias=bias,
                 #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
@@ -589,8 +614,8 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             if use_act_order:
                 device_to_buffers_size[device]["max_inner_outer_dim"] = max(
                     device_to_buffers_size[device]["max_inner_outer_dim"],
-                    submodule.infeatures,
-                    submodule.outfeatures,
+                    submodule.in_features,
+                    submodule.out_features,
                 )
 
     if model_uses_exllama:

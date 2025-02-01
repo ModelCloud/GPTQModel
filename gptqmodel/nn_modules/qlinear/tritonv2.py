@@ -71,45 +71,25 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, pack_dtype, bias, **kwargs,):
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features, out_features, pack_dtype, bias, **kwargs, ):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            **kwargs)
 
-        if self.group_size != self.infeatures:
-            self.padded_infeatures = self.infeatures + (-self.infeatures % self.group_size)
+        if self.group_size != self.in_features:
+            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
             self.padded_infeatures = self.padded_infeatures
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((infeatures // self.pack_factor, outfeatures), dtype=self.pack_dtype),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // self.pack_factor,
-                ),
-                dtype=self.pack_dtype,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
-                dtype=torch.float16,
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
-        else:
-            self.bias = None
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -124,22 +104,22 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         return cls._validate(**args)
 
     def post_init(self):
-        if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.outfeatures)
+        if self.padded_infeatures != self.in_features:
+            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.out_features)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // self.pack_factor
+                self.out_features // self.pack_factor
             )
-            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
     def forward(self, x):
-        # if infeatures is padded, we need to pad the input as well
+        # if in_features is padded, we need to pad the input as well
         if x.size(-1) != self.padded_infeatures:
-            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+            x = F.pad(x, (0, self.padded_infeatures - self.in_features))
 
-        out_shape = x.shape[:-1] + (self.outfeatures,)
+        out_shape = x.shape[:-1] + (self.out_features,)
 
         out = QuantLinearFunction.apply(
             x.reshape(-1, x.shape[-1]),
@@ -153,7 +133,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         )
         out = out.to(dtype=x.dtype).reshape(out_shape)
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
 

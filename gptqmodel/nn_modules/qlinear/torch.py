@@ -49,48 +49,28 @@ class TorchQuantLinear(PackableQuantLinear):
         group_size: int,
         sym: bool,
         desc_act: bool,
-        infeatures: int,
-        outfeatures: int,
+        in_features: int,
+        out_features: int,
         bias: bool,
         pack_dtype: torch.dtype,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            **kwargs)
 
-        if self.group_size != self.infeatures:
-            self.padded_infeatures = self.infeatures + (-self.infeatures % self.group_size)
+        if self.group_size != self.in_features:
+            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
             self.padded_infeatures = self.padded_infeatures
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((self.infeatures // self.pack_dtype_bits * self.bits, self.outfeatures), dtype=self.pack_dtype),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(self.infeatures / self.group_size),
-                    self.outfeatures // self.pack_dtype_bits * self.bits,
-                ),
-                dtype=self.pack_dtype,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(self.infeatures / self.group_size), self.outfeatures),
-                dtype=torch.float16,  # Scales are always float16
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32),
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.float16))
-        else:
-            self.bias = None
 
         if self.bits in [2, 4, 8]:
             self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
@@ -105,13 +85,13 @@ class TorchQuantLinear(PackableQuantLinear):
             ).reshape(1, 3, 12)
 
     def post_init(self):
-        if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.outfeatures)
+        if self.padded_infeatures != self.in_features:
+            self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // self.pack_dtype_bits * self.bits
+                self.out_features // self.pack_dtype_bits * self.bits
             )
-            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
@@ -119,9 +99,9 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
-            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+            x = F.pad(x, (0, self.padded_infeatures - self.in_features))
 
-        out_shape = x.shape[:-1] + (self.outfeatures,)
+        out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         out = self._forward(x, x.dtype, out_shape)
         return out
@@ -132,7 +112,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
     # clear gptq only weights: useful in de-quantization
@@ -209,7 +189,7 @@ def dequantize_model(model: nn.Module):
 
         if isinstance(module, TorchQuantLinear):
             # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.infeatures, module.outfeatures)
+            new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
             new_module.bias = module.bias
 

@@ -41,13 +41,13 @@ class TestInferenceSpeed(InferenceSpeed):
 
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 219.87),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 50.46),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 218.35),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 222.24),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 224.39),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 50.67),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 221.48),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 225.14),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 163.94),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 50.65),
-            # (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474), # Second time running bitblas, there is cache
+            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1129.44), # Second time running bitblas, there is cache
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second):

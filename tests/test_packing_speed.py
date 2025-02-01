@@ -90,8 +90,8 @@ class TestRepacking(unittest.TestCase):
             group_size=self.group_size,
             sym=True,
             desc_act=True,
-            infeatures=self.k,
-            outfeatures=self.n,
+            inf_eatures=self.k,
+            out_features=self.n,
             bias=False)
 
         qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)

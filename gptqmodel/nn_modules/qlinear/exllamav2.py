@@ -138,8 +138,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: torch.dtype,
-                 bias: bool,  **kwargs,):
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features: int, out_features: int, pack_dtype: torch.dtype,
+                 bias: bool, **kwargs, ):
 
         if exllama_v2_import_exception is not None:
             raise ValueError(
@@ -147,50 +147,32 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             )
 
         # backup original values
-        self.original_outfeatures = outfeatures
-        self.original_infeatures = infeatures
+        self.original_out_features = out_features
+        self.original_in_features = in_features
 
         # auto pad
-        group_size = group_size if group_size != -1 else infeatures
-        outfeatures = outfeatures + (-outfeatures % 32)
-        infeatures = infeatures + (-infeatures % group_size)
+        group_size = group_size if group_size != -1 else in_features
+        out_features = out_features + (-out_features % 32)
+        in_features = in_features + (-in_features % group_size)
+        self.in_features_padding_size = in_features - self.original_in_features
+        self.in_features_padding_shape = (0, self.in_features_padding_size)
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            register_buffers_in_features=self.original_in_features,
+            register_buffers_out_feature=self.original_out_features,
+            **kwargs)
 
         self.q_handle = None
         self.q_tensors = None
-
-        # I need to register the tensors, otherwise, we won't be able to load them easily using transformers ...
-        self.register_buffer(
-            "qweight",
-            torch.zeros((self.original_infeatures // self.pack_dtype_bits * self.bits, self.original_outfeatures), dtype=torch.int32),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(self.original_infeatures / self.group_size),
-                    self.original_outfeatures // self.pack_dtype_bits * self.bits,
-                ),
-                dtype=torch.int32,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(self.original_infeatures / self.group_size), self.original_outfeatures),
-                dtype=torch.float16,
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(self.original_infeatures)], dtype=torch.int32),
-        )
-
-        if bias:
-            self.register_buffer("bias", torch.zeros((self.original_outfeatures), dtype=torch.float16))
-        else:
-            self.bias = None
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -200,16 +182,16 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     def post_init(self, temp_dq):
         # resize due to padding after model weights have been loaded
-        if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
-            self.qweight.resize_(self.infeatures // self.pack_dtype_bits * self.bits, self.outfeatures)
+        if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
+            self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
             self.qzeros.resize_(
-                math.ceil(self.infeatures / self.group_size),
-                self.outfeatures // self.pack_dtype_bits * self.bits
+                math.ceil(self.in_features / self.group_size),
+                self.out_features // self.pack_dtype_bits * self.bits
             )
-            self.scales.resize_(math.ceil(self.infeatures / self.group_size), self.outfeatures)
-            self.g_idx = torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32, device=self.g_idx.device)
+            self.scales.resize_(math.ceil(self.in_features / self.group_size), self.out_features)
+            self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
             if self.bias is not None:
-                self.bias.resize_(self.outfeatures)
+                self.bias.resize_(self.out_features)
 
         self.q_tensors = {
             "qweight": self.qweight,
@@ -229,11 +211,11 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             x = x.half()
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
-        # if infeatures is padded, we need to pad the input as well
-        if x.size(-1) != self.infeatures:
-            x = F.pad(x, (0, self.infeatures - self.original_infeatures))
+        # if in_features is padded, we need to pad the input as well
+        if x.size(-1) != self.in_features:
+            x = F.pad(x, self.in_features_padding_shape)
 
-        output = ext_gemm_half_q_half(x, self.q_handle, self.outfeatures, force_cuda)
+        output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
 
         if self.bias is not None:
             output.add_(self.bias)
@@ -241,10 +223,10 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         return output
 
     def temp_dq_size(self):
-        return self.infeatures * self.outfeatures * 2 + 128
+        return self.in_features * self.out_features * 2 + 128
 
     def temp_fwd_size(self, max_input_len, max_batch_size):
-        return self.outfeatures * max_input_len * max_batch_size * 4 + 128
+        return self.out_features * max_input_len * max_batch_size * 4 + 128
 
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
