@@ -349,6 +349,8 @@ class GPTQ:
         self.layer_copy = None
 
         torch_empty_cache(self.device)
+        if self.device_partner and self.device_partner != self.device:
+            torch_empty_cache(self.device_partner)
 
 
 __all__ = ["GPTQ"]
