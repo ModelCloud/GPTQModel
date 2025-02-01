@@ -134,6 +134,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             desc_act=desc_act,
             in_features=in_features,
             out_features=out_features,
+            bias=bias,
             pack_dtype=pack_dtype,
             register_buffers=False,
             **kwargs)

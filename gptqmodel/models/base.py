@@ -898,7 +898,7 @@ class BaseGPTQModel(nn.Module):
         else:
             self.save_pretrained(save_dir, **kwargs)
 
-    def compile(self, backend="inductor", mode="reduce-overhead"):
+    def compile(self, backend="inductor", mode="max-autotune"):
         if not self.quantized:
             logger.warning("model is not quantized, skip compiling...")
             return self
@@ -913,9 +913,12 @@ class BaseGPTQModel(nn.Module):
 
         try:
             self.model = torch.compile(self.model, fullgraph=True, backend=backend, mode=mode)
-        except Exception:
-            logger.info("Compiling model again with `fullgraph=False`")
-            self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+        except Exception as e:
+            logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
+            try:
+                self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+            except Exception as e:
+                logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
         return self
 
     def serve(self,
