@@ -23,6 +23,7 @@ import time
 import torch
 import torch.nn as nn
 import transformers
+import threadpoolctl as tctl
 
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_empty_cache, torch_sync
@@ -61,24 +62,26 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp, out):
-        try:
-            if self.H is None:
-                # large models such as DeepSeek requires too much memory even for A100
-                # move H to second cuda device until we actually need it quantization stage
-                self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
-                logger.info(
-                    f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
-            self._add_batch(inp, out)
+        # Limit pack() thread usage to avoid auto-parallizataion regression
+        with tctl.threadpool_limits(limits=1):
+            try:
+                if self.H is None:
+                    # large models such as DeepSeek requires too much memory even for A100
+                    # move H to second cuda device until we actually need it quantization stage
+                    self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+                    logger.info(
+                        f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+                self._add_batch(inp, out)
 
-        except torch.cuda.OutOfMemoryError:
-            self.device_partner = torch.device("cpu")
-            if self.H is None:
-                # large models such as DeepSeek requires too much memory even for A100
-                # move H to second cuda device until we actually need it quantization stage
-                self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
-                logger.info(
-                    f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
-            self._add_batch(inp, out)
+            except torch.cuda.OutOfMemoryError:
+                self.device_partner = torch.device("cpu")
+                if self.H is None:
+                    # large models such as DeepSeek requires too much memory even for A100
+                    # move H to second cuda device until we actually need it quantization stage
+                    self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+                    logger.info(
+                        f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+                self._add_batch(inp, out)
 
 
     def _add_batch(self, inp, out):

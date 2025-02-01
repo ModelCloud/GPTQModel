@@ -28,7 +28,6 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Type
 
 import accelerate
-import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
@@ -424,21 +423,19 @@ def convert_gptq_v2_to_v1_format(
 
 
 def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
-    # Limit pack() thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        pbar.set_description(f"Packing {name}")
-        quantizers[name], scale, zero, g_idx = quantizers[name]
-        layer_device = qlayers[name].device
-        qlayers[name].to(CPU)
-        layers[name], scale, zero, g_idx = (
-            layers[name].to(CPU),
-            scale.to(CPU),
-            zero.to(CPU),
-            g_idx.to(CPU) if g_idx is not None else None,
-        )
-        qlayers[name].pack(layers[name], scale, zero, g_idx)
-        qlayers[name].to(layer_device)
-        pbar.progress()
+    pbar.set_description(f"Packing {name}")
+    quantizers[name], scale, zero, g_idx = quantizers[name]
+    layer_device = qlayers[name].device
+    qlayers[name].to(CPU)
+    layers[name], scale, zero, g_idx = (
+        layers[name].to(CPU),
+        scale.to(CPU),
+        zero.to(CPU),
+        g_idx.to(CPU) if g_idx is not None else None,
+    )
+    qlayers[name].pack(layers[name], scale, zero, g_idx)
+    qlayers[name].to(layer_device)
+    pbar.progress()
 
 
 def pack_model(
