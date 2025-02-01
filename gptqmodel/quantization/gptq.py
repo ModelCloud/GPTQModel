@@ -44,15 +44,8 @@ class GPTQ:
 
         self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
 
-        # large models such as DeepSeek requires too much memory even for A100
-        # move H to second cuda device until we actually need it quantization stage
-        try:
-            self.H = torch.zeros((self.columns, self.columns), device=self.device_partner)
-            logger.info(f"self.H: using partner device: {self.device_partner}, shape: {self.H.shape}")
-        except torch.OutOfMemoryError:
-            self.device_partner = torch.device("cpu")
-            self.H = torch.zeros((self.columns, self.columns), device=self.device_partner)
-            logger.info(f"self.H: using cpu device: {self.device_partner}, shape: {self.H.shape}")
+        # delay allocation until add_batch
+        self.H = None
         self.nsamples = 0
         self.quantizer = Quantizer()
 
@@ -68,7 +61,24 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp, out):
-        inp = inp.to(self.device_partner)
+        try:
+            if self.H is None:
+                # large models such as DeepSeek requires too much memory even for A100
+                # move H to second cuda device until we actually need it quantization stage
+                self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+            self._add_batch(inp, out)
+            logger.info(f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+        except torch.cuda.OutOfMemoryError:
+            self.device_partner = torch.device("cpu")
+            if self.H is None:
+                # large models such as DeepSeek requires too much memory even for A100
+                # move H to second cuda device until we actually need it quantization stage
+                self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+            self._add_batch(inp, out)
+            logger.info(f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}c")
+
+    def _add_batch(self, inp, out):
+        #inp = inp.to(self.device_partner, dtype=torch.float32)
 
         if os.environ.get("DEBUG"):
             self.inp1 = inp
@@ -97,9 +107,15 @@ class GPTQ:
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         # inp = inp.float()
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
+        inp = math.sqrt(2 / self.nsamples) * inp.to(device=self.device_partner, dtype=torch.float32)
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
-        self.H += inp.matmul(inp.t())
+        try:
+            self.H += inp.matmul(inp.t())
+        except torch.cuda.OutOfMemoryError:
+            self.device_partner = torch.device("cpu")
+            self.H = self.H.to(self.device_partner)
+            inp = inp.to(self.device_partner)
+            self.H += inp.matmul(inp.t())
 
     # wrapper for backward compat with optimum
     # TODO: mark for deprecation
@@ -154,7 +170,7 @@ class GPTQ:
             self.quantizer.find_params(W, weight=True)
 
         # move H back to self.device
-        H = self.H.to(self.device)
+        H = self.H.to(self.device, dtype=torch.float32)
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
