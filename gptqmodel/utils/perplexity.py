@@ -17,7 +17,7 @@ import sys
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from gptqmodel.utils.progress import ProgressBar
 
 
@@ -27,13 +27,13 @@ class Perplexity:
     """
 
     def __init__(
-        self,
-        model,
-        tokenizer,
-        dataset_path="wikitext",
-        dataset_name=None,
-        split="test",
-        text_column="text",
+            self,
+            model,
+            tokenizer,
+            dataset_path="wikitext",
+            dataset_name=None,
+            split="test",
+            text_column="text",
     ):
         """
         Calculate perplexity using the same method as seen in llama.cpp.
@@ -86,10 +86,24 @@ class Perplexity:
 
         # Load the dataset
         length = 512 if self._dataset_path == "wikitext" else 2048
-        data = load_dataset(self._dataset_path, self._dataset_name, split=self._split).filter(lambda x: len(x[self._text_column]) >= length).select(range(1024))
-        # Format the text column of the dataset
-        text_list = [" \n" if s == "" else s for s in data[self._text_column]]
-        return "".join(text_list)
+        if self._dataset_path.startswith("/") or self._dataset_path.startswith("./"):
+            if self._dataset_path.endswith(".gz"):
+                data = load_dataset(self._dataset_name, data_files=self._dataset_path, split=self._split)
+            else:
+                data = load_from_disk(self._dataset_path)[self._split]
+        else:
+            data = load_dataset(self._dataset_path, self._dataset_name, split=self._split)
+
+        datas = []
+        for index, sample in enumerate(data):
+            text = sample[self._text_column]
+            if len(text) >= length:
+                # Format the text column of the dataset
+                datas.append(" \n" if text == "" else text)
+                if len(datas) >= 1024:
+                    break
+
+        return "".join(datas)
 
     @staticmethod
     def softmax(logits):
@@ -238,5 +252,5 @@ class Perplexity:
         """
         # Compute the logits without keeping track of gradients
         with torch.no_grad():
-            outputs = self._model(tokens[:, batch_start : batch_start + batch_size])
+            outputs = self._model(tokens[:, batch_start: batch_start + batch_size])
         return outputs.logits.detach()

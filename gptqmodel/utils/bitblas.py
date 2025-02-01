@@ -17,12 +17,11 @@ import os
 
 import threadpoolctl as tctl
 import torch
-from accelerate.utils import find_tied_parameters
 
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
-from .model import load_checkpoint_in_model_then_tie_weights, recurse_getattr, recurse_setattr
+from .model import load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
@@ -30,7 +29,7 @@ logger = setup_logger()
 
 def prepare_model_for_bitblas_load(
         model,
-        quantize_config: QuantizeConfig,
+        qcfg: QuantizeConfig,
         quant_linear_class,
         torch_dtype,
         model_save_name,
@@ -40,10 +39,10 @@ def prepare_model_for_bitblas_load(
         load_checkpoint_in_model: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
-    if quantize_config.format == FORMAT.BITBLAS:
+    if qcfg.format == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
         logger.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
-        model = convert_to_bitblas(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
+        model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
         load_checkpoint_in_model_then_tie_weights(
             model,
             dtype=torch_dtype,
@@ -57,7 +56,7 @@ def prepare_model_for_bitblas_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # BitBLAS ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        if not load_checkpoint_in_model:
+        if load_checkpoint_in_model:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -67,31 +66,12 @@ def prepare_model_for_bitblas_load(
                 offload_buffers=True,
             )
         # Convert model to bitblas, repacking weights into BitBLAS format.
-        model = convert_to_bitblas(model, quant_linear_class, quantize_config, sym, desc_act, repack=True)
-
-        # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-        tied_params = find_tied_parameters(model)
-
-        for weight_group in tied_params:
-            for param_name in weight_group:
-                if isinstance(recurse_getattr(model, param_name), torch.nn.Parameter):
-                    recurse_setattr(
-                        model,
-                        param_name,
-                        torch.nn.Parameter(recurse_getattr(model, param_name).clone()),
-                    )
-                else:
-                    recurse_setattr(
-                        model,
-                        param_name,
-                        recurse_getattr(model, param_name).clone(),
-                    )
+        model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
     return model
 
 
 @torch.no_grad()
-def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool,
-                       strict: bool = False):
+def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool, desc_act: bool, repack: bool):
     """
     Converts GPTQ-packed weights to the Bitblas format.
 
@@ -122,17 +102,18 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
             # from checkpoints holding zero bias.
             with torch.device("meta"):
                 bitblas_module = BitBLASQuantLinear(
-                    bits=quant_config.bits,
-                    group_size=quant_config.group_size,
+                    bits=qcfg.bits,
+                    group_size=qcfg.group_size,
                     sym=sym,
                     desc_act=desc_act,
                     infeatures=module.infeatures,
                     outfeatures=module.outfeatures,
+                    pack_dtype=qcfg.pack_dtype,
                     bias=module.bias is not None,
                     enable_tuning=True
                 )
 
-            # Dequantize the weight.
+            # convert to bitblas format
             if repack:
                 bitblas_module.repack_from_gptq(module)
 
@@ -145,6 +126,6 @@ def convert_to_bitblas(model, model_quantlinear, quant_config: QuantizeConfig, s
             torch_empty_cache()
 
     # Set quantization config to be BitBLAS.
-    quant_config.runtime_format = FORMAT.BITBLAS
+    qcfg.runtime_format = FORMAT.BITBLAS
 
     return model

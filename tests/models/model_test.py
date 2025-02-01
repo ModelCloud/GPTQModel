@@ -17,8 +17,6 @@
 import os
 import sys
 
-from lm_eval.tasks import TaskManager
-
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -41,7 +39,6 @@ from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
@@ -76,15 +73,33 @@ class ModelTest(unittest.TestCase):
     LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
+    INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country", "the city"]
+    GENERATE_EVAL_SIZE_MIN = 20
+    GENERATE_EVAL_SIZE_MAX = 50
+
+    def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
+        # gptqmodel can auto init tokenizer internally
+        if keywords is None:
+            keywords = self.INFERENCE_RESULT_KEYWORDS
+        if tokenizer is None:
+            tokenizer = model.tokenizer
+
+        generated = self.generate(model, tokenizer, prompt).lower()
+        for k in keywords:
+            if k.lower() in generated:
+                self.assertTrue(True)
+                return
+        self.assertTrue(False, f"none of keywords were found in generated: {generated}")
+
+    # note that sampling is disabled for help with deterministic generation for ci tests
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
-            prompt = "I am in Paris and"
-        device = model.device
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE,
-                             max_new_tokens=self.GENERATE_EVAL_SIZE)
+            prompt = self.INFERENCE_PROMPT
+        inp = tokenizer(prompt, return_tensors="pt").to(model.device)
+        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=self.GENERATE_EVAL_SIZE_MIN, max_new_tokens=self.GENERATE_EVAL_SIZE_MIN)
         output = tokenizer.decode(res[0])
-        print(f"Result is: \n{output}")
+        print(f"Result is: >>\n{output}\n<<")
         return output
 
     def generateChat(self, model, tokenizer, prompt=None):
@@ -97,7 +112,7 @@ class ModelTest(unittest.TestCase):
             ]
 
         input_tensor = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_tensors="pt")
-        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE)
+        outputs = model.generate(input_ids=input_tensor.to(model.device), max_new_tokens=self.GENERATE_EVAL_SIZE_MAX)
         output = tokenizer.decode(outputs[0][input_tensor.shape[1]:], skip_special_tokens=True)
         print(f"Result is: \n{output}")
         return output
@@ -107,15 +122,15 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer):
-        traindata = load_dataset("json", data_files="/monster/data/model/huggingface/c4-train.00000-of-01024.json.gz", split="train")
+    def load_dataset(self, tokenizer, rows: int = 128):
+        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
         for index, sample in enumerate(traindata):
             tokenized = tokenizer(sample['text'])
             if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
                 datas.append(tokenized)
-                if len(datas) >= 128:
+                if len(datas) >= rows:
                     break
 
         return datas
@@ -229,6 +244,8 @@ class ModelTest(unittest.TestCase):
                     model_args = f"pretrained={model.model_local_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
                 else:
                     model_args = ""
+                from lm_eval.tasks import TaskManager
+                from lm_eval.utils import make_table
                 results = lm_eval(
                     model,
                     model_name="vllm" if self.USE_VLLM else "hf",
@@ -243,7 +260,7 @@ class ModelTest(unittest.TestCase):
                     numpy_random_seed=RAND_SEED,
                     torch_random_seed=RAND_SEED,
                     fewshot_random_seed=RAND_SEED,
-                    task_manager=TaskManager(include_path="../tasks", include_defaults=False)
+                    task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                 )
 
                 print('--------Eval Result---------')

@@ -16,34 +16,36 @@
 import math
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
-from ..triton_utils.mixin import TritonModuleMixin
-from . import BaseQuantLinear
+from . import PackableQuantLinear
 
 try:
+    import triton
+    import triton.language as tl
     from triton import __version__ as triton_version
 
     from ..triton_utils.dequant import QuantLinearFunction
+    from ..triton_utils.mixin import TritonModuleMixin
     if version.parse(triton_version) < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
     TRITON_AVAILABLE = True
-except ImportError:
+except BaseException:
     TRITON_AVAILABLE = False
+    class TritonModuleMixin:
+        pass
 
 TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
+TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
 
 logger = setup_logger()
 
 
-class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -54,8 +56,9 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
@@ -68,31 +71,28 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, bias, **kwargs,):
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, pack_dtype, bias, **kwargs,):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
-        self.padded_infeatures = infeatures + (-infeatures % group_size)
-
-        self.bits = bits
-        self.group_size = group_size if group_size != -1 else infeatures
-        self.maxq = 2**self.bits - 1
+        if self.group_size != self.infeatures:
+            self.padded_infeatures = self.infeatures + (-self.infeatures % self.group_size)
+        else:
+            self.padded_infeatures = self.padded_infeatures
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32),
+            torch.zeros((infeatures // self.pack_factor, outfeatures), dtype=self.pack_dtype),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(infeatures / self.group_size),
-                    outfeatures // 32 * self.bits,
+                    outfeatures // self.pack_factor,
                 ),
-                dtype=torch.int32,
+                dtype=self.pack_dtype,
             ),
         )
         self.register_buffer(
@@ -115,71 +115,24 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if not TRITON_AVAILABLE:
             return False, ValueError(TRITON_INSTALL_HINT)
+
+        device = args.get('device')
+
+        if device == DEVICE.XPU and not triton_xpu_available():
+            return False, ValueError(TRITON_XPU_INSTALL_HINT)
+
         return cls._validate(**args)
 
     def post_init(self):
         if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // 32 * self.bits, self.outfeatures)
+            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.outfeatures)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // 32 * self.bits
+                self.outfeatures // self.pack_factor
             )
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
-
-
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().half()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().half()
-
-        intweight = []
-        for idx in range(self.infeatures):
-            intweight.append(
-                torch.round((W[:, idx] + scale_zeros[self.g_idx[idx]]) / self.scales[self.g_idx[idx]]).to(torch.int)[
-                    :, None
-                ]
-            )
-        intweight = torch.cat(intweight, dim=1)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
-
-        i = 0
-        row = 0
-        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
-        while row < qweight.shape[0]:
-            for j in range(i, i + (32 // self.bits)):
-                qweight[row] |= intweight[j] << (self.bits * (j - i))
-            i += 32 // self.bits
-            row += 1
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
-
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
-        i = 0
-        col = 0
-        while col < qzeros.shape[1]:
-            for j in range(i, i + (32 // self.bits)):
-                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-            i += 32 // self.bits
-            col += 1
-
-        qzeros = qzeros.astype(np.int32)
-        self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x):
         # if infeatures is padded, we need to pad the input as well
@@ -187,20 +140,61 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
 
         out_shape = x.shape[:-1] + (self.outfeatures,)
-        quant_linear_fn = QuantLinearFunction
 
-        out = quant_linear_fn.apply(
+        out = QuantLinearFunction.apply(
             x.reshape(-1, x.shape[-1]),
             self.qweight,
             self.scales,
             self.qzeros,
             self.g_idx,
             self.bits,
+            self.pack_dtype_bits,
             self.maxq,
         )
-        out = out.half().reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        out = out.to(dtype=x.dtype).reshape(out_shape)
+        if self.bias is not None:
+            out = out + self.bias
         return out
 
 
 __all__ = ["TritonV2QuantLinear"]
+
+# test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data
+def triton_test_add(x: torch.Tensor, y: torch.Tensor):
+    # don't put it on top-level to avoid crash if triton was not installed
+    @triton.jit
+    def add_kernel(x_ptr,  # *Pointer* to first input vector.
+                   y_ptr,  # *Pointer* to second input vector.
+                   output_ptr,  # *Pointer* to output vector.
+                   n_elements,  # Size of the vector.
+                   BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
+                   ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        output = x + y  # noqa: F841
+    output = torch.empty_like(x)
+    n_elements = output.numel()
+    def grid(meta):
+        return (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    return output
+
+
+def triton_xpu_available():
+    if not TRITON_AVAILABLE:
+        return False
+    size = 1024
+    x = torch.rand(size, device='xpu:0')
+    y = torch.rand(size, device='xpu:0')
+
+    try:
+        triton_test_add(x, y)
+        return True
+    except Exception:
+        return False
+
+

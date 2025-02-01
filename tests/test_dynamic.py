@@ -16,25 +16,28 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
+import json
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
-from gptqmodel.utils import Perplexity  # noqa: E402
+from gptqmodel.utils import Perplexity, safetensor  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
-class TestDynamic(unittest.TestCase):
-    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-    tmp_dir = None
+class TestDynamic(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    tmp_quant_path = None
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
@@ -55,23 +58,27 @@ class TestDynamic(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp_dir = tempfile.TemporaryDirectory()
+        cls.tmp_quant_path = tempfile.TemporaryDirectory()
         cls.tokenizer = AutoTokenizer.from_pretrained(cls.NATIVE_MODEL_ID, use_fast=True)
 
         if not cls.tokenizer.pad_token_id:
             cls.tokenizer.pad_token_id = cls.tokenizer.eos_token_id
 
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
-        cls.calibration_dataset = [cls.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        cls.calibration = cls.load_dataset(cls.tokenizer, rows=32)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         dynamic = {
             # `.*\.` matches the layers_node prefix
             # layer index start at 0
-            r".*\.18\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 18 gate module
-            r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 19 gate module
-            r".*\.20\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 20 gate module
-            r".*\.21\..*gate.*": {"bits": 8, "group_size": 64},  # match layer 21 gate module
+            r".*\.up_proj.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
+            r".*\.gate_proj.*": {"bits": 8, "group_size": 128},  # match layer 2 gate module
+            r".*\.down_proj.*": {"bits": 4, "group_size": 32},
+
+
+            # r".*\.0\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
+            # r".*\.1\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 2 gate module
+            # r".*\.2\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 20 gate module
+            # r".*\.3\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 21 gate module
         }
         quantize_config = QuantizeConfig(
             bits=4,
@@ -82,37 +89,50 @@ class TestDynamic(unittest.TestCase):
             cls.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        model.quantize(cls.calibration_dataset, batch_size=4)
+        model.quantize(cls.calibration, batch_size=4)
 
-        model.save(cls.tmp_dir.name)
+        print(f"Model: {model.model}")
+
+        model.save(cls.tmp_quant_path.name)
+
+        # print quant config
+        with open(cls.tmp_quant_path.name + "/quantize_config.json", 'r') as file:
+            config_data = json.load(file)
+            print(f"quantize_config.json: {config_data}")
+
+        safetensor.inspect_safetensors(cls.tmp_quant_path.name)
 
     @classmethod
     def tearDownClass(cls):
-        cls.tmp_dir.cleanup()
-        assert not os.path.exists(cls.tmp_dir.name)
+        cls.tmp_quant_path.cleanup()
+        assert not os.path.exists(cls.tmp_quant_path.name)
 
     @parameterized.expand(
         [
-            (BACKEND.TRITON),
-            (BACKEND.MARLIN),
+            # exllama v1/v2 only supports 4bit so does not support dynamic bits control
+            (BACKEND.TORCH, TorchQuantLinear, 15.7372),
+            (BACKEND.CUDA, DynamicCudaQuantLinear, 15.7372),
+            (BACKEND.TRITON, TritonV2QuantLinear, 15.7372),
+            (BACKEND.MARLIN, MarlinQuantLinear, 15.8582), # A100: 15.7545
         ]
     )
-    def test_dynamic_bits(self, backend):
+    def test_dynamic_bits(self, backend, backendQLinear, ppl):
         model = GPTQModel.load(
-            self.tmp_dir.name,
+            self.tmp_quant_path.name,
             backend=backend,
         )
 
         for _, submodule in model.named_modules():
-            if isinstance(submodule, TritonV2QuantLinear if backend == BACKEND.TRITON else MarlinQuantLinear):
+            if isinstance(submodule, backendQLinear):
                 break
         else:
-            raise ValueError("Did not find a " + "tritonv2 linear layer" if backend == BACKEND.TRITON else "marlin linear layer")
+            raise ValueError(f"Did not find a `{backendQLinear}` linear layer for backend: `{backend}`")
 
         dynamic_bits_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
         del model
-        assert dynamic_bits_ppl < 10
+        print(f"Backend: {backend}, PPL: {dynamic_bits_ppl}")
+        assert dynamic_bits_ppl <= ppl
 
     def test_skip_module(self):
         dynamic = {
@@ -122,7 +142,7 @@ class TestDynamic(unittest.TestCase):
             self.NATIVE_MODEL_ID,
             quantize_config=QuantizeConfig(dynamic=dynamic),
         )
-        model.quantize(self.calibration_dataset, batch_size=4)
+        model.quantize(self.calibration, batch_size=4)
 
         for name, submodule in model.named_modules():
             if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped
@@ -133,11 +153,4 @@ class TestDynamic(unittest.TestCase):
             del model
 
             q_model = GPTQModel.load(tmp_dir)
-            generate_str = self.tokenizer.decode(
-                q_model.generate(
-                    **self.tokenizer("The capital of France is is", return_tensors="pt").to(q_model.device),
-                    max_new_tokens=2)[0])
-
-            print(f"generate_str: {generate_str}")
-
-            self.assertIn("paris", generate_str.lower())
+            self.assertInference(model=q_model,tokenizer=self.tokenizer)

@@ -18,44 +18,43 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
-class TestQ4Marlin(unittest.TestCase):
+class TestQ4Marlin(ModelTest):
+
+    GENERATE_EVAL_SIZE_MAX = 100
 
     @parameterized.expand(
         [
             # act_order==False, group_size=128
-            ("/monster/data/model/Llama-2-7B-GPTQ"),
+            "/monster/data/model/Llama-2-7B-GPTQ",
 
             # act_order==True, group_size=128
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
             # act_order==True, group_size=64
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-64g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-64g-actorder_True",
             # act_order==True, group_size=32
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-32g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-4bit-32g-actorder_True",
 
             # # 8-bit, act_order==True, group_size=channelwise
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit--1g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit--1g-actorder_True",
             # # 8-bit, act_order==True, group_size=128
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-128g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-128g-actorder_True",
             # # 8-bit, act_order==True, group_size=32
-            ("/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-32g-actorder_True"),
+            "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit/gptq-8bit-32g-actorder_True",
 
             # # 4-bit, act_order==True, group_size=128
-            ("/monster/data/model/gemma-1.1-2b-it-GPTQ")
+            "/monster/data/model/gemma-1.1-2b-it-GPTQ",
         ]
     )
     def test_generation(self, model_id):
-        prompt = "The capital of France is"
-        device = torch.device("cuda:0")
-
         try:
             model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
@@ -71,13 +70,7 @@ class TestQ4Marlin(unittest.TestCase):
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0]).lower()
-
-        self.assertTrue("paris" in predicted_text or "city" in predicted_text)
+        self.assertInference(model=model_q, tokenizer=tokenizer)
 
     def test_bias(self):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
@@ -99,12 +92,4 @@ class TestQ4Marlin(unittest.TestCase):
         model_id = "/monster/data/model/starcoderbase-1b"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        prompt = "The capital of France is"
-        inp = tokenizer(prompt, return_tensors="pt").to("cuda:0")
-
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0])
-
-        self.assertIn("paris", predicted_text.lower())
-
+        self.assertInference(model=model_q, tokenizer=tokenizer)

@@ -97,6 +97,9 @@ def get_version_tag() -> str:
 
     import torch
 
+    if ROCM_VERSION:
+        return f"rocm{ROCM_VERSION}"
+
     cuda_version = os.environ.get("CUDA_VERSION", torch.version.cuda)
     if not cuda_version or not cuda_version.split("."):
         print(
@@ -105,8 +108,6 @@ def get_version_tag() -> str:
         )
         sys.exit(1)
 
-    if ROCM_VERSION:
-        return f"rocm{ROCM_VERSION}"
 
     CUDA_VERSION = "".join(cuda_version.split("."))
 
@@ -172,8 +173,7 @@ if BUILD_CUDA_EXT:
             "-std=c++17",
             "-fopenmp",
             "-lgomp",
-            "-DENABLE_BF16"
-            "-Wno-switch-bool",
+            "-DENABLE_BF16",
         ],
         "nvcc": [
             "-O3",
@@ -181,14 +181,22 @@ if BUILD_CUDA_EXT:
             "-DENABLE_BF16",
             "-U__CUDA_NO_HALF_OPERATORS__",
             "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_HALF2_OPERATORS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--use_fast_math",
             "-diag-suppress=179,39,186",
         ],
     }
+
+    # torch >= 2.6.0 may require extensions to be build with CX11_ABI=1
+    CXX11_ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
+
+    extra_compile_args["cxx"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
+    extra_compile_args["nvcc"] += [ f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}" ]
 
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
@@ -306,7 +314,7 @@ setup(
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
         'vllm': ["vllm>=0.6.4", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
-        'bitblas': ["bitblas==0.0.1.dev13"],
+        'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],

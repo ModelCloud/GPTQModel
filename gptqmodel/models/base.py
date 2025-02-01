@@ -22,8 +22,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch._dynamo
 import torch.nn as nn
 from packaging import version
+from packaging.version import Version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -44,6 +46,8 @@ from .loader import ModelLoader
 from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
 
+# pytorch 2.6.0 fixes many compilation errors
+PYTORCH_MIN_VERFSION_WITH_COMPILE = Version("2.6.0")
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -120,6 +124,7 @@ class BaseGPTQModel(nn.Module):
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.tokenizer = tokenizer
+        self.model.tokenizer = tokenizer # helpful for CI tests
         self.quantize_config = quantize_config
         self.config = self.model.config if hasattr(self.model, "config") else None
 
@@ -267,6 +272,7 @@ class BaseGPTQModel(nn.Module):
             device=DEVICE(self.quantize_config.device),
             pack=True,
             format=self.quantize_config.format,
+            pack_dtype=self.quantize_config.pack_dtype,
         )
 
         # Use the provided tokenizer if one is passed to quantize()
@@ -612,6 +618,8 @@ class BaseGPTQModel(nn.Module):
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
                     mse = self.quantize_config.mse
+
+                    # dynamic overrides
                     if self.quantize_config.dynamic is not None:
                         layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
 
@@ -624,6 +632,7 @@ class BaseGPTQModel(nn.Module):
                         bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                         mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
+
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
                         bits,
@@ -706,6 +715,8 @@ class BaseGPTQModel(nn.Module):
                     desc_act = self.quantize_config.desc_act
                     damp_percent = self.quantize_config.damp_percent
                     static_groups = self.quantize_config.static_groups
+
+                    # dynamic overrides
                     if self.quantize_config.dynamic is not None:
                         group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
                         desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
@@ -823,6 +834,7 @@ class BaseGPTQModel(nn.Module):
             lm_head_name=self.lm_head,
             dynamic=self.quantize_config.dynamic,
             parallel_packing=self.quantize_config.parallel_packing,
+            pack_dtype=self.quantize_config.pack_dtype,
         )
 
         self.model.config.use_cache = forward_pass_use_cache
@@ -871,6 +883,9 @@ class BaseGPTQModel(nn.Module):
                 shutil.copyfile(json_path, os.path.join(save_dir, name))
 
         if self.quantized:
+            # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
+            #untie_weights(self.model)
+
             self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
 
             # overwrite quant_override_files
@@ -883,6 +898,26 @@ class BaseGPTQModel(nn.Module):
                         f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir, **kwargs)
+
+    def compile(self, backend="inductor", mode="reduce-overhead"):
+        if not self.quantized:
+            logger.warning("model is not quantized, skip compiling...")
+            return self
+
+        if Version(torch.__version__) < PYTORCH_MIN_VERFSION_WITH_COMPILE:
+            logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
+            return self
+
+        # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
+        #torch._dynamo.config.suppress_errors = True
+        logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
+
+        try:
+            self.model = torch.compile(self.model, fullgraph=True, backend=backend, mode=mode)
+        except Exception:
+            logger.info("Compiling model again with `fullgraph=False`")
+            self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+        return self
 
     def serve(self,
                host: str = "0.0.0.0",

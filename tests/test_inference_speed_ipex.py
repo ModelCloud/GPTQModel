@@ -19,22 +19,16 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-
-from gptqmodel import GPTQModel  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-
-
-class Test(ModelTest):
-
-    MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
-
-    def test(self):
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
-        model = GPTQModel.load(self.MODEL_ID)
-
-        self.assertEqual(model.config._attn_implementation, "flash_attention_2")
-
-        self.assertInference(model=model,tokenizer=tokenizer)
+from gptqmodel.utils import BACKEND
+from inference_speed import InferenceSpeed
+from parameterized import parameterized
 
 
+class TestInferenceSpeedIpex(InferenceSpeed):
+    @parameterized.expand(
+        [
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 12),
+        ]
+    )
+    def test_inference_speed_ipex(self, model_path, backend, tokens_per_second):
+        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second)

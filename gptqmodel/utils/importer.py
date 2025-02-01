@@ -15,12 +15,12 @@
 
 import os
 from collections import OrderedDict
-from typing import Dict, Optional, Type, Union
+from typing import Dict, List, Optional, Type, Union
 
 import torch
 
 from ..models._const import DEVICE, normalize_device
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
@@ -39,19 +39,19 @@ message_logged = False
 logger = setup_logger()
 
 backend_dict = OrderedDict({
-    BACKEND.MARLIN: MarlinQuantLinear,
-    BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-    BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+    BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
+    BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
+    BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
     BACKEND.TRITON: TritonV2QuantLinear,
     BACKEND.CUDA: DynamicCudaQuantLinear,
-    BACKEND.BITBLAS: BitBLASQuantLinear,
+    BACKEND.BITBLAS: BitBLASQuantLinear, # super slow JIT compile but fastest for bs=1
     BACKEND.IPEX: IPEXQuantLinear,
     BACKEND.TORCH: TorchQuantLinear,
 })
 
 format_dict = {
-    FORMAT.GPTQ: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
+    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -138,6 +138,7 @@ def hf_select_quant_linear(
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
+        pack_dtype=torch.int32,
     )
 
 
@@ -153,48 +154,60 @@ def select_quant_linear(
         pack: bool = False,
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
-) -> Type[BaseQuantLinear]:
+        pack_dtype: torch.dtype = None,
+        multi_select: bool = False, # return all valid kernels
+) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if device is None:
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
+
     backend = BACKEND.AUTO if backend is None else backend
 
+    # Bitblas needs conversion, not direct quant linear load, return generic Torch linear
+    if backend == BACKEND.BITBLAS and format != FORMAT.BITBLAS:
+        if multi_select:
+            return [TorchQuantLinear]
+        else:
+            return TorchQuantLinear
+
     trainable = backend == BACKEND.AUTO_TRAINABLE
+
+    validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-
         allow_backends = format_dict[format]
-
-        # TODO: fix marlin padding
-        # Since Marlin does not support padding in_features and out_features, Marlin is not allowed for hf_select_quant_linear scenarios
-        # for gptq internal use, allow_marlin is set to True
-        if format in [FORMAT.GPTQ, FORMAT.GPTQ_V2] and allow_marlin:
-            allow_backends = [BACKEND.MARLIN] + allow_backends
 
         allow_quant_linears = backend_dict
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
-        for k, v in allow_quant_linears.items():
+        for k, cls in allow_quant_linears.items():
             in_allow_backends = k in allow_backends
-            validate, err = v.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+            validate, err = cls.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
             if os.environ.get("DEBUG") and in_allow_backends and not validate:
                 logger.info(f"skip {k} for {str(err)}")
             if in_allow_backends and validate:
                 if pack:
-                    check_pack_func = hasattr(v, "pack")
+                    check_pack_func = issubclass(cls, PackableQuantLinear)
                     if check_pack_func:
                         if not message_logged:
-                            logger.info(f"Auto pick kernel based on compatibility: {v}")
+                            logger.info(f"Auto pick kernel based on compatibility: {cls}")
                             message_logged = True
-                        return v
+                        validated_qlinears.append(cls)
+                        if not multi_select:
+                            return cls
                 else:
                     if not message_logged:
-                        logger.info(f"Auto pick kernel based on compatibility: {v}")
+                        logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         message_logged = True
-                    return v
+
+                    validated_qlinears.append(cls)
+                    if not multi_select:
+                        return cls
 
         if err:
             raise err
+
+        return validated_qlinears
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
@@ -220,7 +233,7 @@ def select_quant_linear(
 
         cpu_vendor = Device("cpu").vendor
         if cpu_vendor != "intel":
-            logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Running on non-Intel cpu is not guaranteed. Current cpu vendor: `{cpu_vendor}`.")
+            logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Current cpu vendor: `{cpu_vendor}`.")
 
         qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
@@ -228,8 +241,11 @@ def select_quant_linear(
     else:
         qlinear = TorchQuantLinear
 
-    validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, dynamic=dynamic, device=device, trainable=trainable)
+    validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
     if not validate:
         raise ValueError(err)
     else:
-        return qlinear
+        if multi_select:
+            return [qlinear]
+        else:
+            return qlinear

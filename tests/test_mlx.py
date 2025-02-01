@@ -31,9 +31,7 @@ class TestExport(ModelTest):
             )
             mlx_model, tokenizer = load(export_dir)
 
-            prompt = "Tell me the city name. Which city is the capital of France?"
-
-            messages = [{"role": "user", "content": prompt}]
+            messages = [{"role": "user", "content": self.INFERENCE_PROMPT}]
             prompt = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True
             )

@@ -14,17 +14,20 @@
 # limitations under the License.
 
 import sys  # noqa: E402
-import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-GENERATE_EVAL_SIZE = 100
 
+class TestsQ4Torch(ModelTest):
+    GENERATE_EVAL_SIZE_MIN = 5
+    GENERATE_EVAL_SIZE_MAX = 10
 
-class TestsQ4Torch(unittest.TestCase):
+    model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+
     @parameterized.expand(
         [
             (torch.float16, "mps"),
@@ -35,40 +38,23 @@ class TestsQ4Torch(unittest.TestCase):
         if sys.platform != "darwin":
             self.skipTest("This test is macOS only")
 
-        prompt = "I am in Paris and"
 
-        # CPU implementation is extremely slow.
-        new_tokens = 5
-        reference_output = "<s> I am in Paris and I am in love with"
-
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"
 
         model_q = GPTQModel.from_quantized(
-            model_id,
+            self.model_id,
             revision=revision,
             device=device,
             backend=BACKEND.TORCH,
             torch_dtype=torch_dtype,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
+        tokenizer = AutoTokenizer.from_pretrained(self.model_id)
 
         # This one uses Autocast.
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
-        predicted_text = tokenizer.decode(res[0])
-        print("predicted_text", predicted_text)
-        print("reference_output", reference_output)
-        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
-
+        self.assertInference(model=model_q,tokenizer=tokenizer)
         # This one does not.
-        res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
-        predicted_text = tokenizer.decode(res[0])
-        print("predicted_text", predicted_text)
-        print("reference_output", reference_output)
-        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
+        self.assertInference(model=model_q.model,tokenizer=tokenizer)
 
     @parameterized.expand(
         [
@@ -80,32 +66,15 @@ class TestsQ4Torch(unittest.TestCase):
         if sys.platform != "darwin":
             self.skipTest("This test is macOS only")
 
-        prompt = "I am in Paris and"
-
-        # CPU implementation is extremely slow.
-        new_tokens = 5
-        reference_output = "<s> I am in Paris and I am in love with"
-
-        model_id = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-
         model_q = GPTQModel.from_quantized(
-            model_id,
+            self.model_id,
             device=device,
             backend=BACKEND.TORCH,
             torch_dtype=torch_dtype,
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
+        tokenizer = AutoTokenizer.from_pretrained(self.model_id)
 
         # This one uses Autocast.
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
-        predicted_text = tokenizer.decode(res[0])
-
-        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
-
+        self.assertInference(model=model_q,tokenizer=tokenizer)
         # This one does not.
-        res = model_q.model.generate(**inp, num_beams=1, min_new_tokens=new_tokens, max_new_tokens=new_tokens)
-        predicted_text = tokenizer.decode(res[0])
-
-        self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
+        self.assertInference(model=model_q.model,tokenizer=tokenizer)

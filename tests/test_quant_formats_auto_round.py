@@ -38,20 +38,17 @@ class TestQuantization(ModelTest):
 
     @classmethod
     def setUpClass(self):
-        self.pretrained_model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct/" #"/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
+        self.pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
-        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(32))]
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x['text']) >= 512)
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, BACKEND.IPEX, False, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.AUTO_ROUND, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):

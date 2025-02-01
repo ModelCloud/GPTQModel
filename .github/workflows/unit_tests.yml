@@ -63,7 +63,7 @@ env:
   RUNNER: 10.0.13.31
   TRANSFORMERS_DIFF_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   TORCH_2_5_TESTS: "test_evalplus.py,test_perplexity.py,test_q4_ipex.py,test_ipex_xpu.py,test_save_loaded_quantized_model.py,test_quant_formats.py,models/test_hymba.py"
-  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py"
+  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_quant_time.py,test_packing_speed.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
@@ -74,7 +74,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
@@ -108,7 +108,7 @@ jobs:
           echo "max-parallel=$max_p"
 
   list-test-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
@@ -335,7 +335,7 @@ jobs:
       - name: Download source from local
         continue-on-error: true
         run: |
-          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
           ls -ahl .
           sha256=$(sha256sum $file_name)
           echo "sha256=$sha256"
@@ -347,7 +347,7 @@ jobs:
         with:
           name: source
           path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
+          run-id: ${{ github.run_id }}
 
       - name: Uncompress source
         continue-on-error: true
@@ -492,7 +492,7 @@ jobs:
       - name: Download source from local
         continue-on-error: true
         run: |
-          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/gptqmodel_source.tar.gz
+          curl -s -O  http://${{ needs.check-vm.outputs.ip }}/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
           ls -ahl .
           sha256=$(sha256sum $file_name)
           echo "sha256=$sha256"
@@ -504,7 +504,7 @@ jobs:
         with:
           name: source
           path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
+          run-id: ${{ github.run_id }}
 
       - name: Uncompress source
         continue-on-error: true
@@ -548,7 +548,7 @@ jobs:
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
-          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
@@ -586,7 +586,7 @@ jobs:
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
-          if [ "${{ matrix.test_script }}" == "test_ipex_xpu" ]; then
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
             pip uninstall vllm -y

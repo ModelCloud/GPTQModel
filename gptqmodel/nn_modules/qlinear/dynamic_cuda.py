@@ -45,6 +45,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"
@@ -58,7 +59,6 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             infeatures: int,
             outfeatures: int,
             bias: bool,
-            weight_dtype=torch.float16,
             kernel_switch_threshold=128,
             **kwargs,
     ):
@@ -67,7 +67,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
                 f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {gptqmodel_cuda_import_exception}"
             )
         super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,
-                         outfeatures=outfeatures, bias=bias, weight_dtype=weight_dtype, **kwargs)
+                         outfeatures=outfeatures, bias=bias, **kwargs)
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
@@ -80,6 +80,15 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
         assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
+        if self.bits == 4:
+            self.qmatmul = self.gptqmodel_cuda.vecquant4matmul
+        elif self.bits == 8:
+            self.qmatmul = self.gptqmodel_cuda.vecquant8matmul
+        elif self.bits == 2:
+            self.qmatmul = self.gptqmodel_cuda.vecquant2matmul
+        elif self.bits == 3:
+            self.qmatmul = self.gptqmodel_cuda.vecquant3matmul
+
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if gptqmodel_cuda_import_exception is not None:
@@ -89,55 +98,29 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
-        x_dtype = x.dtype
 
         assert x.device.type == "cuda"
 
+        # switch to torch kernel when input shape is >= kernel_switch_threshold
+        # cuda is only optimized for < kernel_switch_threshold and will run slower than torch otherwise
         if x.shape[0] >= self.kernel_switch_threshold:
             logger.warning_once(
-               f"Cannot run on cuda kernel. Using torch forward() that may be slower. Shape: `{x.shape[0]}` >= `{self.kernel_switch_threshold}`")
-            return self._forward(x, x_dtype, out_shape)
+              f"Input shape `{x.shape[0]}` >= `{self.kernel_switch_threshold}` is not optimized for cuda kernel: dynamic switching to torch kernel.")
+            return self._forward(x, x.dtype, out_shape)
 
         out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
-        if self.bits == 2:
-            self.gptqmodel_cuda.vecquant2matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        elif self.bits == 3:
-            self.gptqmodel_cuda.vecquant3matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        elif self.bits == 4:
-            self.gptqmodel_cuda.vecquant4matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        elif self.bits == 8:
-            self.gptqmodel_cuda.vecquant8matmul(
-                x.float(),
-                self.qweight,
-                out,
-                self.scales.float(),
-                self.qzeros,
-                self.g_idx,
-            )
-        out = out.to(x_dtype)
-        out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        self.qmatmul(
+            x.to(dtype=torch.float32),
+            self.qweight,
+            out,
+            self.scales.to(dtype=torch.float32),
+            self.qzeros,
+            self.g_idx,
+        )
+
+        out = out.to(x.dtype).reshape(out_shape)
+        if self.bias is not None:
+            out = out + self.bias
         return out
 
 

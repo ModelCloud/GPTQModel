@@ -26,27 +26,29 @@ from gptqmodel.models._const import DEVICE  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
 
-class TestsIPEX(ModelTest):
+class TestTritonXPU(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
 
     def test(self):
         origin_model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=QuantizeConfig(),
-            backend=BACKEND.IPEX,
+            backend=BACKEND.TRITON,
             device=DEVICE.XPU,
         )
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
         calibration_dataset = self.load_dataset(tokenizer)
-        origin_model.quantize(calibration_dataset, backend=BACKEND.IPEX)
+        origin_model.quantize(calibration_dataset, backend=BACKEND.TRITON)
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)
 
           model = GPTQModel.load(
               tmpdir,
-              backend=BACKEND.IPEX,
+              backend=BACKEND.TRITON,
               device=DEVICE.XPU,
           )
+          generate_str = tokenizer.decode(model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device), max_new_tokens=2)[0])
 
-        self.assertInference(model=model,tokenizer=tokenizer)
+          print(f"generate_str: {generate_str}")
 
+          self.assertIn("paris", generate_str.lower())

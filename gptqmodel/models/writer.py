@@ -28,8 +28,9 @@ import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
-from transformers import AutoConfig
+from transformers import AutoConfig, PreTrainedTokenizerFast
 from transformers.modeling_utils import no_init_weights
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
 
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
@@ -168,7 +169,7 @@ def ModelWriter(cls):
                 )
         else:
             model = self.get_model_with_quantize(
-                quantize_config=quantize_config,
+                qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
 
@@ -314,9 +315,21 @@ def ModelWriter(cls):
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
 
+            # fixed this issue: https://github.com/huggingface/transformers/issues/35832
+            saved_tokenizer_config = get_tokenizer_config(save_dir)
+            config_tokenizer_class = saved_tokenizer_config.get("tokenizer_class")
+            # if the tokenizer is fast, but the tokenizer_config.json does not have Fast suffix, add "Fast" suffix
+            if (not config_tokenizer_class.endswith("Fast")) and (
+                isinstance(self.tokenizer, PreTrainedTokenizerFast)
+                ):
+                saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
+                with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+                    json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
+
+
     cls.save_quantized = save_quantized
 
-    def get_model_with_quantize(self, quantize_config, model_id_or_path):
+    def get_model_with_quantize(self, qcfg, model_id_or_path):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -346,7 +359,7 @@ def ModelWriter(cls):
 
             for name in list(layers.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == self.lm_head:
+                if qcfg.lm_head and name == self.lm_head:
                     continue
 
                 if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
@@ -360,13 +373,14 @@ def ModelWriter(cls):
             make_quant(
                 model,
                 layers,
-                quantize_config.bits,
-                quantize_config.group_size,
+                qcfg.bits,
+                qcfg.group_size,
                 backend=BACKEND.AUTO,
-                format=quantize_config.format,
+                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=quantize_config.desc_act,
+                desc_act=qcfg.desc_act,
                 pack=True,
+                pack_dtype=qcfg.pack_dtype,
             )
 
         load_checkpoint_in_model_then_tie_weights(

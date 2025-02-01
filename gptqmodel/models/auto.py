@@ -19,6 +19,11 @@ import os
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
+    print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
+
+if not os.environ.get("CUDA_DEVICE_ORDER", None):
+    os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
+    print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for compatibililty.")
 
 import sys  # noqa: E402
 
@@ -35,7 +40,8 @@ from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
-from ..utils import BACKEND, EVAL  # noqa: E402
+from ..utils import BACKEND  # noqa: E402
+from ..utils.eval import EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
@@ -128,7 +134,7 @@ MODEL_MAP = {
     "phimoe": PhiMoEGPTQForCausalLM,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
-    "minicpm3":MiniCPM3GPTQ,
+    "minicpm3": MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "dbrx": DbrxGPTQ,
@@ -213,11 +219,11 @@ class GPTQModel:
 
     @classmethod
     def from_pretrained(
-        cls,
-        model_id_or_path: str,
-        quantize_config: QuantizeConfig,
-        trust_remote_code: bool = False,
-        **model_init_kwargs,
+            cls,
+            model_id_or_path: str,
+            quantize_config: QuantizeConfig,
+            trust_remote_code: bool = False,
+            **model_init_kwargs,
     ) -> BaseGPTQModel:
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
             logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
@@ -238,17 +244,17 @@ class GPTQModel:
 
     @classmethod
     def from_quantized(
-        cls,
-        model_id_or_path: Optional[str],
-        device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
-        device: Optional[Union[str, int]] = None,
-        backend: Union[str, BACKEND] = BACKEND.AUTO,
-        trust_remote_code: bool = False,
-        # verify weight files matches predefined hash during loading
-        # usage: hash_format:hash_value, example: md5:ugkdh232
-        # supports all hashlib hash methods
-        verify_hash: Optional[Union[str, List[str]]] = None,
-        **kwargs,
+            cls,
+            model_id_or_path: Optional[str],
+            device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
+            device: Optional[Union[str, int]] = None,
+            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            trust_remote_code: bool = False,
+            # verify weight files matches predefined hash during loading
+            # usage: hash_format:hash_value, example: md5:ugkdh232
+            # supports all hashlib hash methods
+            verify_hash: Optional[Union[str, List[str]]] = None,
+            **kwargs,
     ) -> BaseGPTQModel:
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
 
@@ -374,6 +380,12 @@ class GPTQModel:
             save_weights(target_path, mlx_weights, donate_weights=True)
 
             save_config(mlx_config, config_path=target_path + "/config.json")
+        elif format == "hf":
+            from ..nn_modules.qlinear.torch import dequantize_model
+
+            dequantized_model = dequantize_model(gptq_model.model)
+            dequantized_model.save_pretrained(target_path)
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
+

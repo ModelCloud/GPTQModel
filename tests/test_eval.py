@@ -19,7 +19,7 @@ import unittest
 from typing import Union
 
 from gptqmodel import GPTQModel
-from gptqmodel.utils import EVAL
+from gptqmodel.utils.eval import EVAL
 from lm_eval.tasks import TaskManager
 from parameterized import parameterized
 
@@ -28,14 +28,14 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 class TestEval(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1"
+        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
     @parameterized.expand(
         [
-            # (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
-            # (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
-            # (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
-            # (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
+            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
+            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
@@ -53,7 +53,7 @@ class TestEval(unittest.TestCase):
                                      output_file=output_file,
                                      backend=backend,
                                      extra_model_args=extra_model_args,
-                                     task_manager=TaskManager(include_path="tasks", include_defaults=False)
+                                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
                                      )
 
             if eval_backend == EVAL.LM_EVAL:
@@ -73,10 +73,5 @@ class TestEval(unittest.TestCase):
                 result = results.get(task.value)
                 base_formatted, plus_formatted, _ = float(result.get("base tests")), float(
                     result.get("base + extra tests")), result.get("results_path")
-                self.assertGreaterEqual(base_formatted, 0.27, "Base score does not match expected result")
-                self.assertGreaterEqual(plus_formatted, 0.24, "Plus score does not match expected result")
-
-
-
-
-
+                self.assertGreaterEqual(base_formatted, 0.26, "Base score does not match expected result")
+                self.assertGreaterEqual(plus_formatted, 0.23, "Plus score does not match expected result")

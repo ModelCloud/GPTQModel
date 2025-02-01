@@ -50,12 +50,14 @@ class TestPerplexity(unittest.TestCase):
     N_CTX = 512
     N_BATCH = 512
 
+    @classmethod
     def get_config_with_format(self, format: FORMAT):
         if format == FORMAT.MARLIN or format == FORMAT.BITBLAS:
             return self.OPT_DATASET_PATH, self.OPT_DATASET_NAME, self.OPT_DATASET_SPLIT, self.OPT_DATASET_COLUMN, self.OPT_MODEL_ID, self.opt_tokenizer
         else:
             return self.TINYLLAMA_DATASET_PATH, self.TINYLLAMA_DATASET_NAME, self.TINYLLAMA_DATASET_SPLIT, self.TINYLLAMA_DATASET_COLUMN, self.TINYLLAMA_MODEL_ID, self.tinyllama_tokenizer
 
+    @classmethod
     def calculate_avg_ppl(self, path, name, split, column, model, tokenizer):
         ppl = Perplexity(
             model=model,
@@ -85,12 +87,13 @@ class TestPerplexity(unittest.TestCase):
         if not self.opt_tokenizer.pad_token_id:
             self.opt_tokenizer.pad_token_id = self.opt_tokenizer.eos_token_id
 
-        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(self, FORMAT.GPTQ)
-        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl(self, FORMAT.MARLIN)
+        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(FORMAT.GPTQ)
+        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl( FORMAT.MARLIN)
 
 
+    @classmethod
     def calculate_native_ppl(self, format):
-        dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(self, format)
+        dataset_path, dataset_name, dataset_split, dataset_column, model_id, tokenizer = self.get_config_with_format(format)
 
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -103,7 +106,6 @@ class TestPerplexity(unittest.TestCase):
             native_ppl = self.opt_125m_native_ppl
         else:
             native_ppl = self.calculate_avg_ppl(
-                self,
                 dataset_path,
                 dataset_name,
                 dataset_split,

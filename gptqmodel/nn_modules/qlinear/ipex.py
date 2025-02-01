@@ -100,6 +100,7 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
@@ -112,35 +113,28 @@ class IPEXQuantLinear(BaseQuantLinear):
         sym: bool,
         infeatures: int,
         outfeatures: int,
+        pack_dtype: torch.dtype,
         bias: bool,
         kernel_switch_threshold=128,
         training=False,
-        weight_dtype=None,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
 
-        if weight_dtype is None:
-            weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
-
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.bits = bits
-        self.group_size = group_size
-        self.maxq = 2**self.bits - 1
-        self.weight_dtype = weight_dtype
+        # FIX ME IPEX CPU has no float16 support
+        self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
         self.init_ipex = False
 
         self.register_buffer(
             "qweight",
-            torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32),
+            torch.zeros((infeatures // self.pack_dtype_bits * self.bits, outfeatures), dtype=torch.int32),
         )
         self.register_buffer(
             "qzeros",
             torch.zeros(
                 (
                     math.ceil(infeatures / self.group_size),
-                    outfeatures // 32 * self.bits,
+                    outfeatures // self.pack_dtype_bits * self.bits,
                 ),
                 dtype=torch.int32,
             ),
@@ -149,7 +143,7 @@ class IPEXQuantLinear(BaseQuantLinear):
             "scales",
             torch.zeros(
                 (math.ceil(infeatures / self.group_size), outfeatures),
-                dtype=weight_dtype,
+                dtype=self.weight_dtype,
             ),
         )
         self.register_buffer(
@@ -157,7 +151,7 @@ class IPEXQuantLinear(BaseQuantLinear):
             torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
         )
         if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=weight_dtype))
+            self.register_buffer("bias", torch.zeros((outfeatures), dtype=self.weight_dtype))
         else:
             self.bias = None
 
@@ -166,7 +160,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         self.training = training
 
         # for training forward
-        self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
+        self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -199,23 +193,15 @@ class IPEXQuantLinear(BaseQuantLinear):
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=linear.weight.dtype)
 
-        intweight = []
-        for idx in range(self.infeatures):
-            intweight.append(
-                torch.round(
-                    (W[:, idx] + scale_zeros[self.g_idx[idx]]) / self.scales[self.g_idx[idx]]).to(torch.int)[:, None])
-        intweight = torch.cat(intweight, dim=1)
+        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(np.uint32)
 
-        i = 0
-        row = 0
         qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
-        while row < qweight.shape[0]:
-            for j in range(i, i + (32 // self.bits)):
-                qweight[row] |= intweight[j] << (self.bits * (j - i))
-            i += 32 // self.bits
-            row += 1
+        for row in range(qweight.shape[0]):
+            i = row * (32 // self.bits)
+            for j in range(32 // self.bits):
+                qweight[row] |= intweight[i + j] << (self.bits * j)
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -223,13 +209,10 @@ class IPEXQuantLinear(BaseQuantLinear):
         zeros -= 1
         zeros = zeros.numpy().astype(np.uint32)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
-        i = 0
-        col = 0
-        while col < qzeros.shape[1]:
-            for j in range(i, i + (32 // self.bits)):
-                qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
-            i += 32 // self.bits
-            col += 1
+        for col in range(qzeros.shape[1]):
+            i = col * (32 // self.bits)
+            for j in range(32 // self.bits):
+                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)

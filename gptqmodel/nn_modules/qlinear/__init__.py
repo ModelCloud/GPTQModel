@@ -14,9 +14,12 @@
 # limitations under the License.
 
 import sys
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
+import numpy as np
+import torch as t  # conflict with torch.py
 import torch.nn as nn
+import transformers
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -32,23 +35,55 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
+    SUPPORTS_PACK_DTYPES: List[t.dtype] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, *args,
+    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: t.dtype,  *args,
                  **kwargs):
         super().__init__()
-        _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures)
+
+        self.infeatures = infeatures
+        self.outfeatures = outfeatures
+        self.group_size = group_size if group_size != -1 else infeatures
+        self.bits = bits
+        self.desc_act = desc_act
+        self.pack_dtype = pack_dtype
+        self.maxq = 2 ** self.bits - 1
+        self.pack_dtype = pack_dtype
+
+
+        if self.pack_dtype == t.int8:
+            self.pack_dtype_bits = 8
+            self.pack_np_dtype = np.int8 # qweight saved dtype
+            self.pack_np_math_dtype = np.uint8 # pre-save math dtype
+        elif self.pack_dtype == t.int16:
+            self.pack_dtype_bits = 16
+            self.pack_np_dtype = np.int16
+            self.pack_np_math_dtype = np.uint16
+        elif self.pack_dtype == t.int32:
+            self.pack_dtype_bits = 32
+            self.pack_np_dtype = np.int32
+            self.pack_np_math_dtype = np.uint32
+        elif self.pack_dtype == t.int64:
+            self.pack_dtype_bits = 64
+            self.pack_np_dtype = np.int64
+            self.pack_np_math_dtype = np.uint64
+        else:
+            raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
+
+        self.pack_factor = self.pack_dtype_bits // self.bits
+        _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=infeatures,outfeatures=outfeatures, pack_dtype=pack_dtype)
         if err:
             raise err
 
     @classmethod
     # custom quant linear class can override this and add custom checks
     def validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures:int=None,
-                  outfeatures:int=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
+                  outfeatures:int=None, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[
         bool, Optional[Exception]]:
         validate, err = cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
-                                      infeatures=infeatures, outfeatures=outfeatures, dynamic=dynamic,
+                                      infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, dynamic=dynamic,
                                       device=device, trainable=trainable)
         return validate, err
 
@@ -86,9 +121,13 @@ class BaseQuantLinear(nn.Module):
                 raise ValueError(f"{cls.__name__}.{name} cannot be None or an empty list.")
 
     @classmethod
-    def _validate(cls, bits: int, group_size: int, desc_act: bool, sym: bool, dynamic:Optional[dict]=None, infeatures:int=None,
-                  outfeatures:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, infeatures:int=None,
+                  outfeatures:int=None,  device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
+
+        if pack_dtype not in cls.SUPPORTS_PACK_DTYPES:
+            err = f"{cls} does not support `pack_dtype`: {pack_dtype}"
+            return False, NotImplementedError(err)
 
         if PLATFORM.ALL not in cls.SUPPORTS_PLATFORM and sys.platform not in cls.SUPPORTS_PLATFORM:
             err = f"{cls} does not support platform: {sys.platform}"
@@ -181,3 +220,75 @@ class BaseQuantLinear(nn.Module):
     # override me
     def post_init(self):
         pass
+
+class PackableQuantLinear(BaseQuantLinear):
+    def pack(self, linear, scales, zeros, g_idx=None):
+        W = linear.weight.data.clone()
+        if isinstance(linear, nn.Conv2d):
+            W = W.flatten(1)
+        if isinstance(linear, transformers.pytorch_utils.Conv1D):
+            W = W.t()
+
+        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+
+        scales = scales.t().contiguous()
+        zeros = zeros.t().contiguous()
+        scale_zeros = zeros * scales
+        self.scales = scales.clone().to(dtype=t.float16)
+        if linear.bias is not None:
+            self.bias = linear.bias.clone().to(dtype=t.float16)
+
+        intweight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
+        intweight = intweight.t().contiguous()
+        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
+
+        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
+                           dtype=self.pack_np_dtype)
+        if self.bits in [2, 4, 8]:
+            for row in range(qweight.shape[0]):
+                for j in range(self.pack_factor):
+                    qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
+        elif self.bits == 3:
+            for row in range(qweight.shape[0]):
+                row_offset = row * 10  # Cache row * 10
+                row_offset_plus_10 = row_offset + 10  # Cache row * 10 + 10
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j)
+                qweight[row] |= intweight[row_offset_plus_10] << 30
+                row += 1
+                qweight[row] |= (intweight[row_offset_plus_10] >> 2) & 1
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j + 1)
+                qweight[row] |= intweight[row_offset_plus_10] << 31
+                row += 1
+                qweight[row] |= (intweight[row_offset_plus_10] >> 1) & 0x3
+                for j in range(10):
+                    qweight[row] |= intweight[row_offset + j] << (3 * j + 2)
+
+        self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+
+        zeros = zeros.numpy().astype(self.pack_np_math_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits),
+                          dtype=self.pack_np_math_dtype)
+        if self.bits in [2, 4, 8]:
+            for col in range(qzeros.shape[1]):
+                for j in range(self.pack_factor):
+                    qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
+        elif self.bits == 3:
+            for col in range(qzeros.shape[1]):
+                col_offset = col * 10  # Cache col * 10
+                col_offset_plus_10 = col_offset + 10  # Cache col * 10 + 10
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j)
+                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 30
+                col += 1
+                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 2) & 1
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 1)
+                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 31
+                col += 1
+                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 1) & 0x3
+                for j in range(10):
+                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 2)
+
+        self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))

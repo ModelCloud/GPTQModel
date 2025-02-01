@@ -17,7 +17,7 @@ __global__ void gptq_marlin_repack_kernel(
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
-                                 int64_t num_bits) {
+                                 int64_t num_bits, int64_t pack_bits) {
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "marlin_repack_from_gptq(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -27,12 +27,12 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 
 namespace marlin {
 
-template <int const num_threads, int const num_bits, bool const has_perm>
+template <int const num_threads, int const num_bits, int pack_bits, bool const has_perm>
 __global__ void gptq_marlin_repack_kernel(
     uint32_t const* __restrict__ b_q_weight_ptr,
     uint32_t const* __restrict__ perm_ptr, uint32_t* __restrict__ out_ptr,
     int size_k, int size_n) {
-  constexpr int pack_factor = 32 / num_bits;
+  constexpr int pack_factor = pack_bits / num_bits;
 
   int k_tiles = size_k / tile_k_size;
   int n_tiles = size_n / tile_n_size;
@@ -259,21 +259,21 @@ __global__ void gptq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-  #define CALL_IF(NUM_BITS, HAS_PERM)                                         \
-    else if (num_bits == NUM_BITS && has_perm == HAS_PERM) {                  \
+  #define CALL_IF(NUM_BITS, PACK_BITS, HAS_PERM)                                         \
+    else if (num_bits == NUM_BITS and pack_bits == PACK_BITS && has_perm == HAS_PERM) {                  \
       cudaFuncSetAttribute(                                                   \
           marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
-                                            HAS_PERM>,                        \
+                                            PACK_BITS, HAS_PERM>,                        \
           cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
       marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
-                                        HAS_PERM>                             \
+                                        PACK_BITS, HAS_PERM>                             \
           <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
               b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);             \
     }
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
-                                 int64_t num_bits) {
+                                 int64_t num_bits, int64_t pack_bits) {
   // Verify compatibility with marlin tile of 16x64
   TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
               " is not divisible by tile_k_size = ", marlin::tile_k_size);
@@ -282,7 +282,7 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
-  int const pack_factor = 32 / num_bits;
+  int const pack_factor = pack_bits / num_bits;
 
   // Verify B
   TORCH_CHECK((size_k / pack_factor) == b_q_weight.size(0),
@@ -332,10 +332,10 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 
   if (false) {
   }
-  CALL_IF(4, false)
-  CALL_IF(4, true)
-  CALL_IF(8, false)
-  CALL_IF(8, true)
+  CALL_IF(4, 32, false)
+  CALL_IF(4, 32, true)
+  CALL_IF(8, 32, false)
+  CALL_IF(8, 32, true)
   else {
     TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits,
                 ", has_perm = ", has_perm);

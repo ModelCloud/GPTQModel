@@ -60,15 +60,9 @@ def import_bitblas():
         print(f"BITBLAS_TARGET {BITBLAS_TARGET}")
 
     if BITBLAS_DATABASE_PATH is None:
-        # from importlib.metadata import version
-
         from bitblas.cache import get_database_path
-
-        # bitblas_version = version(distribution_name="bitblas")
-        # gptqmodel_version = version(distribution_name="gptqmodel")
-
-        BITBLAS_DATABASE_PATH = get_database_path()
-
+        BITBLAS_DATABASE_PATH = f"{get_database_path()}_{bitblas.__version__}"
+        print(f"BITBLAS_DATABASE_PATH: {BITBLAS_DATABASE_PATH}")
 
 def unpack_qzeros(qzeros, bits):
     qzeros = qzeros.view(torch.int32)
@@ -100,6 +94,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -123,6 +118,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         sym: bool,
         infeatures: int,
         outfeatures: int,
+        pack_dtype: torch.dtype,
         bias: bool,
         enable_tuning: bool = True,
         fast_decoding: bool = True,
@@ -131,16 +127,12 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, **kwargs)
+        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         import_bitblas()
 
         self._validate_parameters(group_size, infeatures, outfeatures)
 
-        self.bits = bits
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.group_size = self._set_group_size(group_size, infeatures)
         self.opt_features = opt_features
         self.target = BITBLAS_TARGET
         self._configure_bitblas_matmul(
@@ -160,9 +152,6 @@ class BitBLASQuantLinear(BaseQuantLinear):
     ):
         if infeatures % group_size != 0:
             raise ValueError("`infeatures` must be divisible by `group_size`.")
-
-    def _set_group_size(self, group_size: int, infeatures: int):
-        return infeatures if group_size == -1 else group_size
 
     def _initialize_buffers(self, infeatures: int, outfeatures: int, bias: bool):
         self.register_buffer(
@@ -290,15 +279,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
         if linear.bias is not None:
             self.bias = linear.bias.clone().half()
 
-        intweight = []
-        for idx in range(self.infeatures):
-            g_idx = idx // self.group_size
-            intweight.append(
-                torch.round((W[:, idx] + scale_zeros[g_idx]) / self.scales[g_idx]).to(torch.int)[
-                    :, None
-                ]
-            )
-        intweight = torch.cat(intweight, dim=1)
+        intweight = torch.round((W + scale_zeros[g_idx].T) / scales[g_idx].T).to(torch.int)
+
         intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(np.uint32)
 
@@ -396,11 +378,11 @@ class BitBLASQuantLinear(BaseQuantLinear):
         C = torch.empty(
             A.shape[:-1] + (self.scales.shape[0],), dtype=A.dtype, device=A.device
         )
-        A_void = ctypes.c_void_p(A.data_ptr())
+
         # m is the product of the last n - 1 dimensions of A
         m = ctypes.c_int32(reduce(operator.mul, A.shape[:-1], 1))
         self.bitblas_matmul.call_lib(
-            A_void , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
+            ctypes.c_void_p(A.data_ptr()) , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
         )
         return C
 
