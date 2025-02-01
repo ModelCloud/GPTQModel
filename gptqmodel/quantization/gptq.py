@@ -187,7 +187,7 @@ class GPTQ:
         while 1 > percdamp > 0:
             try:
                 damp = percdamp * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=self.device)
+                diag = torch.arange(self.columns, device=H.device)
                 H[diag, diag] += damp
 
                 H = torch.linalg.cholesky(H)
