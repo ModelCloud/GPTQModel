@@ -88,6 +88,8 @@ class ExllamaQuantLinear(PackableQuantLinear):
         group_size = group_size if group_size != -1 else in_features
         out_features = out_features + (-out_features % 32)
         in_features = in_features + (-in_features % group_size)
+        self.in_features_padding_size = in_features - self.original_in_features
+        self.in_features_padding_shape = (0, self.in_features_padding_size)
 
         super().__init__(
             bits=bits,
@@ -145,7 +147,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
         if x.size(-1) != self.in_features:
-            x = F.pad(x, (0, self.in_features - self.original_in_features))
+            x = F.pad(x, self.in_features_padding_shape)
 
         out = ext_q4_matmul(x, self.q4, self.width)
 
