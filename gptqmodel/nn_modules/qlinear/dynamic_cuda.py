@@ -56,9 +56,10 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             group_size: int,
             sym: bool,
             desc_act: bool,
-            infeatures: int,
-            outfeatures: int,
+            in_features: int,
+            out_features: int,
             bias: bool,
+            pack_dtype: torch.dtype,
             kernel_switch_threshold=128,
             **kwargs,
     ):
@@ -66,8 +67,18 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             raise ValueError(
                 f"Trying to use the cuda backend, but could not import the C++/CUDA dependencies with the following error: {gptqmodel_cuda_import_exception}"
             )
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures,
-                         outfeatures=outfeatures, bias=bias, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            **kwargs)
+
+        # assert in_features % 64 == 0 and out_features % 64 == 0
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
@@ -75,10 +86,8 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         self.gptqmodel_cuda = gptqmodel_cuda_256
 
         # fall back to cuda_64
-        if infeatures % 256 != 0 or outfeatures % 256 != 0:
+        if in_features % 256 != 0 or out_features % 256 != 0:
             self.gptqmodel_cuda = gptqmodel_cuda_64
-
-        assert infeatures % 64 == 0 and outfeatures % 64 == 0
 
         if self.bits == 4:
             self.qmatmul = self.gptqmodel_cuda.vecquant4matmul
@@ -96,10 +105,10 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         return cls._validate(**args)
 
     def forward(self, x: torch.Tensor):
-        out_shape = x.shape[:-1] + (self.outfeatures,)
+        out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
 
-        assert x.device.type == "cuda"
+        # assert x.device.type == "cuda"
 
         # switch to torch kernel when input shape is >= kernel_switch_threshold
         # cuda is only optimized for < kernel_switch_threshold and will run slower than torch otherwise
@@ -108,7 +117,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
               f"Input shape `{x.shape[0]}` >= `{self.kernel_switch_threshold}` is not optimized for cuda kernel: dynamic switching to torch kernel.")
             return self._forward(x, x.dtype, out_shape)
 
-        out = torch.zeros((x.shape[0], self.outfeatures), device=x.device, dtype=torch.float32)
+        out = torch.zeros((x.shape[0], self.out_features), device=x.device, dtype=torch.float32)
         self.qmatmul(
             x.to(dtype=torch.float32),
             self.qweight,

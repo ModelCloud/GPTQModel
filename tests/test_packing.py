@@ -89,8 +89,8 @@ class TestRepacking(unittest.TestCase):
             group_size=self.group_size,
             sym=True,
             desc_act=True,
-            infeatures=self.k,
-            outfeatures=self.n,
+            in_features=self.k,
+            out_features=self.n,
             pack_dtype=self.pack_dtype,
             bias=False)
 

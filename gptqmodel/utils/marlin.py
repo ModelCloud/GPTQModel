@@ -124,22 +124,22 @@ def convert_to_marlin(
                 group_size=module.group_size,
                 sym=sym,
                 desc_act=desc_act,
-                infeatures=module.original_infeatures,
-                outfeatures=module.original_outfeatures,
+                in_features=module.original_in_features,
+                out_features=module.original_out_features,
                 pack_dtype=module.pack_dtype,
                 bias=module.bias is not None,
             )
 
         # workspace is never in the state_dict, thus we need to allocate it manually.
-        new_module.workspace = torch.zeros(new_module.outfeatures // 128 * 16, dtype=module.pack_dtype, device=module.device)
+        new_module.workspace = torch.zeros(new_module.out_features // 128 * 16, dtype=module.pack_dtype, device=module.device)
 
         # Dequantize the weight.
         if repack:
             import gptqmodel_marlin_cuda
 
             qweight = module.qweight
-            if new_module.infeatures != new_module.original_infeatures or new_module.outfeatures != new_module.original_outfeatures:
-                padded_qweight = torch.zeros((new_module.infeatures, new_module.outfeatures), dtype=torch.int, device=module.qweight.device)
+            if new_module.in_features != new_module.original_in_features or new_module.out_features != new_module.original_out_features:
+                padded_qweight = torch.zeros((new_module.in_features, new_module.out_features), dtype=torch.int, device=module.qweight.device)
                 padded_qweight[:module.qweight.size(0), :module.qweight.size(1)] = qweight
                 qweight = padded_qweight
 
@@ -158,17 +158,17 @@ def convert_to_marlin(
 
             s = module.scales.data.clone()
 
-            if new_module.infeatures != new_module.original_infeatures or new_module.outfeatures != new_module.original_outfeatures:
-                padded_s = torch.zeros((s.size(0), new_module.outfeatures), dtype=torch.half, device=s.device)
+            if new_module.in_features != new_module.original_in_features or new_module.out_features != new_module.original_out_features:
+                padded_s = torch.zeros((s.size(0), new_module.out_features), dtype=torch.half, device=s.device)
                 padded_s[:s.size(0), :s.size(1)] = s
                 s = padded_s
 
-            if module.group_size != module.infeatures:
+            if module.group_size != module.in_features:
                 s = s.reshape((1, -1))
                 s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
             else:
                 s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
-            s = s.reshape((-1, new_module.outfeatures)).contiguous()
+            s = s.reshape((-1, new_module.out_features)).contiguous()
 
             new_module.B = marlin_repacked_weight
             new_module.s = s

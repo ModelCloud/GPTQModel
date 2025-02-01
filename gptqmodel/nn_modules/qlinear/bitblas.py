@@ -116,8 +116,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
         group_size: int,
         desc_act: bool,
         sym: bool,
-        infeatures: int,
-        outfeatures: int,
+        in_features: int,
+        out_features: int,
         pack_dtype: torch.dtype,
         bias: bool,
         enable_tuning: bool = True,
@@ -127,18 +127,27 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures,  pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=pack_dtype,
+            register_buffers=False,
+            **kwargs)
 
         import_bitblas()
 
-        self._validate_parameters(group_size, infeatures, outfeatures)
+        self._validate_parameters(group_size, in_features, out_features)
 
         self.opt_features = opt_features
         self.target = BITBLAS_TARGET
         self._configure_bitblas_matmul(
             enable_tuning, fast_decoding, bias, propagate_b, layout, bits
         )
-        self._initialize_buffers(infeatures, outfeatures, bias)
+        self._initialize_buffers(in_features, out_features, bias)
         self.reset_parameters()
 
     @classmethod
@@ -148,12 +157,12 @@ class BitBLASQuantLinear(BaseQuantLinear):
         return cls._validate(**args)
 
     def _validate_parameters(
-        self, group_size: int, infeatures: int, outfeatures: int
+        self, group_size: int, in_features: int, out_features: int
     ):
-        if infeatures % group_size != 0:
-            raise ValueError("`infeatures` must be divisible by `group_size`.")
+        if in_features % group_size != 0:
+            raise ValueError("`in_features` must be divisible by `group_size`.")
 
-    def _initialize_buffers(self, infeatures: int, outfeatures: int, bias: bool):
+    def _initialize_buffers(self, in_features: int, out_features: int, bias: bool):
         self.register_buffer(
             "qweight",
             torch.zeros(
@@ -164,7 +173,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.register_buffer(
             "scales",
             torch.zeros(
-                (outfeatures, infeatures // self.group_size), dtype=self.TORCH_DTYPE
+                (out_features, in_features // self.group_size), dtype=self.TORCH_DTYPE
             ),
         )
         if self.zeros_mode == "quantized":
@@ -172,20 +181,20 @@ class BitBLASQuantLinear(BaseQuantLinear):
             self.register_buffer(
                 "zeros",
                 torch.zeros(
-                    (infeatures // self.group_size, outfeatures // storage_nbit * self.bits), dtype=self.TORCH_STORAGE_DTYPE
+                    (in_features // self.group_size, out_features // storage_nbit * self.bits), dtype=self.TORCH_STORAGE_DTYPE
                 ),
             )
         else:
             self.register_buffer(
                 "zeros",
                 torch.zeros(
-                    (outfeatures, infeatures // self.group_size), dtype=self.TORCH_DTYPE
+                    (out_features, in_features // self.group_size), dtype=self.TORCH_DTYPE
                 ),
             )
 
         if bias:
             self.register_buffer(
-                "bias", torch.zeros((outfeatures), dtype=self.TORCH_DTYPE)
+                "bias", torch.zeros((out_features), dtype=self.TORCH_DTYPE)
             )
         else:
             self.bias = None
@@ -200,8 +209,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
         W_dtype = f"uint{bits}"
         matmul_config = MatmulConfig(
             M=self.opt_features,
-            N=self.outfeatures,
-            K=self.infeatures,
+            N=self.out_features,
+            K=self.in_features,
             A_dtype=bitblas_dtype,
             W_dtype=W_dtype,
             out_dtype=bitblas_dtype,
@@ -341,7 +350,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     def repack_from_gptq(self, gptq_module):
         from bitblas.quantization.utils import general_compress
 
-        # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
+        # qweight in gptq old quant linear stored with (out_features, in_features), should be transposed.
         qweight = gptq_module.qweight.T.contiguous().view(self.TORCH_STORAGE_DTYPE)
         if self.bitblas_matmul.weight_transform is not None:
             qweight = self.bitblas_matmul.weight_transform(qweight.cpu()).cuda()
