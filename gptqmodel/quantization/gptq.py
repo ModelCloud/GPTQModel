@@ -205,7 +205,7 @@ class GPTQ:
             self.quantizer.find_params(W, weight=True)
 
         # move H back to self.device
-        H = self.H.to(self.device, dtype=torch.float32)
+        H = self.H.to(self.device_partner, dtype=torch.float32)
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -240,7 +240,7 @@ class GPTQ:
         while 1 > percdamp > 0:
             try:
                 damp = percdamp * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=self.device)
+                diag = torch.arange(self.columns, device=self.device_partner)
                 H[diag, diag] += damp
 
                 H = torch.linalg.cholesky(H)
@@ -309,7 +309,7 @@ class GPTQ:
                 logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 logger.debug(torch.sum(Losses))
 
-        torch_sync(self.device)
+        torch_sync(self.device_partner)
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
