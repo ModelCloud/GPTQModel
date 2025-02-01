@@ -74,6 +74,7 @@ class GPTQ:
                 self._add_batch(inp, out)
 
             except torch.cuda.OutOfMemoryError:
+                torch_empty_cache(self.device_partner)
                 self.device_partner = torch.device("cpu")
                 if self.H is None:
                     # large models such as DeepSeek requires too much memory even for A100
@@ -115,25 +116,30 @@ class GPTQ:
         self.nsamples += tmp
         # inp = inp.float()
         try:
-            inp = math.sqrt(2 / self.nsamples) * inp.to(device=self.device_partner, dtype=torch.float32)
+            inp = inp.to(device=self.device_partner, dtype=torch.float32)
         except torch.cuda.OutOfMemoryError:
+            torch_empty_cache(self.device_partner)
             self.device_partner = torch.device("cpu")
             self.H = self.H.to(self.device_partner)
-            inp = math.sqrt(2 / self.nsamples) * inp.to(device=self.device_partner, dtype=torch.float32)
+            inp = inp.to(device=self.device_partner, dtype=torch.float32)
             logger.info(
-                f"self.H: math.sqrt oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+                f"self.H: inp to float32 oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+
+        inp = math.sqrt(2 / self.nsamples) * inp
 
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         try:
-            self.H += inp.matmul(inp.t())
+            result = inp.matmul(inp.t())
         except torch.cuda.OutOfMemoryError:
+            torch_empty_cache(self.device_partner)
             self.device_partner = torch.device("cpu")
             self.H = self.H.to(self.device_partner)
             inp = inp.to(self.device_partner)
-            self.H += inp.matmul(inp.t())
+            result = inp.matmul(inp.t())
             logger.info(
-                f"self.H: matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+                f"self.H: inp matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
 
+        self.H += result
     # wrapper for backward compat with optimum
     # TODO: mark for deprecation
     def fasterquant(
