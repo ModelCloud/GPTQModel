@@ -39,13 +39,19 @@ class GPTQ:
     def __init__(self, layer):
         self.layer = layer
         self.device = self.layer.weight.device
+        self.device_partner = torch.device("cuda:1")
         self.layer_copy = self._clone_layer()
 
         self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
 
         # large models such as DeepSeek requires too much memory even for A100
         # move H to second cuda device until we actually need it quantization stage
-        self.H = torch.zeros((self.columns, self.columns), device="cuda:1")
+        try:
+            self.H = torch.zeros((self.columns, self.columns), device=self.device_partner)
+        except torch.OutOfMemoryError:
+            self.device_partner = torch.device("cpu")
+            self.H = torch.zeros((self.columns, self.columns), device=self.device_partner)
+
         self.nsamples = 0
         self.quantizer = Quantizer()
 
@@ -61,7 +67,7 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp, out):
-        inp = inp.to("cuda:1")
+        inp = inp.to(self.device_partner)
 
         if os.environ.get("DEBUG"):
             self.inp1 = inp
