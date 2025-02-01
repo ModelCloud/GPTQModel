@@ -66,16 +66,20 @@ class GPTQ:
                 # large models such as DeepSeek requires too much memory even for A100
                 # move H to second cuda device until we actually need it quantization stage
                 self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+                logger.info(
+                    f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
             self._add_batch(inp, out)
-            logger.info(f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+
         except torch.cuda.OutOfMemoryError:
             self.device_partner = torch.device("cpu")
             if self.H is None:
                 # large models such as DeepSeek requires too much memory even for A100
                 # move H to second cuda device until we actually need it quantization stage
                 self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+                logger.info(
+                    f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
             self._add_batch(inp, out)
-            logger.info(f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}c")
+
 
     def _add_batch(self, inp, out):
         #inp = inp.to(self.device_partner, dtype=torch.float32)
@@ -116,6 +120,8 @@ class GPTQ:
             self.H = self.H.to(self.device_partner)
             inp = inp.to(self.device_partner)
             self.H += inp.matmul(inp.t())
+            logger.info(
+                f"self.H: matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
 
     # wrapper for backward compat with optimum
     # TODO: mark for deprecation
