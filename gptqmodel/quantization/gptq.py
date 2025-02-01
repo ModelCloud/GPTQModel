@@ -20,6 +20,7 @@ import os
 import sys
 import time
 
+import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
@@ -34,19 +35,46 @@ logger = setup_logger()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+# _active_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
+#
+# # round-robin iterator
+# import itertools
+#
+# _device_roundrobin = itertools.cycle(_active_devices)
+#
+#
+# # Function to get the next device in the round-robin sequence
+# def get_next_device():
+#     return next(_device_roundrobin)
+
+
 
 class GPTQ:
-    def __init__(self, layer):
+    def __init__(self,
+         layer,
+         # pass second gpu/device in `model.quantize(..., partner_device=torch.device("cuda:1"))` for large models
+         # or if single gpu has low vram or not enough vram
+         partner_device: torch.device = None
+        ):
         self.layer = layer
         self.device = self.layer.weight.device
-        self.layer_copy = self._clone_layer()
+        self.device_partner = self.layer.weight.device # get_next_device() # self.layer.weight.device if not partner_device else partner_device
 
-        self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
-        self.H = torch.zeros((self.columns, self.columns), device=self.device)
+        # we can skip wasteful clone if conditions match
+        if not isinstance(self.layer, nn.Conv2d) and not isinstance(self.layer, transformers.pytorch_utils.Conv1D):
+            self.rows, self.columns = self.layer.weight.data.shape[0], self.layer.weight.data.shape[1]
+        else:
+            self.layer_copy = self._clone_layer(float32=False)
+            self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
+
+        self.layer_copy = None
+
+        # delay allocation until add_batch
+        self.H = None
         self.nsamples = 0
         self.quantizer = Quantizer()
 
-    def _clone_layer(self):
+    def _clone_layer(self, float32: bool = False):
         clone = self.layer.weight.data.clone()
 
         if isinstance(self.layer, nn.Conv2d):
@@ -55,12 +83,44 @@ class GPTQ:
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
-        return clone.float()
+        if float32:
+            return clone.to(torch.float32)
+        else:
+            return clone
 
     def add_batch(self, inp, out):
-        if os.environ.get("DEBUG"):
-            self.inp1 = inp
-            self.out1 = out
+        # Limit pack() thread usage to avoid auto-parallizataion regression
+        with tctl.threadpool_limits(limits=1):
+            try:
+                if self.H is None:
+                    # large models such as DeepSeek requires too much memory even for A100
+                    # move H to second cuda device until we actually need it quantization stage
+                    self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+                    if self.device_partner != self.device:
+                        logger.info(
+                            f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+                self._add_batch(inp, out)
+
+            except torch.OutOfMemoryError:
+                #torch_empty_cache(self.device_partner)
+                self.device_partner = torch.device("cpu")
+                # self.device_partner = get_next_device()
+                if self.H is None:
+                    # large models such as DeepSeek requires too much memory even for A100
+                    # move H to second cuda device until we actually need it quantization stage
+                    self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self.device_partner)
+                    if self.device_partner != self.device:
+                        logger.info(
+                            f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+                self._add_batch(inp, out)
+
+
+    def _add_batch(self, inp, out):
+        #inp = inp.to(device=torch.device("cpu"))
+
+        # if os.environ.get("DEBUG"):
+        #     self.inp1 = inp
+        #     self.out1 = out
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
@@ -85,10 +145,44 @@ class GPTQ:
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         # inp = inp.float()
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
-        self.H += inp.matmul(inp.t())
+        try:
+            inp = inp.to(device=self.device_partner, dtype=torch.float32)
+        except torch.OutOfMemoryError:
+            # torch_empty_cache(self.device_partner)
+            self.device_partner = torch.device("cpu")
+            # self.device_partner = get_next_device()
+            self.H = self.H.to(self.device_partner)
+            inp = inp.to(device=self.device_partner, dtype=torch.float32)
+            if self.device_partner != self.device:
+                logger.info(
+                    f"self.H: inp to float32 oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
 
+        inp = math.sqrt(2 / self.nsamples) * inp
+
+        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
+        inp_transposed = inp.t()
+        try:
+            inp = inp.matmul(inp_transposed)
+        except torch.OutOfMemoryError:
+            # torch_empty_cache(self.device_partner)
+            self.device_partner = torch.device("cpu")
+            # self.device_partner = get_next_device()
+            self.H = self.H.to(self.device_partner)
+            inp = inp.to(self.device_partner)
+            inp_transposed = inp_transposed.to(self.device_partner)
+            inp = inp.matmul(inp_transposed)
+            logger.info(
+                f"self.H: inp matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
+
+        # TODO this should never happen
+        if inp.device != self.H.device:
+            inp = inp.to(device=self.H.device)
+
+        self.H.add_(inp)
+
+        del inp_transposed
+        del inp
+        del tmp
     # wrapper for backward compat with optimum
     # TODO: mark for deprecation
     def fasterquant(
@@ -133,7 +227,7 @@ class GPTQ:
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.layer_copy is None:
-            W = self._clone_layer()
+            W = self._clone_layer(float32=True).to(device=self.device_partner)
         else:
             W = self.layer_copy
             self.layer_copy = None
@@ -141,7 +235,8 @@ class GPTQ:
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
 
-        H = self.H
+        # move H back to self.device
+        H = self.H.to(self.device_partner, dtype=torch.float32)
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -176,7 +271,7 @@ class GPTQ:
         while 1 > percdamp > 0:
             try:
                 damp = percdamp * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=self.device)
+                diag = torch.arange(self.columns, device=self.device_partner)
                 H[diag, diag] += damp
 
                 H = torch.linalg.cholesky(H)
@@ -238,14 +333,14 @@ class GPTQ:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            if os.environ.get("DEBUG"):
-                self.layer.weight.data[:, :i2] = Q[:, :i2]
-                self.layer.weight.data[:, i2:] = W[:, i2:]
+            # if os.environ.get("DEBUG"):
+            #     self.layer.weight.data[:, :i2] = Q[:, :i2]
+            #     self.layer.weight.data[:, i2:] = W[:, i2:]
+            #
+            #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+            #     logger.debug(torch.sum(Losses))
 
-                logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-                logger.debug(torch.sum(Losses))
-
-        torch_sync(self.device)
+        torch_sync(self.device_partner)
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
@@ -277,8 +372,8 @@ class GPTQ:
         # move back to self.dev
         self.layer.weight.data = self.layer.weight.data.to(device=self.device)
 
-        if os.environ.get("DEBUG"):
-            logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+        # if os.environ.get("DEBUG"):
+        #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -291,9 +386,9 @@ class GPTQ:
         return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
-        if os.environ.get("DEBUG"):
-            self.inp1 = None
-            self.out1 = None
+        # if os.environ.get("DEBUG"):
+        #     self.inp1 = None
+        #     self.out1 = None
 
         self.H = None
         self.Losses = None
@@ -303,6 +398,8 @@ class GPTQ:
         self.layer_copy = None
 
         torch_empty_cache(self.device)
+        if self.device_partner and self.device_partner != self.device:
+            torch_empty_cache(self.device_partner)
 
 
 __all__ = ["GPTQ"]

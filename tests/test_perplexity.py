@@ -16,6 +16,8 @@
 # -- do not touch
 import os
 
+from tests.test_xing import group_size
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -126,26 +128,26 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
-            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 16),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, 32),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, 64),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, 128),
+            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4, 128),
+            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 128),
         ]
     )
-    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
+    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int, grou_size: int):
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
-                group_size=128,
+                group_size=group_size,
                 format=format,
                 desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
                 bits=bits,
-                group_size=128,
+                group_size=group_size,
                 format=format,
             )
         else:

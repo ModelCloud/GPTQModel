@@ -107,6 +107,16 @@ class BaseGPTQModel(nn.Module):
 
     server = None
 
+    # _active_devices = [ torch.device("cuda:0"), torch.device("cuda:1")]
+    #
+    # # round-robin iterator
+    # import itertools
+    # _device_roundrobin = itertools.cycle(_active_devices)
+    #
+    # # Function to get the next device in the round-robin sequence
+    # def get_next_device(self):
+    #     return next(self._device_roundrobin)
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -226,6 +236,7 @@ class BaseGPTQModel(nn.Module):
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
+        partner_device: Optional[torch.device] = None,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -233,6 +244,11 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
+            )
+
+        if partner_device is not None and not isinstance(partner_device, torch.device):
+            raise ValueError(
+                f"Partner device (second gpu/device) for quantization of large models must be of type `torch.device`: actual = `{partner_device}"
             )
 
         if backend == BACKEND.IPEX:
@@ -606,6 +622,9 @@ class BaseGPTQModel(nn.Module):
 
             if get_device(layer) == CPU and self.quantize_config.device != CPU:
                 move_to(layer, self.quantize_config.device)
+                # device = self.get_next_device()
+                # print(f"NEXT DEVICE: {device}")
+                # move_to(layer, device=device)
 
             cur_layer_device = get_device(layer)
             full = find_layers(layer, name=self.lm_head if is_lm_head else "")
@@ -633,7 +652,7 @@ class BaseGPTQModel(nn.Module):
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                         mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
 
-                    gptq[name] = GPTQ(subset[name])
+                    gptq[name] = GPTQ(subset[name], partner_device)
                     gptq[name].quantizer.configure(
                         bits,
                         perchannel=True,
