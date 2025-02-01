@@ -35,17 +35,17 @@ logger = setup_logger()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-_active_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
-
-# round-robin iterator
-import itertools
-
-_device_roundrobin = itertools.cycle(_active_devices)
-
-
-# Function to get the next device in the round-robin sequence
-def get_next_device():
-    return next(_device_roundrobin)
+# _active_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
+#
+# # round-robin iterator
+# import itertools
+#
+# _device_roundrobin = itertools.cycle(_active_devices)
+#
+#
+# # Function to get the next device in the round-robin sequence
+# def get_next_device():
+#     return next(_device_roundrobin)
 
 
 
@@ -118,9 +118,9 @@ class GPTQ:
     def _add_batch(self, inp, out):
         #inp = inp.to(self.device_partner, dtype=torch.float32)
 
-        if os.environ.get("DEBUG"):
-            self.inp1 = inp
-            self.out1 = out
+        # if os.environ.get("DEBUG"):
+        #     self.inp1 = inp
+        #     self.out1 = out
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
@@ -175,6 +175,7 @@ class GPTQ:
 
         self.H.add_(inp)
 
+        del inp_transposed
         del inp
         del tmp
     # wrapper for backward compat with optimum
@@ -327,12 +328,12 @@ class GPTQ:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            if os.environ.get("DEBUG"):
-                self.layer.weight.data[:, :i2] = Q[:, :i2]
-                self.layer.weight.data[:, i2:] = W[:, i2:]
-
-                logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-                logger.debug(torch.sum(Losses))
+            # if os.environ.get("DEBUG"):
+            #     self.layer.weight.data[:, :i2] = Q[:, :i2]
+            #     self.layer.weight.data[:, i2:] = W[:, i2:]
+            #
+            #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+            #     logger.debug(torch.sum(Losses))
 
         torch_sync(self.device_partner)
 
@@ -366,8 +367,8 @@ class GPTQ:
         # move back to self.dev
         self.layer.weight.data = self.layer.weight.data.to(device=self.device)
 
-        if os.environ.get("DEBUG"):
-            logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+        # if os.environ.get("DEBUG"):
+        #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -380,9 +381,9 @@ class GPTQ:
         return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
-        if os.environ.get("DEBUG"):
-            self.inp1 = None
-            self.out1 = None
+        # if os.environ.get("DEBUG"):
+        #     self.inp1 = None
+        #     self.out1 = None
 
         self.H = None
         self.Losses = None
