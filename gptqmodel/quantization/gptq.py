@@ -40,17 +40,23 @@ class GPTQ:
     def __init__(self, layer):
         self.layer = layer
         self.device = self.layer.weight.device
-        self.device_partner = self.device
-        self.layer_copy = self._clone_layer()
+        self.device_partner = torch.device("cuda:1")
 
-        self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
+        # we can skip wasteful clone if conditions match
+        if not isinstance(self.layer, nn.Conv2d) and not isinstance(self.layer, transformers.pytorch_utils.Conv1D):
+            self.rows, self.columns = self.layer.weight.data.shape[0], self.layer.weight.data.shape[1]
+        else:
+            self.layer_copy = self._clone_layer(float32=False)
+            self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
+
+        self.layer_copy = None
 
         # delay allocation until add_batch
         self.H = None
         self.nsamples = 0
         self.quantizer = Quantizer()
 
-    def _clone_layer(self):
+    def _clone_layer(self, float32: bool = False):
         clone = self.layer.weight.data.clone()
 
         if isinstance(self.layer, nn.Conv2d):
@@ -59,7 +65,10 @@ class GPTQ:
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
-        return clone.float()
+        if float32:
+            return clone.to(torch.float32)
+        else:
+            return clone
 
     def add_batch(self, inp, out):
         # Limit pack() thread usage to avoid auto-parallizataion regression
@@ -140,6 +149,9 @@ class GPTQ:
                 f"self.H: inp matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
 
         self.H.add_(inp)
+
+        del inp
+        del tmp
     # wrapper for backward compat with optimum
     # TODO: mark for deprecation
     def fasterquant(
@@ -184,7 +196,7 @@ class GPTQ:
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.layer_copy is None:
-            W = self._clone_layer()
+            W = self._clone_layer(float32=True).to(device=self.device_partner)
         else:
             W = self.layer_copy
             self.layer_copy = None
