@@ -101,7 +101,7 @@ class GPTQ:
                             f"self.H: using partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
                 self._add_batch(inp, out)
 
-            except torch.cuda.OutOfMemoryError:
+            except torch.OutOfMemoryError:
                 #torch_empty_cache(self.device_partner)
                 self.device_partner = torch.device("cpu")
                 # self.device_partner = get_next_device()
@@ -147,7 +147,7 @@ class GPTQ:
         # inp = inp.float()
         try:
             inp = inp.to(device=self.device_partner, dtype=torch.float32)
-        except torch.cuda.OutOfMemoryError:
+        except torch.OutOfMemoryError:
             # torch_empty_cache(self.device_partner)
             self.device_partner = torch.device("cpu")
             # self.device_partner = get_next_device()
@@ -163,7 +163,7 @@ class GPTQ:
         inp_transposed = inp.t()
         try:
             inp = inp.matmul(inp_transposed)
-        except torch.cuda.OutOfMemoryError:
+        except torch.OutOfMemoryError:
             # torch_empty_cache(self.device_partner)
             self.device_partner = torch.device("cpu")
             # self.device_partner = get_next_device()
