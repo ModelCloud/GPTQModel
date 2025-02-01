@@ -116,7 +116,7 @@ class GPTQ:
 
 
     def _add_batch(self, inp, out):
-        #inp = inp.to(self.device_partner, dtype=torch.float32)
+        inp = inp.to(device=torch.device("cpu"))
 
         # if os.environ.get("DEBUG"):
         #     self.inp1 = inp
@@ -169,6 +169,7 @@ class GPTQ:
             # self.device_partner = get_next_device()
             self.H = self.H.to(self.device_partner)
             inp = inp.to(self.device_partner)
+            inp_transposed = inp_transposed.to(self.device_partner)
             inp = inp.matmul(inp_transposed)
             logger.info(
                 f"self.H: inp matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
