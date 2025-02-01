@@ -129,17 +129,17 @@ class GPTQ:
 
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         try:
-            result = inp.matmul(inp.t())
+            inp = inp.matmul(inp.t())
         except torch.cuda.OutOfMemoryError:
             torch_empty_cache(self.device_partner)
             self.device_partner = torch.device("cpu")
             self.H = self.H.to(self.device_partner)
             inp = inp.to(self.device_partner)
-            result = inp.matmul(inp.t())
+            inp = inp.matmul(inp.t())
             logger.info(
                 f"self.H: inp matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
 
-        self.H += result
+        self.H.add_(inp)
     # wrapper for backward compat with optimum
     # TODO: mark for deprecation
     def fasterquant(
