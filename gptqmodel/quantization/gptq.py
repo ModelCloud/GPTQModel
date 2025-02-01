@@ -35,6 +35,19 @@ logger = setup_logger()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+_active_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
+
+# round-robin iterator
+import itertools
+
+_device_roundrobin = itertools.cycle(_active_devices)
+
+
+# Function to get the next device in the round-robin sequence
+def get_next_device():
+    return next(_device_roundrobin)
+
+
 
 class GPTQ:
     def __init__(self,
@@ -45,7 +58,7 @@ class GPTQ:
         ):
         self.layer = layer
         self.device = self.layer.weight.device
-        self.device_partner = self.layer.weight.device if not partner_device else partner_device
+        self.device_partner = self.layer.weight.device # get_next_device() # self.layer.weight.device if not partner_device else partner_device
 
         # we can skip wasteful clone if conditions match
         if not isinstance(self.layer, nn.Conv2d) and not isinstance(self.layer, transformers.pytorch_utils.Conv1D):
@@ -89,8 +102,9 @@ class GPTQ:
                 self._add_batch(inp, out)
 
             except torch.cuda.OutOfMemoryError:
-                torch_empty_cache(self.device_partner)
-                self.device_partner = torch.device("cpu")
+                #torch_empty_cache(self.device_partner)
+                # self.device_partner = torch.device("cpu")
+                self.device_partner = get_next_device()
                 if self.H is None:
                     # large models such as DeepSeek requires too much memory even for A100
                     # move H to second cuda device until we actually need it quantization stage
@@ -134,8 +148,9 @@ class GPTQ:
         try:
             inp = inp.to(device=self.device_partner, dtype=torch.float32)
         except torch.cuda.OutOfMemoryError:
-            torch_empty_cache(self.device_partner)
-            self.device_partner = torch.device("cpu")
+            # torch_empty_cache(self.device_partner)
+            # self.device_partner = torch.device("cpu")
+            self.device_partner = get_next_device()
             self.H = self.H.to(self.device_partner)
             inp = inp.to(device=self.device_partner, dtype=torch.float32)
             if self.device_partner != self.device:
@@ -148,8 +163,9 @@ class GPTQ:
         try:
             inp = inp.matmul(inp.t())
         except torch.cuda.OutOfMemoryError:
-            torch_empty_cache(self.device_partner)
-            self.device_partner = torch.device("cpu")
+            # torch_empty_cache(self.device_partner)
+            # self.device_partner = torch.device("cpu")
+            self.device_partner = get_next_device()
             self.H = self.H.to(self.device_partner)
             inp = inp.to(self.device_partner)
             inp = inp.matmul(inp.t())

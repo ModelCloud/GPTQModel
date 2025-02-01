@@ -107,15 +107,15 @@ class BaseGPTQModel(nn.Module):
 
     server = None
 
-    _active_devices = [ torch.device("cuda:0"), torch.device("cuda:1")]
-
-    # round-robin iterator
-    import itertools
-    _device_roundrobin = itertools.cycle(_active_devices)
-
-    # Function to get the next device in the round-robin sequence
-    def get_next_device(self):
-        return next(self._device_roundrobin)
+    # _active_devices = [ torch.device("cuda:0"), torch.device("cuda:1")]
+    #
+    # # round-robin iterator
+    # import itertools
+    # _device_roundrobin = itertools.cycle(_active_devices)
+    #
+    # # Function to get the next device in the round-robin sequence
+    # def get_next_device(self):
+    #     return next(self._device_roundrobin)
 
     def __init__(
         self,
@@ -621,10 +621,10 @@ class BaseGPTQModel(nn.Module):
                 cpu_memorys.append(cpu_memory)
 
             if get_device(layer) == CPU and self.quantize_config.device != CPU:
-                device = self.get_next_device()
-                #move_to(layer, self.quantize_config.device)
-                print(f"NEXT DEVICE: {device}")
-                move_to(layer, device=device)
+                move_to(layer, self.quantize_config.device)
+                # device = self.get_next_device()
+                # print(f"NEXT DEVICE: {device}")
+                # move_to(layer, device=device)
 
             cur_layer_device = get_device(layer)
             full = find_layers(layer, name=self.lm_head if is_lm_head else "")
