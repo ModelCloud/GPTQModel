@@ -37,10 +37,10 @@ torch.backends.cudnn.allow_tf32 = False
 
 
 class GPTQ:
-    def __init__(self, layer, device_partner: torch.device = torch.device("cuda:1")):
+    def __init__(self, layer):
         self.layer = layer
         self.device = self.layer.weight.device
-        self.device_partner = device_partner if device_partner else self.device
+        self.device_partner = self.device
         self.layer_copy = self._clone_layer()
 
         self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
