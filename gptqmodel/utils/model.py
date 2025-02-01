@@ -31,6 +31,8 @@ import accelerate
 import torch
 import torch.nn as nn
 import transformers
+import threadpoolctl as tctl
+
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
