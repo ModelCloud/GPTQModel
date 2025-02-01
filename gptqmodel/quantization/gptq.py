@@ -174,6 +174,10 @@ class GPTQ:
             logger.info(
                 f"self.H: inp matmul oom, switch to partner device: {self.device_partner}, H shape: {self.H.shape}, Input Shape: {inp.shape}")
 
+        # TODO this should never happen
+        if inp.device != self.H.device:
+            inp = inp.to(device=self.H.device)
+
         self.H.add_(inp)
 
         del inp_transposed
