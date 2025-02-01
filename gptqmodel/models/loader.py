@@ -98,6 +98,8 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     if is_local:
         return pretrained_model_id_or_path
     else:
+        # hf_transfer does not accept max_memory arg
+        kwargs.pop('max_memory', None)
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
 
 def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
