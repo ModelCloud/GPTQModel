@@ -103,8 +103,8 @@ class GPTQ:
 
             except torch.cuda.OutOfMemoryError:
                 #torch_empty_cache(self.device_partner)
-                # self.device_partner = torch.device("cpu")
-                self.device_partner = get_next_device()
+                self.device_partner = torch.device("cpu")
+                # self.device_partner = get_next_device()
                 if self.H is None:
                     # large models such as DeepSeek requires too much memory even for A100
                     # move H to second cuda device until we actually need it quantization stage
@@ -149,8 +149,8 @@ class GPTQ:
             inp = inp.to(device=self.device_partner, dtype=torch.float32)
         except torch.cuda.OutOfMemoryError:
             # torch_empty_cache(self.device_partner)
-            # self.device_partner = torch.device("cpu")
-            self.device_partner = get_next_device()
+            self.device_partner = torch.device("cpu")
+            # self.device_partner = get_next_device()
             self.H = self.H.to(self.device_partner)
             inp = inp.to(device=self.device_partner, dtype=torch.float32)
             if self.device_partner != self.device:
@@ -164,8 +164,8 @@ class GPTQ:
             inp = inp.matmul(inp.t())
         except torch.cuda.OutOfMemoryError:
             # torch_empty_cache(self.device_partner)
-            # self.device_partner = torch.device("cpu")
-            self.device_partner = get_next_device()
+            self.device_partner = torch.device("cpu")
+            # self.device_partner = get_next_device()
             self.H = self.H.to(self.device_partner)
             inp = inp.to(self.device_partner)
             inp = inp.matmul(inp.t())
