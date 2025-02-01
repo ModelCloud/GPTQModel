@@ -129,7 +129,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
 
         out = out.to(x.dtype).reshape(out_shape)
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
 

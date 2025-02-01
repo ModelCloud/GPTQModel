@@ -243,7 +243,8 @@ class IPEXQuantLinear(BaseQuantLinear):
         out = torch.matmul(x, weights)
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            out.add_(self.bias)
 
         return out
 

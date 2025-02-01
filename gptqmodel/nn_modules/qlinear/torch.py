@@ -112,7 +112,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
     # clear gptq only weights: useful in de-quantization

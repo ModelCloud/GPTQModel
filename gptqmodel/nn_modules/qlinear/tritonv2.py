@@ -133,7 +133,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         )
         out = out.to(dtype=x.dtype).reshape(out_shape)
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
 
