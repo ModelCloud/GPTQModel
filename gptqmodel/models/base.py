@@ -81,6 +81,7 @@ class BaseGPTQModel(nn.Module):
     require_pkgs_version: Optional[List[str]] = None
     # some models require a specific dtype, such as float16
     require_dtype: Optional[str|torch.dtype] = None
+    require_fast_init: bool = True
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction

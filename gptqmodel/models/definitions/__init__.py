@@ -23,6 +23,7 @@ from .dbrx import DbrxGPTQ
 from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ
 from .deepseek_v2 import DeepSeekV2GPTQ
+from .deepseek_v3 import DeepSeekV3GPTQ
 from .exaone import ExaoneGPTQ
 from .gemma import GemmaGPTQ
 from .gemma2 import Gemma2GPTQ

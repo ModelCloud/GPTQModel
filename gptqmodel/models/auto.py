@@ -55,6 +55,7 @@ from .definitions.dbrx import DbrxGPTQ  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
+from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
@@ -139,6 +140,7 @@ MODEL_MAP = {
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
+    "deepseek_v3": DeepSeekV3GPTQ,
     "exaone": ExaoneGPTQ,
     "grinmoe": GrinMOEGPTQ,
     "mllama": MLlamaGPTQ,
