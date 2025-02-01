@@ -28,11 +28,10 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Type
 
 import accelerate
+import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-import threadpoolctl as tctl
-
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig

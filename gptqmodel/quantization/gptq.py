@@ -20,10 +20,10 @@ import os
 import sys
 import time
 
+import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-import threadpoolctl as tctl
 
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_empty_cache, torch_sync
@@ -37,10 +37,15 @@ torch.backends.cudnn.allow_tf32 = False
 
 
 class GPTQ:
-    def __init__(self, layer):
+    def __init__(self,
+         layer,
+         # pass second gpu/device in `model.quantize(..., partner_device=torch.device("cuda:1"))` for large models
+         # or if single gpu has low vram or not enough vram
+         partner_device: torch.device = None
+        ):
         self.layer = layer
         self.device = self.layer.weight.device
-        self.device_partner = torch.device("cuda:1")
+        self.device_partner = self.layer.weight.device if not partner_device else partner_device
 
         # we can skip wasteful clone if conditions match
         if not isinstance(self.layer, nn.Conv2d) and not isinstance(self.layer, transformers.pytorch_utils.Conv1D):

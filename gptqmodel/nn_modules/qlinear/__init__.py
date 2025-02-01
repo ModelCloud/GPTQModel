@@ -17,10 +17,10 @@ import sys
 from typing import List, Optional, Tuple
 
 import numpy as np
+import threadpoolctl as tctl
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
-import threadpoolctl as tctl
 
 from ...models._const import DEVICE, PLATFORM
 
