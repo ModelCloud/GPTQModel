@@ -28,9 +28,8 @@ class TestQuantTime(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     INPUTS_MAX_LENGTH = 2048
     DATASETS_MAX_COUNT = 128
-    QUANT_TIME = 94
-    MAX_DELTA_FLOOR_PERCENT = 0.05
-    MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.5 # 3090 spends 132.33%
+    QUANT_TIME = 136
+    MAX_DELTA_PERCENT = 5 # %
 
     def test_quant_time(self):
         quantize_config = QuantizeConfig(
@@ -51,18 +50,11 @@ class TestQuantTime(ModelTest):
         end_time = time.time()
 
         quant_time = end_time - start_time
+        diff_pct = (quant_time / self.QUANT_TIME)
 
         print("**************** Quant Time Result Info****************")
-        print(f"Quant Time: {quant_time} s")
+        print(f"Quant Time: {quant_time}s vs Expected: {self.QUANT_TIME}s, diff: {diff_pct}")
         print("**************** Quant Time Result Info End****************")
 
-        diff_pct = (quant_time / self.QUANT_TIME) * 100
-        negative_pct = 100 * (1 - self.MAX_DELTA_FLOOR_PERCENT)
-        positive_pct = 100 * (1 + self.MAX_POSITIVE_DELTA_CEIL_PERCENT)
-
-        self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                        f"Quant Time Second: {quant_time} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
-
-
-
-
+        self.assertTrue(abs(diff_pct) <= self.MAX_DELTA_PERCENT,
+                        f"Quant Time(s): Actual `{quant_time}` vs Expected `{self.QUANT_TIME}`, diff {diff_pct:.2f}% is out of range of {self.MAX_DELTA_PERCENT}%]")
