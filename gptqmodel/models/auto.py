@@ -35,6 +35,8 @@ import os.path  # noqa: E402
 from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
+import numpy # noqa: E402
+import random # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
@@ -94,6 +96,11 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+
+# make quants and inference more determinisitc
+torch.manual_seed(787)
+random.seed(787)
+numpy.random.seed(787)
 
 logger = setup_logger()
 
