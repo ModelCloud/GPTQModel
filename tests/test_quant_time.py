@@ -29,7 +29,7 @@ class TestQuantTime(ModelTest):
     INPUTS_MAX_LENGTH = 2048
     DATASETS_MAX_COUNT = 128
     QUANT_TIME = 136
-    MAX_DELTA_PERCENT = 0.05
+    MAX_DELTA_PERCENT = 5 # %
 
     def test_quant_time(self):
         quantize_config = QuantizeConfig(
