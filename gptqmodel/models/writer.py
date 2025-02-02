@@ -38,7 +38,7 @@ from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_
                                    META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_layers,
+from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules,
                            get_model_files_size, get_moe_layer_modules, get_state_dict_for_save,
                            load_checkpoint_in_model_then_tie_weights, make_quant)
 from ..utils.torch import torch_empty_cache
@@ -354,25 +354,25 @@ def ModelWriter(cls):
                 _ = get_moe_layer_modules(layer_modules=self.layer_modules,
                                                       num_experts=num_experts)
 
-            layers = find_layers(model)
-            ignore_layers = [self.lm_head] + self.base_modules
+            modules = find_modules(model)
+            ignore_modules = [self.lm_head] + self.base_modules
 
-            for name in list(layers.keys()):
+            for name in list(modules.keys()):
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == self.lm_head:
                     continue
 
-                if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in self.layer_modules for ignore_layer in sublist
+                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in self.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd layers only
+                    # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
-                    del layers[name]
+                    del modules[name]
 
             make_quant(
                 model,
-                layers,
+                modules,
                 qcfg.bits,
                 qcfg.group_size,
                 backend=BACKEND.AUTO,

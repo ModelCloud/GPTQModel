@@ -27,6 +27,7 @@ from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -167,6 +168,7 @@ class TestPerplexity(unittest.TestCase):
             )
 
             del model
+            torch_empty_cache()
 
             model = GPTQModel.load(
                 tmp_dir,

@@ -36,7 +36,7 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, check_to_quantized, find_layers, get_device,
+from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device,
                            get_module, get_module_by_name_prefix, get_moe_layer_modules,
                            move_to, nested_move_to, normalize_tokenizer, pack_model)
 from ..utils.progress import ProgressBar
@@ -608,7 +608,7 @@ class BaseGPTQModel(nn.Module):
                 move_to(layer, self.quantize_config.device)
 
             cur_layer_device = get_device(layer)
-            full = find_layers(layer, name=self.lm_head if is_lm_head else "")
+            full = find_modules(layer, name=self.lm_head if is_lm_head else "")
             modules = [[self.lm_head]] if is_lm_head else layer_modules
             for index, names in enumerate(modules):
                 subset = {n: full[n] for n in names if n in full}
@@ -618,6 +618,7 @@ class BaseGPTQModel(nn.Module):
                     bits = self.quantize_config.bits
                     sym = self.quantize_config.sym
                     mse = self.quantize_config.mse
+
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
@@ -661,6 +662,7 @@ class BaseGPTQModel(nn.Module):
                     else:
                         handle.append(subset[name].register_forward_hook(add_batch(name)))
 
+                logger.info(f"layer-{i}-{name}: Begin Forward() Pass")
                 fwd_start = time.time()
                 for j in range(num_batches):
                     layer_input = []
@@ -723,6 +725,8 @@ class BaseGPTQModel(nn.Module):
                         damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", damp_percent)
                         static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
 
+
+                    logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
                         percdamp=damp_percent,
                         group_size=group_size,
@@ -762,7 +766,9 @@ class BaseGPTQModel(nn.Module):
                         move_to(g_idx, CPU),
                     )
                     gptq[name].free()
+                    logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
+            logger.info(f"layer-{i}-{name}: Begin Forward() Pass 2 Post-Quant")
             for j in range(num_batches):
                 layer_input = []
                 for k, layer_inp in enumerate(layer_inputs[j]):

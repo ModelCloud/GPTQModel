@@ -102,7 +102,7 @@ def nested_move_to(v, device):
         return v
 
 
-def find_layers(module, layers=None, name=""):
+def find_modules(module, layers=None, name=""):
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
@@ -111,7 +111,7 @@ def find_layers(module, layers=None, name=""):
             return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers, name=name + "." + name1 if name != "" else name1))
+        res.update(find_modules(child, layers=layers, name=name + "." + name1 if name != "" else name1))
     return res
 
 
@@ -423,22 +423,24 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
+def pack_module(name, qModules, quantizers, layers, pbar=None):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
-        pbar.set_description(f"Packing {name}")
+        if pbar:
+            pbar.set_description(f"Packing {name}")
         quantizers[name], scale, zero, g_idx = quantizers[name]
-        layer_device = qlayers[name].device
-        qlayers[name].to(CPU)
+        layer_device = qModules[name].device
+        qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
             layers[name].to(CPU),
             scale.to(CPU),
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        qlayers[name].pack(layers[name], scale, zero, g_idx)
-        qlayers[name].to(layer_device)
-        pbar.progress()
+        qModules[name].pack(layers[name], scale, zero, g_idx)
+        qModules[name].to(layer_device)
+        if pbar:
+            pbar.progress()
 
 
 def pack_model(
@@ -455,7 +457,7 @@ def pack_model(
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
-    QuantLinear = select_quant_linear(
+    quantLinear = select_quant_linear(
         bits=bits,
         dynamic=dynamic,
         group_size=group_size,
@@ -471,8 +473,8 @@ def pack_model(
 
     logger.info("Packing model...")
 
-    layers = find_layers(model)
-    layers = {n: layers[n] for n in quantizers}
+    modules = find_modules(model)
+    modules = {n: modules[n] for n in quantizers}
     make_quant(
         model,
         quantizers,
@@ -486,8 +488,8 @@ def pack_model(
         dynamic=dynamic,
         pack_dtype=pack_dtype,
     )
-    qlayers = find_layers(model, [QuantLinear])
-    names = list(qlayers.keys())
+    qModules = find_modules(model, [quantLinear])
+    names = list(qModules.keys())
 
     if parallel_packing:
         max_workers = 2
@@ -497,13 +499,13 @@ def pack_model(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         with ProgressBar(total=len(names)) as pbar:
             def wrapper(name):
-                pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
+                pack_module(name, qModules, quantizers, modules, pbar)
 
             for _ in executor.map(wrapper, names):
                 pass
 
     logger.info("Model packed.")
-    return QuantLinear
+    return quantLinear
 
 
 def verify_model_hash(file_path: str, verify_hash: str):
