@@ -15,6 +15,7 @@
 
 # -- do not touch
 import os
+import time
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -127,7 +128,8 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
@@ -135,18 +137,18 @@ class TestPerplexity(unittest.TestCase):
             (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
         ]
     )
-    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
+    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
-                group_size=128,
+                group_size=group_size,
                 format=format,
                 desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
                 bits=bits,
-                group_size=128,
+                group_size=group_size,
                 format=format,
             )
         else:
@@ -160,7 +162,13 @@ class TestPerplexity(unittest.TestCase):
         )
 
         dataset = self.opt_calibration_dataset if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration_dataset
-        model.quantize(dataset, batch_size=128 if IS_ROCM else 256)
+        start = time.time()
+        model.quantize(
+            dataset,
+            batch_size=128 if IS_ROCM else 256,
+            buffered_fwd=buffered_fwd,
+        )
+        quant_time = time.time() - start
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
@@ -175,6 +183,7 @@ class TestPerplexity(unittest.TestCase):
                 device_map="auto",
             )
 
+            start = time.time()
             quantized_ppl = self.calculate_avg_ppl(
                 dataset_path,
                 dataset_name,
@@ -183,8 +192,9 @@ class TestPerplexity(unittest.TestCase):
                 model,
                 tokenizer,
             )
+            ppl_time = time.time() - start
 
-            print(f"Format {format}, Quantized PPL: {quantized_ppl}")
+            print(f"Format {format}, Quantized PPL: {quantized_ppl}, Quant Time: {quant_time:.2f}, PPL Time: {ppl_time:.2f}")
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama ppl == 8.7863, FORMAT.MARLIN Tinyllama ppl == 9.0036
