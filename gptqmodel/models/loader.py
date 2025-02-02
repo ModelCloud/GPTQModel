@@ -38,7 +38,7 @@ from ..utils.importer import auto_select_device, normalize_device_device_map, se
 from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_layers, get_checkpoints,
+from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init,
                            load_checkpoint_in_model_then_tie_weights, make_quant, normalize_tokenizer,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
@@ -430,25 +430,25 @@ def ModelLoader(cls):
                 cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 
-            layers = find_layers(model)
-            ignore_layers = [cls.lm_head] + cls.base_modules
+            modules = find_modules(model)
+            ignore_modules = [cls.lm_head] + cls.base_modules
 
-            for name in list(layers.keys()):
+            for name in list(modules.keys()):
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in cls.layer_modules for ignore_layer in sublist
+                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd layers only
+                    # log non-lm-head quantizerd modules only
                     if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
-                    del layers[name]
+                    del modules[name]
 
             preload_qlinear_kernel = make_quant(
                 model,
-                layers,
+                modules,
                 qcfg.bits,
                 qcfg.group_size,
                 backend=backend,
