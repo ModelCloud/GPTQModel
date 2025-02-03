@@ -39,6 +39,7 @@ class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
+    SUPPORTS_EXTENSIONS = []
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"

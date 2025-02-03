@@ -68,6 +68,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_EXTENSIONS = []
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"

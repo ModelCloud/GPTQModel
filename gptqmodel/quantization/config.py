@@ -17,6 +17,7 @@ import copy
 import json
 import os.path
 import re
+from enum import Enum
 from dataclasses import dataclass, field, fields
 from importlib.metadata import version as pkg_version
 from os.path import join
@@ -56,6 +57,7 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
 
+EXTENSION_FIELD = "extension"
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -103,6 +105,9 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     FORMAT_FIELD_JSON: FORMAT_FIELD_CODE,
 }
 
+# register extensions
+class EXTENSION(str, Enum):
+    EORA = "eora" # EoRA
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
@@ -180,6 +185,9 @@ class QuantizeConfig():
     # affects [`qweights`, `qzeros`]
     pack_dtype: Optional[Union[str, torch.int64, torch.int32, torch.int16, torch.int8]] = field(default=torch.int32)
 
+    # pending used field
+    extension: Optional[Dict] = field(default=None)
+
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -242,6 +250,33 @@ class QuantizeConfig():
                     raise ValueError("Keys in the meta dictionary must be strings")
         else:
             self.meta = {}
+
+        # validate and normalize extension
+        if self.extension is not None:
+            if not isinstance(self.extension, dict):
+                raise ValueErroor("`extension` must be a dictionary")
+
+            # extensions allowed:
+            str_extensions = [member.value for member in EXTENSION]
+            for k, v in self.extension.items():
+                if k not in str_extensions:
+                    raise ValueError(f"Unsupported extension: {k}, allowed: `{EXTENSIONS}`")
+
+                if k.lower() is EXTENSION.EORA:
+                    if not isinstance(v, dict):
+                        raise ValueError("`EoRA config` must be a dictionary containing `rank`")
+
+                    self.extension_set(EXTENSION.EORA.value, EoRAConfig(**v))
+
+
+    def extension_set(self, key: str, value: Any):
+        if self.extension is None:
+            self.extension = {}
+
+        self.extension[key.lower()] = value
+
+    def extension_get(self, key: str) -> Any:
+            return self.extension.get(key.lower()) if self.extension else None
 
     def meta_set(self, key: str, value: Any):
         self.meta[key] = value
@@ -393,10 +428,11 @@ class QuantizeConfig():
             FORMAT_FIELD_JSON: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
+            EXTENSION_FIELD: self.extension,
         }
 
-        # simplify: clean keys where the value is None
-        out = {k: v for k, v in out.items() if v is not None}
+        # simplify: clean keys where the value is None or empty [list, dict]
+        out = {k: v for k, v in out.items() if v is not None and (v is not [] or v is not {})}
 
         dict_scale_dtype_to_str(out)
         return out
@@ -415,7 +451,12 @@ class QuantizeConfig():
             # FIX ME: g_idx is I32, one per infeature
             per_group_bits += 4  # ESTIMATE for g_idx int32: one per features/group_size item
             bpw = per_group_bits / self.group_size
+
+            # normally g_idx (int32 allocated one per in_feature) is allocated in device memory
+            # but each module may have different infeatures we don't have enouch ctx here, use estimated `0.1` for now
+            bpw += 0.1
         else:
+            # there is only one scale int32 + one qzero int32 per entire module so overall it contributes to close to 0 bpw
             bpw = self.bits
         logger.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
@@ -484,3 +525,17 @@ class BaseQuantizeConfig(QuantizeConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
+
+
+@dataclass
+class ExtensionConfig():
+    pass
+
+
+
+@dataclass
+class EoRAConfig(ExtensionConfig):
+    rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
+
+    def to_dict(self):
+        return {"rank": self.rank}

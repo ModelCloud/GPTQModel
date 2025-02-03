@@ -22,7 +22,7 @@ import torch.nn as nn
 import transformers
 
 from ...models._const import DEVICE, PLATFORM
-
+from ...quantization.config import EXTENSION
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -36,6 +36,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
+    SUPPORTS_EXTENSIONS: List[EXTENSION] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -137,7 +138,9 @@ class BaseQuantLinear(nn.Module):
             pack_dtype:t.dtype=None,
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
-            trainable:Optional[bool]=None) -> Tuple[
+            trainable:Optional[bool]=None,
+            extension:Optional[Tuple]=None,
+    ) -> Tuple[
         bool, Optional[Exception]]:
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                                       in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
@@ -173,8 +176,11 @@ class BaseQuantLinear(nn.Module):
         for name, value in child_supports_variables:
             if not name.startswith("SUPPORTS") or callable(value):
                 continue
-            if value is None or (isinstance(value, list) and not value):
-                raise ValueError(f"{cls.__name__}.{name} cannot be None or an empty list.")
+            if value is None:
+                raise ValueError(f"{cls.__name__}.{name} cannot be None.")
+
+            # if isinstance(value, list) and not value:
+            #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, in_features:int=None,
