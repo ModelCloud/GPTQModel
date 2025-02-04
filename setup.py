@@ -114,14 +114,11 @@ def get_version_tag() -> str:
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
-
-with open('requirements.txt') as f:
-    requirement_list = f.read().splitlines()
-    if os.getenv("CI"):
-        requirements = []
-    else:
-        requirements = requirement_list
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+requirements = []
+if not os.getenv("CI"):
+    with open('requirements.txt') as f:
+        requirements = [line.strip() for line in f if line.strip()]
+        #subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
 
