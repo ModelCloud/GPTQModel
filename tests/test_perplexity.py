@@ -130,11 +130,11 @@ class TestPerplexity(unittest.TestCase):
         [
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
-            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, False),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, False),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, False),
+            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4, False),
+            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, False),
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
@@ -143,7 +143,13 @@ class TestPerplexity(unittest.TestCase):
                 bits=bits,
                 group_size=group_size,
                 format=format,
-                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
+                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True,
+                # inject this rule so dynamic logic is checked even if zero matches happen
+                dynamic={
+                    "-:.*mlp\.NEVER_NEGATIVE_MATCH_proj.*": {"bits": 8, "group_size": 32},
+                    "+:.*mlp\.NEVER_POSITIVE_MATCH_proj.*": {"bits": 8, "group_size": 32},
+                    ":.*mlp\.NEVER_POSITIVE_MATCH2_proj.*": {"bits": 8, "group_size": 32},
+                }
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
