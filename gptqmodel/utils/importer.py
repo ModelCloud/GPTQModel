@@ -241,6 +241,8 @@ def select_quant_linear(
         qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
+    elif backend == BACKEND.EORA_TORCH:
+        qlinear = EoRATorchQuantLinear
     else:
         qlinear = TorchQuantLinear
 
