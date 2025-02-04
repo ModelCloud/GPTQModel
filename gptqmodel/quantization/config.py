@@ -176,7 +176,7 @@ class QuantizeConfig():
     # gptq was originally designed to pack quantized weights inside INT32 dtypes
     # allowing using different dtypes used for packing quantized weights
     # affects [`qweights`, `qzeros`]
-    pack_dtype: Optional[Union[str, torch.int64, torch.int32, torch.int16, torch.int8]] = field(default=torch.int32)
+    pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
     def __post_init__(self):
         fields_info = fields(self)
