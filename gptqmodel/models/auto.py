@@ -32,11 +32,11 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import os.path  # noqa: E402
+import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
-import numpy # noqa: E402
-import random # noqa: E402
+import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
@@ -406,10 +406,10 @@ class GPTQModel:
                     ):
 
         if not quantized_path:
-            raise RuntimeError(f"You must pass quantized model path as str to push_to_hub.")
+            raise RuntimeError("You must pass quantized model path as str to push_to_hub.")
 
         if not repo_id:
-            raise RuntimeError(f"You must pass repo_id as str to push_to_hub.")
+            raise RuntimeError("You must pass repo_id as str to push_to_hub.")
 
         from huggingface_hub import HfApi
         repo_type = "model"
