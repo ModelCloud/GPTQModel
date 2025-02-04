@@ -884,6 +884,16 @@ class BaseGPTQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
+    # placeholder, noop, and alert users to correct static api
+    def push_to_hub(self,
+                    repo_id: str,
+                    quantized_path: str,  # saved local directory path
+                    private: bool = False,
+                    exists_ok: bool = False,  # set to true if repo already exists
+                    token: Optional[str] = None):
+
+        logger.error("`push_to_hub()` api cannot be used on the model instance. Please use `GPTQModel.push_to_hub()` static api instead.")
+
     def save(
             self,
             save_dir: str,

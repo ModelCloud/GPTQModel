@@ -396,3 +396,35 @@ class GPTQModel:
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 
+    # Use HfAPI and not Transformers to do upload
+    @staticmethod
+    def push_to_hub(repo_id: str,
+                    quantized_path: str,  # saved local directory path
+                    private: bool = False,
+                    exists_ok: bool = False,  # set to true if repo already exists
+                    token: Optional[str] = None,
+                    ):
+
+        if not quantized_path:
+            raise RuntimeError(f"You must pass quantized model path as str to push_to_hub.")
+
+        if not repo_id:
+            raise RuntimeError(f"You must pass repo_id as str to push_to_hub.")
+
+        from huggingface_hub import HfApi
+        repo_type = "model"
+
+        api = HfApi()
+        # if repo does not exists, create it
+        try:
+            api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
+        except Exception:
+            api.create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
+
+        # upload the quantized save folder
+        api.upload_large_folder(
+            folder_path=quantized_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+
