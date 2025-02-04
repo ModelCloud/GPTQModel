@@ -11,3 +11,4 @@ sentencepiece>=0.2.0
 protobuf>=5.29.1
 pillow>=10.4.0
 hf_transfer>=0.1.9
+lm-eval==0.4.7
