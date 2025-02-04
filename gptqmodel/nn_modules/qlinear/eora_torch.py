@@ -22,10 +22,11 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import EXTENSION
 
 logger = setup_logger()
 
-class EoraTorchQuantLinear(PackableQuantLinear):
+class EoRATorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -39,10 +40,10 @@ class EoraTorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
-    SUPPORTS_EXTENSIONS = [Extension.EORA] # <-- EoRA declration
+    SUPPORTS_EXTENSIONS = [EXTENSION.EORA] # <-- EoRA declration
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "torch"
+    QUANT_TYPE = "eora_torch"
 
     def __init__(
         self,
@@ -69,16 +70,16 @@ class EoraTorchQuantLinear(PackableQuantLinear):
             **kwargs)
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-        self.register_buffer(
-            "lora_A",
-            t.zeros((0,0), dtype=self.pack_dtype), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-        )
+        # self.register_buffer(
+        #     "lora_A",
+        #     t.zeros((0,0), dtype=self.pack_dtype), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+        # )
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-        self.register_buffer(
-            "lora_B",
-            t.zeros((0, 0), dtype=self.pack_dtype), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-        )
+        # self.register_buffer(
+        #     "lora_B",
+        #     t.zeros((0, 0), dtype=self.pack_dtype), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+        # )
 
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
@@ -193,34 +194,6 @@ class EoraTorchQuantLinear(PackableQuantLinear):
                 weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
             weights = torch.cat(weights, dim=1)
 
-        return weights
+        return weight
 
-def dequantize_model(model: nn.Module):
-    for name, module in model.model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
-            raise ValueError(
-                "Only models loaded using TorchQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH."
-            )
-
-        if isinstance(module, TorchQuantLinear):
-            # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = module.bias
-
-            # Replace the module in the model
-            parent = model.model
-            if '.' in name:
-                parent_name, module_name = name.rsplit('.', 1)
-                parent = dict(model.model.named_modules())[parent_name]
-            else:
-                module_name = name
-
-            setattr(parent, module_name, new_module)
-
-    del model.config.quantization_config
-    return model
-
-
-__all__ = ["TorchQuantLinear", "dequantize_model"]
+__all__ = ["EoRATorchQuantLinear"]

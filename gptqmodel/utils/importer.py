@@ -28,6 +28,8 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.eora_torch import EoRATorchQuantLinear
+
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
@@ -47,11 +49,12 @@ backend_dict = OrderedDict({
     BACKEND.BITBLAS: BitBLASQuantLinear, # super slow JIT compile but fastest for bs=1
     BACKEND.IPEX: IPEXQuantLinear,
     BACKEND.TORCH: TorchQuantLinear,
+    BACKEND.EORA_TORCH: EoRATorchQuantLinear,
 })
 
 format_dict = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
-    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH, BACKEND.EORA_TORCH],
+    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH, BACKEND.EORA_TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],

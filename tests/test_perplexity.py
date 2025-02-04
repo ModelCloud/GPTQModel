@@ -24,7 +24,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import GPTQModel, BACKEND  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
@@ -128,8 +128,8 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
@@ -180,6 +180,7 @@ class TestPerplexity(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmp_dir,
+                backend=BACKEND.EORA_TORCH,
                 device_map="auto",
             )
 
