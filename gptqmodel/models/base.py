@@ -41,7 +41,7 @@ from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_devic
                            move_to, nested_move_to, normalize_tokenizer, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
-from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES, DEFAULT_MAX_SHARD_SIZE
 from .loader import ModelLoader
 from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
@@ -898,7 +898,7 @@ class BaseGPTQModel(nn.Module):
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            max_shard_size: Optional[str] = None,
+            max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
