@@ -34,6 +34,7 @@ ROCM = device("cuda:0")  # rocm maps to fake cuda
 
 SUPPORTS_MODULE_TYPES = [transformers.pytorch_utils.Conv1D, nn.Conv2d, nn.Linear]
 
+DEFAULT_MAX_SHARD_SIZE = "4GB"
 
 class DEVICE(str, Enum):
     ALL = "all"  # All device
