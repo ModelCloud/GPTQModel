@@ -39,7 +39,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
-    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_EXTENSIONS = [EXTENSION.EORA] # <-- EoRA declration
 
     # for transformers/optimum tests compat
@@ -194,6 +194,6 @@ class EoRATorchQuantLinear(PackableQuantLinear):
                 weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
             weights = torch.cat(weights, dim=1)
 
-        return weight
+        return weights
 
 __all__ = ["EoRATorchQuantLinear"]
