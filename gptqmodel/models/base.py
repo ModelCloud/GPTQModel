@@ -229,6 +229,8 @@ class BaseGPTQModel(nn.Module):
         backend: Optional[BACKEND] = BACKEND.AUTO,
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+        auto_gc: bool = True,
     ) -> List[Dict[str, str]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -547,7 +549,8 @@ class BaseGPTQModel(nn.Module):
             if module is not None:
                 move_to(module, ori_outside_layer_module_devices[module_name])
 
-        torch_empty_cache()
+        if auto_gc:
+            torch_empty_cache()
 
         layer_modules = self.layer_modules
 
@@ -720,7 +723,8 @@ class BaseGPTQModel(nn.Module):
                         subset[name].forward_hook = None
 
                 if index == len(layer_modules) - 1:
-                    torch_empty_cache()
+                    if auto_gc:
+                        torch_empty_cache()
 
                 for name_index, name in enumerate(subset):
                     layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
@@ -810,7 +814,8 @@ class BaseGPTQModel(nn.Module):
                 del layer_input
                 del additional_layer_inputs
                 if num_batches > 1 and j == num_batches - 1:
-                    torch_empty_cache()
+                    if auto_gc:
+                        torch_empty_cache()
 
             if not is_lm_head:
                 layers[i] = move_to(layer, CPU)
@@ -825,7 +830,8 @@ class BaseGPTQModel(nn.Module):
                 [],
             )  # TODO: is it really OK to cache only the first positional argument?
 
-            torch_empty_cache()
+            if auto_gc:
+                torch_empty_cache()
 
         logger.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
@@ -858,7 +864,8 @@ class BaseGPTQModel(nn.Module):
         self.model.config.use_cache = forward_pass_use_cache
 
         self.quantized = True
-        torch_empty_cache()
+        if auto_gc:
+            torch_empty_cache()
 
         return self.quant_log
 

@@ -305,46 +305,56 @@ class PackableQuantLinear(BaseQuantLinear):
                 for j in range(self.pack_factor):
                     qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
-            for row in range(qweight.shape[0]):
-                row_offset = row * 10  # Cache row * 10
-                row_offset_plus_10 = row_offset + 10  # Cache row * 10 + 10
-                for j in range(10):
-                    qweight[row] |= intweight[row_offset + j] << (3 * j)
-                qweight[row] |= intweight[row_offset_plus_10] << 30
+            i = 0
+            row = 0
+            while row < qweight.shape[0]:
+                for j in range(i, i + 10):
+                    qweight[row] |= intweight[j] << (3 * (j - i))
+                i += 10
+                qweight[row] |= intweight[i] << 30
                 row += 1
-                qweight[row] |= (intweight[row_offset_plus_10] >> 2) & 1
-                for j in range(10):
-                    qweight[row] |= intweight[row_offset + j] << (3 * j + 1)
-                qweight[row] |= intweight[row_offset_plus_10] << 31
+                qweight[row] |= (intweight[i] >> 2) & 1
+                i += 1
+                for j in range(i, i + 10):
+                    qweight[row] |= intweight[j] << (3 * (j - i) + 1)
+                i += 10
+                qweight[row] |= intweight[i] << 31
                 row += 1
-                qweight[row] |= (intweight[row_offset_plus_10] >> 1) & 0x3
-                for j in range(10):
-                    qweight[row] |= intweight[row_offset + j] << (3 * j + 2)
+                qweight[row] |= (intweight[i] >> 1) & 0x3
+                i += 1
+                for j in range(i, i + 10):
+                    qweight[row] |= intweight[j] << (3 * (j - i) + 2)
+                i += 10
+                row += 1
 
         self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
 
         zeros = zeros.numpy().astype(self.pack_np_math_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits),
-                          dtype=self.pack_np_math_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_factor), dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for col in range(qzeros.shape[1]):
                 for j in range(self.pack_factor):
                     qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
-            for col in range(qzeros.shape[1]):
-                col_offset = col * 10  # Cache col * 10
-                col_offset_plus_10 = col_offset + 10  # Cache col * 10 + 10
-                for j in range(10):
-                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j)
-                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 30
-                col += 1
-                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 2) & 1
-                for j in range(10):
-                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 1)
-                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 31
-                col += 1
-                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 1) & 0x3
-                for j in range(10):
-                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 2)
+            i = 0
+            col = 0
+            for j in range(i, i + 10):
+                qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
+            i += 10
+            qzeros[:, col] |= zeros[:, i] << 30
+            col += 1
+            qzeros[:, col] |= (zeros[:, i] >> 2) & 1
+            i += 1
+            for j in range(i, i + 10):
+                qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
+            i += 10
+            qzeros[:, col] |= zeros[:, i] << 31
+            col += 1
+            qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
+            i += 1
+            for j in range(i, i + 10):
+                qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
+            i += 10
+            col += 1
 
         self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
