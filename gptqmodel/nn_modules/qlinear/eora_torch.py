@@ -14,7 +14,10 @@
 # limitations under the License.
 
 import math
+import os
 
+import huggingface_hub
+import safetensors
 import torch
 import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
@@ -24,6 +27,8 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import EoRA
 
 logger = setup_logger()
+
+lora_cache = None
 
 class EoRATorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
@@ -77,16 +82,30 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         print(f"EoRA Kernel: {self.extension}, module: {self.name}")
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-        self.register_buffer(
-            "lora_A",
-            torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-        )
+        # self.register_buffer(
+        #     "lora_A",
+        #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+        # )
+        #
+        # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+        # self.register_buffer(
+        #     "lora_B",
+        #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+        # )
 
-        # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-        self.register_buffer(
-            "lora_B",
-            torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-        )
+        # hack to load A + B
+        global lora_cache
+        if lora_cache is None:
+            if os.path.isfile(extension.lora_path):
+                lora_cache = safetensors.torch.load_file(extension.lora_path)
+                print(f"tensor_dict: {lora_cache}")
+            else:
+                # TODO FIX ME
+                raise Exception("Need to add HF support")
+
+        # load A
+        self.lora_A = lora_cache.get(f"{self.name}.lora_A.weight").to(device="cuda:0") # fix static device TODO FIXME
+        self.lora_B = lora_cache.get(f"{self.name}.lora_B.weight").to(device="cuda:0")
 
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
