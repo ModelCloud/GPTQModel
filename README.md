@@ -75,7 +75,7 @@ GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in r
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
 ## Features
-* ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/transformers)
+* ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
 * 🚀 Extensive model support for: `Ovis VL`, `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
