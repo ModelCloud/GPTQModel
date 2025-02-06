@@ -37,11 +37,16 @@ torch.save(quantized_weights, fake_quant_path)
 quantized_weights = torch.load(fake_quant_path, map_location='cpu')
 
 ## 4-bit gs=128 Acc: 0.2850
-batch_size = 1
+
+batch_size = 2
 from test_prepare_dataset import construct_ARC
 calibration_dataset = construct_ARC(nsamples=1024)
 eora_rank = 128
-eora_weight = get_eora_optimize(model_id, quant_config, quantized_weights, calibration_dataset, batch_size, eora_rank)
-torch.save(eora_weight, eora_path)
-print(eora_weight)
+model = GPTQModel.load(model_id, quant_config)
 
+eora_weight = model.get_eora(calibration_dataset, batch_size, quantized_weights, eora_rank)
+
+torch.save(eora_weight, eora_path)
+
+eora_weight = torch.load(eora_path,  map_location='cpu')
+print(eora_weight)

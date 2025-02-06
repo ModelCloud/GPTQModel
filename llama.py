@@ -18,7 +18,7 @@ model = None
 quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
 fake_quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
 eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128/eora.pt"
-eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
+eora_path2 = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
 flag1 = False
@@ -119,13 +119,64 @@ if save:
 
   save_file(eora_weight, f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf/adapter_model.safetensors")
 
-flag4 = True
+flag4 = False
 if flag4:
-  batch_size = 1
+  batch_size = 2
   from test_prepare_dataset import construct_ARC
   calibration_dataset = construct_ARC(nsamples=1024)
   eora_rank = 128
-  eora_weight = get_eora_optimize(model_id, quant_config, quantized_weights, calibration_dataset, batch_size, eora_rank)
-  torch.save(eora_weight, eora_path)
-  print(eora_weight)
+  model = GPTQModel.load(model_id, quant_config)
+  
+  eora_weight = model.get_eora(calibration_dataset, batch_size, quantized_weights, eora_rank)
 
+  torch.save(eora_weight, eora_path2)
+
+eora_weight = torch.load(eora_path2,  map_location='cpu')
+print(eora_weight)
+
+save = True
+if save:
+  from safetensors.torch import save_file
+  import json
+  lowrank_config = {
+    "alpha_pattern": {},
+    "auto_mapping": None,
+    "base_model_name_or_path": None,
+    "bias": "none",
+    "fan_in_fan_out": False,
+    "inference_mode": False,
+    "init_lora_weights": True,
+    "layer_replication": None,
+    "layers_pattern": None,
+    "layers_to_transform": None,
+    "lora_alpha": 128,
+    "lora_dropout": 0.1,
+    "megatron_config": None,
+    "megatron_core": "megatron.core",
+    "modules_to_save": None,
+    "peft_type": "LORA",
+    "r": 128,
+    "rank_pattern": {},
+    "revision": None,
+    "target_modules": [
+        "o_proj",
+        "v_proj",
+        "down_proj",
+        "up_proj",
+        "q_proj",
+        "gate_proj",
+        "k_proj"
+    ],
+    "task_type": "CAUSAL_LM",
+    "use_dora": False,
+    "use_rslora": False
+  }
+  # Serializing json
+  json_object = json.dumps(lowrank_config, indent=4)
+
+  # Writing to the adapter_config.json
+  with open(f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf-v2/adapter_config.json", "w") as outfile:
+      outfile.write(json_object)
+  ## save the lowrank weight
+
+  save_file(eora_weight, f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf-v2/adapter_model.safetensors")
