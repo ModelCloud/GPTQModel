@@ -6,19 +6,16 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-
+## This is the oldway of constructing the calibration dataset
 import numpy as np
 import torch
 import transformers
 from typing import Dict, Optional, Sequence
 import re
 
-
-
 def set_seed(seed):
     np.random.seed(seed)
     torch.random.manual_seed(seed)
-
 def get_mathqa_c4(nsamples, seed, seqlen, model):
     from datasets import load_dataset
     traindata_mathqa = load_dataset('math_qa', split='train')
@@ -162,7 +159,6 @@ def get_wikitext2(nsamples, seed, seqlen, model):
         tar[:, :-1] = -100
         trainloader.append((inp, tar))
     return trainloader
-
 
 def get_loaders(
     data_name, nsamples=128, seed=0, seqlen=2048, model=''

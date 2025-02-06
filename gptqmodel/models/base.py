@@ -445,7 +445,8 @@ class BaseGPTQModel(nn.Module):
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
-
+        print(f" cur_layer_device { cur_layer_device}")
+        print(f" data_device {data_device}")
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(_, args, kwargs):
             # Positional arguments.

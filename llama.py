@@ -5,7 +5,7 @@ import torch
 
 from gptqmodel.quantization.config import EoRA
 from gptqmodel.utils.eval import EVAL
-from gptqmodel.eora import get_eora
+from gptqmodel.eora import get_eora, get_eora_optimize
 
 bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
@@ -18,6 +18,7 @@ model = None
 quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
 fake_quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
 eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128/eora.pt"
+eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
 flag1 = False
@@ -36,10 +37,10 @@ if flag1:
   # increase `batch_size` to match gpu/vram specs to speed up quantization
   quant_log, quantized_weights = model.quantize(calibration_dataset, batch_size=2)
 
-  model.save(quant_path)
+  # model.save(quant_path)
 
 # test post-quant inference
-flag2 = True
+flag2 = False
 if flag2:
   model = GPTQModel.load(quant_path)
 
@@ -68,11 +69,10 @@ if flag3:
   eora_weight = get_eora(model_id=model_id, quant_config = quant_config, data_name=data_name, quantized_weights = quantized_weights, eora_nsamples=eora_nsamples, eora_rank =eora_rank, dev=dev)
   torch.save(eora_weight, eora_path)
 
-
-eora_weight = torch.load(eora_path,  map_location='cpu')
+  eora_weight = torch.load(eora_path,  map_location='cpu')
 # print(eora_weight)
 
-save = True
+save = False
 if save:
   from safetensors.torch import save_file
   import json
@@ -121,19 +121,11 @@ if save:
 
 flag4 = True
 if flag4:
+  batch_size = 1
+  from test_prepare_dataset import construct_ARC
+  calibration_dataset = construct_ARC(nsamples=1024)
+  eora_rank = 128
+  eora_weight = get_eora_optimize(model_id, quant_config, quantized_weights, calibration_dataset, batch_size, eora_rank)
+  torch.save(eora_weight, eora_path)
+  print(eora_weight)
 
-  eora_config = EoRA(base_model=quant_path, eora_path=eora_path, rank = 128)
-
-  quant_config = QuantizeConfig(bits=bit, group_size=128, adapter={"eora": eora_config})
-
-  model = GPTQModel.load(
-      quant_path,
-      quantize_config= quant_config,
-      backend=BACKEND.EORA_TORCH,
-      device_map="auto",
-  )
-
-
-  # print(model)
-  result = model.generate("Uncovering deep insights begins with")[0]
-  print(result)
