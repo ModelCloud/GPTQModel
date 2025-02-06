@@ -257,7 +257,7 @@ class QuantizeConfig():
                 raise ValueErroor("`extension` must be a dictionary")
 
             # extensions normalize/parse
-            self.extension = parse_exception(self.extension)
+            self.extension = parse_extension(self.extension)
 
         print(f"extension: {self.extension}")
 
@@ -524,15 +524,12 @@ class Extension():
 
 @dataclass
 class EoRA(Extension):
-    # TODO: base_model is only using during lora generation, not inference; can be moved to Eora calibration arg
-    base_model: str = field(default="")
-    eora_path: str = field(default="")
+    lora_path: str = field(default=None)
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
 
     def to_dict(self):
         return {
-            "base_model": self.base_model,
-            "eora_path": self.eora_path,
+            "lora_path": self.eora_path,
             "rank": self.rank}
 
 # register extensions

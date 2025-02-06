@@ -15,15 +15,13 @@
 
 # -- do not touch
 import os
-
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import json
 import tempfile  # noqa: E402
 
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
