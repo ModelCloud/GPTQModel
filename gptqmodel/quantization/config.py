@@ -188,9 +188,6 @@ class QuantizeConfig():
     # pending used field
     extension: Optional[Dict] = field(default=None)
 
-    # EoRA config placeholder as for now
-    eora_config: Optional[Dict] = field(default=None)
-
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -259,24 +256,13 @@ class QuantizeConfig():
             if not isinstance(self.extension, dict):
                 raise ValueErroor("`extension` must be a dictionary")
 
-            # extensions allowed:
-            ## This part has bug related to EoRA that I can not addressed
+            # extensions normalize/parse
+            self.extension = parse_exception(self.extension)
 
-            str_extensions = [member.value for member in EXTENSION]
-            for k, v in self.extension.items():
-                if k not in str_extensions:
-                    raise ValueError(f"Unsupported extension: {k}, allowed: `{EXTENSION}`")
+        printf(f"extension: {self.extension}")
 
-                if k.lower() is EXTENSION.EORA:
-                    if not isinstance(v, dict):
-                        raise ValueError("`EoRA config` must be a dictionary containing `rank`")
-
-                    self.extension_set(EXTENSION.EORA.value, EoRAConfig(**v))
-
-        
         ## EoRA config placeholder
-        print(self.eora_config)
-
+        printf(self.eora_config)
 
     def extension_set(self, key: str, value: Any):
         if self.extension is None:
@@ -535,15 +521,13 @@ class BaseQuantizeConfig(QuantizeConfig):
         super().__init__(**kwargs)
         logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
 
-
 @dataclass
-class ExtensionConfig():
+class Extension():
     pass
 
-
 @dataclass
-class EoRAConfig(ExtensionConfig):
-
+class EoRA(Extension):
+    # TODO: base_model is only using during lora generation, not inference; can be moved to Eora calibration arg
     base_model: str = field(default="")
     eora_path: str = field(default="")
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
@@ -553,3 +537,26 @@ class EoRAConfig(ExtensionConfig):
             "base_model": self.base_model,
             "eora_path": self.eora_path,
             "rank": self.rank}
+
+# register extensions
+EXTENSIONS = {"eora": EoRA}
+
+def parse_extension(ext: Dict[str, Union[Dict, Extension]]):
+    if len(ext) == 0:
+        return None
+
+    if len(ext) > 1:
+        raise ValueError(f"QuantizeConfig.extension only accept single element: actual {len(ext)}, {ext}")
+
+    k, v = next(iter(ext.items()))
+    extCls = EXTENSIONS.get(k)
+    if extCls is None:
+        raise ValueError(f"QuantizeConfig.extension only accept `{EXTENSIONS.keys()}`: actual `{k}`.")
+
+    if isinstance(v, extCls):
+        return v
+    elif isinstance(v, Dict):
+        return extCls(**v)
+    else:
+        raise ValueError(f"QuantizeConfig.extension is unknown or cannot be parsed: `{ext}`.")
+

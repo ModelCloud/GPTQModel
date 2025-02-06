@@ -22,7 +22,8 @@ import torch.nn as nn
 import transformers
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import EXTENSION, ExtensionConfig
+from ...quantization.config import Extension
+
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -36,7 +37,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
-    SUPPORTS_EXTENSIONS: List[EXTENSION] = None
+    SUPPORTS_EXTENSIONS: List[Extension] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -139,7 +140,7 @@ class BaseQuantLinear(nn.Module):
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
-            extension:Optional[ExtensionConfig]=None,
+            extension:Optional[Extension]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
@@ -184,7 +185,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, extension:Optional[ExtensionConfig]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, extension:Optional[Extension]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
         if extension is not None and extension not in cls.SUPPORTS_EXTENSIONS:

@@ -16,13 +16,12 @@
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import EXTENSION
+from ...quantization.config import EoRA
 
 logger = setup_logger()
 
@@ -40,7 +39,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = [EXTENSION.EORA] # <-- EoRA declration
+    SUPPORTS_EXTENSIONS = [EoRA] # <-- EoRA declration
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "eora_torch"
@@ -55,7 +54,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool,
         pack_dtype: torch.dtype,
-        # eora_rank: int,
+        extension: EoRA,
         **kwargs,
     ):
         super().__init__(
@@ -69,6 +68,9 @@ class EoRATorchQuantLinear(PackableQuantLinear):
             pack_dtype=pack_dtype,
             register_buffers=True,
             **kwargs)
+
+        # EoRA rank
+        # self.rank = extension.rank
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
         self.register_buffer(

@@ -41,11 +41,12 @@ from transformers.utils.hub import cached_file
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.eora_torch import EoRATorchQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import dynamic_get
+from ..quantization.config import dynamic_get, Extension
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -138,23 +139,26 @@ def get_module(module, key):
         module = getattr(module, name, None)
     return module
 
-
 def make_quant(
     module,
     names,
-    bits: int,
-    group_size: int,
+    qcfg: QuantizeConfig,
     backend: BACKEND,
-    format: str | FORMAT,
     lm_head_name: str,
-    desc_act: bool = False,
-    sym: bool = True,
     pack: bool = False,
-    dynamic=None,
     device: DEVICE = None,
     from_quantized: bool = False,
-    pack_dtype: torch.dtype = None,
 ) -> BaseQuantLinear:
+
+    bits = qcfg.bits
+    group_size =qcfg.group_size
+    extension = qcfg.extension
+    format = qcfg.format
+    desc_act = qcfg.desc_act
+    sym = qcfg.sym
+    dynamic = qcfg.dynamic
+    pack_dtype = qcfg.pack_dtype
+
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
         bits=bits,
@@ -168,6 +172,7 @@ def make_quant(
         device=device,
         pack_dtype=pack_dtype,
         multi_select=True,
+        extension=extension,
     )
 
     logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
@@ -191,7 +196,9 @@ def make_quant(
                 sym=sym,
                 device=device,
                 lm_head_name=lm_head_name,
-                pack_dtype=pack_dtype)
+                pack_dtype=pack_dtype,
+                extension=qcfg.extension,
+            )
             logger.info(f"make_quant: Selected linear: `{linear}`.")
             return linear_instance
         except NotImplementedError as e:
@@ -215,6 +222,8 @@ def create_quant_layer(
         device: DEVICE,
         lm_head_name: str,
         pack_dtype: torch.dtype,
+        extension: Optional[Extension] = None,
+
                        ) -> BaseQuantLinear:
     if isinstance(module, linear):
         return linear
@@ -273,9 +282,13 @@ def create_quant_layer(
                 pack_dtype=tmp_pack_dtype,
                 in_features=in_features,
                 out_features=out_features,
-                device=device)
+                device=device,
+                extension=None, # TODO FIX ME..need to pass EoraConfig if loaded
+            )
             if err is not None:
                 raise err
+
+
 
             new_layer = linear(
                 bits=tmp_bits,
@@ -289,6 +302,7 @@ def create_quant_layer(
                 #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
                 name=name,
                 lm_head_name=lm_head_name,
+                extension=extension,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -457,6 +471,15 @@ def pack_model(
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        format=format,
+        desc_act=desc_act,
+        sym=sym,
+        dynamic=dynamic,
+        pack_dtype=pack_dtype,
+    )
     quantLinear = select_quant_linear(
         bits=bits,
         dynamic=dynamic,
@@ -477,16 +500,11 @@ def pack_model(
     modules = {n: modules[n] for n in quantizers}
     make_quant(
         model,
-        quantizers,
-        bits,
-        group_size,
+        names=quantizers,
+        qcfg=qcfg,
         backend=backend,
-        format=format,
         lm_head_name=lm_head_name,
-        desc_act=desc_act,
         pack=True,
-        dynamic=dynamic,
-        pack_dtype=pack_dtype,
     )
     qModules = find_modules(model, [quantLinear])
     names = list(qModules.keys())

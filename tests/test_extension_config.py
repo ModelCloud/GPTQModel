@@ -17,7 +17,7 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.quantization.config import EoRAConfig
+from gptqmodel.quantization.config import EoRA, parse_extension
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -31,10 +31,36 @@ class TestExtensionConfig(unittest.TestCase):
     def setUpClass(self):
         pass
 
+    def test_extension_parse(self):
+        ext = parse_extension(ext={"eora": {"rank": 128}})
+
+        assert isinstance(ext, EoRA)
+        assert ext.rank == 128
+        print(f"{ext}")
+
+        ext = parse_extension(ext={"eora": EoRA(rank=128)})
+
+        assert isinstance(ext, EoRA)
+        assert ext.rank == 128
+        print(f"{ext}")
+
+        try:
+            parse_extension(ext={"eora": {"rank": 128, "crash": 1}})
+            raise RuntimeError("Non supported extension.property should crash on decode")
+        except Exception as e:
+            pass
+
+        try:
+            parse_extension(ext={"CRASH": {"rank": 128}})
+            raise RuntimeError("Non supported extension should crash on decode")
+        except Exception as e:
+            pass
+
+
     def test_extension_config(self):
         rank_field = "rank"
         rank = 2
-        eora_config = EoRAConfig(rank=rank)
+        eora_config = EoRA(rank=rank)
 
         kv = eora_config.to_dict()
         print(f"eora config: {kv}")
@@ -48,7 +74,7 @@ class TestExtensionConfig(unittest.TestCase):
         bits = 4
         rank = 2
 
-        eora_config = EoRAConfig(rank=rank)
+        eora_config = EoRA(rank=rank)
 
         qconfig = QuantizeConfig(
             bits=bits,

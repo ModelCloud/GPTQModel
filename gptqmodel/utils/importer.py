@@ -32,6 +32,7 @@ from ..nn_modules.qlinear.eora_torch import EoRATorchQuantLinear
 
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
+from ..quantization.config import Extension
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
@@ -159,6 +160,7 @@ def select_quant_linear(
         dynamic=None,
         pack_dtype: torch.dtype = None,
         multi_select: bool = False, # return all valid kernels
+        extension: Optional[Extension] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if device is None:
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
@@ -185,7 +187,17 @@ def select_quant_linear(
         # Suppose all quant linears in the model should have the same backend.
         for k, cls in allow_quant_linears.items():
             in_allow_backends = k in allow_backends
-            validate, err = cls.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
+            validate, err = cls.validate(
+                bits=bits,
+                group_size=group_size,
+                desc_act=desc_act,
+                sym=sym,
+                pack_dtype=pack_dtype,
+                dynamic=dynamic,
+                device=device,
+                trainable=trainable,
+                extension=extension,
+            )
             if os.environ.get("DEBUG") and in_allow_backends and not validate:
                 logger.info(f"skip {k} for {str(err)}")
             if in_allow_backends and validate:

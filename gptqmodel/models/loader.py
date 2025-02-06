@@ -448,18 +448,13 @@ def ModelLoader(cls):
 
             preload_qlinear_kernel = make_quant(
                 model,
-                modules,
-                qcfg.bits,
-                qcfg.group_size,
+                names=modules,
+                qcfg=qcfg,
                 backend=backend,
-                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=qcfg.desc_act,
-                sym=qcfg.sym,
-                dynamic=qcfg.dynamic,
                 device=device,
-                pack_dtype=qcfg.pack_dtype,
             )
+
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
 

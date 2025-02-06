@@ -372,15 +372,11 @@ def ModelWriter(cls):
 
             make_quant(
                 model,
-                modules,
-                qcfg.bits,
-                qcfg.group_size,
+                names=modules,
+                qcfg=qcfg,
                 backend=BACKEND.AUTO,
-                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=qcfg.desc_act,
                 pack=True,
-                pack_dtype=qcfg.pack_dtype,
             )
 
         load_checkpoint_in_model_then_tie_weights(
