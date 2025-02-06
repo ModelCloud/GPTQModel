@@ -17,7 +17,7 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.quantization.config import EoRA, parse_extension
+from gptqmodel.quantization.config import EoRA, normalize_adapter
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -32,26 +32,26 @@ class TestExtensionConfig(unittest.TestCase):
         pass
 
     def test_extension_parse(self):
-        ext = parse_extension(ext={"eora": {"rank": 128}})
+        ext = normalize_adapter(adapter={"eora": {"rank": 128}})
 
         assert isinstance(ext, EoRA)
         assert ext.rank == 128
         print(f"{ext}")
 
-        ext = parse_extension(ext={"eora": EoRA(rank=128)})
+        ext = normalize_adapter(adapter={"eora": EoRA(rank=128)})
 
         assert isinstance(ext, EoRA)
         assert ext.rank == 128
         print(f"{ext}")
 
         try:
-            parse_extension(ext={"eora": {"rank": 128, "crash": 1}})
+            normalize_adapter(adapter={"eora": {"rank": 128, "crash": 1}})
             raise RuntimeError("Non supported extension.property should crash on decode")
         except Exception as e:
             pass
 
         try:
-            parse_extension(ext={"CRASH": {"rank": 128}})
+            normalize_adapter(adapter={"CRASH": {"rank": 128}})
             raise RuntimeError("Non supported extension should crash on decode")
         except Exception as e:
             pass
@@ -78,7 +78,7 @@ class TestExtensionConfig(unittest.TestCase):
 
         qconfig = QuantizeConfig(
             bits=bits,
-            extension={"eora": eora_config},
+            adapter={"eora": eora_config},
         )
 
         print(f"qconfig: {qconfig}")
@@ -86,9 +86,9 @@ class TestExtensionConfig(unittest.TestCase):
 
         print(f"qconfig extract: {get_eroa_config}")
         assert qconfig.bits == bits
-        assert len(qconfig.extension) == 1
-        assert qconfig.extension.get("eora") == eora_config
-        assert qconfig.extension.get("eora").rank == rank
+        assert len(qconfig.adapter) == 1
+        assert qconfig.adapter.get("eora") == eora_config
+        assert qconfig.adapter.get("eora").rank == rank
         assert get_eroa_config.rank == rank
 
 

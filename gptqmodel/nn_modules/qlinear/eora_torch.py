@@ -43,7 +43,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = [EoRA] # <-- EoRA declration
+    SUPORTS_ADAPTERS = [EoRA] # <-- EoRA declration
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "eora_torch"
@@ -59,7 +59,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool,
         pack_dtype: torch.dtype,
-        extension: EoRA,
+        adapter: EoRA,
         **kwargs,
     ):
         super().__init__(
@@ -76,8 +76,8 @@ class EoRATorchQuantLinear(PackableQuantLinear):
             **kwargs)
 
         # EoRA rank
-        self.extension = extension # TODO push down to base class
-        self.rank = extension.rank
+        self.extension = adapter # TODO push down to base class
+        self.rank = adapter.rank
         print(f"EoRA Kernel: {self.extension}, module: {self.name}")
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
@@ -95,8 +95,8 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         # hack to load A + B
         global lora_cache
         if lora_cache is None:
-            if os.path.isfile(extension.lora_path):
-                lora_cache = safetensors.torch.load_file(extension.lora_path)
+            if os.path.isfile(adapter.lora_path):
+                lora_cache = safetensors.torch.load_file(adapter.lora_path)
                 print(f"tensor_dict: {lora_cache}")
             else:
                 # TODO FIX ME

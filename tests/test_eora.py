@@ -26,12 +26,11 @@ def test_load():
     quant_model_path = "sliuau/llama3.2-1b-4bit-group128"
     lora_path = "adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
 
-    eora_config = EoRA(lora_path=lora_path, rank=128)
-
+    adapter = EoRA(lora_path=lora_path, rank=128)
 
     model = GPTQModel.load(
         quant_model_path,
-        extension=eora_config,
+        adapter=adapter,
         backend=BACKEND.EORA_TORCH,
         device_map="auto",
     )

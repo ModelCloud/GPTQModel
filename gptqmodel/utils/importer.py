@@ -32,7 +32,7 @@ from ..nn_modules.qlinear.eora_torch import EoRATorchQuantLinear
 
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
-from ..quantization.config import Extension
+from ..quantization.config import Adapter
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
@@ -160,7 +160,7 @@ def select_quant_linear(
         dynamic=None,
         pack_dtype: torch.dtype = None,
         multi_select: bool = False, # return all valid kernels
-        extension: Optional[Extension] = None,
+        adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if device is None:
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
@@ -196,7 +196,7 @@ def select_quant_linear(
                 dynamic=dynamic,
                 device=device,
                 trainable=trainable,
-                extension=extension,
+                adapter=adapter,
             )
             if os.environ.get("DEBUG") and in_allow_backends and not validate:
                 logger.info(f"skip {k} for {str(err)}")

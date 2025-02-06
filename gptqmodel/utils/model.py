@@ -46,7 +46,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import dynamic_get, Extension
+from ..quantization.config import dynamic_get, Adapter
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -152,7 +152,7 @@ def make_quant(
 
     bits = qcfg.bits
     group_size =qcfg.group_size
-    extension = qcfg.extension
+    extension = qcfg.adapter
     format = qcfg.format
     desc_act = qcfg.desc_act
     sym = qcfg.sym
@@ -172,7 +172,7 @@ def make_quant(
         device=device,
         pack_dtype=pack_dtype,
         multi_select=True,
-        extension=extension,
+        adapter=extension,
     )
 
     logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
@@ -197,7 +197,7 @@ def make_quant(
                 device=device,
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
-                extension=qcfg.extension,
+                adapter=qcfg.adapter,
             )
             logger.info(f"make_quant: Selected linear: `{linear}`.")
             return linear_instance
@@ -222,7 +222,7 @@ def create_quant_layer(
         device: DEVICE,
         lm_head_name: str,
         pack_dtype: torch.dtype,
-        extension: Optional[Extension] = None,
+        adapter: Optional[Adapter] = None,
 
                        ) -> BaseQuantLinear:
     if isinstance(module, linear):
@@ -283,7 +283,7 @@ def create_quant_layer(
                 in_features=in_features,
                 out_features=out_features,
                 device=device,
-                extension=extension, # TODO FIX ME..need to pass Eora if loaded
+                adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
             )
             if err is not None:
                 raise err
@@ -302,7 +302,7 @@ def create_quant_layer(
                 #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
                 name=name,
                 lm_head_name=lm_head_name,
-                extension=extension,
+                adapter=adapter,
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))

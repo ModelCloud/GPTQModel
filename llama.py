@@ -124,7 +124,7 @@ if flag4:
 
   eora_config = EoRA(base_model=quant_path, eora_path=eora_path, rank = 128)
 
-  quant_config = QuantizeConfig(bits=bit, group_size=128, extension={"eora": eora_config})
+  quant_config = QuantizeConfig(bits=bit, group_size=128, adapter={"eora": eora_config})
 
   model = GPTQModel.load(
       quant_path,

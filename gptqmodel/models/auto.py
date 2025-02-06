@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 
-from ..quantization.config import Extension, parse_extension
+from ..quantization.config import Adapter, normalize_adapter
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -262,7 +262,7 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
-            extension: Optional[Extension|Dict] = None,
+            adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             # verify weight files matches predefined hash during loading
             # usage: hash_format:hash_value, example: md5:ugkdh232
@@ -270,14 +270,10 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ) -> BaseGPTQModel:
-        # normalize extension to instance
-        if extension is not None and not isinstance(extension, Extension):
-            if isinstance(extension, dict):
-                extension = parse_extension(extension)
-            else:
-                raise ValueError(f"Cannot parse QuantConfig.extension: {extension}")
+        # normalize adapter to instance
+        adapter = normalize_adapter(adapter)
 
-        print(f"from_quantized: extension: {extension}")
+        print(f"from_quantized: adapter: {adapter}")
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
 
         if isinstance(backend, str):
@@ -290,7 +286,7 @@ class GPTQModel:
             backend=backend,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,
-            extension=extension,
+            adapter=adapter,
             **kwargs,
         )
 

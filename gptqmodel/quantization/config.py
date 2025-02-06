@@ -57,7 +57,7 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
 
-EXTENSION_FIELD = "extension"
+ADAPTER_FIELD = "adapter"
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -186,7 +186,7 @@ class QuantizeConfig():
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
     # pending used field
-    extension: Optional[Dict] = field(default=None)
+    adapter: Optional[Dict] = field(default=None)
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -252,23 +252,23 @@ class QuantizeConfig():
             self.meta = {}
 
         # validate and normalize extension
-        if self.extension is not None:
-            if not isinstance(self.extension, dict):
-                raise ValueErroor("`extension` must be a dictionary")
+        if self.adapter is not None:
+            if isinstance(self.adapter, dict):
+                raise ValueErroor("`adapter` must be a dictionary")
 
-            # extensions normalize/parse
-            self.extension = parse_extension(self.extension)
+            # adapter normalize
+            self.adapter = normalize_adapter(self.adapter)
 
-        print(f"extension: {self.extension}")
+        print(f"adapter: {self.adapter}")
 
     def extension_set(self, key: str, value: Any):
-        if self.extension is None:
-            self.extension = {}
+        if self.adapter is None:
+            self.adapter = {}
 
-        self.extension[key.lower()] = value
+        self.adapter[key.lower()] = value
 
     def extension_get(self, key: str) -> Any:
-            return self.extension.get(key.lower()) if self.extension else None
+            return self.adapter.get(key.lower()) if self.adapter else None
 
     def meta_set(self, key: str, value: Any):
         self.meta[key] = value
@@ -420,7 +420,7 @@ class QuantizeConfig():
             FORMAT_FIELD_JSON: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
-            EXTENSION_FIELD: self.extension,
+            ADAPTER_FIELD: self.adapter,
         }
 
         # simplify: clean keys where the value is None or empty [list, dict]
@@ -519,11 +519,11 @@ class BaseQuantizeConfig(QuantizeConfig):
         logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
 
 @dataclass
-class Extension():
+class Adapter():
     pass
 
 @dataclass
-class EoRA(Extension):
+class EoRA(Adapter):
     lora_path: str = field(default=None)
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
 
@@ -533,24 +533,30 @@ class EoRA(Extension):
             "rank": self.rank}
 
 # register extensions
-EXTENSIONS = {"eora": EoRA}
+ADAPTER_MAPPING = {"eora": EoRA}
 
-def parse_extension(ext: Dict[str, Union[Dict, Extension]]):
-    if len(ext) == 0:
+def normalize_adapter(adapter: Dict[str, Union[Dict, Adapter]]):
+    if adapter is None:
         return None
 
-    if len(ext) > 1:
-        raise ValueError(f"QuantizeConfig.extension only accept single element: actual {len(ext)}, {ext}")
+    if isinstance(adapter, Adapter):
+        return adapter
 
-    k, v = next(iter(ext.items()))
-    extCls = EXTENSIONS.get(k)
+    if len(adapter) == 0:
+        return None
+
+    if len(adapter) > 1:
+        raise ValueError(f"QuantizeConfig.extension only accept single element: actual {len(adapter)}, {adapter}")
+
+    k, v = next(iter(adapter.items()))
+    extCls = ADAPTER_MAPPING.get(k)
     if extCls is None:
-        raise ValueError(f"QuantizeConfig.extension only accept `{EXTENSIONS.keys()}`: actual `{k}`.")
+        raise ValueError(f"QuantizeConfig.extension only accept `{ADAPTER_MAPPING.keys()}`: actual `{k}`.")
 
     if isinstance(v, extCls):
         return v
     elif isinstance(v, Dict):
         return extCls(**v)
     else:
-        raise ValueError(f"QuantizeConfig.extension is unknown or cannot be parsed: `{ext}`.")
+        raise ValueError(f"QuantizeConfig.extension is unknown or cannot be parsed: `{adapter}`.")
 

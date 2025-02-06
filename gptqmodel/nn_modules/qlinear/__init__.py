@@ -20,9 +20,10 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
+from dill.logger import adapter
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import Extension
+from ...quantization.config import Adapter
 
 
 class BaseQuantLinear(nn.Module):
@@ -37,7 +38,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
-    SUPPORTS_EXTENSIONS: List[Extension] = None
+    SUPORTS_ADAPTERS: List[Adapter] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -140,12 +141,12 @@ class BaseQuantLinear(nn.Module):
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
-            extension:Optional[Extension]=None,
+            adapter:Optional[Adapter]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
-                                      in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                                      dynamic=dynamic, device=device, trainable=trainable, extension=extension)
+                             in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
+                             dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
 
     @classmethod
     # internal method and should not be overriden
@@ -185,11 +186,11 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, extension:Optional[Extension]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if extension is not None and extension.__class__ not in cls.SUPPORTS_EXTENSIONS:
-            err = f"{cls} does not support extension: {extension}"
+        if adapter is not None and adapter.__class__ not in cls.SUPORTS_ADAPTERS:
+            err = f"{cls} does not support adapter: {adapter}"
             return False, NotImplementedError(err)
 
         if pack_dtype not in cls.SUPPORTS_PACK_DTYPES:
