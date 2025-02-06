@@ -104,8 +104,8 @@ class EoRATorchQuantLinear(PackableQuantLinear):
                 raise Exception("Need to add HF support")
 
         # load A
-        self.lora_A = lora_cache.get(f"{self.name}.lora_A.weight").to(device="cuda:0") # fix static device TODO FIXME
-        self.lora_B = lora_cache.get(f"{self.name}.lora_B.weight").to(device="cuda:0")
+        self.lora_A = lora_cache.get(f"{self.name}.lora_A.weight").T.to(device="cuda:0") # fix static device TODO FIXME
+        self.lora_B = lora_cache.get(f"{self.name}.lora_B.weight").T.to(device="cuda:0")
 
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
@@ -153,7 +153,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         # EoRA needs to apply A/B projection on to dequantized fp16 `weights`
         # here..... <-- EoRA A/B math with W (weights)
 
-        out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype) + ((x @ self.lora_A ) @ self.lora_B).to(x_dtype)
+        out = (torch.matmul(x, weights).reshape(out_shape) + ((x @ self.lora_A ) @ self.lora_B)).to(x_dtype)
 
         if self.bias is not None:
             out.add_(self.bias)
