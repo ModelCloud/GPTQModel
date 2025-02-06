@@ -83,6 +83,7 @@ class BaseQuantLinear(nn.Module):
         else:
             raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
+        # pack_factor is only used for bits 2, 4, and 8. bit3 3 does not use this variable.
         self.pack_factor = self.pack_dtype_bits // self.bits
         _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, in_features=in_features, out_features=out_features, pack_dtype=pack_dtype)
         if err:
@@ -299,7 +300,7 @@ class PackableQuantLinear(BaseQuantLinear):
         intweight = intweight.numpy().astype(self.pack_np_math_dtype)
 
         qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
-                           dtype=self.pack_np_dtype)
+                           dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for row in range(qweight.shape[0]):
                 for j in range(self.pack_factor):
@@ -330,7 +331,7 @@ class PackableQuantLinear(BaseQuantLinear):
         self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
 
         zeros = zeros.numpy().astype(self.pack_np_math_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_factor), dtype=self.pack_np_math_dtype)
+        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for col in range(qzeros.shape[1]):
                 for j in range(self.pack_factor):
