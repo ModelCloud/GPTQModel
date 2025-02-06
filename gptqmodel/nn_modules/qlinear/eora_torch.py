@@ -16,7 +16,6 @@
 import math
 import os
 
-import huggingface_hub
 import safetensors
 import torch
 import torch.nn.functional as F
@@ -103,10 +102,6 @@ class EoRATorchQuantLinear(PackableQuantLinear):
                 # TODO FIX ME
                 raise Exception("Need to add HF support")
 
-        # load A
-        self.lora_A = lora_cache.get(f"{self.name}.lora_A.weight").T.to(device="cuda:0") # fix static device TODO FIXME
-        self.lora_B = lora_cache.get(f"{self.name}.lora_B.weight").T.to(device="cuda:0")
-
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
@@ -135,7 +130,9 @@ class EoRATorchQuantLinear(PackableQuantLinear):
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
-
+        # load A
+        self.lora_A = lora_cache.get(f"{self.name}.lora_A.weight").T.to(device=self.g_idx.device, dtype=torch.float16)
+        self.lora_B = lora_cache.get(f"{self.name}.lora_B.weight").T.to(device=self.g_idx.device, dtype=torch.float16)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
