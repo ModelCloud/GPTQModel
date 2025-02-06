@@ -283,7 +283,7 @@ def create_quant_layer(
                 in_features=in_features,
                 out_features=out_features,
                 device=device,
-                extension=None, # TODO FIX ME..need to pass EoraConfig if loaded
+                extension=extension, # TODO FIX ME..need to pass Eora if loaded
             )
             if err is not None:
                 raise err

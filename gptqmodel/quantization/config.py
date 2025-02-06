@@ -259,10 +259,7 @@ class QuantizeConfig():
             # extensions normalize/parse
             self.extension = parse_exception(self.extension)
 
-        printf(f"extension: {self.extension}")
-
-        ## EoRA config placeholder
-        printf(self.eora_config)
+        print(f"extension: {self.extension}")
 
     def extension_set(self, key: str, value: Any):
         if self.extension is None:

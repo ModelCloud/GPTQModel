@@ -1,7 +1,9 @@
 from datasets import load_dataset
-from gptqmodel import QuantizeConfig, EoRAConfig
+from gptqmodel import QuantizeConfig
 from gptqmodel import GPTQModel, BACKEND
 import torch
+
+from gptqmodel.quantization.config import EoRA
 from gptqmodel.utils.eval import EVAL
 from gptqmodel.eora import get_eora
 
@@ -120,9 +122,9 @@ if save:
 flag4 = True
 if flag4:
 
-  eora_config = EoRAConfig(base_model=quant_path, eora_path=eora_path, rank = 128)
+  eora_config = EoRA(base_model=quant_path, eora_path=eora_path, rank = 128)
 
-  quant_config = QuantizeConfig(bits=bit, group_size=128, eora_config=eora_config.to_dict())
+  quant_config = QuantizeConfig(bits=bit, group_size=128, extension={"eora": eora_config})
 
   model = GPTQModel.load(
       quant_path,
