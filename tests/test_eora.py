@@ -28,15 +28,10 @@ def test_load():
 
     eora_config = EoRA(lora_path=lora_path, rank=128)
 
-    qcfg = QuantizeConfig(
-        bits=4,
-        group_size=128,
-        extension={"eora": eora_config}
-    )
 
     model = GPTQModel.load(
         quant_model_path,
-        quantize_config=qcfg,
+        extension=eora_config,
         backend=BACKEND.EORA_TORCH,
         device_map="auto",
     )

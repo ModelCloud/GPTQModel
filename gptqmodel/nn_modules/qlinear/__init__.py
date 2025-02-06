@@ -42,6 +42,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
     def __init__(self,
+                 name: str,
                  bits: int,
                  group_size: int,
                  desc_act: bool,
@@ -55,7 +56,7 @@ class BaseQuantLinear(nn.Module):
                  register_buffers_out_features: int = None,
                  **kwargs):
         super().__init__()
-
+        self.name = name # full path module name in model weights
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size if group_size != -1 else in_features
@@ -188,7 +189,7 @@ class BaseQuantLinear(nn.Module):
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, extension:Optional[Extension]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if extension is not None and extension not in cls.SUPPORTS_EXTENSIONS:
+        if extension is not None and extension.__class__ not in cls.SUPPORTS_EXTENSIONS:
             err = f"{cls} does not support extension: {extension}"
             return False, NotImplementedError(err)
 

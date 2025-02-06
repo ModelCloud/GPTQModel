@@ -46,6 +46,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
 
     def __init__(
         self,
+        name: str,
         bits: int,
         group_size: int,
         sym: bool,
@@ -58,6 +59,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         **kwargs,
     ):
         super().__init__(
+            name=name,
             bits=bits,
             group_size=group_size,
             sym=sym,
@@ -70,7 +72,9 @@ class EoRATorchQuantLinear(PackableQuantLinear):
             **kwargs)
 
         # EoRA rank
-        # self.rank = extension.rank
+        self.extension = extension # TODO push down to base class
+        self.rank = extension.rank
+        print(f"EoRA Kernel: {self.extension}, module: {self.name}")
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
         self.register_buffer(
