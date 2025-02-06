@@ -1,11 +1,11 @@
 from datasets import load_dataset
-from gptqmodel import QuantizeConfig
-from gptqmodel import GPTQModel
+from gptqmodel import QuantizeConfig, EoRAConfig
+from gptqmodel import GPTQModel, BACKEND
 import torch
 from gptqmodel.utils.eval import EVAL
 from gptqmodel.eora import get_eora
 
-bit = 3
+bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
 model = None
 
@@ -13,9 +13,9 @@ model = None
 # quant_path = "Llama-3.2-1B-gptqmodel-3bit"
 # fake_quant_path = "Llama-3.2-1B-gptqmodel-3bit-fakequantized/qw.pt"
 
-quant_path = "Llama-3.2-1B-gptqmodel-4bit"
-fake_quant_path = "Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
-eora_path = "Llama-3.2-1B-gptqmodel-4bit-eora-rank-128/eora.pt"
+quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
+fake_quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
+eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128/eora.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
 flag1 = False
@@ -37,14 +37,14 @@ if flag1:
   model.save(quant_path)
 
 # test post-quant inference
-flag2 = False
+flag2 = True
 if flag2:
   model = GPTQModel.load(quant_path)
 
   result = model.generate("Uncovering deep insights begins with")[0]
-
-  lm_eval_results = GPTQModel.eval(quant_path, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
-  print(lm_eval_results)
+  print(result)
+  # lm_eval_results = GPTQModel.eval(quant_path, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
+  # print(lm_eval_results)
 
 # torch.save(quantized_weights, fake_quant_path)
 
@@ -66,5 +66,72 @@ if flag3:
   eora_weight = get_eora(model_id=model_id, quant_config = quant_config, data_name=data_name, quantized_weights = quantized_weights, eora_nsamples=eora_nsamples, eora_rank =eora_rank, dev=dev)
   torch.save(eora_weight, eora_path)
 
+
 eora_weight = torch.load(eora_path,  map_location='cpu')
-print(eora_weight)
+# print(eora_weight)
+
+save = True
+if save:
+  from safetensors.torch import save_file
+  import json
+  lowrank_config = {
+    "alpha_pattern": {},
+    "auto_mapping": None,
+    "base_model_name_or_path": None,
+    "bias": "none",
+    "fan_in_fan_out": False,
+    "inference_mode": False,
+    "init_lora_weights": True,
+    "layer_replication": None,
+    "layers_pattern": None,
+    "layers_to_transform": None,
+    "lora_alpha": 128,
+    "lora_dropout": 0.1,
+    "megatron_config": None,
+    "megatron_core": "megatron.core",
+    "modules_to_save": None,
+    "peft_type": "LORA",
+    "r": 128,
+    "rank_pattern": {},
+    "revision": None,
+    "target_modules": [
+        "o_proj",
+        "v_proj",
+        "down_proj",
+        "up_proj",
+        "q_proj",
+        "gate_proj",
+        "k_proj"
+    ],
+    "task_type": "CAUSAL_LM",
+    "use_dora": False,
+    "use_rslora": False
+  }
+  # Serializing json
+  json_object = json.dumps(lowrank_config, indent=4)
+
+  # Writing to the adapter_config.json
+  with open(f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf/adapter_config.json", "w") as outfile:
+      outfile.write(json_object)
+  ## save the lowrank weight
+
+  save_file(eora_weight, f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf/adapter_model.safetensors")
+
+flag4 = True
+if flag4:
+
+  eora_config = EoRAConfig(base_model=quant_path, eora_path=eora_path, rank = 128)
+
+  quant_config = QuantizeConfig(bits=bit, group_size=128, eora_config=eora_config.to_dict())
+
+  model = GPTQModel.load(
+      quant_path,
+      quantize_config= quant_config,
+      backend=BACKEND.EORA_TORCH,
+      device_map="auto",
+  )
+
+
+  # print(model)
+  result = model.generate("Uncovering deep insights begins with")[0]
+  print(result)

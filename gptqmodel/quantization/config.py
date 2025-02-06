@@ -188,6 +188,9 @@ class QuantizeConfig():
     # pending used field
     extension: Optional[Dict] = field(default=None)
 
+    # EoRA config placeholder as for now
+    eora_config: Optional[Dict] = field(default=None)
+
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -257,16 +260,22 @@ class QuantizeConfig():
                 raise ValueErroor("`extension` must be a dictionary")
 
             # extensions allowed:
+            ## This part has bug related to EoRA that I can not addressed
+
             str_extensions = [member.value for member in EXTENSION]
             for k, v in self.extension.items():
                 if k not in str_extensions:
-                    raise ValueError(f"Unsupported extension: {k}, allowed: `{EXTENSIONS}`")
+                    raise ValueError(f"Unsupported extension: {k}, allowed: `{EXTENSION}`")
 
                 if k.lower() is EXTENSION.EORA:
                     if not isinstance(v, dict):
                         raise ValueError("`EoRA config` must be a dictionary containing `rank`")
 
                     self.extension_set(EXTENSION.EORA.value, EoRAConfig(**v))
+
+        
+        ## EoRA config placeholder
+        print(self.eora_config)
 
 
     def extension_set(self, key: str, value: Any):
@@ -532,10 +541,15 @@ class ExtensionConfig():
     pass
 
 
-## test sean push
 @dataclass
 class EoRAConfig(ExtensionConfig):
+
+    base_model: str = field(default="")
+    eora_path: str = field(default="")
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
 
     def to_dict(self):
-        return {"rank": self.rank}
+        return {
+            "base_model": self.base_model,
+            "eora_path": self.eora_path,
+            "rank": self.rank}

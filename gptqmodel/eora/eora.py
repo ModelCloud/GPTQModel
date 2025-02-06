@@ -161,8 +161,8 @@ def get_eora(model_id, quant_config, data_name, quantized_weights, eora_nsamples
 
                 subset[name].weight.data = comp_weight.to(subset[name].weight.data.dtype)
 
-                lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu()
-                lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu()
+                lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(torch.float16)
+                lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(torch.float16)
                 del B, A, quantized_weight, U, S, V, L, Q
 
                
@@ -182,3 +182,7 @@ def get_eora(model_id, quant_config, data_name, quantized_weights, eora_nsamples
     torch.cuda.empty_cache()
 
     return lowrank_dict
+
+@torch.no_grad()
+def get_eora_optimize(model_id, quant_config, data_name, quantized_weights, eora_nsamples, eora_rank, dev):
+    print('Starting ...')

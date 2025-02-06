@@ -55,6 +55,7 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool,
         pack_dtype: torch.dtype,
+        # eora_rank: int,
         **kwargs,
     ):
         super().__init__(
@@ -70,16 +71,16 @@ class EoRATorchQuantLinear(PackableQuantLinear):
             **kwargs)
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-        # self.register_buffer(
-        #     "lora_A",
-        #     t.zeros((0,0), dtype=self.pack_dtype), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-        # )
+        self.register_buffer(
+            "lora_A",
+            torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+        )
 
         # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-        # self.register_buffer(
-        #     "lora_B",
-        #     t.zeros((0, 0), dtype=self.pack_dtype), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-        # )
+        self.register_buffer(
+            "lora_B",
+            torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+        )
 
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
@@ -127,7 +128,8 @@ class EoRATorchQuantLinear(PackableQuantLinear):
         # EoRA needs to apply A/B projection on to dequantized fp16 `weights`
         # here..... <-- EoRA A/B math with W (weights)
 
-        out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
+        out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype) + ((x @ self.lora_A ) @ self.lora_B).to(x_dtype)
+
         if self.bias is not None:
             out.add_(self.bias)
         return out

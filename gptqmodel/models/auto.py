@@ -317,7 +317,7 @@ class GPTQModel:
             if backend == "gptqmodel":
                 def_args += ",gptqmodel=True"
             model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
-
+            
             results = lm_eval(
                 model_name=model_name,
                 model_args=model_args,
