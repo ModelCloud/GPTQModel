@@ -23,6 +23,7 @@ from importlib.metadata import version as pkg_version
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import safetensors
 import torch
 from packaging import version
 
@@ -518,45 +519,93 @@ class BaseQuantizeConfig(QuantizeConfig):
         super().__init__(**kwargs)
         logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
 
+# cache of adapter tensors loaded from disk
+adapter_load_cache = None
+
 @dataclass
 class Adapter():
-    pass
+    name: str
+    lora_path: str
+    rank: int
+
+    # override me
+    def apply(self, x: torch.Tensor, out: torch.Tensor):
+        pass
+
+    # override me
+    def post_init(self, weight_key: str, device: torch.device):
+        pass
 
 @dataclass
 class EoRA(Adapter):
+    name: str = "eora"
     lora_path: str = field(default=None)
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
 
+    lora_A: torch.Tensor = None
+    lora_B: torch.Tensor = None
+
+    def apply(self, x: torch.Tensor, out: torch.Tensor):
+        #out = out + ((x @ self.lora_A) @ self.lora_B)
+        return out.add_((x @ self.lora_A) @ self.lora_B)
+
+    def post_init(self, weight_key: str, device:torch.device):
+        global adapter_load_cache
+        if adapter_load_cache is None:
+            if os.path.isfile(self.lora_path):
+                adapter_load_cache = safetensors.torch.load_file(self.lora_path)
+                print(f"Adapter `{self.name}` tensors loaded from disk")  # {adapter_load_cache}
+            else:
+                # TODO FIX ME add hf.co/huggingface.co download support
+                raise Exception("Need to add HF support")
+
+        lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
+        lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
+
+        print(f"Adapter: lora_A {lora_A.shape}")
+        print(f"Adapter: lora_B {lora_B.shape}")
+        if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
+            print(
+                f"Warning: lora_A and lora_B tensors should be `torch.float16`: actual = `[{lora_a.dtype}, {lora_b.dtype}]`.")
+
+        self.lora_A = lora_A.to(device=device, dtype=torch.float16)
+        self.lora_B = lora_B.to(device=device, dtype=torch.float16)
+
+        print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
+        print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+
     def to_dict(self):
         return {
-            "lora_path": self.eora_path,
-            "rank": self.rank}
+            "name": self.name,
+            "lora_path": self.lora_path,
+            "rank": self.rank
+        }
+
 
 # register extensions
 ADAPTER_MAPPING = {"eora": EoRA}
 
-def normalize_adapter(adapter: Dict[str, Union[Dict, Adapter]]):
+def normalize_adapter(adapter:  Union[Dict, Adapter]):
     if adapter is None:
         return None
 
     if isinstance(adapter, Adapter):
         return adapter
 
-    if len(adapter) == 0:
-        return None
+    if not isinstance(adapter, Dict):
+        raise ValueError(f"Invalid adapter config: `adapter`.")
 
-    if len(adapter) > 1:
-        raise ValueError(f"QuantizeConfig.extension only accept single element: actual {len(adapter)}, {adapter}")
+    adapter_type = adapter.get("name")
+    if adapter_type is None:
+        raise ValueError(f"Invalid adapter class `{adapter_type}`: expected = `{ADAPTER_MAPPING}`.")
 
-    k, v = next(iter(adapter.items()))
-    extCls = ADAPTER_MAPPING.get(k)
-    if extCls is None:
+    adapterCls = ADAPTER_MAPPING.get(k)
+    if adapterCls is None:
         raise ValueError(f"QuantizeConfig.extension only accept `{ADAPTER_MAPPING.keys()}`: actual `{k}`.")
 
-    if isinstance(v, extCls):
-        return v
-    elif isinstance(v, Dict):
-        return extCls(**v)
-    else:
-        raise ValueError(f"QuantizeConfig.extension is unknown or cannot be parsed: `{adapter}`.")
+    try:
+        adapterInstance = adapterCls(**v)
+    except Exception as e:
+        raise ValueError(f"Invalid adapter config: `{v}`.")
 
+    return adapterInstance

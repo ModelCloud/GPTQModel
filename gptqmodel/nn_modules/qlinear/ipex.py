@@ -21,6 +21,7 @@ import torch.nn as nn
 import transformers
 from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from ...quantization.config import Adapter, EoRA
 
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
@@ -100,8 +101,7 @@ class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = []
-
+    SUPORTS_ADAPTERS = [EoRA]
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
 
@@ -114,6 +114,7 @@ class IPEXQuantLinear(BaseQuantLinear):
         in_features: int,
         out_features: int,
         pack_dtype: torch.dtype,
+        adapter: Adapter,
         bias: bool,
         kernel_switch_threshold=128,
         training=False,
@@ -128,6 +129,7 @@ class IPEXQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -244,6 +246,10 @@ class IPEXQuantLinear(BaseQuantLinear):
         out = torch.matmul(x, weights)
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
 

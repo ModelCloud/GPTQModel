@@ -25,6 +25,7 @@ import torch.nn as nn
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import Adapter, EoRA
 from ...utils.logger import setup_logger
 
 logger = setup_logger()
@@ -95,7 +96,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = []
+    SUPORTS_ADAPTERS = [EoRA]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -120,6 +121,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         in_features: int,
         out_features: int,
         pack_dtype: torch.dtype,
+        adapter: Adapter,
         bias: bool,
         enable_tuning: bool = True,
         fast_decoding: bool = True,
@@ -137,6 +139,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adpater=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -395,6 +398,10 @@ class BitBLASQuantLinear(BaseQuantLinear):
         self.bitblas_matmul.call_lib(
             ctypes.c_void_p(A.data_ptr()) , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
         )
+
+        if self.adapter:
+            C = self.adapter.apply(x=A, out=C)
+
         return C
 
 

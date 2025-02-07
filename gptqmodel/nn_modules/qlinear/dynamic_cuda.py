@@ -20,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import Adapter, EoRA
 
 logger = setup_logger()
 
@@ -46,7 +47,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = []
+    SUPORTS_ADAPTERS = [EoRA]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"
@@ -61,6 +62,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             out_features: int,
             bias: bool,
             pack_dtype: torch.dtype,
+            adapter: Adapter,
             kernel_switch_threshold=128,
             **kwargs,
     ):
@@ -77,6 +79,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             **kwargs)
 
         # assert in_features % 64 == 0 and out_features % 64 == 0
@@ -129,6 +132,10 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         )
 
         out = out.to(x.dtype).reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
         return out

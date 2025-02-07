@@ -28,7 +28,6 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..nn_modules.qlinear.eora_torch import EoRATorchQuantLinear
 
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
@@ -50,7 +49,6 @@ backend_dict = OrderedDict({
     BACKEND.BITBLAS: BitBLASQuantLinear, # super slow JIT compile but fastest for bs=1
     BACKEND.IPEX: IPEXQuantLinear,
     BACKEND.TORCH: TorchQuantLinear,
-    BACKEND.EORA_TORCH: EoRATorchQuantLinear,
 })
 
 format_dict = {
@@ -253,8 +251,6 @@ def select_quant_linear(
         qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
-    elif backend == BACKEND.EORA_TORCH:
-        qlinear = EoRATorchQuantLinear
     else:
         qlinear = TorchQuantLinear
 

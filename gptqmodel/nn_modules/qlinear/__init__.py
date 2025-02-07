@@ -20,11 +20,9 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
-from dill.logger import adapter
 
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import Adapter
-
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -52,6 +50,7 @@ class BaseQuantLinear(nn.Module):
                  out_features: int,
                  bias: bool,
                  pack_dtype: t.dtype,
+                 adapter: Adapter,
                  register_buffers: bool = False,
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
@@ -66,6 +65,7 @@ class BaseQuantLinear(nn.Module):
         self.pack_dtype = pack_dtype
         self.maxq = 2 ** self.bits - 1
         self.pack_dtype = pack_dtype
+        self.adapter = adapter
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
@@ -126,6 +126,39 @@ class BaseQuantLinear(nn.Module):
                 self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
             else:
                 self.bias = None
+
+        # load adapter if any
+        if adapter is not None:
+            # self.register_buffer(
+            #     "lora_A",
+            #     t.zeros((in_features, 128), dtype=t.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            # )
+            #
+            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # self.register_buffer(
+            #     "lora_B",
+            #     t.zeros((128, out_features), dtype=t.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            # )
+
+            print(f"Adapter lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
+
+            # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
+            # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # self.register_buffer(
+            #     "lora_A",
+            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            # )
+            #
+            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # self.register_buffer(
+            #     "lora_B",
+            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            # )
+
+    # all kernels should override this method
+    def post_init(self):
+        if self.adapter is not None:
+            self.adapter.post_init(weight_key=self.name, device=self.qweight.device)
 
     @classmethod
     # custom quant linear class can override this and add custom checks
@@ -285,9 +318,6 @@ class BaseQuantLinear(nn.Module):
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
-    # override me
-    def post_init(self):
-        pass
 
 class PackableQuantLinear(BaseQuantLinear):
     def pack(self, linear, scales, zeros, g_idx=None):

@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import Adapter, EoRA
 
 exllama_import_exception = None
 try:
@@ -68,14 +69,24 @@ class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = []
+    SUPORTS_ADAPTERS = [EoRA]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features: int, out_features: int, pack_dtype: torch.dtype, bias: bool, **kwargs, ):
+    def __init__(self,
+         bits: int,
+         group_size: int,
+         desc_act: bool,
+         sym: bool,
+         in_features: int,
+         out_features: int,
+         pack_dtype: torch.dtype,
+         adapter: Adapter,
+         bias: bool, **kwargs,
+    ):
         if exllama_import_exception is not None:
             raise ValueError(
                 f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
@@ -100,6 +111,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             register_buffers_in_features=self.original_in_features,
             register_buffers_out_feature=self.original_out_features,
@@ -151,6 +163,9 @@ class ExllamaQuantLinear(PackableQuantLinear):
             x = F.pad(x, self.in_features_padding_shape)
 
         out = ext_q4_matmul(x, self.q4, self.width)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         if self.bias is not None:
             out.add_(self.bias)

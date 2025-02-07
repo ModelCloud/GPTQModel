@@ -24,6 +24,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import Adapter, EoRA
 from ...utils.rocm import IS_ROCM
 
 marlin_import_exception = None
@@ -169,13 +170,22 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_EXTENSIONS = []
-
+    SUPORTS_ADAPTERS = [EoRA]
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features: int, out_features: int, pack_dtype: torch.dtype,
-                 bias: bool, **kwargs):
+    def __init__(self,
+         bits: int,
+         group_size: int,
+         desc_act: bool,
+         sym: bool,
+         in_features: int,
+         out_features: int,
+         pack_dtype: torch.dtype,
+         adapter: Adapter,
+         bias: bool,
+         **kwargs
+    ):
         if marlin_import_exception is not None:
             raise ValueError(
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
@@ -198,6 +208,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -360,11 +371,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             group_size=self.group_size)
         replace_tensor(self, "scales", marlin_scales)
 
+        super().post_init()
+
     def forward(self, A: torch.Tensor):
         if A.dtype != torch.float16:
             A = A.to(torch.float16)
 
-        return apply_gptq_marlin_linear(
+        output = apply_gptq_marlin_linear(
             input=A.contiguous() if self.is_lm_head else A,
             weight=self.qweight,
             weight_scale=self.scales,
@@ -377,6 +390,11 @@ class MarlinQuantLinear(BaseQuantLinear):
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
             bias=self.bias)
+
+        if self.adapter:
+            output = self.adapter.apply(x=A, out=output)
+
+        return output
 
 # Precompute permutations for Marlin weight and scale shuffling
 def _get_perms():

@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import Adapter, EoRA
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 
@@ -59,8 +60,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
-    SUPPORTS_EXTENSIONS = []
-
+    SUPORTS_ADAPTERS = [EoRA]
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
 
@@ -72,7 +72,18 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features, out_features, pack_dtype, bias, **kwargs, ):
+    def __init__(self,
+         bits: int,
+         group_size: int,
+         desc_act: bool,
+         sym: bool,
+         in_features: int,
+         out_features: int,
+         bias: bool,
+         pack_dtype: torch.dtype,
+         adapter: Adapter,
+         **kwargs,
+    ):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
         super().__init__(
@@ -84,6 +95,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -133,6 +145,10 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.maxq,
         )
         out = out.to(dtype=x.dtype).reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
         return out

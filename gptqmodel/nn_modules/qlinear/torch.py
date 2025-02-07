@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.config import Adapter, EoRA
 
 logger = setup_logger()
 
@@ -39,8 +40,7 @@ class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
-    SUPPORTS_EXTENSIONS = []
-
+    SUPORTS_ADAPTERS = [EoRA]
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
 
@@ -54,6 +54,7 @@ class TorchQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool,
         pack_dtype: torch.dtype,
+        adapter: Adapter,
         **kwargs,
     ):
         super().__init__(
@@ -65,6 +66,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -96,6 +98,7 @@ class TorchQuantLinear(PackableQuantLinear):
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
+        super().post_init()
 
 
     def forward(self, x: torch.Tensor):
@@ -111,10 +114,15 @@ class TorchQuantLinear(PackableQuantLinear):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         weights = self.dequantize_weight(num_itr=num_itr)
 
-        out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
+        out = torch.matmul(x, weights).reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+
+        return out.to(x_dtype)
 
     # clear gptq only weights: useful in de-quantization
     def _empty_gptq_only_weights(self):

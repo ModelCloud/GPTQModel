@@ -31,7 +31,7 @@ def test_load():
     model = GPTQModel.load(
         quant_model_path,
         adapter=adapter,
-        backend=BACKEND.EORA_TORCH,
+        backend=BACKEND.TORCH,
         device_map="auto",
     )
 
