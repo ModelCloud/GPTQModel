@@ -126,6 +126,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
+        super().post_init()
 
     def forward(self, x):
         # if in_features is padded, we need to pad the input as well
@@ -143,15 +144,14 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.bits,
             self.pack_dtype_bits,
             self.maxq,
-        )
-        out = out.to(dtype=x.dtype).reshape(out_shape)
+        ).reshape(out_shape)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+        return out.to(dtype=x.dtype)
 
 
 __all__ = ["TritonV2QuantLinear"]

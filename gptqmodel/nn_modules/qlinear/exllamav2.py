@@ -213,7 +213,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
 
     def forward(self, x, force_cuda=False):
-        if x.dtype != torch.float16:
+        x_dtype = x.dtype
+        if x_dtype != torch.float16:
             logger.warning_once(
                 f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
@@ -233,7 +234,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         if self.bias is not None:
             output.add_(self.bias)
 
-        return output
+        return output.to(dtype=x_dtype)
 
     def temp_dq_size(self):
         return self.in_features * self.out_features * 2 + 128

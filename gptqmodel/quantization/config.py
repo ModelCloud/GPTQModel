@@ -562,6 +562,10 @@ class EoRA(Adapter):
         lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
         lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
 
+        # since loder cache is singleton, we need to reset to None to ci loop tests can pass
+        if len(adapter_load_cache) == 0:
+            adapter_load_cache = None
+
         print(f"Adapter: {self.name}, loaded lora_A shape: {lora_A.shape}")
         print(f"Adapter: {self.name}, loaded lora_B shape: {lora_B.shape}")
         if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:

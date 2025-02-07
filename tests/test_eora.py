@@ -26,13 +26,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 @parameterized.expand([
     (BACKEND.TORCH),
-    # (BACKEND.CUDA),
-    # (BACKEND.TRITON),
-    # (BACKEND.EXLLAMA_V1),
-    # (BACKEND.EXLLAMA_V2),
-    # (BACKEND.MARLIN),
-    # (BACKEND.IPEX),
-    # (BACKEND.BITBLAS,
+    (BACKEND.CUDA),
+    (BACKEND.TRITON),
+    (BACKEND.EXLLAMA_V1),
+    # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
+    (BACKEND.MARLIN),
+    # (BACKEND.IPEX), <-- not tested yet
+    # (BACKEND.BITBLAS, <-- not tested yet
 ])
 def test_load(backend: BACKEND):
     quant_model_path = "sliuau/llama3.2-1b-4bit-group128"

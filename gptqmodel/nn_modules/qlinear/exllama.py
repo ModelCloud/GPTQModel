@@ -148,9 +148,12 @@ class ExllamaQuantLinear(PackableQuantLinear):
             self.qweight.device.index,
         )
 
+        super().post_init()
+
 
     def forward(self, x):
-        if x.dtype != torch.float16:
+        x_dtype = x.dtype
+        if x_dtype != torch.float16:
             logger.warning_once(
                 f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
@@ -170,4 +173,4 @@ class ExllamaQuantLinear(PackableQuantLinear):
         if self.bias is not None:
             out.add_(self.bias)
 
-        return out
+        return out.to(x_dtype)

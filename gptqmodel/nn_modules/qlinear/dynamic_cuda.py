@@ -131,14 +131,15 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             self.g_idx,
         )
 
-        out = out.to(x.dtype).reshape(out_shape)
+        out = out.reshape(out_shape)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+
+        return out.to(x.dtype)
 
 
 __all__ = ["DynamicCudaQuantLinear"]
