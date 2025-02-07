@@ -554,7 +554,7 @@ class EoRA(Adapter):
         if adapter_load_cache is None:
             if os.path.isfile(self.lora_path):
                 adapter_load_cache = safetensors.torch.load_file(self.lora_path)
-                print(f"Adapter `{self.name}` tensors loaded from disk")  # {adapter_load_cache}
+                print(f"Adapter `{self.lora_path}` tensors loaded from disk")  # {adapter_load_cache}
             else:
                 # TODO FIX ME add hf.co/huggingface.co download support
                 raise Exception("Need to add HF support")
@@ -562,8 +562,8 @@ class EoRA(Adapter):
         lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
         lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
 
-        print(f"Adapter: lora_A {lora_A.shape}")
-        print(f"Adapter: lora_B {lora_B.shape}")
+        print(f"Adapter: {self.name}, loaded lora_A shape: {lora_A.shape}")
+        print(f"Adapter: {self.name}, loaded lora_B shape: {lora_B.shape}")
         if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
             print(
                 f"Warning: lora_A and lora_B tensors should be `torch.float16`: actual = `[{lora_a.dtype}, {lora_b.dtype}]`.")
@@ -571,8 +571,8 @@ class EoRA(Adapter):
         self.lora_A = lora_A.to(device=device, dtype=torch.float16)
         self.lora_B = lora_B.to(device=device, dtype=torch.float16)
 
-        print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
-        print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+        #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
+        #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
 
     def to_dict(self):
         return {

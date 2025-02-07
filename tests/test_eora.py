@@ -16,13 +16,25 @@
 # -- do not touch
 import os
 
+from parameterized import parameterized
+
 from gptqmodel import QuantizeConfig, GPTQModel, BACKEND
 from gptqmodel.quantization import EoRA
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-def test_load():
+@parameterized.expand([
+    (BACKEND.TORCH),
+    # (BACKEND.CUDA),
+    # (BACKEND.TRITON),
+    # (BACKEND.EXLLAMA_V1),
+    # (BACKEND.EXLLAMA_V2),
+    # (BACKEND.MARLIN),
+    # (BACKEND.IPEX),
+    # (BACKEND.BITBLAS,
+])
+def test_load(backend: BACKEND):
     quant_model_path = "sliuau/llama3.2-1b-4bit-group128"
     lora_path = "adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
 
@@ -31,11 +43,12 @@ def test_load():
     model = GPTQModel.load(
         quant_model_path,
         adapter=adapter,
-        backend=BACKEND.TORCH,
+        backend=backend,
         device_map="auto",
     )
 
     # print(model)
-    tokens = model.generate("Uncovering deep insights begins with")[0]
+    tokens = model.generate("Capital of France is")[0]
     result = model.tokenizer.decode(tokens)
     print(f"Result: {result}")
+    assert "paris" in result.lower()

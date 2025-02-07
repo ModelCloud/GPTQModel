@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import math
 import sys
 from typing import List, Optional, Tuple
@@ -65,7 +66,9 @@ class BaseQuantLinear(nn.Module):
         self.pack_dtype = pack_dtype
         self.maxq = 2 ** self.bits - 1
         self.pack_dtype = pack_dtype
-        self.adapter = adapter
+        # we need to clone the adapter since passed in adapter may be shared
+        # adapter tensors are lodaed inside adapter so they must be unique per module
+        self.adapter =  copy.deepcopy(adapter)
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
