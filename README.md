@@ -12,7 +12,7 @@
 </p>
   
 ## News
-* 2/06/2025 [1.8.0-dev]: ⚡ Flexible weight packing: allow quantized weights to be packed to [int32, int16, int8]. `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. New `auto_gc: bool` control in `quantize()` which can reduce quantization time if model is small and has no chance of oom. Fixed 3-bit packing regression in v1.7.4.
+* 02/07/2025 [1.8.0-dev]: ⚡ Flexible weight packing: allow quantized weights to be packed to `[int32, int16, int8]`. `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. `DeekSeek v3/R1` model support. New `auto_gc: bool` control in `quantize()` which can reduce quantization time if model is small and has no chance of oom. Fixed 3-bit packing regression in v1.7.4.
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
 * 01/19/2025 [1.7.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.2): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
