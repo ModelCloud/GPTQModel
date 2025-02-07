@@ -181,9 +181,6 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "--expt-relaxed-constexpr",
-            "--expt-extended-lambda",
-            "--use_fast_math",
             "-diag-suppress=179,39,186",
         ],
     }
@@ -194,12 +191,15 @@ if BUILD_CUDA_EXT:
     extra_compile_args["cxx"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
     extra_compile_args["nvcc"] += [ f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}" ]
 
+    # nvidia (nvcc) only compile flags that rocm doesn't support
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
             "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
             "--use_fast_math",
         ]
 
