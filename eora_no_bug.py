@@ -5,7 +5,9 @@ import torch
 
 from gptqmodel.quantization.config import EoRA
 from gptqmodel.utils.eval import EVAL
-from gptqmodel.eora import get_eora, get_eora_optimize
+# from gptqmodel.eora import get_eora, get_eora_optimize
+
+from gptqmodel.quantization import EoRA
 
 bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
