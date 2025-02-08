@@ -530,9 +530,7 @@ class BaseGPTQModel(nn.Module):
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, data_device)
             try:
-                if hasattr(self.model, "visual"):
-                    self.model.visual = move_to(self.model.visual, self.quantize_config.device)
-
+                self.pre_embedding_stage_hook()
                 if is_ovis:
                     self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
@@ -977,6 +975,11 @@ class BaseGPTQModel(nn.Module):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
+    def pre_embedding_stage_hook(self):
+        pass
+
+    def post_embedding_stage_hook(self):
+        pass
 
 
     def __getattr__(self, item):
