@@ -75,7 +75,7 @@ common_setup_kwargs = {
     "long_description_content_type": "text/markdown",
     "url": "https://github.com/ModelCloud/GPTQModel",
     "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
-    "platforms": ["linux"],
+    "platforms": ["linux", "windows", "darwin"],
     "classifiers": [
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3",
