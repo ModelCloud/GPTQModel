@@ -554,45 +554,47 @@ class BaseGPTQModel(nn.Module):
                     if is_ovis:
                         self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                     else:
-                        last_layer_inputs = layer_inputs
-                        last_layer_outputs = []
+                        last_layer_inputs = layer_inputs[0]
+
+                        mask = attention_masks[i]
+                        layer_attention_mask = mask if mask is None else move_to(mask, self.quantize_config.device)
+
+                        additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                        layer_position_ids = None if not position_ids else move_to(position_ids[i],
+                                                                                   self.quantize_config.device)
+                        if layer_position_ids is not None:
+                            additional_layer_inputs["position_ids"] = layer_position_ids
+                        for k, v in layer_input_kwargs[i].items():
+                            additional_layer_inputs[k] = nested_move_to(v, self.quantize_config.device)
+                        # if hasattr(layer, "reuse_kv"):
+                        #     if layer.reuse_kv:
+                        #         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+
                         for layer in layers:
+                            assert isinstance(last_layer_inputs, list)
+
                             if get_device(layer) == CPU and self.quantize_config.device != CPU:
                                 move_to(layer, self.quantize_config.device)
 
                             layer_input = []
-                            for k, layer_inp in enumerate(last_layer_inputs[i]):
+                            for k, layer_inp in enumerate(last_layer_inputs):
                                 layer_input.append(move_to(layer_inp, self.quantize_config.device))
-
-                            mask = attention_masks[i]
-                            layer_attention_mask = mask if mask is None else move_to(mask, self.quantize_config.device)
-
-                            additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                            layer_position_ids = None if not position_ids else move_to(position_ids[i],
-                                                                                       self.quantize_config.device)
-                            if layer_position_ids is not None:
-                                additional_layer_inputs["position_ids"] = layer_position_ids
-                            for k, v in layer_input_kwargs[i].items():
-                                additional_layer_inputs[k] = nested_move_to(v, self.quantize_config.device)
-
-                            # if hasattr(layer, "reuse_kv"):
-                            #     if layer.reuse_kv:
-                            #         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
-
-                            layer_output = move_to(
+                            last_layer_outputs = move_to(
                                 layer(*layer_input, **additional_layer_inputs)[0],
                                 cur_layer_device if calibration_enable_gpu_cache else CPU,
                             )
-                            last_layer_outputs.append([layer_output])
-
-                            last_layer_inputs, last_layer_outputs = (
-                                last_layer_outputs,
-                                [],
-                            )
+                            last_layer_inputs = [last_layer_outputs]
+                            del last_layer_outputs
+                            del layer_input
 
                             layers[i] = move_to(layer, CPU)
 
-                        lm_head_module(*last_layer_inputs[i])
+                        del additional_layer_inputs
+
+                        layer_input = []
+                        for k, layer_inp in enumerate(last_layer_inputs):
+                            layer_input.append(move_to(layer_inp, self.quantize_config.device))
+                        lm_head_module(*layer_input)
                 except ValueError:
                     pass
 
