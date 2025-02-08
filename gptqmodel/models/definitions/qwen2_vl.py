@@ -76,10 +76,10 @@ class Qwen2VLGPTQ(BaseGPTQModel):
         }
     }
 
-    def pre_quantize_generate_hook(self):
+    def pre_quantize_generate_hook_start(self):
         self.model.visual = move_to(self.model.visual, self.quantize_config.device)
 
-    def post_quantize_generate_hook(self):
+    def pre_quantize_generate_hook_end(self):
         self.model.visual = move_to(self.model.visual, CPU)
 
     @staticmethod
