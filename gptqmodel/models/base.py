@@ -425,11 +425,11 @@ class BaseGPTQModel(nn.Module):
                 raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
-            lm_head_self.quantize_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.quantize_config.dynamic is None:
-                self.quantize_config.dynamic = {self.lm_head: lm_head_self.quantize_config}
+                self.quantize_config.dynamic = {self.lm_head: lm_head_quant_config}
             elif self.quantize_config.dynamic_get(self.lm_head, default_value=None) is None:
-                self.quantize_config.dynamic[self.lm_head] = lm_head_self.quantize_config
+                self.quantize_config.dynamic[self.lm_head] = lm_head_quant_config
 
         forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
         self.model.config.use_cache = False
@@ -981,11 +981,11 @@ class BaseGPTQModel(nn.Module):
                 raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
-            lm_head_self.quantize_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.quantize_config.dynamic is None:
-                self.quantize_config.dynamic = {self.lm_head: lm_head_self.quantize_config}
+                self.quantize_config.dynamic = {self.lm_head: lm_head_quant_config}
             elif self.quantize_config.dynamic_get(self.lm_head, default_value=None) is None:
-                self.quantize_config.dynamic[self.lm_head] = lm_head_self.quantize_config
+                self.quantize_config.dynamic[self.lm_head] = lm_head_quant_config
 
         forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
         self.model.config.use_cache = False
