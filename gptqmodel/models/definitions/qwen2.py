@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from ..base import BaseGPTQModel
-
+import torch
 
 class Qwen2GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
@@ -27,3 +27,6 @@ class Qwen2GPTQ(BaseGPTQModel):
         ["mlp.up_proj", "mlp.gate_proj"],
         ["mlp.down_proj"],
     ]
+
+    def lm_head_pre_quantize_generate_hook(self, tensor: torch.tensor) -> torch.tensor:
+        return self.model.model.norm(tensor)

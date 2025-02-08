@@ -570,7 +570,7 @@ class BaseGPTQModel(nn.Module):
                         #     if layer.reuse_kv:
                         #         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
 
-                        for layer in layers:
+                        for layer_index, layer in enumerate(layers):
                             assert isinstance(last_layer_inputs, list)
 
                             if get_device(layer) == CPU and self.quantize_config.device != CPU:
@@ -583,6 +583,10 @@ class BaseGPTQModel(nn.Module):
                                 layer(*layer_input, **additional_layer_inputs)[0],
                                 cur_layer_device if calibration_enable_gpu_cache else CPU,
                             )
+
+                            if layer_index == len(layers) - 1:
+                                last_layer_outputs = self.lm_head_pre_quantize_generate_hook(last_layer_outputs)
+
                             last_layer_inputs = [last_layer_outputs]
                             del last_layer_outputs
                             del layer_input
@@ -1034,7 +1038,8 @@ class BaseGPTQModel(nn.Module):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
-
+    def lm_head_pre_quantize_generate_hook(self, tensor: torch.tensor) -> torch.tensor:
+        pass
 
     def __getattr__(self, item):
         try:
