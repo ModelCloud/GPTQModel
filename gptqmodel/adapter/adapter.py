@@ -11,7 +11,7 @@ adapter_load_cache = None
 @dataclass
 class Adapter():
     name: str
-    path_or_id: str
+    path: str
     rank: int
 
     # override me
@@ -26,7 +26,7 @@ class Adapter():
 @dataclass
 class Lora(Adapter):
     name: str = "lora"
-    path_or_id: str = field(default=None)
+    path: str = field(default=None)
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
 
     lora_A: torch.Tensor = None
@@ -39,9 +39,9 @@ class Lora(Adapter):
     def post_init(self, weight_key: str, device:torch.device):
         global adapter_load_cache
         if adapter_load_cache is None:
-            if os.path.isfile(self.path_or_id):
-                adapter_load_cache = safetensors.torch.load_file(self.path_or_id)
-                print(f"Adapter `{self.path_or_id}` tensors loaded from disk")  # {adapter_load_cache}
+            if os.path.isfile(self.path):
+                adapter_load_cache = safetensors.torch.load_file(self.path)
+                print(f"Adapter `{self.path}` tensors loaded from disk")  # {adapter_load_cache}
             else:
                 # TODO FIX ME add hf.co/huggingface.co download support
                 raise Exception("Need to add HF support")
@@ -68,7 +68,7 @@ class Lora(Adapter):
     def to_dict(self):
         return {
             "name": self.name,
-            "lora_path": self.path_or_id,
+            "path": self.path,
             "rank": self.rank
         }
 

@@ -44,7 +44,7 @@ class Test(ModelTest):
         # quant_model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
         # lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
 
-        adapter = Lora(path_or_id=lora_path, rank=128)
+        adapter = Lora(path=lora_path, rank=128)
 
         model = GPTQModel.load(
             quant_model_path,
