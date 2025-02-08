@@ -22,8 +22,9 @@ import torch
 
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
-from ...utils.model import MODALITY
+from ...utils.model import MODALITY, move_to
 from ..base import BaseGPTQModel
+from .._const import CPU
 
 
 class OvisGPTQ(BaseGPTQModel):
@@ -41,6 +42,14 @@ class OvisGPTQ(BaseGPTQModel):
     modality = [MODALITY.IMAGE_TO_TEXT]
 
     IGNORE_ID = -100
+
+    def pre_quantize_generate_hook_start(self):
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, self.quantize_config.device)
+        self.model.vte = move_to(self.model.vte, self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, CPU)
+        self.model.vte = move_to(self.model.vte, CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         text_max_length = 832

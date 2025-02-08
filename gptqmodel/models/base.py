@@ -518,17 +518,19 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
             lm_head_handle = layers[0].register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
+        self.pre_quantize_generate_hook_start()
         for example in calibration_dataset:
             for k, v in example.items():
+                data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
                     for i in range(len(v)):
                         if len(v[i].shape) == 1:
                             v[i] = v[i].unsqueeze(0)
-                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], cur_layer_device)
+                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
-                    example[k] = move_to(v, cur_layer_device)
+                    example[k] = move_to(v, data_device)
             try:
                 if is_ovis:
                     self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
@@ -536,6 +538,7 @@ class BaseGPTQModel(nn.Module):
                     self.model(**example)
             except ValueError:
                 pass
+        self.pre_quantize_generate_hook_end()
         handle.remove()
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
             lm_head_handle.remove()
@@ -974,6 +977,11 @@ class BaseGPTQModel(nn.Module):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
+    def pre_quantize_generate_hook_start(self):
+        pass
+
+    def pre_quantize_generate_hook_end(self):
+        pass
 
 
     def __getattr__(self, item):
