@@ -19,7 +19,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.adapter.adapter import EoRA
+from gptqmodel.adapter.adapter import Lora
 # -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -44,7 +44,7 @@ class Test(ModelTest):
         # quant_model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
         # lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
 
-        adapter = EoRA(lora_path=lora_path, rank=128)
+        adapter = Lora(path_or_id=lora_path, rank=128)
 
         model = GPTQModel.load(
             quant_model_path,

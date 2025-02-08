@@ -17,13 +17,14 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.adapter.adapter import EoRA, normalize_adapter
+from gptqmodel.adapter.adapter import Lora, normalize_adapter
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
 
+lora = "lora"
 
 class TestExtensionConfig(unittest.TestCase):
     @classmethod
@@ -31,20 +32,20 @@ class TestExtensionConfig(unittest.TestCase):
         pass
 
     def test_extension_parse(self):
-        ext = normalize_adapter(adapter={"eora": {"rank": 128}})
+        ext = normalize_adapter(adapter={lora: {"rank": 128}})
 
-        assert isinstance(ext, EoRA)
+        assert isinstance(ext, Lora)
         assert ext.rank == 128
         print(f"{ext}")
 
-        ext = normalize_adapter(adapter={"eora": EoRA(rank=128)})
+        ext = normalize_adapter(adapter={lora: Lora(rank=128)})
 
-        assert isinstance(ext, EoRA)
+        assert isinstance(ext, Lora)
         assert ext.rank == 128
         print(f"{ext}")
 
         try:
-            normalize_adapter(adapter={"eora": {"rank": 128, "crash": 1}})
+            normalize_adapter(adapter={lora: {"rank": 128, "crash": 1}})
             raise RuntimeError("Non supported extension.property should crash on decode")
         except Exception:
             pass
@@ -59,12 +60,12 @@ class TestExtensionConfig(unittest.TestCase):
     def test_extension_config(self):
         rank_field = "rank"
         rank = 2
-        eora_config = EoRA(rank=rank)
+        lora_config = Lora(rank=rank)
 
-        kv = eora_config.to_dict()
-        print(f"eora config: {kv}")
+        kv = lora_config.to_dict()
+        print(f"{lora} config: {kv}")
 
-        assert eora_config.rank == rank
+        assert lora_config.rank == rank
         assert len(kv) == 1
         assert rank_field in kv.keys()
         assert kv[rank_field] == rank
@@ -73,21 +74,21 @@ class TestExtensionConfig(unittest.TestCase):
         bits = 4
         rank = 2
 
-        eora_config = EoRA(rank=rank)
+        eora_config = Lora(rank=rank)
 
         qconfig = QuantizeConfig(
             bits=bits,
-            adapter={"eora": eora_config},
+            adapter={lora: eora_config},
         )
 
         print(f"qconfig: {qconfig}")
-        get_eroa_config = qconfig.extension_get("eora")
+        get_eroa_config = qconfig.extension_get(lora)
 
         print(f"qconfig extract: {get_eroa_config}")
         assert qconfig.bits == bits
         assert len(qconfig.adapter) == 1
-        assert qconfig.adapter.get("eora") == eora_config
-        assert qconfig.adapter.get("eora").rank == rank
+        assert qconfig.adapter.get(lora) == eora_config
+        assert qconfig.adapter.get(lora).rank == rank
         assert get_eroa_config.rank == rank
 
 

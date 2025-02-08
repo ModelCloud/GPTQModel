@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from gptqmodel.adapter.adapter import Adapter, EoRA
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
@@ -69,7 +69,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [EoRA]
+    SUPORTS_ADAPTERS = [Lora]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"

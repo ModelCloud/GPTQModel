@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from gptqmodel.adapter.adapter import Adapter, EoRA
+from gptqmodel.adapter.adapter import Adapter, Lora
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
@@ -60,7 +60,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
-    SUPORTS_ADAPTERS = [EoRA]
+    SUPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
 

@@ -16,7 +16,7 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, EoRA
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
@@ -47,7 +47,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [EoRA]
+    SUPORTS_ADAPTERS = [Lora]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"

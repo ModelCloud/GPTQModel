@@ -18,7 +18,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from gptqmodel.adapter.adapter import Adapter, EoRA
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
@@ -40,7 +40,7 @@ class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
-    SUPORTS_ADAPTERS = [EoRA]
+    SUPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
 

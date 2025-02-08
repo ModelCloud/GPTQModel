@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from gptqmodel.adapter.adapter import Adapter, EoRA
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
@@ -96,7 +96,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [EoRA]
+    SUPORTS_ADAPTERS = [Lora]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
