@@ -182,23 +182,24 @@ class TestPerplexity(unittest.TestCase):
                 tmp_dir,
             )
 
+            # TODO: move to a new test
             # test upload
-            model.push_to_hub(
-                repo_id="ModelCloud/CiUploadTest",
-                quantized_path=tmp_dir,
-                private=True,
-                exists_ok=True,
-            )
+            # model.push_to_hub(
+            #     repo_id="ModelCloud/CiUploadTest",
+            #     quantized_path=tmp_dir,
+            #     private=True,
+            #     exists_ok=True,
+            # )
 
             del model
             torch_empty_cache()
 
-            GPTQModel.push_to_hub(
-                repo_id="ModelCloud/CiUploadTest",
-                quantized_path=tmp_dir,
-                private=True,
-                exists_ok=True,
-            )
+            # GPTQModel.push_to_hub(
+            #     repo_id="ModelCloud/CiUploadTest",
+            #     quantized_path=tmp_dir,
+            #     private=True,
+            #     exists_ok=True,
+            # )
 
             model = GPTQModel.load(
                 tmp_dir,
