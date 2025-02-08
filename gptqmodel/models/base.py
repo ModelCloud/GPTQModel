@@ -519,16 +519,20 @@ class BaseGPTQModel(nn.Module):
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
         for example in calibration_dataset:
             for k, v in example.items():
+                data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
                     for i in range(len(v)):
                         if len(v[i].shape) == 1:
                             v[i] = v[i].unsqueeze(0)
-                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], cur_layer_device)
+                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
-                    example[k] = move_to(v, cur_layer_device)
+                    example[k] = move_to(v, data_device)
             try:
+                if hasattr(self.model, "visual"):
+                    self.model.visual = move_to(self.model.visual, self.quantize_config.device)
+
                 if is_ovis:
                     self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
