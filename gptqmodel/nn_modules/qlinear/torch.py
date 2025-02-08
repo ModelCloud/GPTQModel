@@ -71,7 +71,7 @@ class TorchQuantLinear(PackableQuantLinear):
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
-            self.padded_infeatures = self.padded_infeatures
+            self.padded_infeatures = self.infeatures
 
         if self.bits in [2, 4, 8]:
             self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)

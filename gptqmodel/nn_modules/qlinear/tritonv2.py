@@ -90,7 +90,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
-            self.padded_infeatures = self.padded_infeatures
+            self.padded_infeatures = self.infeatures
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
