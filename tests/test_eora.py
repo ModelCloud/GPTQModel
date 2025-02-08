@@ -23,33 +23,39 @@ from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import GPTQModel, BACKEND  # noqa: E402
 from gptqmodel.quantization import EoRA  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
-@parameterized.expand([
-    (BACKEND.TORCH),
-    (BACKEND.CUDA),
-    (BACKEND.TRITON),
-    (BACKEND.EXLLAMA_V1),
-    # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
-    (BACKEND.MARLIN),
-    # (BACKEND.IPEX), <-- not tested yet
-    # (BACKEND.BITBLAS, <-- not tested yet
-])
-def test_load(backend: BACKEND):
-    quant_model_path = "sliuau/llama3.2-1b-4bit-group128"
-    lora_path = "adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
+class Test(ModelTest):
+    @parameterized.expand([
+        BACKEND.TORCH,
+        BACKEND.CUDA,
+        BACKEND.TRITON,
+        BACKEND.EXLLAMA_V1,
+        # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
+        BACKEND.MARLIN,
+        # (BACKEND.IPEX), <-- not tested yet
+        # (BACKEND.BITBLAS, <-- not tested yet
+    ])
+    def test_load(self, backend: BACKEND):
+        quant_model_path = "sliuau/llama3.2-1b-4bit-group128"
+        lora_path = "adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
 
-    adapter = EoRA(lora_path=lora_path, rank=128)
+        # TODO, use local path before merge
+        # quant_model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
+        # lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
 
-    model = GPTQModel.load(
-        quant_model_path,
-        adapter=adapter,
-        backend=backend,
-        device_map="auto",
-    )
+        adapter = EoRA(lora_path=lora_path, rank=128)
 
-    # print(model)
-    tokens = model.generate("Capital of France is")[0]
-    result = model.tokenizer.decode(tokens)
-    print(f"Result: {result}")
-    assert "paris" in result.lower()
+        model = GPTQModel.load(
+            quant_model_path,
+            adapter=adapter,
+            backend=backend,
+            device_map="auto",
+        )
+
+        # print(model)
+        tokens = model.generate("Capital of France is")[0]
+        result = model.tokenizer.decode(tokens)
+        print(f"Result: {result}")
+        assert "paris" in result.lower()
