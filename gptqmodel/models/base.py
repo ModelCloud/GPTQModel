@@ -976,10 +976,10 @@ class BaseGPTQModel(nn.Module):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
-    def pre_embedding_stage_hook(self):
+    def pre_quantize_generate_hook(self):
         pass
 
-    def post_embedding_stage_hook(self):
+    def post_quantize_generate_hook(self):
         pass
 
 
