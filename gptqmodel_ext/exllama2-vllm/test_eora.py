@@ -28,4 +28,4 @@ ax = x @ eora_a
 def test_eora_kernel():
     gptq_pytorch_out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit) + (ax @ eora_b)
     gptq_eora_fused_out = gptq_gemm_eora(x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
-    torch.testing.assert_close(gptq_pytorch_out, gptq_eora_fused_out, rtol=0.05, atol=2)  # 5 % relative tolerance, 2 absolute tolerance
+    torch.testing.assert_close(gptq_pytorch_out, gptq_eora_fused_out, rtol=0.05, atol=0.5)  # 5 % relative tolerance, 0.5 absolute tolerance
