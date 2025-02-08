@@ -48,15 +48,11 @@ class TestLmHeadQuant(ModelTest):
 
     sample_length = 1024
     samples = 128
-    model_id = "Qwen/Qwen1.5-1.8B-Chat"
+    model_id = "/monster/data/model/Qwen1.5-1.8B-Chat"
 
     @classmethod
     def setUpClass(cls):
-        calibration_dataset = load_dataset(
-            "allenai/c4",
-            data_files="en/c4-train.00001-of-01024.json.gz",
-            split="train"
-        ).filter(lambda x: len(x["text"]) >= cls.sample_length).select(range(cls.samples))["text"]
+        calibration_dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train").filter(lambda x: len(x["text"]) >= cls.sample_length).select(range(cls.samples))["text"]
 
         # Truncating sample text to reduce memory usage
         cls.calibration_dataset = [c[:cls.sample_length] for c in calibration_dataset]
