@@ -48,7 +48,7 @@ class TestLmHeadQuant(ModelTest):
 
     sample_length = 1024
     samples = 128
-    model_id = "Qwen/Qwen1.5-1.8B-Chat"
+    model_id = "/monster/data/model/Qwen1.5-1.8B-Chat"
 
     @classmethod
     def setUpClass(cls):
