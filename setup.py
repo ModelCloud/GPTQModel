@@ -88,7 +88,9 @@ common_setup_kwargs = {
         "Intended Audience :: Developers",
         "Intended Audience :: Education",
         "Intended Audience :: Science/Research",
+        "Intended Audience :: Information Technology",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
     ],
 }
 
