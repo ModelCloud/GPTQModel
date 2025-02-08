@@ -16,13 +16,14 @@
 # -- do not touch
 import os
 
-from parameterized import parameterized
-
-from gptqmodel import QuantizeConfig, GPTQModel, BACKEND
-from gptqmodel.quantization import EoRA
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 # -- end do not touch
+from parameterized import parameterized  # noqa: E402
+
+from gptqmodel import GPTQModel, BACKEND  # noqa: E402
+from gptqmodel.quantization import EoRA  # noqa: E402
+
 
 @parameterized.expand([
     (BACKEND.TORCH),
