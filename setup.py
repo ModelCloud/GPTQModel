@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -73,8 +74,11 @@ common_setup_kwargs = {
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
     "url": "https://github.com/ModelCloud/GPTQModel",
+    "project_urls": {
+        "Homepage": "https://github.com/ModelCloud/GPTQModel",
+    },
     "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
-    "platforms": ["linux"],
+    "platforms": ["linux", "windows", "darwin"],
     "classifiers": [
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3",
@@ -82,11 +86,14 @@ common_setup_kwargs = {
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Programming Language :: C++",
         "Intended Audience :: Developers",
         "Intended Audience :: Education",
         "Intended Audience :: Science/Research",
+        "Intended Audience :: Information Technology",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
     ],
 }
 
@@ -328,6 +335,6 @@ setup(
         "bdist_wheel": CachedWheelsCommand,
     },
     ext_modules=extensions,
-    license="Apache Software License",
+    license="Apache 2.0",
     **common_setup_kwargs
 )
