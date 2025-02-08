@@ -328,5 +328,6 @@ setup(
         "bdist_wheel": CachedWheelsCommand,
     },
     ext_modules=extensions,
+    license="Apache Software License",
     **common_setup_kwargs
 )
