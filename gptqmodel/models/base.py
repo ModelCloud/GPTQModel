@@ -517,6 +517,7 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
             lm_head_handle = layers[0].register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
+        self.pre_embedding_stage_hook()
         for example in calibration_dataset:
             for k, v in example.items():
                 data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
@@ -530,13 +531,13 @@ class BaseGPTQModel(nn.Module):
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, data_device)
             try:
-                self.pre_embedding_stage_hook()
                 if is_ovis:
                     self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
                     self.model(**example)
             except ValueError:
                 pass
+        self.post_embedding_stage_hook()
         handle.remove()
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
             lm_head_handle.remove()
