@@ -440,9 +440,9 @@ class BaseGPTQModel(nn.Module):
         position_ids = []
         layer_input_kwargs = []
         layer_outputs = []
-
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            self.model.to(self.quantize_config.device)
+        print("self.model",self.model)
+        # if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+        #     self.model.to(self.quantize_config.device)
 
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
@@ -479,8 +479,7 @@ class BaseGPTQModel(nn.Module):
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
 
-            if not self.quantize_config.lm_head or self.quantize_config.lm_head_low_gpu_mem_usage:
-                raise ValueError
+            raise ValueError
 
         lm_head_inputs = []
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
@@ -514,8 +513,6 @@ class BaseGPTQModel(nn.Module):
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            lm_head_handle = layers[0].register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
         for example in calibration_dataset:
             for k, v in example.items():
@@ -536,7 +533,69 @@ class BaseGPTQModel(nn.Module):
             except ValueError:
                 pass
         handle.remove()
+
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
+            lm_head_handle = lm_head_module.register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
+
+            for i, example in enumerate(calibration_dataset):
+                for k, v in example.items():
+                    if isinstance(v, list):
+                        for i in range(len(v)):
+                            if len(v[i].shape) == 1:
+                                v[i] = v[i].unsqueeze(0)
+                            v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], self.quantize_config.device)
+                    else:
+                        if len(v.shape) == 1:
+                            v = v.unsqueeze(0)
+                        example[k] = move_to(v, self.quantize_config.device)
+
+                try:
+                    # TODO Handling special model: ovis
+                    if is_ovis:
+                        self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
+                    else:
+                        last_layer_inputs = layer_inputs
+                        last_layer_outputs = []
+                        for layer in layers:
+                            if get_device(layer) == CPU and self.quantize_config.device != CPU:
+                                move_to(layer, self.quantize_config.device)
+
+                            layer_input = []
+                            for k, layer_inp in enumerate(last_layer_inputs[i]):
+                                layer_input.append(move_to(layer_inp, self.quantize_config.device))
+
+                            mask = attention_masks[i]
+                            layer_attention_mask = mask if mask is None else move_to(mask, self.quantize_config.device)
+
+                            additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                            layer_position_ids = None if not position_ids else move_to(position_ids[i],
+                                                                                       self.quantize_config.device)
+                            if layer_position_ids is not None:
+                                additional_layer_inputs["position_ids"] = layer_position_ids
+                            for k, v in layer_input_kwargs[i].items():
+                                additional_layer_inputs[k] = nested_move_to(v, self.quantize_config.device)
+
+                            # if hasattr(layer, "reuse_kv"):
+                            #     if layer.reuse_kv:
+                            #         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+
+                            layer_output = move_to(
+                                layer(*layer_input, **additional_layer_inputs)[0],
+                                cur_layer_device if calibration_enable_gpu_cache else CPU,
+                            )
+                            last_layer_outputs.append([layer_output])
+
+                            last_layer_inputs, last_layer_outputs = (
+                                last_layer_outputs,
+                                [],
+                            )
+
+                            layers[i] = move_to(layer, CPU)
+
+                        lm_head_module(*last_layer_inputs[i])
+                except ValueError:
+                    pass
+
             lm_head_handle.remove()
 
         if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
@@ -566,7 +625,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        layer_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count))
+        layer_pb = ProgressBar(range(1))
         gpu_memorys = []
         cpu_memorys = []
         durations = []
@@ -578,7 +637,7 @@ class BaseGPTQModel(nn.Module):
         replace_linear_with_hooked_linear(self.model)
 
         for i in layer_pb:
-            is_lm_head = i >= layer_count
+            is_lm_head = True
             if is_lm_head:
                 layer_pb.set_description("Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
