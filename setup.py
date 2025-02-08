@@ -74,6 +74,9 @@ common_setup_kwargs = {
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
     "url": "https://github.com/ModelCloud/GPTQModel",
+    "project_urls": {
+        "Homepage": "https://github.com/ModelCloud/GPTQModel",
+    },
     "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
     "platforms": ["linux", "windows", "darwin"],
     "classifiers": [
