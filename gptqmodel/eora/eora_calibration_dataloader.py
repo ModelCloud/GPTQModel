@@ -6,12 +6,14 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import re
+from typing import Dict, Optional, Sequence
+
 ## This is the oldway of constructing the calibration dataset
 import numpy as np
 import torch
 import transformers
-from typing import Dict, Optional, Sequence
-import re
+
 
 def set_seed(seed):
     np.random.seed(seed)

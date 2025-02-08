@@ -18,10 +18,10 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, EoRA
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import Adapter, EoRA
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 

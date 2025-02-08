@@ -16,11 +16,11 @@
 from typing import Optional, Tuple
 
 import torch
+from gptqmodel.adapter.adapter import Adapter, EoRA
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import Adapter, EoRA
 
 logger = setup_logger()
 

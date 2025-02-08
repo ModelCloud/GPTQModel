@@ -905,7 +905,6 @@ class BaseGPTQModel(nn.Module):
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
 
-        task = None
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
@@ -1202,7 +1201,7 @@ class BaseGPTQModel(nn.Module):
                     del additional_layer_inputs
 
                 fwd_end = time.time()
-                fwd_time = fwd_end - fwd_start
+                fwd_end - fwd_start
 
                 for h in handle:
                     h.remove()
@@ -1241,7 +1240,7 @@ class BaseGPTQModel(nn.Module):
                     scaling_diag_matrix = Q @ torch.diag(sqrtEigenvalues)
                     try:
                         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
-                    except Exception as e:
+                    except Exception:
                         print("Warning: scaling_diag_matrix is not full rank!")
                         scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(dev)
                         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)

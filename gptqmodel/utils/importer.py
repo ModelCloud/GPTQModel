@@ -18,6 +18,7 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
 import torch
+from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
@@ -28,10 +29,8 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
-from ..quantization.config import Adapter
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM

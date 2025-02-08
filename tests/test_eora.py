@@ -18,12 +18,11 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.adapter.adapter import EoRA
 # -- end do not touch
-from parameterized import parameterized  # noqa: E402
-
-from gptqmodel import GPTQModel, BACKEND  # noqa: E402
-from gptqmodel.quantization import EoRA  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 
 
 class Test(ModelTest):

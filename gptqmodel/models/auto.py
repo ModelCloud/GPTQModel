@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 
-from ..quantization.config import Adapter, normalize_adapter
+from gptqmodel.adapter.adapter import Adapter, normalize_adapter
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -329,7 +329,7 @@ class GPTQModel:
             if backend == "gptqmodel":
                 def_args += ",gptqmodel=True"
             model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
-            
+
             results = lm_eval(
                 model_name=model_name,
                 model_args=model_args,

@@ -22,10 +22,10 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from gptqmodel.adapter.adapter import Adapter, EoRA
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import Adapter, EoRA
 from ...utils.logger import setup_logger
 
 logger = setup_logger()

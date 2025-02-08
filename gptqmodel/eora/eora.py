@@ -1,17 +1,20 @@
+import time
+
 import torch
 import torch.nn as nn
 from gptqmodel import GPTQModel
-from .modelutils import find_layers
-from .eora_calibration_dataloader import get_loaders
-from gptqmodel.models.base import * 
-from ..utils.logger import setup_logger
-
-from gptqmodel.utils.model import get_module_by_name_prefix, get_device, move_to, nested_move_to, torch_empty_cache, get_moe_layer_modules, find_modules
 ## import const
 from gptqmodel.models._const import CPU, CUDA, CUDA_0
-from gptqmodel.utils.progress import ProgressBar
+from gptqmodel.models.base import *
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
-import time
+from gptqmodel.utils.model import (find_modules, get_device, get_module_by_name_prefix,
+                                   get_moe_layer_modules, move_to, nested_move_to, torch_empty_cache)
+from gptqmodel.utils.progress import ProgressBar
+
+from ..utils.logger import setup_logger
+from .eora_calibration_dataloader import get_loaders
+from .modelutils import find_layers
+
 logger = setup_logger()
 
 @torch.no_grad()

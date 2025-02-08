@@ -1,13 +1,9 @@
-from datasets import load_dataset
-from gptqmodel import QuantizeConfig
-from gptqmodel import GPTQModel, BACKEND
 import torch
+from datasets import load_dataset
+from gptqmodel import GPTQModel, QuantizeConfig
 
-from gptqmodel.quantization.config import EoRA
-from gptqmodel.utils.eval import EVAL
 # from gptqmodel.eora import get_eora, get_eora_optimize
 
-from gptqmodel.quantization import EoRA
 
 bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
@@ -42,6 +38,7 @@ quantized_weights = torch.load(fake_quant_path, map_location='cpu')
 
 batch_size = 2
 from test_prepare_dataset import construct_ARC
+
 calibration_dataset = construct_ARC(nsamples=1024)
 eora_rank = 128
 model = GPTQModel.load(model_id, quant_config)

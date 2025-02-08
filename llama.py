@@ -1,11 +1,7 @@
-from datasets import load_dataset
-from gptqmodel import QuantizeConfig
-from gptqmodel import GPTQModel, BACKEND
 import torch
-
-from gptqmodel.quantization.config import EoRA
-from gptqmodel.utils.eval import EVAL
-from gptqmodel.eora import get_eora, get_eora_optimize
+from datasets import load_dataset
+from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel.eora import get_eora
 
 bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
@@ -74,8 +70,9 @@ if flag3:
 
 save = False
 if save:
-  from safetensors.torch import save_file
   import json
+
+  from safetensors.torch import save_file
   lowrank_config = {
     "alpha_pattern": {},
     "auto_mapping": None,
@@ -136,8 +133,9 @@ print(eora_weight)
 
 save = True
 if save:
-  from safetensors.torch import save_file
   import json
+
+  from safetensors.torch import save_file
   lowrank_config = {
     "alpha_pattern": {},
     "auto_mapping": None,

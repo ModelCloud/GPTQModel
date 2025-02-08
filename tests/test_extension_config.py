@@ -17,13 +17,12 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.quantization.config import EoRA, normalize_adapter
+from gptqmodel.adapter.adapter import EoRA, normalize_adapter
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
-
 
 
 class TestExtensionConfig(unittest.TestCase):
@@ -47,13 +46,13 @@ class TestExtensionConfig(unittest.TestCase):
         try:
             normalize_adapter(adapter={"eora": {"rank": 128, "crash": 1}})
             raise RuntimeError("Non supported extension.property should crash on decode")
-        except Exception as e:
+        except Exception:
             pass
 
         try:
             normalize_adapter(adapter={"CRASH": {"rank": 128}})
             raise RuntimeError("Non supported extension should crash on decode")
-        except Exception as e:
+        except Exception:
             pass
 
 

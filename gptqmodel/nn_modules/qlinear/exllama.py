@@ -21,10 +21,10 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, EoRA
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import Adapter, EoRA
 
 exllama_import_exception = None
 try:

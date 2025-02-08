@@ -279,7 +279,7 @@ class GPTQ:
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
 
-        ## 
+        ##
         # if Q.shape != self.layer.weight.shape:
         #     self.layer.weight.data = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
         # else:

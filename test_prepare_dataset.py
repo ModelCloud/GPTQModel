@@ -2,6 +2,7 @@
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 
+
 def question_answering_format(question, answer):
     
     return f"Question: {question}\nAnswer: {answer}"

@@ -1,9 +1,9 @@
 import os
 
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.adapter.adapter import EoRA
 from parameterized import parameterized
 
-from gptqmodel import QuantizeConfig, GPTQModel, BACKEND
-from gptqmodel.quantization import EoRA
 
 @parameterized.expand([
     (BACKEND.TORCH),

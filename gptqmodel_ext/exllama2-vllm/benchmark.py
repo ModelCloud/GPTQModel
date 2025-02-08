@@ -1,6 +1,7 @@
-import torch
 import time
-from eora import gptq_gemm_eora, gptq_gemm
+
+import torch
+from eora import gptq_gemm, gptq_gemm_eora
 
 m = 8
 k = 4096

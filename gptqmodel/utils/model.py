@@ -32,6 +32,7 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
@@ -45,7 +46,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import dynamic_get, Adapter
+from ..quantization.config import dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger

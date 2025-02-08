@@ -1,6 +1,8 @@
+import functools
+
 import torch
 import torch.nn as nn
-import functools
+
 
 def recurse_getattr(obj, attr: str):
     """

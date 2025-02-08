@@ -18,4 +18,3 @@ from .quantization import BaseQuantizeConfig, QuantizeConfig
 from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
-from .eora import get_eora, get_eora_optimize
