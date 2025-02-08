@@ -34,11 +34,11 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import os.path  # noqa: E402
+import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
-import numpy # noqa: E402
-import random # noqa: E402
+import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
@@ -407,4 +407,36 @@ class GPTQModel:
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
+
+    # Use HfAPI and not Transformers to do upload
+    @staticmethod
+    def push_to_hub(repo_id: str,
+                    quantized_path: str,  # saved local directory path
+                    private: bool = False,
+                    exists_ok: bool = False,  # set to true if repo already exists
+                    token: Optional[str] = None,
+                    ):
+
+        if not quantized_path:
+            raise RuntimeError("You must pass quantized model path as str to push_to_hub.")
+
+        if not repo_id:
+            raise RuntimeError("You must pass repo_id as str to push_to_hub.")
+
+        from huggingface_hub import HfApi
+        repo_type = "model"
+
+        api = HfApi()
+        # if repo does not exists, create it
+        try:
+            api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
+        except Exception:
+            api.create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
+
+        # upload the quantized save folder
+        api.upload_large_folder(
+            folder_path=quantized_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
 

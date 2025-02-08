@@ -256,20 +256,19 @@ def create_quant_layer(
 
             # dynamic bits, group_size, sym, pack_dtype for each layer/module
             if dynamic is not None:
+                overrides = dynamic_get(dynamic=dynamic, module_name=name)
                 # negative module match, skip this module
-                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
+                if overrides == False:  # noqa: E712
                     continue
 
                 # positive module match
-                for pattern, pattern_dict in dynamic.items():
+                if overrides:
                     # override base QuantizeConfig for every quant config key/value
-                    if re.match(pattern, name):
-                        tmp_bits = pattern_dict.get("bits", bits)
-                        tmp_group_size = pattern_dict.get("group_size", group_size)
-                        tmp_desc_act = pattern_dict.get("desc_act", desc_act)
-                        tmp_sym = pattern_dict.get("sym", sym)
-                        tmp_pack_dtype = pattern_dict.get("pack_dtype", pack_dtype)
-                        break
+                    tmp_bits = overrides.get("bits", bits)
+                    tmp_group_size = overrides.get("group_size", group_size)
+                    tmp_desc_act = overrides.get("desc_act", desc_act)
+                    tmp_sym = overrides.get("sym", sym)
+                    tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
 
             # when loading a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
@@ -349,15 +348,46 @@ def convert_gptq_v1_to_v2_format(
                     elif cfg.pack_dtype == torch.int8:
                         submodule.qzeros.data += 0b01010101
                 elif cfg.bits == 3:
-                    raise Exception("FIX ME")
+                    # range 0 offset
+                    if cfg.pack_dtype == torch.int64:
+                        offset = 0b0010010010010010010010010010010000100100100100100100100100100100
+                    elif cfg.pack_dtype == torch.int32:
+                        offset = 0b00100100100100100100100100100100
+                    elif cfg.pack_dtype == torch.int16:
+                        offset = 0b0010010010010010
+                    elif cfg.pack_dtype == torch.int8:
+                        offset = 0b00100100
+
                     submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] += (
-                        0b00100100100100100100100100100100
+                        offset
                     )
+
+                    # range 1 offset
+                    if cfg.pack_dtype == torch.int64:
+                        offset = 0b1001001001001001001001001001001010010010010010010010010010010010
+                    elif cfg.pack_dtype == torch.int32:
+                        offset = 0b10010010010010010010010010010010
+                    elif cfg.pack_dtype == torch.int16:
+                        offset = 0b1001001001001001
+                    elif cfg.pack_dtype == torch.int8:
+                        offset = 0b10010010
+
                     submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] += (
-                        0b10010010010010010010010010010010
+                        offset
                     )
+
+                    # range 2 offset
+                    if cfg.pack_dtype == torch.int64:
+                        offset = 0b0100100100100100100100100100100101001001001001001001001001001001
+                    elif cfg.pack_dtype == torch.int32:
+                        offset = 0b01001001001001001001001001001001
+                    elif cfg.pack_dtype == torch.int16:
+                        offset = 0b0100100100100100
+                    elif cfg.pack_dtype == torch.int8:
+                        offset = 0b01001001
+
                     submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] += (
-                        0b01001001001001001001001001001001
+                        offset
                     )
                 elif cfg.bits == 4:
                     if cfg.pack_dtype == torch.int64:

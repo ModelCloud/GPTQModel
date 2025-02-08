@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import subprocess
 import sys
 import urllib
 import urllib.error
@@ -114,14 +113,11 @@ def get_version_tag() -> str:
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
-
-with open('requirements.txt') as f:
-    requirement_list = f.read().splitlines()
-    if os.getenv("CI"):
-        requirements = []
-    else:
-        requirements = requirement_list
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+requirements = []
+if not os.getenv("CI"):
+    with open('requirements.txt') as f:
+        requirements = [line.strip() for line in f if line.strip()]
+        #subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
 
@@ -185,9 +181,6 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "--expt-relaxed-constexpr",
-            "--expt-extended-lambda",
-            "--use_fast_math",
             "-diag-suppress=179,39,186",
         ],
     }
@@ -198,12 +191,15 @@ if BUILD_CUDA_EXT:
     extra_compile_args["cxx"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
     extra_compile_args["nvcc"] += [ f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}" ]
 
+    # nvidia (nvcc) only compile flags that rocm doesn't support
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
             "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
             "--use_fast_math",
         ]
 

@@ -12,7 +12,11 @@
 </p>
   
 ## News
-* 1/26/2025 [1.8.0-dev]: ⚡ Flexible weight packing: allow quantized weights to be packed to [int32, int16, int8]. `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`.
+* 02/07/2025 [1.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.0): ⚡ `DeekSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
+`Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. 
+New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 
+New `GPTQModel.push_to_hub()` api for easy quant model to HF repo. New `buffered_fwd: bool` control in `model.quantize()`.
+Fixed 3-bit packing regression in v1.7.4.
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
 * 01/19/2025 [1.7.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.2): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
@@ -75,7 +79,7 @@ GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in r
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
 ## Features
-* ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/transformers), and [Peft (main)](https://github.com/huggingface/transformers)
+* ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
 * 🚀 Extensive model support for: `Ovis VL`, `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
@@ -94,18 +98,18 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ![image](https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e)
 
 ## Model Support  
-| Model            |    |                |    |                  |    |            |    |    |   |
-|------------------|----|----------------|----|------------------|----|------------|----|----|---|
-| Baichuan         | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | ✅ | Yi | ✅ |
-| Bloom            | ✅  | Gemma 2        | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6   | ✅ |   XVERSE | ✅  |
-| ChatGLM          | ✅ | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | ✅ |    |   |
-| CodeGen          | ✅  | GPTNeoX        | ✅  | MiniCPM3         | ✅  | Qwen       | ✅  |    |   |
-| Cohere 1-2       | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | ✅ |    |   |
-| DBRX Converted   | ✅ | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2 VL    | ✅ |    |   |
-| Deci             | ✅  | Granite        | ✅ | MobileLLM        | ✅ | RefinedWeb | ✅  |    |   |
-| DeepSeek-V2      | ✅ | GRIN-MoE       | ✅ | MOSS             | ✅  | StableLM   | ✅  |    |   |
-| DeepSeek-V2-Lite | ✅ | Hymba          | ✅ | MPT              | ✅  | StarCoder2 | ✅  |    |   |
-| EXAONE 3.0       | ✅ | InternLM 1/2.5 | ✅ | OPT              | ✅  | TeleChat2 | ✅  |    |   |
+| Model             |    |                |    |                  |    |            |    |    |   |
+|-------------------|----|----------------|----|------------------|----|------------|----|----|---|
+| Baichuan          | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | ✅ | Yi | ✅ |
+| Bloom             | ✅  | Gemma 2        | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6   | ✅ |   XVERSE | ✅  |
+| ChatGLM           | ✅ | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | ✅ |    |   |
+| CodeGen           | ✅  | GPTNeoX        | ✅  | MiniCPM3         | ✅  | Qwen       | ✅  |    |   |
+| Cohere 1-2        | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | ✅ |    |   |
+| DBRX Converted    | ✅ | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2 VL    | ✅ |    |   |
+| Deci              | ✅  | Granite        | ✅ | MobileLLM        | ✅ | RefinedWeb | ✅  |    |   |
+| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE       | ✅ | MOSS             | ✅  | StableLM   | ✅  |    |   |
+| DeepSeek-V2-Lite  | ✅ | Hymba          | ✅ | MPT              | ✅  | StarCoder2 | ✅  |    |   |
+| EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | OPT              | ✅  | TeleChat2 | ✅  |    |   |
 
 ## Platform and HW Support 
 
@@ -145,13 +149,14 @@ pip install -v . --no-build-isolation
 ```
 
 ### Inference
-Two line api to use `GPTQModel` for gptq model inference:
+Three line api to use `GPTQModel` for gptq model inference:
 
 ```py
 from gptqmodel import GPTQModel
 
 model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v2.5")
-result = model.generate("Uncovering deep insights begins with")[0]
+result = model.generate("Uncovering deep insights begins with")[0] # tokens
+print(model.tokenizer.decode(result)) # string output
 ```
 
 
@@ -188,7 +193,8 @@ model.save(quant_path)
 
 # test post-quant inference
 model = GPTQModel.load(quant_path)
-result = model.generate("Uncovering deep insights begins with")[0]
+result = model.generate("Uncovering deep insights begins with")[0] # tokens
+print(model.tokenizer.decode(result)) # string output
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)

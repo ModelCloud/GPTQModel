@@ -122,20 +122,18 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
         if isinstance(value, dict):
             dict_scale_dtype_to_str(value)
 
-
-def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], layer_name: str, key: str = None,
+def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
-    for pattern, pattern_dict in dynamic.items():
+    for pattern, overrides in dynamic.items():
         if pattern.startswith("-:"):
-            if re.match(pattern.removeprefix("-:"), layer_name):
+            if re.match(pattern.removeprefix("-:"), module_name):
                 return False
-        elif re.match(pattern.removeprefix("+:"), layer_name):
+        elif re.match(pattern.removeprefix("+:"), module_name):
             if key is None:
-                return pattern_dict
+                return overrides
             else:
-                return pattern_dict.get(key, default_value)
+                return overrides.get(key, default_value)
     return default_value
-
 
 @dataclass
 class QuantizeConfig():
@@ -255,7 +253,7 @@ class QuantizeConfig():
         # validate and normalize extension
         if self.adapter is not None:
             if isinstance(self.adapter, dict):
-                raise ValueErroor("`adapter` must be a dictionary")
+                raise ValueError("`adapter` must be a dictionary")
 
             # adapter normalize
             self.adapter = normalize_adapter(self.adapter)

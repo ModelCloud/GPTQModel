@@ -28,7 +28,7 @@ from gptqmodel import GPTQModel, BACKEND  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
-from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -130,11 +130,11 @@ class TestPerplexity(unittest.TestCase):
         [
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            # (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
-            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, 32, False),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, 32, False),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, 32, False),
+            # (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4, 32, False),
+            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 32, False),
         ]
     )
     def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
@@ -143,7 +143,13 @@ class TestPerplexity(unittest.TestCase):
                 bits=bits,
                 group_size=group_size,
                 format=format,
-                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
+                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True,
+                # inject this rule so dynamic logic is checked even if zero matches happen
+                dynamic={
+                    "-:.*mlp\.NEVER_NEGATIVE_MATCH_proj.*": {"bits": 8, "group_size": 32},
+                    "+:.*mlp\.NEVER_POSITIVE_MATCH_proj.*": {"bits": 8, "group_size": 32},
+                    ":.*mlp\.NEVER_POSITIVE_MATCH2_proj.*": {"bits": 8, "group_size": 32},
+                }
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
@@ -167,6 +173,7 @@ class TestPerplexity(unittest.TestCase):
             dataset,
             batch_size=128 if IS_ROCM else 256,
             # buffered_fwd=buffered_fwd,  TODO FIX ME
+            auto_gc=False, # speed up quant
         )
         quant_time = time.time() - start
 
@@ -175,8 +182,24 @@ class TestPerplexity(unittest.TestCase):
                 tmp_dir,
             )
 
+            # TODO: move to a new test
+            # test upload
+            # model.push_to_hub(
+            #     repo_id="ModelCloud/CiUploadTest",
+            #     quantized_path=tmp_dir,
+            #     private=True,
+            #     exists_ok=True,
+            # )
+
             del model
             torch_empty_cache()
+
+            # GPTQModel.push_to_hub(
+            #     repo_id="ModelCloud/CiUploadTest",
+            #     quantized_path=tmp_dir,
+            #     private=True,
+            #     exists_ok=True,
+            # )
 
             model = GPTQModel.load(
                 tmp_dir,

@@ -21,7 +21,7 @@ import json
 import os
 import re
 from os.path import isfile, join
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import torch
 import transformers
@@ -43,7 +43,7 @@ from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_mod
                            load_checkpoint_in_model_then_tie_weights, make_quant)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import CPU
+from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
 
 logger = setup_logger()
 
@@ -70,7 +70,7 @@ def ModelWriter(cls):
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            max_shard_size: Optional[str] = None,
+            max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""

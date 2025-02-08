@@ -41,7 +41,7 @@ from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_devic
                            move_to, nested_move_to, normalize_tokenizer, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
-from ._const import CPU, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
@@ -226,6 +226,9 @@ class BaseGPTQModel(nn.Module):
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+        buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
         auto_gc: bool = True,
     ) -> List[Dict[str, str]]:
         if self.quantized:
@@ -445,7 +448,7 @@ class BaseGPTQModel(nn.Module):
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
-       
+
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(_, args, kwargs):
             # Positional arguments.
@@ -654,7 +657,8 @@ class BaseGPTQModel(nn.Module):
                 def add_batch(name):
                     def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
                         # gptq is mutable.
-                        gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
+                        g = gptq[name] # noqa: F821
+                        g.add_batch(inp[0].data, out.data)  # noqa: F821
 
                     return tmp
 
@@ -665,7 +669,7 @@ class BaseGPTQModel(nn.Module):
                     else:
                         handle.append(subset[name].register_forward_hook(add_batch(name)))
 
-                # logger.info(f"layer-{i}-{name}: Begin Forward() Pass")
+                # logger.info(f"layer-{i}: Begin Forward() Pass")
                 fwd_start = time.time()
                 for j in range(num_batches):
                     layer_input = []
@@ -779,7 +783,7 @@ class BaseGPTQModel(nn.Module):
                     gptq[name].free()
                     # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
-            # logger.info(f"layer-{i}-{name}: Begin Forward() Pass 2 Post-Quant")
+            # logger.info(f"layer-{i}: Begin Forward() Pass 2 Post-Quant")
             for j in range(num_batches):
                 layer_input = []
                 for k, layer_inp in enumerate(layer_inputs[j]):
@@ -879,7 +883,7 @@ class BaseGPTQModel(nn.Module):
         backend: Optional[BACKEND] = BACKEND.AUTO,
         auto_gc: bool = True,
     ) -> List[Dict[str, str]]:
-        
+
         print('Starting EoRA...')
 
         if self.quantized:
@@ -1110,7 +1114,7 @@ class BaseGPTQModel(nn.Module):
             layer_modules = get_moe_layer_modules(layer_modules=layer_modules,
                                                     num_experts=num_experts)
 
-        
+
         layer_count = len(layers)
         layer_pb = ProgressBar(range(layer_count))
         shared_kv_cache_dict = {}
@@ -1125,9 +1129,9 @@ class BaseGPTQModel(nn.Module):
 
             if get_device(layer) == CPU and self.quantize_config.device != CPU:
                 move_to(layer, self.quantize_config.device)
-            
+
             cur_layer_device = get_device(layer)
-                
+
             full = find_modules(layer, name="")
             modules = layer_modules
             for index, names in enumerate(modules):
@@ -1144,15 +1148,15 @@ class BaseGPTQModel(nn.Module):
                         inp = input[0].detach().float()
                         if inp.dim() == 2:
                             inp = inp.unsqueeze(0)
-                        
+
                         tmp = inp.shape[0]
                         adds = torch.matmul(inp.transpose(1,2), inp)
                         adds_sum = torch.sum(adds, dim=0)
-                        
+
                         subset_eigen_scaling_diag_matrix[name] *= eigen_nsamples / (eigen_nsamples+tmp)
-                        
+
                         subset_eigen_scaling_diag_matrix[name] += adds_sum / eigen_nsamples
-                        
+
                         del inp, adds, adds_sum, output
                         torch.cuda.empty_cache()
                     return tmpp
@@ -1226,13 +1230,13 @@ class BaseGPTQModel(nn.Module):
                     ## save this later for SVD
 
                     raw_scaling_diag_matrix = subset_eigen_scaling_diag_matrix[name].double().to(dev)
-                    
+
                     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
                     if (L < 0).any().item():
                         print(f"found negative eigenvalues in {name}")
                         minimum = torch.min(L[L > 0])
                         L[L < 0] = minimum
-                    
+
                     sqrtEigenvalues = torch.sqrt(L)
                     scaling_diag_matrix = Q @ torch.diag(sqrtEigenvalues)
                     try:
@@ -1255,7 +1259,7 @@ class BaseGPTQModel(nn.Module):
                     truc_u = U[:, :lowrank_r]
                     truc_v = torch.matmul(V[:lowrank_r, :], scaling_matrix_inv)
                     truc_sigma = torch.diag(truc_s)
-                    
+
                     sqrtS = torch.sqrt(truc_sigma)
                     B = torch.matmul(truc_u, sqrtS).to(quantized_weight.dtype)
                     A = torch.matmul(sqrtS, truc_v).to(quantized_weight.dtype)
@@ -1309,11 +1313,11 @@ class BaseGPTQModel(nn.Module):
             )
             if auto_gc:
                 torch_empty_cache()
-            
+
         self.model.config.use_cache = forward_pass_use_cache
         if auto_gc:
             torch_empty_cache()
-        
+
         return lowrank_dict
 
 
@@ -1340,11 +1344,21 @@ class BaseGPTQModel(nn.Module):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
 
+    # placeholder, noop, and alert users to correct static api
+    def push_to_hub(self,
+                    repo_id: str,
+                    quantized_path: str,  # saved local directory path
+                    private: bool = False,
+                    exists_ok: bool = False,  # set to true if repo already exists
+                    token: Optional[str] = None):
+
+        logger.error("`push_to_hub()` api cannot be used on the model instance. Please use `GPTQModel.push_to_hub()` static api instead.")
+
     def save(
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            max_shard_size: Optional[str] = None,
+            max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
             **kwargs,
     ):

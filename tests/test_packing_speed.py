@@ -15,22 +15,21 @@
 
 # -- do not touch
 import os
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import time  # noqa: E402
-import threadpoolctl # noqa: E402
 import unittest  # noqa: E402
 
+import threadpoolctl  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 # isort: off
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 
 
 def gen_quant4(k, n, groupsize=-1):
@@ -82,9 +81,9 @@ class TestRepacking(unittest.TestCase):
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
     print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
 
-    print(f"gen_quant: start")
+    print("gen_quant: start")
     _, linear, s = gen_quant4(k, n, group_size)
-    print(f"gen_quant: start...end")
+    print("gen_quant: start...end")
 
     def pack(self, qlinearCls):
         qlinear = qlinearCls(
