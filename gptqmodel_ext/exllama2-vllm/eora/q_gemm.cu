@@ -212,7 +212,7 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
     MatrixView_half Ax_(Ax, size_m, size_r);
     MatrixView_half eora_b_(eora_b, size_r, size_n);
 
-    int BLOCK_R_SIZE = BLOCK_KN_SIZE * size_r / size_k;
+    double block_r_size = BLOCK_KN_SIZE * size_r / double(size_k);
 
     int t = threadIdx.x;
 
@@ -220,12 +220,12 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
     int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
     int offset_m = blockIdx.y * m_count;
     int offset_k = blockIdx.z * BLOCK_KN_SIZE;
-    int offset_r = blockIdx.z * BLOCK_R_SIZE;
+    int offset_r = int(rint(blockIdx.z * block_r_size));
 
     int end_n = min(offset_n + BLOCK_KN_SIZE * 4, size_n);
     int end_m = min(offset_m + m_count, size_m);
     int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
-    int end_r = min(offset_r + BLOCK_R_SIZE, size_r);
+    int end_r = min(int(rint((blockIdx.z + 1) * block_r_size)), size_r);
 
     int n = offset_n + t * 4;
 
