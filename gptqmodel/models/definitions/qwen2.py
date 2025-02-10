@@ -16,6 +16,7 @@
 
 import torch
 from ..base import BaseGPTQModel
+from ...utils.model import move_to, get_device
 
 
 class Qwen2GPTQ(BaseGPTQModel):
@@ -31,4 +32,8 @@ class Qwen2GPTQ(BaseGPTQModel):
     ]
 
     def lm_head_pre_quantize_generate_hook(self, tensor: torch.tensor) -> torch.tensor:
-        return self.model.model.norm(tensor)
+        ori_norm_device = get_device(self.model.model.norm)
+        move_to(self.model.model.norm, self.quantize_config.device)
+        tensor = self.model.model.norm(tensor)
+        move_to(self.model.model.norm, ori_norm_device)
+        return tensor
