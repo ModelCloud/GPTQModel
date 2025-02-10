@@ -72,7 +72,18 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features, out_features, pack_dtype, bias, **kwargs, ):
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features,
+        out_features,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        **kwargs,
+    ):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
         super().__init__(
