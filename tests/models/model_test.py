@@ -17,6 +17,7 @@
 # -- do not touch
 import os
 import sys
+from typing import Dict, List
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -78,6 +79,9 @@ class ModelTest(unittest.TestCase):
     INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country", "the city"]
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
+
+    LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
+    EXPECT_LM_HEAD_LOSS = None
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -333,6 +337,19 @@ class ModelTest(unittest.TestCase):
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+    def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
+        final_log = quant_log[-1]
+        if final_log["module"] == "lm_head":
+            loss_value = float(final_log["loss"])
+            diff_pct = (loss_value / self.EXPECT_LM_HEAD_LOSS) * 100
+            print(f"lm_head loss: {loss_value} diff {diff_pct:.2f}%")
+            negative_pct = 100 * (1 - self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+            positive_pct = 100 * (1 + self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
+                            f"lm_head loss: {loss_value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+        else:
+            raise ValueError("No quantization for lm_head module")
 
     def clear_directory(self, directory_path):
         for item in os.listdir(directory_path):
