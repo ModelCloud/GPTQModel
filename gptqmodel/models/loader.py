@@ -41,7 +41,7 @@ from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init,
-                           load_checkpoint_in_model_then_tie_weights, make_quant, normalize_tokenizer,
+                           load_checkpoint_in_model_then_tie_weights, make_quant,
                            simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
@@ -102,14 +102,6 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         # hf_transfer does not accept max_memory arg
         kwargs.pop('max_memory', None)
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
-
-def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        return normalize_tokenizer(config, tokenizer)
-    except Exception as e:
-        logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
-        return None
 
 
 def ModelLoader(cls):
@@ -196,7 +188,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
         model.eval()
 
-        tokenizer = get_tokenizer(pretrained_model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
@@ -587,7 +579,7 @@ def ModelLoader(cls):
 
         model.eval()
 
-        tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if backend == BACKEND.MLX:
             import tempfile
