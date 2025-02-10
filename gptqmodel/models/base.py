@@ -129,7 +129,7 @@ class BaseGPTQModel(nn.Module):
         self.load_quantized_model = load_quantized_model
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
-                self.tokenizer = Tokenicer.load(tokenizer)
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=trust_remote_code)
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
