@@ -28,6 +28,7 @@ import torch.nn as nn
 from packaging import version
 from packaging.version import Version
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
+from tokenicer import Tokenicer
 
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..quantization import GPTQ, QuantizeConfig
@@ -39,7 +40,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device,
                            get_module, get_module_by_name_prefix, get_moe_layer_modules,
-                           move_to, nested_move_to, normalize_tokenizer, pack_model)
+                           move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
 from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
@@ -126,8 +127,17 @@ class BaseGPTQModel(nn.Module):
         self.model = model
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
-        self.tokenizer = tokenizer
-        self.model.tokenizer = tokenizer # helpful for CI tests
+        if tokenizer is not None:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                self.tokenizer = Tokenicer.load(tokenizer)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+            self.tokenizer.auto_assign_pad_token()
+            self.model.tokenizer = self.tokenizer.tokenizer # helpful for CI tests
+        else:
+            self.tokenizer = tokenizer
+            self.model.tokenizer = tokenizer # helpful for CI tests
         self.quantize_config = quantize_config
         self.config = self.model.config if hasattr(self.model, "config") else None
 
@@ -191,30 +201,8 @@ class BaseGPTQModel(nn.Module):
                 }
             )
 
-        pad_token_id = self.config.pad_token_id
-        if not pad_token_id:
-            if self.tokenizer:
-                vocab = self.tokenizer.get_vocab()
-
-                # auto select the best pad token to use
-                for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
-                    token_id = vocab.get(token)
-                    if token_id is not None:
-                        pad_token_id = token_id
-                        break
-            else:
-                logger.warning("Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
-
-            if not pad_token_id and isinstance(self.config.eos_token_id, list):  # Llama-3.1-8B-Instruct's eos_token_id is a list
-                pad_token_id = self.config.eos_token_id[0]
-            elif not pad_token_id:
-                pad_token_id = self.config.eos_token_id
-
-        if pad_token_id is None:
-            raise ValueError("Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
-
         new_calibration_dataset_batched = [
-            collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
+            collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
             for start in range(0, len(new_calibration_dataset), batch_size)
         ]
 
@@ -285,9 +273,12 @@ class BaseGPTQModel(nn.Module):
 
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
-            self.tokenizer = tokenizer
-            # after tokenizer is reset, need to normalize it again
-            self.tokenizer = normalize_tokenizer(self.config, self.tokenizer)
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                self.tokenizer = Tokenicer.load(tokenizer)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+            self.tokenizer.auto_assign_pad_token()
 
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
