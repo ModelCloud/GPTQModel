@@ -22,6 +22,7 @@ class ExaoneGPTQ(BaseGPTQModel):
     require_trust_remote_code = True
 
     base_modules = ["transformer.ln_f", "transformer.wte"]
+    final_layer_norm_module = "transformer.ln_f"
 
     layers_node = "transformer.h"
     layer_type = "ExaoneBlock"

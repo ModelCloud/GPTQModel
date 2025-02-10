@@ -21,6 +21,7 @@ from ...utils.model import move_to, get_device
 
 class Qwen2GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
+    norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "Qwen2DecoderLayer"

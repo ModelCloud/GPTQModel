@@ -22,6 +22,7 @@ class DbrxConvertedGPTQ(BaseGPTQModel):
     require_trust_remote_code = True
 
     base_modules = ["transformer.wte", "transformer.norm_f"]
+    final_layer_norm_module = "transformer.norm_f"
 
     layers_node = "transformer.blocks"
     layer_type = "DbrxBlock"

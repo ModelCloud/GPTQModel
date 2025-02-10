@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class GPTNeoXGPTQ(BaseGPTQModel):
     base_modules = ["gpt_neox.embed_in", "gpt_neox.final_layer_norm"]
+    final_layer_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"
 
     layers_node = "gpt_neox.layers"

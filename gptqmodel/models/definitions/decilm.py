@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class DeciLMGPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
+    final_layer_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "DeciLMDecoderLayer"

@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class GPTJGPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.ln_f"]
+    final_layer_norm_module = "gpt_neox.final_layer_norm"
 
     layers_node = "transformer.h"
     layer_type = "GPTJBlock"
