@@ -501,10 +501,10 @@ class BaseGPTQModel(nn.Module):
             for k, v in example.items():
                 data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
-                    for i in range(len(v)):
-                        if len(v[i].shape) == 1:
-                            v[i] = v[i].unsqueeze(0)
-                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], data_device)
+                    for layer_index in range(len(v)):
+                        if len(v[layer_index].shape) == 1:
+                            v[layer_index] = v[layer_index].unsqueeze(0)
+                        v[layer_index] = move_to(v[layer_index].to(torch.bfloat16) if is_ovis else v[layer_index], data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
@@ -554,14 +554,14 @@ class BaseGPTQModel(nn.Module):
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
-        for i in layer_pb:
-            is_lm_head = i >= layer_count
+        for layer_index in layer_pb:
+            is_lm_head = layer_index >= layer_count
             if is_lm_head:
                 layer_pb.set_description("Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
             else:
-                layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
-                layer = layers[i]
+                layer_pb.set_description(f"Quantizing layer {layer_index} of {layer_count - 1}")
+                layer = layers[layer_index]
 
             if layer.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -573,14 +573,14 @@ class BaseGPTQModel(nn.Module):
                     title='GPU Memory',
                     series='GPU Memory',
                     value=gpu_memory,
-                    iteration=i,
+                    iteration=layer_index,
                 )
 
                 task.get_logger().report_scalar(
                     title='CPU Memory',
                     series='CPU Memory',
                     value=cpu_memory,
-                    iteration=i,
+                    iteration=layer_index,
                 )
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
@@ -602,7 +602,7 @@ class BaseGPTQModel(nn.Module):
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
-                        layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
+                        layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{layer_index}.{name}"
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
                             logger.info(f"skip module: {layer_name}")
@@ -676,11 +676,11 @@ class BaseGPTQModel(nn.Module):
                     # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                     if hasattr(layer, "reuse_kv"):
                         if layer.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
                         layer_output = layer(*layer_input) if is_lm_head else layer(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(i) is None:
-                            shared_kv_cache_dict[i] = layer_output[-1]
+                        if shared_kv_cache_dict.get(layer_index) is None:
+                            shared_kv_cache_dict[layer_index] = layer_output[-1]
                     else:
                         layer(*layer_input) if is_lm_head else layer(*layer_input, **additional_layer_inputs)
 
@@ -702,8 +702,8 @@ class BaseGPTQModel(nn.Module):
                         torch_empty_cache()
 
                 for name_index, name in enumerate(subset):
-                    layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{i}.{name}"
-                    layer_pb.set_description(f"Quantizing {name} in layer {i} of {layer_count - 1}")
+                    layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{layer_index}.{name}"
+                    layer_pb.set_description(f"Quantizing {name} in layer {layer_index} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
                     desc_act = self.quantize_config.desc_act
@@ -728,22 +728,22 @@ class BaseGPTQModel(nn.Module):
                     if task is not None:
                         task.get_logger().report_scalar(
                             title='Quantization Loss',
-                            series=f'layer_{i}_loss',
+                            series=f'layer_{layer_index}_loss',
                             value=avg_loss,
                             iteration=name_index,
                         )
 
                         task.get_logger().report_scalar(
                             title='Quantization Time',
-                            series=f'layer_{i}_time',
+                            series=f'layer_{layer_index}_time',
                             value=duration,
                             iteration=name_index,
                         )
                     durations.append(duration)
                     avg_losses.append(avg_loss)
-                    module_names.append(f"layer-{i}-{name}")
+                    module_names.append(f"layer-{layer_index}-{name}")
 
-                    stat = {QUANT_LOG_LAYER: i, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                    stat = {QUANT_LOG_LAYER: layer_index, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                             QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}", QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
@@ -778,11 +778,11 @@ class BaseGPTQModel(nn.Module):
 
                 if hasattr(layer, "reuse_kv"):
                     if layer.reuse_kv:
-                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
                 output = layer(*layer_input)[0] if is_lm_head else layer(*layer_input, **additional_layer_inputs)[0]
 
-                if i == layer_count - 1:
+                if layer_index == layer_count - 1:
                     output = self.lm_head_pre_quantize_generate_hook(output)
 
                 layer_output = move_to(
@@ -797,10 +797,7 @@ class BaseGPTQModel(nn.Module):
                     if auto_gc:
                         torch_empty_cache()
 
-            if not is_lm_head:
-                layers[i] = move_to(layer, CPU)
-            else:
-                move_to(layer, CPU)
+            layers[layer_index] = move_to(layer, CPU)
 
             del layer
             del gptq
