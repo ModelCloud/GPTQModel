@@ -46,6 +46,7 @@ class TestLmHeadLoad(ModelTest):
 
 class TestLmHeadQuant(ModelTest):
     APPLY_CHAT_TEMPLATE = True
+    EXPECT_LM_HEAD_LOSS = 31.11202
 
     sample_length = 1024
     samples = 128
@@ -67,6 +68,8 @@ class TestLmHeadQuant(ModelTest):
         model = GPTQModel.load(self.model_id, quant_config)
 
         model.quantize(self.calibration_dataset, batch_size=8)
+
+        self.check_lm_head_loss(model.quant_log)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.tokenizer.save_pretrained(tmp_dir)
