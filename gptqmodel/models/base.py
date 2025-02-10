@@ -761,51 +761,54 @@ class BaseGPTQModel(nn.Module):
                     # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
             # logger.info(f"layer-{i}: Begin Forward() Pass 2 Post-Quant")
-            for j in range(num_batches):
-                layer_input = []
-                for k, layer_inp in enumerate(layer_inputs[j]):
-                    layer_input.append(move_to(layer_inp, cur_layer_device))
+            if layer_index <= len(layer_pb) - 1:
+                for j in range(num_batches):
+                    layer_input = []
+                    for k, layer_inp in enumerate(layer_inputs[j]):
+                        layer_input.append(move_to(layer_inp, cur_layer_device))
 
-                mask = attention_masks[j]
-                layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+                    mask = attention_masks[j]
+                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
 
-                additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
-                if layer_position_ids is not None:
-                    additional_layer_inputs["position_ids"] = layer_position_ids
-                for k, v in layer_input_kwargs[j].items():
-                    additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                    layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
+                    if layer_position_ids is not None:
+                        additional_layer_inputs["position_ids"] = layer_position_ids
+                    for k, v in layer_input_kwargs[j].items():
+                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                if hasattr(layer, "reuse_kv"):
-                    if layer.reuse_kv:
-                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
+                    if hasattr(layer, "reuse_kv"):
+                        if layer.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
-                output = layer(*layer_input)[0] if is_lm_head else layer(*layer_input, **additional_layer_inputs)[0]
+                    output = layer(*layer_input)[0] if is_lm_head else layer(*layer_input, **additional_layer_inputs)[0]
 
-                if layer_index == layer_count - 1:
-                    output = self.lm_head_pre_quantize_generate_hook(output)
+                    if layer_index == layer_count - 1:
+                        output = self.lm_head_pre_quantize_generate_hook(output)
 
-                layer_output = move_to(
-                    output,
-                    cur_layer_device if calibration_enable_gpu_cache else CPU,
-                )
-                layer_outputs.append([layer_output])
+                    layer_output = move_to(
+                        output,
+                        cur_layer_device if calibration_enable_gpu_cache else CPU,
+                    )
+                    layer_outputs.append([layer_output])
 
-                del layer_input
-                del additional_layer_inputs
-                if num_batches > 1 and j == num_batches - 1:
-                    if auto_gc:
-                        torch_empty_cache()
+                    del layer_input
+                    del additional_layer_inputs
+                    if num_batches > 1 and j == num_batches - 1:
+                        if auto_gc:
+                            torch_empty_cache()
 
             layers[layer_index] = move_to(layer, CPU)
 
             del layer
             del gptq
             del layer_inputs
-            layer_inputs, layer_outputs = (
-                layer_outputs,
-                [],
-            )  # TODO: is it really OK to cache only the first positional argument?
+
+            if layer_index <= len(layer_pb) - 1:
+                layer_inputs, layer_outputs = (
+                    layer_outputs,
+                    [],
+                )  # TODO: is it really OK to cache only the first positional argument?
 
             if auto_gc:
                 torch_empty_cache()
