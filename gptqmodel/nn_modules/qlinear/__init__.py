@@ -44,7 +44,6 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
     def __init__(self,
-                 name: str,
                  bits: int,
                  group_size: int,
                  desc_act: bool,
@@ -54,11 +53,14 @@ class BaseQuantLinear(nn.Module):
                  bias: bool,
                  pack_dtype: t.dtype,
                  adapter: Adapter,
+                 name: str = None,
                  register_buffers: bool = False,
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
                  **kwargs):
         super().__init__()
+        if name is None:
+            name = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
         self.name = name # full path module name in model weights
         self.in_features = in_features
         self.out_features = out_features
