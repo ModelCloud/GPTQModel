@@ -17,15 +17,26 @@
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.adapter.adapter import Lora
-# -- end do not touch
+from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 
 class Test(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
+    lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
+
+    NATIVE_ARC_CHALLENGE_ACC = 0.3567
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+
+    @classmethod
+    def setUpClass(cls):
+        cls.adapter = Lora(path=cls.lora_path, rank=128)
+
     @parameterized.expand([
         BACKEND.TORCH,
         BACKEND.CUDA,
@@ -37,18 +48,9 @@ class Test(ModelTest):
         # (BACKEND.BITBLAS, <-- not tested yet
     ])
     def test_load(self, backend: BACKEND):
-        quant_model_path = "sliuau/llama3.2-1b-4bit-group128"
-        lora_path = "adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
-
-        # TODO, use local path before merge
-        # quant_model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
-        # lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
-
-        adapter = Lora(path=lora_path, rank=128)
-
         model = GPTQModel.load(
-            quant_model_path,
-            adapter=adapter,
+            self.NATIVE_MODEL_ID,
+            adapter=self.adapter,
             backend=backend,
             device_map="auto",
         )
@@ -58,3 +60,18 @@ class Test(ModelTest):
         result = model.tokenizer.decode(tokens)
         print(f"Result: {result}")
         assert "paris" in result.lower()
+
+    def test_lm_eval_from_path(self):
+        adapter = Lora(path=self.lora_path, rank=128)
+        task_results = self.lm_eval(None, extra_args={"adapter": adapter.to_dict()})
+        self.check_results(task_results)
+
+    def test_lm_eval_from_model(self):
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            adapter=self.adapter,
+            backend=BACKEND.MARLIN,
+            device_map="auto",
+        )
+        task_results = self.lm_eval(model)
+        self.check_results(task_results)
