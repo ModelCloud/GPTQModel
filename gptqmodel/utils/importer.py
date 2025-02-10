@@ -117,7 +117,7 @@ def hf_select_quant_linear(
         meta: Optional[Dict[str, any]] = None,
         pack: Optional[bool] = True,
         device_map: Optional[Union[str, dict]] = None,
-        backend: Optional[Union[str, BACKEND]] = None,≈
+        backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
     if isinstance(backend, str):
