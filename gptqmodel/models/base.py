@@ -761,7 +761,8 @@ class BaseGPTQModel(nn.Module):
                     # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
             # logger.info(f"layer-{i}: Begin Forward() Pass 2 Post-Quant")
-            if layer_index <= len(layer_pb) - 1:
+            is_last_quant = layer_index == len(layer_pb) - 1
+            if not is_last_quant:
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
@@ -804,7 +805,7 @@ class BaseGPTQModel(nn.Module):
             del gptq
             del layer_inputs
 
-            if layer_index <= len(layer_pb) - 1:
+            if not is_last_quant:
                 layer_inputs, layer_outputs = (
                     layer_outputs,
                     [],
