@@ -442,9 +442,6 @@ class BaseGPTQModel(nn.Module):
         layer_input_kwargs = []
         layer_outputs = []
 
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            self.model.to(self.quantize_config.device)
-
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
@@ -480,24 +477,7 @@ class BaseGPTQModel(nn.Module):
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
 
-            if not self.quantize_config.lm_head or self.quantize_config.lm_head_low_gpu_mem_usage:
-                raise ValueError
-
-        lm_head_inputs = []
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            def store_lm_head_input_hook(_, args, kwargs):
-                # Positional arguments.
-                lm_head_layer_input = []
-                for inp in args:
-                    lm_head_layer_input.append(move_to(inp, data_device))
-                if len(lm_head_layer_input) == 0:
-                    # Some models put hidden_states in kwargs instead of args.
-                    # For example, gptj ...
-                    if kwargs.get("hidden_states") is not None:
-                        lm_head_layer_input.append(move_to(kwargs["hidden_states"], data_device))
-
-                lm_head_inputs.append(lm_head_layer_input)
-                raise ValueError
+            raise ValueError
 
         # move layer to target device
         layers[0] = layers[0].to(self.quantize_config.device)
@@ -515,8 +495,6 @@ class BaseGPTQModel(nn.Module):
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            lm_head_handle = layers[0].register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
         self.pre_quantize_generate_hook_start()
         for example in calibration_dataset:
@@ -540,13 +518,8 @@ class BaseGPTQModel(nn.Module):
                 pass
         self.pre_quantize_generate_hook_end()
         handle.remove()
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            lm_head_handle.remove()
 
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            self.model.to(CPU)
-        else:
-            move_to(layers[0], CPU)
+        move_to(layers[0], CPU)
 
         for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
@@ -586,8 +559,6 @@ class BaseGPTQModel(nn.Module):
             if is_lm_head:
                 layer_pb.set_description("Quantizing lm_head")
                 layer = get_module(self.model, key=self.lm_head)
-                if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-                    layer_inputs = lm_head_inputs
             else:
                 layer_pb.set_description(f"Quantizing layer {i} of {layer_count - 1}")
                 layer = layers[i]

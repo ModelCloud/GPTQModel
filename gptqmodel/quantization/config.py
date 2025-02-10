@@ -151,8 +151,6 @@ class QuantizeConfig():
     true_sequential: bool = field(default=True)
 
     lm_head: bool = field(default=False)
-    # there are 2 methods for lm_head quantization: high/low gpu vram modes where high will result in lower error loss
-    lm_head_low_gpu_mem_usage: bool = field(default=True)
 
     quant_method: str = field(default=QUANT_METHOD.GPTQ)
 
