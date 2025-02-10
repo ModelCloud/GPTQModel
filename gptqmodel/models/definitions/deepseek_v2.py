@@ -28,7 +28,7 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
     dynamic_expert_index = "n_routed_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]
-    final_layer_norm_module = "model.norm"
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "DeepseekV2DecoderLayer"

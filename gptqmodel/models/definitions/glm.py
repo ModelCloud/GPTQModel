@@ -20,7 +20,7 @@ from ..base import BaseGPTQModel
 # GLM is HF-ied ChatGLM and marked by -HF suffix in THUDM hf repos
 class GLM(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
-    final_layer_norm_module = "model.norm"
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "GlmDecoderLayer"

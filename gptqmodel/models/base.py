@@ -76,7 +76,7 @@ class BaseGPTQModel(nn.Module):
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
 
-    final_layer_norm_module: str = None
+    pre_lm_head_norm_module: str = None
 
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
@@ -961,8 +961,8 @@ class BaseGPTQModel(nn.Module):
         pass
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
-        if self.final_layer_norm_module:
-            norm = get_module_by_name_prefix(self.model, self.final_layer_norm_module)
+        if self.pre_lm_head_norm_module:
+            norm = get_module_by_name_prefix(self.model, self.pre_lm_head_norm_module)
             self.pre_quantize(norm)
 
             for element in inputs:

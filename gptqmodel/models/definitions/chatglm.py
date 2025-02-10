@@ -23,7 +23,7 @@ class ChatGLM(BaseGPTQModel):
     require_monkeypatch = True
 
     base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
-    final_layer_norm_module = "transformer.encoder.final_layernorm"
+    pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
 
     layers_node = "transformer.encoder.layers"
     layer_type = "GLMBlock"

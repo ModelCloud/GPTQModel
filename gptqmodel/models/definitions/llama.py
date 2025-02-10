@@ -21,6 +21,7 @@ class LlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
     base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.

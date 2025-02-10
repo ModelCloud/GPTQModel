@@ -24,7 +24,7 @@ class BloomGPTQ(BaseGPTQModel):
         "transformer.word_embeddings_layernorm",
         "transformer.ln_f",
     ]
-    final_layer_norm_module = "transformer.ln_f"
+    pre_lm_head_norm_module = "transformer.ln_f"
 
     # repeating layers
     layers_node = "transformer.h"
