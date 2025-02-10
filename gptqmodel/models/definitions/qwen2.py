@@ -30,10 +30,3 @@ class Qwen2GPTQ(BaseGPTQModel):
         ["mlp.up_proj", "mlp.gate_proj"],
         ["mlp.down_proj"],
     ]
-
-    def lm_head_pre_quantize_generate_hook(self, tensor: torch.tensor) -> torch.tensor:
-        norm = self.model.model.norm
-        self.quantize_before(norm)
-        tensor = norm(tensor)
-        self.quantize_after(norm)
-        return tensor

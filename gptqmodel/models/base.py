@@ -559,6 +559,7 @@ class BaseGPTQModel(nn.Module):
             if is_lm_head_module:
                 quant_modules_pb.set_description("Quantizing lm_head")
                 module = get_module(self.model, key=self.lm_head)
+                layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
                 quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
                 module = layers[module_index]
@@ -585,7 +586,7 @@ class BaseGPTQModel(nn.Module):
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
 
-            self.quantize_before(module)
+            self.pre_quantize(module)
 
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
@@ -781,13 +782,8 @@ class BaseGPTQModel(nn.Module):
                         if module.reuse_kv:
                             additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                    output = module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0]
-
-                    if self.quantize_config.lm_head and module_index == layer_count - 1:
-                        output = self.lm_head_pre_quantize_generate_hook(output)
-
                     layer_output = move_to(
-                        output,
+                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
                         cur_layer_device if calibration_enable_gpu_cache else CPU,
                     )
                     layer_outputs.append([layer_output])
@@ -799,9 +795,9 @@ class BaseGPTQModel(nn.Module):
                             torch_empty_cache()
 
             if not is_lm_head_module:
-                layers[module_index] = self.quantize_after(module)
+                layers[module_index] = self.post_quantize(module)
             else:
-                self.quantize_after(module)
+                self.post_quantize(module)
 
             del module
             del gptq
@@ -962,15 +958,22 @@ class BaseGPTQModel(nn.Module):
     def pre_quantize_generate_hook_end(self):
         pass
 
-    def lm_head_pre_quantize_generate_hook(self, tensor: torch.tensor) -> torch.tensor:
-        return tensor
+    def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
+        self.pre_quantize(self.model.model.norm)
 
-    def quantize_before(self, module: nn.Module) -> nn.Module:
+        for element in inputs:
+            for i in range(len(element)):
+                element[i] = self.model.model.norm(element[i])
+
+        self.post_quantize(self.model.model.norm)
+        return inputs
+
+    def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, self.quantize_config.device)
         return module
 
-    def quantize_after(self, module: nn.Module) -> nn.Module:
+    def post_quantize(self, module: nn.Module) -> nn.Module:
         return move_to(module, CPU)
 
     def __getattr__(self, item):
