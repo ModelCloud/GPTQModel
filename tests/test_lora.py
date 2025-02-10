@@ -70,8 +70,7 @@ class Test(ModelTest):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             adapter=self.adapter,
-            backend=BACKEND.MARLIN,
-            device_map="auto",
+            backend=BACKEND.TRITON,
         )
         task_results = self.lm_eval(model)
         self.check_results(task_results)
