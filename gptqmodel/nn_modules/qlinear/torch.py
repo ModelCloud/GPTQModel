@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -52,9 +53,9 @@ class TorchQuantLinear(PackableQuantLinear):
         desc_act: bool,
         in_features: int,
         out_features: int,
-        bias: bool,
-        pack_dtype: torch.dtype,
-        adapter: Adapter,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs,
     ):
         super().__init__(
@@ -73,7 +74,7 @@ class TorchQuantLinear(PackableQuantLinear):
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
-            self.padded_infeatures = self.padded_infeatures
+            self.padded_infeatures = self.in_features
 
         if self.bits in [2, 4, 8]:
             self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)

@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -139,17 +140,19 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self,
-         bits: int,
-         group_size: int,
-         desc_act: bool,
-         sym: bool,
-         in_features: int,
-         out_features: int,
-         pack_dtype: torch.dtype,
-         adapter: Adapter,
-         bias: bool, **kwargs,
-    ):
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
+        **kwargs, ):
+
         if exllama_v2_import_exception is not None:
             raise ValueError(
                 f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_v2_import_exception}"

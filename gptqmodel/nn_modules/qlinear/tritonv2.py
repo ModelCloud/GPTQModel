@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -72,17 +73,18 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self,
-         bits: int,
-         group_size: int,
-         desc_act: bool,
-         sym: bool,
-         in_features: int,
-         out_features: int,
-         bias: bool,
-         pack_dtype: torch.dtype,
-         adapter: Adapter,
-         **kwargs,
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features,
+        out_features,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
+        **kwargs,
     ):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
@@ -102,7 +104,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
-            self.padded_infeatures = self.padded_infeatures
+            self.padded_infeatures = self.in_features
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:

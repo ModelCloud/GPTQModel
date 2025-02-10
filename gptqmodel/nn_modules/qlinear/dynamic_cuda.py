@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -60,9 +61,9 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             desc_act: bool,
             in_features: int,
             out_features: int,
-            bias: bool,
-            pack_dtype: torch.dtype,
-            adapter: Adapter,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int32,
+            adapter: Adapter = None,
             kernel_switch_threshold=128,
             **kwargs,
     ):

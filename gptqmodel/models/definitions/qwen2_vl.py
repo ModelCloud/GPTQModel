@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,8 +23,9 @@ from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY
+from ...utils.model import MODALITY, move_to
 from ..base import BaseGPTQModel
+from .._const import CPU
 
 
 class Qwen2VLGPTQ(BaseGPTQModel):
@@ -74,6 +76,12 @@ class Qwen2VLGPTQ(BaseGPTQModel):
             "vision_token_id": 151654
         }
     }
+
+    def pre_quantize_generate_hook_start(self):
+        self.model.visual = move_to(self.model.visual, self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        self.model.visual = move_to(self.model.visual, CPU)
 
     @staticmethod
     def process_vision_info(
