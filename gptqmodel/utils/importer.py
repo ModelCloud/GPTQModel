@@ -117,9 +117,7 @@ def hf_select_quant_linear(
         meta: Optional[Dict[str, any]] = None,
         pack: Optional[bool] = True,
         device_map: Optional[Union[str, dict]] = None,
-        backend: Optional[Union[str, BACKEND]] = None,
-        pack_dtype: torch.dtype = torch.int32,
-        adapter: Optional[Adapter] = None,
+        backend: Optional[Union[str, BACKEND]] = None,≈
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
     if isinstance(backend, str):
@@ -141,8 +139,8 @@ def hf_select_quant_linear(
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
-        pack_dtype=pack_dtype,
-        adapter=adapter,
+        pack_dtype=torch.int32,
+        adapter=None,
     )
 
 
