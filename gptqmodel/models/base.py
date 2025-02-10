@@ -585,8 +585,7 @@ class BaseGPTQModel(nn.Module):
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
 
-            if get_device(module) == CPU and self.quantize_config.device != CPU:
-                move_to(module, self.quantize_config.device)
+            self.quantize_before(module)
 
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
@@ -800,9 +799,9 @@ class BaseGPTQModel(nn.Module):
                             torch_empty_cache()
 
             if not is_lm_head_module:
-                layers[module_index] = move_to(module, CPU)
+                layers[module_index] = self.quantize_after(module)
             else:
-                move_to(module, CPU)
+                self.quantize_after(module)
 
             del module
             del gptq
@@ -966,6 +965,13 @@ class BaseGPTQModel(nn.Module):
     def lm_head_pre_quantize_generate_hook(self, tensor: torch.tensor) -> torch.tensor:
         return tensor
 
+    def quantize_before(self, module: nn.Module) -> nn.Module:
+        if get_device(module) == CPU and self.quantize_config.device != CPU:
+            return move_to(module, self.quantize_config.device)
+        return module
+
+    def quantize_after(self, module: nn.Module) -> nn.Module:
+        return move_to(module, CPU)
 
     def __getattr__(self, item):
         try:
