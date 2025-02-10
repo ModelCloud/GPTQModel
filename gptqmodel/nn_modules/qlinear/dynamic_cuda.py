@@ -61,8 +61,8 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             in_features: int,
             out_features: int,
             bias: bool,
-            pack_dtype: torch.dtype = torch.int32,
-            adapter: Adapter = None,
+            pack_dtype: torch.dtype,
+            adapter: Adapter,
             kernel_switch_threshold=128,
             **kwargs,
     ):

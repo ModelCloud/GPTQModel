@@ -181,9 +181,9 @@ class MarlinQuantLinear(BaseQuantLinear):
          sym: bool,
          in_features: int,
          out_features: int,
+         pack_dtype: torch.dtype,
+         adapter: Adapter,
          bias: bool,
-         pack_dtype: torch.dtype = torch.int32,
-         adapter: Adapter = None,
          **kwargs
     ):
         if marlin_import_exception is not None:

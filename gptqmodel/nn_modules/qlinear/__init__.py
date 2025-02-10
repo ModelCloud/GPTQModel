@@ -43,6 +43,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
     def __init__(self,
+                 name: str,
                  bits: int,
                  group_size: int,
                  desc_act: bool,
@@ -50,16 +51,13 @@ class BaseQuantLinear(nn.Module):
                  in_features: int,
                  out_features: int,
                  bias: bool,
-                 pack_dtype: t.dtype = t.int32,
-                 name: str = None,
-                 adapter: Adapter = None,
+                 pack_dtype: t.dtype,
+                 adapter: Adapter,
                  register_buffers: bool = False,
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
                  **kwargs):
         super().__init__()
-        if name is None:
-            name = self.__class__.__name__
         self.name = name # full path module name in model weights
         self.in_features = in_features
         self.out_features = out_features
@@ -90,7 +88,7 @@ class BaseQuantLinear(nn.Module):
             self.pack_np_dtype = np.int64
             self.pack_np_math_dtype = np.uint64
         else:
-            raise ValueError(f"Unsupported weight_dtype: {self.pack_dtype}")
+            raise ValueError("Unsupported weight_dtype. Only int16 and int32 are supported.")
 
         # pack_factor is only used for bits 2, 4, and 8. bit3 3 does not use this variable.
         self.pack_factor = self.pack_dtype_bits // self.bits

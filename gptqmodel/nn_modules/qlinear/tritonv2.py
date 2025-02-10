@@ -80,8 +80,8 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
          in_features: int,
          out_features: int,
          bias: bool,
-         pack_dtype: torch.dtype = torch.int32,
-         adapter: Adapter = None,
+         pack_dtype: torch.dtype,
+         adapter: Adapter,
          **kwargs,
     ):
         if not TRITON_AVAILABLE:
