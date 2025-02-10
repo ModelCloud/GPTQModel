@@ -174,8 +174,16 @@ class MarlinQuantLinear(BaseQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, in_features: int, out_features: int, pack_dtype: torch.dtype,
-                 bias: bool, **kwargs):
+    def __init__(
+        self, bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
