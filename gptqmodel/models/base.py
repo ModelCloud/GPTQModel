@@ -501,10 +501,10 @@ class BaseGPTQModel(nn.Module):
             for k, v in example.items():
                 data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
-                    for layer_index in range(len(v)):
-                        if len(v[layer_index].shape) == 1:
-                            v[layer_index] = v[layer_index].unsqueeze(0)
-                        v[layer_index] = move_to(v[layer_index].to(torch.bfloat16) if is_ovis else v[layer_index], data_device)
+                    for module_index in range(len(v)):
+                        if len(v[module_index].shape) == 1:
+                            v[module_index] = v[module_index].unsqueeze(0)
+                        v[module_index] = move_to(v[module_index].to(torch.bfloat16) if is_ovis else v[module_index], data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
@@ -543,7 +543,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        layer_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count))
+        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count))
         gpu_memorys = []
         cpu_memorys = []
         durations = []
@@ -554,16 +554,16 @@ class BaseGPTQModel(nn.Module):
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
-        for layer_index in layer_pb:
-            is_lm_head = layer_index >= layer_count
-            if is_lm_head:
-                layer_pb.set_description("Quantizing lm_head")
-                layer = get_module(self.model, key=self.lm_head)
+        for module_index in quant_modules_pb:
+            is_lm_head_module = module_index >= layer_count
+            if is_lm_head_module:
+                quant_modules_pb.set_description("Quantizing lm_head")
+                module = get_module(self.model, key=self.lm_head)
             else:
-                layer_pb.set_description(f"Quantizing layer {layer_index} of {layer_count - 1}")
-                layer = layers[layer_index]
+                quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
+                module = layers[module_index]
 
-            if layer.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
+            if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
             if task is not None:
@@ -573,24 +573,24 @@ class BaseGPTQModel(nn.Module):
                     title='GPU Memory',
                     series='GPU Memory',
                     value=gpu_memory,
-                    iteration=layer_index,
+                    iteration=module_index,
                 )
 
                 task.get_logger().report_scalar(
                     title='CPU Memory',
                     series='CPU Memory',
                     value=cpu_memory,
-                    iteration=layer_index,
+                    iteration=module_index,
                 )
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
 
-            if get_device(layer) == CPU and self.quantize_config.device != CPU:
-                move_to(layer, self.quantize_config.device)
+            if get_device(module) == CPU and self.quantize_config.device != CPU:
+                move_to(module, self.quantize_config.device)
 
-            cur_layer_device = get_device(layer)
-            full = find_modules(layer, name=self.lm_head if is_lm_head else "")
-            modules = [[self.lm_head]] if is_lm_head else layer_modules
+            cur_layer_device = get_device(module)
+            full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
+            modules = [[self.lm_head]] if is_lm_head_module else layer_modules
             for index, names in enumerate(modules):
                 subset = {n: full[n] for n in names if n in full}
                 skipped_modules = []
@@ -602,7 +602,7 @@ class BaseGPTQModel(nn.Module):
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
-                        layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{layer_index}.{name}"
+                        layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
                             logger.info(f"skip module: {layer_name}")
@@ -674,15 +674,15 @@ class BaseGPTQModel(nn.Module):
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
                     # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                    if hasattr(layer, "reuse_kv"):
-                        if layer.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
+                    if hasattr(module, "reuse_kv"):
+                        if module.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                        layer_output = layer(*layer_input) if is_lm_head else layer(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(layer_index) is None:
-                            shared_kv_cache_dict[layer_index] = layer_output[-1]
+                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                        if shared_kv_cache_dict.get(module_index) is None:
+                            shared_kv_cache_dict[module_index] = layer_output[-1]
                     else:
-                        layer(*layer_input) if is_lm_head else layer(*layer_input, **additional_layer_inputs)
+                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -702,8 +702,8 @@ class BaseGPTQModel(nn.Module):
                         torch_empty_cache()
 
                 for name_index, name in enumerate(subset):
-                    layer_name = self.lm_head if is_lm_head else f"{self.layers_node}.{layer_index}.{name}"
-                    layer_pb.set_description(f"Quantizing {name} in layer {layer_index} of {layer_count - 1}")
+                    layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
+                    quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
                     group_size = self.quantize_config.group_size
                     desc_act = self.quantize_config.desc_act
@@ -728,22 +728,22 @@ class BaseGPTQModel(nn.Module):
                     if task is not None:
                         task.get_logger().report_scalar(
                             title='Quantization Loss',
-                            series=f'layer_{layer_index}_loss',
+                            series=f'layer_{module_index}_loss',
                             value=avg_loss,
                             iteration=name_index,
                         )
 
                         task.get_logger().report_scalar(
                             title='Quantization Time',
-                            series=f'layer_{layer_index}_time',
+                            series=f'layer_{module_index}_time',
                             value=duration,
                             iteration=name_index,
                         )
                     durations.append(duration)
                     avg_losses.append(avg_loss)
-                    module_names.append(f"layer-{layer_index}-{name}")
+                    module_names.append(f"layer-{module_index}-{name}")
 
-                    stat = {QUANT_LOG_LAYER: layer_index, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                    stat = {QUANT_LOG_LAYER: module_index, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                             QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}", QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
@@ -761,7 +761,7 @@ class BaseGPTQModel(nn.Module):
                     # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
             # logger.info(f"layer-{i}: Begin Forward() Pass 2 Post-Quant")
-            is_last_quant = layer_index == len(layer_pb) - 1
+            is_last_quant = module_index == len(quant_modules_pb) - 1
             if not is_last_quant:
                 for j in range(num_batches):
                     layer_input = []
@@ -778,13 +778,13 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                    if hasattr(layer, "reuse_kv"):
-                        if layer.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
+                    if hasattr(module, "reuse_kv"):
+                        if module.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                    output = layer(*layer_input)[0] if is_lm_head else layer(*layer_input, **additional_layer_inputs)[0]
+                    output = module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0]
 
-                    if layer_index == layer_count - 1:
+                    if self.quantize_config.lm_head and module_index == layer_count - 1:
                         output = self.lm_head_pre_quantize_generate_hook(output)
 
                     layer_output = move_to(
@@ -799,9 +799,12 @@ class BaseGPTQModel(nn.Module):
                         if auto_gc:
                             torch_empty_cache()
 
-            layers[layer_index] = move_to(layer, CPU)
+            if not is_lm_head_module:
+                layers[module_index] = move_to(module, CPU)
+            else:
+                move_to(module, CPU)
 
-            del layer
+            del module
             del gptq
             del layer_inputs
 
