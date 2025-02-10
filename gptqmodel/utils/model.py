@@ -221,7 +221,7 @@ def create_quant_layer(
         sym: bool,
         device: DEVICE,
         lm_head_name: str,
-        pack_dtype: torch.dtype,
+        pack_dtype: torch.dtype = torch.int32,
         adapter: Optional[Adapter] = None,
 
                        ) -> BaseQuantLinear:

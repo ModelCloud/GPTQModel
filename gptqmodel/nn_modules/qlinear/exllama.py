@@ -83,9 +83,10 @@ class ExllamaQuantLinear(PackableQuantLinear):
          sym: bool,
          in_features: int,
          out_features: int,
-         pack_dtype: torch.dtype,
-         adapter: Adapter,
-         bias: bool, **kwargs,
+         bias: bool,
+         pack_dtype: torch.dtype = torch.int32,
+         adapter: Adapter = None,
+         **kwargs,
     ):
         if exllama_import_exception is not None:
             raise ValueError(
