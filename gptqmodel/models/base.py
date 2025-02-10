@@ -273,7 +273,7 @@ class BaseGPTQModel(nn.Module):
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
-                self.tokenizer = Tokenicer.load(tokenizer)
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
