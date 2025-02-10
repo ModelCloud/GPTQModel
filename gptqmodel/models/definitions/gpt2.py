@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class GPT2GPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.wpe", "transformer.ln_f"]
+    pre_lm_head_norm_module = "transformer.ln_f"
 
     layers_node = "transformer.h"
     layer_type = "GPT2Block"

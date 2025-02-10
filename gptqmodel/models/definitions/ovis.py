@@ -29,6 +29,7 @@ from .._const import CPU
 
 class OvisGPTQ(BaseGPTQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
+    pre_lm_head_norm_module = "llm.model.norm"
 
     layers_node = "llm.model.layers"
     layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer"]

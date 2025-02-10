@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class Phi3GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "embed_dropout", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "Phi3DecoderLayer"
