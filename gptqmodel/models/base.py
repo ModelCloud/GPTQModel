@@ -133,7 +133,6 @@ class BaseGPTQModel(nn.Module):
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
-            self.tokenizer.auto_assign_pad_token()
             self.model.tokenizer = self.tokenizer.tokenizer # helpful for CI tests
         else:
             self.tokenizer = tokenizer
@@ -278,7 +277,6 @@ class BaseGPTQModel(nn.Module):
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
-            self.tokenizer.auto_assign_pad_token()
 
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
