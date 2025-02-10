@@ -34,9 +34,7 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
     layers_node = "model.layers"
     layer_type = "DeepseekV3DecoderLayer"
 
-    # DeepSeek-V3 uses 256 experts
     layer_modules = [
-        # DeepSeek-V2 usage, included in layer 0-61
         ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
 
         ["self_attn.o_proj"],
@@ -45,7 +43,10 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
 
         # included in layer 3-61, uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
+        # DeepSeek-V3 uses 256 experts
+        # for quantization on A100, don't merge gate_proj and up_proj
+        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
+        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
 
         # included in layer 3-61
