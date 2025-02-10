@@ -13,8 +13,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from typing import List
+import torch
 from ..base import BaseGPTQModel
+from ...utils.model import get_module_by_name_prefix
 
 
 class OPTGPTQ(BaseGPTQModel):
@@ -25,6 +27,7 @@ class OPTGPTQ(BaseGPTQModel):
         "model.decoder.project_in",
         "model.decoder.final_layer_norm",
     ]
+    pre_lm_head_norm_module = "model.decoder.final_layer_norm"
 
     layers_node = "model.decoder.layers"
     layer_type = "OPTDecoderLayer"
@@ -34,3 +37,20 @@ class OPTGPTQ(BaseGPTQModel):
         ["fc1"],
         ["fc2"],
     ]
+
+    def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
+        if self.config.do_layer_norm_before and not self.config._remove_final_layer_norm:
+            inputs = super().lm_head_pre_quantize_generate_hook(inputs)
+
+        project_out = get_module_by_name_prefix(self.model, "model.decoder.project_out")
+        if project_out is not None:
+            self.pre_quantize(project_out)
+
+            for element in inputs:
+                for i in range(len(element)):
+                    element[i] = project_out(element[i])
+
+            self.post_quantize(project_out)
+
+        return inputs
+

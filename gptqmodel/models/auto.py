@@ -131,6 +131,7 @@ MODEL_MAP = {
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
     "stablelm_epoch": StableLMEpochGPTQ,
+    "stablelm": StableLMEpochGPTQ,
     "starcoder2": Starcoder2GPTQ,
     "mixtral": MixtralGPTQ,
     "qwen2": Qwen2GPTQ,
