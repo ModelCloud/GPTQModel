@@ -20,6 +20,8 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from torch.nn import Parameter
+
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
@@ -53,6 +55,10 @@ def gptq_gemm(x, qweight, qzeros, scales, g_idx, bit):
 
 def gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, bit, A, B):
     return gptqmodel_exllama_v2v.gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
+
+def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
+                 bit: int) -> None:
+    gptqmodel_exllama_v2v.gptq_shuffle(q_weight, q_perm, bit)
 
 
 class ExllamaV2VQuantLinear(BaseQuantLinear):
@@ -139,10 +145,23 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
 
         super().post_init()
 
+        self.qzeros = Parameter(self.qzeros.data, requires_grad=False)
+        self.qweight = Parameter(self.qweight.data, requires_grad=False)
+        self.g_idx = Parameter(self.g_idx.data, requires_grad=False)
+        self.scales = Parameter(self.scales.data, requires_grad=False)
+
+        # exllama needs to shuffle the weight after the weight is loaded
+        # here we do the shuffle on first forward pass
+        if self.desc_act:
+            self.g_idx.data = torch.argsort(self.g_idx).to(torch.int)
+        else:
+            self.g_idx.data = torch.empty((0,),
+                                           dtype=torch.int,
+                                           device=self.g_idx.device)
+            gptq_shuffle(self.qweight, self.g_idx, self.bits)
+
 
     def forward(self, x):
-
-
         x_dtype = x.dtype
         if x_dtype != torch.float16:
             logger.warning_once(
