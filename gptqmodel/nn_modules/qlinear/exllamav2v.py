@@ -145,21 +145,21 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
 
         super().post_init()
 
-        self.qzeros = Parameter(self.qzeros.data, requires_grad=False)
-        self.qweight = Parameter(self.qweight.data, requires_grad=False)
-        self.g_idx = Parameter(self.g_idx.data, requires_grad=False)
-        self.scales = Parameter(self.scales.data, requires_grad=False)
+        # self.qzeros = Parameter(self.qzeros.data, requires_grad=False)
+        # self.qweight = Parameter(self.qweight.data, requires_grad=False)
+        # self.g_idx = Parameter(self.g_idx.data, requires_grad=False)
+        # self.scales = Parameter(self.scales.data, requires_grad=False)
 
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
         if self.desc_act:
-            self.g_idx.data = torch.argsort(self.g_idx).to(torch.int)
+            self.g_idx.data = torch.argsort(self.g_idx).to(torch.int32)
         else:
             self.g_idx.data = torch.empty((0,),
-                                           dtype=torch.int,
+                                           dtype=torch.int32,
                                            device=self.g_idx.device)
-            gptq_shuffle(self.qweight, self.g_idx, self.bits)
 
+        gptq_shuffle(self.qweight, self.g_idx, self.bits)
 
     def forward(self, x):
         x_dtype = x.dtype
