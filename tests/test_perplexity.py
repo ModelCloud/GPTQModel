@@ -26,6 +26,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
+
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -149,9 +150,9 @@ class TestPerplexity(unittest.TestCase):
                 desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True,
                 # inject this rule so dynamic logic is checked even if zero matches happen
                 dynamic={
-                    "-:.*mlp\.NEVER_NEGATIVE_MATCH_proj.*": {"bits": 8, "group_size": 32},
-                    "+:.*mlp\.NEVER_POSITIVE_MATCH_proj.*": {"bits": 8, "group_size": 32},
-                    ":.*mlp\.NEVER_POSITIVE_MATCH2_proj.*": {"bits": 8, "group_size": 32},
+                    "-:.*mlp\.NEVER_NEGATIVE_MATCH_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
+                    "+:.*mlp\.NEVER_POSITIVE_MATCH_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
+                    ":.*mlp\.NEVER_POSITIVE_MATCH2_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
                 }
             )
         elif method == QUANT_METHOD.AUTO_ROUND:

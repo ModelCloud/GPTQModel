@@ -12,6 +12,8 @@
 </p>
   
 ## News
+* 02/10/2025 [1.8.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.5): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
+* Optimized `DeekSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeekSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
 `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. 
 New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 

@@ -23,7 +23,7 @@ import transformers
 
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.models._const import DEVICE, PLATFORM
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
@@ -90,7 +90,7 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(BaseQuantLinear):
+class IPEXQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -246,7 +246,7 @@ class IPEXQuantLinear(BaseQuantLinear):
                 g_idx_i = self.g_idx[i * num_dim : (i + 1) * num_dim]
                 weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
             weights = torch.cat(weights, dim=1)
-        out = torch.matmul(x, weights)
+        out = torch.matmul(x, weights.to(x.dtype))
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
 

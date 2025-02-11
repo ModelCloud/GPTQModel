@@ -22,6 +22,7 @@ class InternLM2GPTQ(BaseGPTQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
     base_modules = ["model.tok_embeddings", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "InternLM2DecoderLayer"

@@ -119,14 +119,6 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         kwargs.pop('max_memory', None)
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
 
-def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        return normalize_tokenizer(config, tokenizer)
-    except Exception as e:
-        logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
-        return None
-
 
 def ModelLoader(cls):
     @classmethod
@@ -212,7 +204,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
         model.eval()
 
-        tokenizer = get_tokenizer(pretrained_model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
@@ -603,7 +595,7 @@ def ModelLoader(cls):
 
         model.eval()
 
-        tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if backend == BACKEND.MLX:
             import tempfile

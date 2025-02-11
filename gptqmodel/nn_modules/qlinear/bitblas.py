@@ -24,6 +24,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
@@ -85,7 +87,7 @@ def unpack_qzeros(qzeros, bits):
     return unpacked_zeros
 
 
-class BitBLASQuantLinear(BaseQuantLinear):
+class BitBLASQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [1, 2, 4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]

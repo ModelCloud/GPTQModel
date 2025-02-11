@@ -339,7 +339,7 @@ def ModelWriter(cls):
             config_tokenizer_class = saved_tokenizer_config.get("tokenizer_class")
             # if the tokenizer is fast, but the tokenizer_config.json does not have Fast suffix, add "Fast" suffix
             if (not config_tokenizer_class.endswith("Fast")) and (
-                isinstance(self.tokenizer, PreTrainedTokenizerFast)
+                isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast)
                 ):
                 saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
                 with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
