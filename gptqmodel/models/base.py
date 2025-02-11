@@ -171,7 +171,7 @@ class BaseGPTQModel(nn.Module):
     def prepare_dataset(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
-        calibration_dataset_concat_size: Optional[int] = None,
+        calibration_dataset_concat_size: Optional[int] = 2048,
         batch_size: int = 1,
     ):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
