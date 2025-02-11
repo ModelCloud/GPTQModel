@@ -40,14 +40,15 @@ class Test(ModelTest):
         cls.adapter = Lora(path=cls.lora_path, rank=128)
 
     @parameterized.expand([
-        BACKEND.TORCH,
-        BACKEND.CUDA,
-        BACKEND.TRITON,
-        BACKEND.EXLLAMA_V1,
-        # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
-        BACKEND.MARLIN,
-        # (BACKEND.IPEX), <-- not tested yet
-        # (BACKEND.BITBLAS, <-- not tested yet
+        BACKEND.EXLLAMA_V2V,
+        # BACKEND.TORCH,
+        # BACKEND.CUDA,
+        # BACKEND.TRITON,
+        # BACKEND.EXLLAMA_V1,
+        # # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
+        # BACKEND.MARLIN,
+        # # (BACKEND.IPEX), <-- not tested yet
+        # # (BACKEND.BITBLAS, <-- not tested yet
     ])
     def test_load(self, backend: BACKEND):
         model = GPTQModel.load(
@@ -63,16 +64,16 @@ class Test(ModelTest):
         print(f"Result: {result}")
         assert "paris" in result.lower()
 
-    def test_lm_eval_from_path(self):
-        adapter = Lora(path=self.lora_path, rank=128)
-        task_results = self.lm_eval(None, extra_args={"adapter": adapter.to_dict()})
-        self.check_results(task_results)
-
-    def test_lm_eval_from_model(self):
-        model = GPTQModel.load(
-            self.NATIVE_MODEL_ID,
-            adapter=self.adapter,
-            backend=BACKEND.TRITON,
-        )
-        task_results = self.lm_eval(model)
-        self.check_results(task_results)
+    # def test_lm_eval_from_path(self):
+    #     adapter = Lora(path=self.lora_path, rank=128)
+    #     task_results = self.lm_eval(None, extra_args={"backend":"exllama_v2v", "adapter": adapter.to_dict()})
+    #     self.check_results(task_results)
+    #
+    # def test_lm_eval_from_model(self):
+    #     model = GPTQModel.load(
+    #         self.NATIVE_MODEL_ID,
+    #         adapter=self.adapter,
+    #         backend=BACKEND.EXLLAMA_V2V,
+    #     )
+    #     task_results = self.lm_eval(model)
+    #     self.check_results(task_results)

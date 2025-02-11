@@ -15,8 +15,8 @@ setup(
         cpp_extension.CUDAExtension(
             'eora_cuda',
             [
-                "eora/q_gemm.cu",
-                "eora/pybind.cu",
+                "q_gemm.cu",
+                "pybind.cu",
             ],
             include_dirs=[os.path.abspath("."), os.path.abspath("eora")],
             extra_compile_args={

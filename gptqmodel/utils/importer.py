@@ -28,6 +28,7 @@ from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.exllamav2v import ExllamaV2VQuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -54,8 +55,8 @@ BACKEND_DICT = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
-    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2V, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
+    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2V, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -231,6 +232,8 @@ def select_quant_linear(
         qlinear = BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
         qlinear = MarlinQuantLinear
+    elif backend == BACKEND.EXLLAMA_V2V:
+        qlinear = ExllamaV2VQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
