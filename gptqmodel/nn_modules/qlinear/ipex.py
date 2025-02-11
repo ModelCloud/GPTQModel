@@ -243,7 +243,7 @@ class IPEXQuantLinear(BaseQuantLinear):
                 g_idx_i = self.g_idx[i * num_dim : (i + 1) * num_dim]
                 weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
             weights = torch.cat(weights, dim=1)
-        out = torch.matmul(x, weights)
+        out = torch.matmul(x, weights.to(x.dtype))
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
         if self.bias is not None:
