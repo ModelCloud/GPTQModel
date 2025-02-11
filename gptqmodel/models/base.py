@@ -225,8 +225,8 @@ class BaseGPTQModel(nn.Module):
             current_length = 0
 
             new_line = self.tokenizer("\n\n", return_tensors="pt")
-            new_line_input_ids = new_line["input_ids"][0]
-            new_line_attention_mask = new_line["attention_mask"][0]
+            new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
+            new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
             new_line_input_ids_len = len(new_line_input_ids)
 
             for example in new_calibration_dataset:
