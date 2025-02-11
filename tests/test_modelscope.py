@@ -1,5 +1,5 @@
 import os
-os.environ["GPTQMODEL_USE_MODELSCOPE"] = "1"
+os.environ["GPTQMODEL_USE_MODELSCOPE"] = "True"
 import sys
 import subprocess  # noqa: E402
 import importlib.util  # noqa: E402

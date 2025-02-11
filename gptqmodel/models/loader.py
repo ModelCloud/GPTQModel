@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
-if os.getenv("GPTQMODEL_USE_MODELSCOPE"):
+if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() == 'true':
     from modelscope import snapshot_download
 else:
     from huggingface_hub import snapshot_download
