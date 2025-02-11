@@ -214,10 +214,10 @@ if BUILD_CUDA_EXT:
 
     extensions = [
         cpp_ext.CUDAExtension(
-            'gptqmodel_exllama_v2v',
+            'gptqmodel_exllama_eora',
             [
-                "gptqmodel_ext/exllamav2v/q_gemm.cu",
-                "gptqmodel_ext/exllamav2v/pybind.cu",
+                "gptqmodel_ext/exllama_eora/q_gemm.cu",
+                "gptqmodel_ext/exllama_eora/pybind.cu",
             ],
             extra_link_args=extra_link_args,
             extra_compile_args=extra_compile_args,

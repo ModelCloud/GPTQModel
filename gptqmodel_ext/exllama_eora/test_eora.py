@@ -1,6 +1,6 @@
 import torch
 # from eora import fused_concurrent, fused_sequential, cublas_reference, gptq_gemm_eora, gptq_gemm
-from gptqmodel_exllama_v2v import gptq_gemm, gptq_gemm_lora
+from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_lora
 
 m = 1
 k = 4096

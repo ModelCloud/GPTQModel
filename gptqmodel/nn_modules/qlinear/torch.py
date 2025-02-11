@@ -103,6 +103,8 @@ class TorchQuantLinear(PackableQuantLinear):
 
         super().post_init()
 
+        self.wf = self.wf.to(device=self.qweight.device)
+
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
@@ -135,9 +137,6 @@ class TorchQuantLinear(PackableQuantLinear):
         self.scales = None
 
     def dequantize_weight(self, num_itr=1):
-        if self.wf.device != self.qzeros.device:
-            self.wf = self.wf.to(self.qzeros.device)
-
         if self.bits in [2, 4, 8]:
             dtype = torch.int16 if self.bits == 8 else torch.int8
             zeros = torch.bitwise_right_shift(

@@ -31,7 +31,7 @@ from ...utils.logger import setup_logger
 exllama_v2v_import_exception = None
 
 try:
-    import gptqmodel_exllama_v2v
+    import gptqmodel_exllama_eora
 except ImportError as e:
     exllama_v2v_import_exception = e
 
@@ -50,18 +50,18 @@ def _torch_device(idx):
     return f"cuda:{idx}"
 
 def gptq_gemm(x, qweight, qzeros, scales, g_idx, bit):
-    return gptqmodel_exllama_v2v.gptq_gemm(x, qweight, qzeros, scales, g_idx, True, bit)
+    return gptqmodel_exllama_eora.gptq_gemm(x, qweight, qzeros, scales, g_idx, True, bit)
 
 
 def gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, bit, A, B):
-    return gptqmodel_exllama_v2v.gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
+    return gptqmodel_exllama_eora.gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
-    gptqmodel_exllama_v2v.gptq_shuffle(q_weight, q_perm, bit)
+    gptqmodel_exllama_eora.gptq_shuffle(q_weight, q_perm, bit)
 
 
-class ExllamaV2VQuantLinear(BaseQuantLinear):
+class ExllamaEoraQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4, 8] # TODO: validate 2/3
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -145,10 +145,10 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
 
         super().post_init()
 
-        # self.qzeros = Parameter(self.qzeros.data, requires_grad=False)
-        # self.qweight = Parameter(self.qweight.data, requires_grad=False)
-        # self.g_idx = Parameter(self.g_idx.data, requires_grad=False)
-        # self.scales = Parameter(self.scales.data, requires_grad=False)
+        self.qzeros = Parameter(self.qzeros.data, requires_grad=False)
+        self.qweight = Parameter(self.qweight.data, requires_grad=False)
+        self.g_idx = Parameter(self.g_idx.data, requires_grad=False)
+        self.scales = Parameter(self.scales.data, requires_grad=False)
 
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass

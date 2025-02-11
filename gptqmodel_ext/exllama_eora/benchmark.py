@@ -1,6 +1,6 @@
 import torch
 import time
-from gptqmodel_exllama_v2v import gptq_gemm_lora, gptq_gemm
+from gptqmodel_exllama_eora import gptq_gemm_lora, gptq_gemm
 
 m = 8
 k = 4096

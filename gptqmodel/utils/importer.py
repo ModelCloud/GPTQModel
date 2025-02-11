@@ -28,7 +28,7 @@ from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.exllamav2v import ExllamaV2VQuantLinear
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -233,7 +233,7 @@ def select_quant_linear(
     elif backend == BACKEND.MARLIN:
         qlinear = MarlinQuantLinear
     elif backend == BACKEND.EXLLAMA_V2V:
-        qlinear = ExllamaV2VQuantLinear
+        qlinear = ExllamaEoraQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
