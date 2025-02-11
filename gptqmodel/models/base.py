@@ -59,7 +59,6 @@ from ..utils.model import (
     get_moe_layer_modules,
     move_to,
     nested_move_to,
-    normalize_tokenizer,
     pack_model,
 )
 from ..utils.progress import ProgressBar
@@ -673,15 +672,15 @@ class BaseGPTQModel(nn.Module):
 
                     with torch.no_grad():
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                    if hasattr(module, "reuse_kv"):
-                        if module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(module_index) is None:
-                            shared_kv_cache_dict[module_index] = layer_output[-1]
-                        else:
-                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(module_index) is None:
+                                shared_kv_cache_dict[module_index] = layer_output[-1]
+                            else:
+                                module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -728,7 +727,7 @@ class BaseGPTQModel(nn.Module):
                     ## Assign the quantized weight to the weight
                     gptq[name].layer.weight.data = quantized_weight.to(device=gptq[name].device)
                     ## Offload the quantized weight to CPU for EoRA
-                    quantized_weights['model.layers.%d.%s' % (i, name)] = quantized_weight.cpu()
+                    quantized_weights['model.layers.%d.%s' % (index, name)] = quantized_weight.cpu()
 
 
                     if task is not None:
@@ -906,12 +905,6 @@ class BaseGPTQModel(nn.Module):
             format=self.quantize_config.format,
             pack_dtype=self.quantize_config.pack_dtype,
         )
-
-        # Use the provided tokenizer if one is passed to quantize()
-        if tokenizer is not None:
-            self.tokenizer = tokenizer
-            # after tokenizer is reset, need to normalize it again
-            self.tokenizer = normalize_tokenizer(self.config, self.tokenizer)
 
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
