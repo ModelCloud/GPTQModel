@@ -17,6 +17,7 @@
 # -- do not touch
 import os
 
+import torch
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -45,16 +46,19 @@ class TestInferenceSpeed(InferenceSpeed):
 
     @parameterized.expand(
         [
-            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 284.46),
-            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 161.72),
-            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 271.73),
-            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 288.47),
-            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 220.76),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 159.48),
-            # (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1888.53), # Second time running bitblas, there is cache
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 284.46),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 161.72),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 271.73),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 288.47),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 220.76),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 227.96),
+            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2039.43), # Second time running bitblas, there is cache
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second):
+        # Start a fresh compile for each parameter of the test case
+        torch._dynamo.reset()
+
         # There are differences between the results of the first and second runs of bitblas
         # (there is a cache when running bitblas for the second time),
         # so only the results of the second run of bitblas are asserted.
