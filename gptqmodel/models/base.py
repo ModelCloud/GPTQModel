@@ -171,6 +171,8 @@ class BaseGPTQModel(nn.Module):
     def prepare_dataset(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
+        calibration_data_concat: bool = False,
+        calibration_data_concat_context: int = 2048,
         batch_size: int = 1,
     ):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
@@ -217,6 +219,66 @@ class BaseGPTQModel(nn.Module):
                 }
             )
 
+        if calibration_data_concat:
+            concatenated_data = []
+            current_input_ids = []
+            current_attention_mask = []
+            current_length = 0
+
+            for example in new_calibration_dataset:
+                input_ids = example["input_ids"][0]
+                attention_mask = example["attention_mask"][0]
+
+                if current_length + len(input_ids) > calibration_data_concat_context:
+                    if current_input_ids:
+                        remaining_space = calibration_data_concat_context - current_length
+                        # if there is remaining space, add the remaining input to the current block
+                        if remaining_space > 0:
+                            current_input_ids.extend(self.tokenizer.pad_token_id)
+                            current_input_ids.extend(input_ids[:remaining_space])
+                            current_attention_mask.extend(self.tokenizer.pad_token_id)
+                            current_attention_mask.extend(attention_mask[:remaining_space])
+
+                            concatenated_data.append({
+                                "input_ids": [current_input_ids],
+                                "attention_mask": [current_attention_mask]
+                            })
+                        else:
+                            # if there is no remaining space, add the current block to the concatenated data
+                            concatenated_data.append({
+                                "input_ids": [current_input_ids],
+                                "attention_mask": [current_attention_mask]
+                            })
+
+                        current_input_ids = input_ids[:calibration_data_concat_context]
+                        current_attention_mask = attention_mask[:calibration_data_concat_context]
+                        current_length = len(current_input_ids)
+                    else:
+                        current_input_ids = input_ids[:calibration_data_concat_context]
+                        current_attention_mask = attention_mask[:calibration_data_concat_context]
+                        current_length = len(current_input_ids)
+
+                        concatenated_data.append({
+                            "input_ids": [current_input_ids],
+                            "attention_mask": [current_attention_mask]
+                        })
+                else:
+                    current_input_ids.extend(input_ids)
+                    current_attention_mask.extend(attention_mask)
+                    current_length += len(input_ids)
+
+            if current_input_ids:
+                padding_length = calibration_data_concat_context - len(current_input_ids)
+                if padding_length > 0:
+                    current_input_ids.extend([self.tokenizer.pad_token_id] * padding_length)
+                    current_attention_mask.extend([1] * padding_length)
+                concatenated_data.append({
+                    "input_ids": [current_input_ids],
+                    "attention_mask": [current_attention_mask]
+                })
+
+            new_calibration_dataset = concatenated_data
+
         new_calibration_dataset_batched = [
             collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
             for start in range(0, len(new_calibration_dataset), batch_size)
@@ -229,6 +291,8 @@ class BaseGPTQModel(nn.Module):
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration_data_concat: bool = False,
+        calibration_data_concat_context: int = 2048,
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -307,7 +371,7 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size,)
+        calibration_dataset = self.prepare_dataset(calibration_dataset, calibration_data_concat, calibration_data_concat_context, batch_size)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
