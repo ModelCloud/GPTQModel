@@ -124,7 +124,7 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
             return False, exllama_v2v_import_exception
         return cls._validate(**args)
 
-    def post_init(self, temp_dq):
+    def post_init(self):
         # resize due to padding after model weights have been loaded
         if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
             self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
