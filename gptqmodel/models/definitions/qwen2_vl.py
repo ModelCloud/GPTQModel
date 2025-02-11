@@ -24,8 +24,8 @@ from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
-from ..base import BaseGPTQModel
 from .._const import CPU
+from ..base import BaseGPTQModel
 
 
 class Qwen2VLGPTQ(BaseGPTQModel):

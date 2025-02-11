@@ -14,9 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import List
+
 import torch
-from ..base import BaseGPTQModel
+
 from ...utils.model import get_module_by_name_prefix
+from ..base import BaseGPTQModel
 
 
 class OPTGPTQ(BaseGPTQModel):

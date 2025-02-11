@@ -1,6 +1,7 @@
 import os
 import sys
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 if sys.platform == "darwin":
@@ -8,10 +9,11 @@ if sys.platform == "darwin":
 
 import tempfile  # noqa: E402
 
-from gptqmodel import GPTQModel  # noqa: E402
 from mlx_lm import generate, load  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
 
 
 class TestExport(ModelTest):

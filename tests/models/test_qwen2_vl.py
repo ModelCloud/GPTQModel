@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from gptqmodel.models.definitions.qwen2_vl import Qwen2VLGPTQ
 from model_test import ModelTest
+
+from gptqmodel.models.definitions.qwen2_vl import Qwen2VLGPTQ
 
 
 class TestQwen2_VL(ModelTest):
