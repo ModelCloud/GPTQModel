@@ -220,63 +220,62 @@ class BaseGPTQModel(nn.Module):
 
         if calibration_dataset_concat_size:
             concatenated_data = []
-            current_input_ids = []
-            current_attention_mask = []
+            input_ids_buff = []
+            attention_mask_buff = []
             current_length = 0
 
-            new_line_token = self.tokenizer("\n\n", return_tensors="pt")["input_ids"][0]
-            new_line_token_len = len(new_line_token)
+            new_line = self.tokenizer("\n\n", return_tensors="pt")
+            new_line_input_ids = new_line["input_ids"][0]
+            new_line_attention_mask = new_line["attention_mask"][0]
+            new_line_input_ids_len = len(new_line_input_ids)
 
             for example in new_calibration_dataset:
                 input_ids = example["input_ids"][0]
                 attention_mask = example["attention_mask"][0]
 
-                if current_length + len(input_ids) > calibration_dataset_concat_size:
-                    if current_input_ids:
+                if current_length + len(input_ids) + new_line_input_ids_len >= calibration_dataset_concat_size:
+                    if len(input_ids_buff) > 0:
                         remaining_space = calibration_dataset_concat_size - current_length
                         # if there is remaining space, add the remaining input to the current block
                         if remaining_space > 0:
-                            current_input_ids.extend(new_line_token)
-                            current_input_ids.extend(input_ids[:remaining_space - new_line_token_len])
-                            current_attention_mask.extend([1] * new_line_token_len)
-                            current_attention_mask.extend(attention_mask[:remaining_space - new_line_token_len])
+                            input_ids_buff.extend(new_line_input_ids)
+                            input_ids_buff.extend(input_ids[:remaining_space - new_line_input_ids_len])
+                            attention_mask_buff.extend(new_line_attention_mask)
+                            attention_mask_buff.extend(attention_mask[:remaining_space - new_line_input_ids_len])
 
                             concatenated_data.append({
-                                "input_ids": [current_input_ids],
-                                "attention_mask": [current_attention_mask]
+                                "input_ids": [input_ids_buff],
+                                "attention_mask": [attention_mask_buff]
                             })
                         else:
                             # if there is no remaining space, add the current block to the concatenated data
                             concatenated_data.append({
-                                "input_ids": [current_input_ids],
-                                "attention_mask": [current_attention_mask]
+                                "input_ids": [input_ids_buff],
+                                "attention_mask": [attention_mask_buff]
                             })
 
-                        current_input_ids = input_ids[:calibration_dataset_concat_size]
-                        current_attention_mask = attention_mask[:calibration_dataset_concat_size]
-                        current_length = len(current_input_ids)
+                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
+                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
+                        current_length = len(input_ids_buff)
                     else:
-                        current_input_ids = input_ids[:calibration_dataset_concat_size]
-                        current_attention_mask = attention_mask[:calibration_dataset_concat_size]
-                        current_length = len(current_input_ids)
-
-                        concatenated_data.append({
-                            "input_ids": [current_input_ids],
-                            "attention_mask": [current_attention_mask]
-                        })
+                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
+                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
+                        current_length = len(input_ids_buff)
                 else:
-                    current_input_ids.extend(input_ids)
-                    current_attention_mask.extend(attention_mask)
-                    current_length += len(input_ids)
+                    input_ids_buff.extend(new_line_input_ids)
+                    input_ids_buff.extend(input_ids)
+                    attention_mask_buff.extend(new_line_attention_mask)
+                    attention_mask_buff.extend(attention_mask)
+                    current_length += len(input_ids) + new_line_input_ids_len
 
-            if current_input_ids:
-                padding_length = calibration_dataset_concat_size - len(current_input_ids)
+            if input_ids_buff:
+                padding_length = calibration_dataset_concat_size - len(input_ids_buff)
                 if padding_length > 0:
-                    current_input_ids.extend([self.tokenizer.pad_token_id] * padding_length)
-                    current_attention_mask.extend([1] * padding_length)
+                    input_ids_buff.extend([self.tokenizer.pad_token_id] * padding_length)
+                    attention_mask_buff.extend([0] * padding_length)
                 concatenated_data.append({
-                    "input_ids": [current_input_ids],
-                    "attention_mask": [current_attention_mask]
+                    "input_ids": [input_ids_buff],
+                    "attention_mask": [attention_mask_buff]
                 })
 
             new_calibration_dataset = concatenated_data
