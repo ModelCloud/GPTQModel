@@ -141,6 +141,8 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
 
 
     def forward(self, x):
+
+
         x_dtype = x.dtype
         if x_dtype != torch.float16:
             logger.warning_once(
@@ -149,16 +151,23 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
 
             x = x.to(dtype=torch.float16)
 
+        # sync with vllm
+        out_shape = x.shape[:-1] + (self.qweight.shape[-1],)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.in_features:
         #     x = F.pad(x, self.in_features_padding_shape)
 
         if self.adapter:
-            output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B)
+            # output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
+            output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
         else:
-            output = gptq_gemm(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
+            output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
 
+        # sync with vllm
+        output = output.reshape(out_shape)
 
 #         #
 #         # if self.adapter:
