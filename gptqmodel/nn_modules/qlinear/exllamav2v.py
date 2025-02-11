@@ -155,7 +155,7 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
             x = F.pad(x, self.in_features_padding_shape)
 
         if self.adapter:
-            output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, self.lora_A, self.lora_B)
+            output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, self.adapter.lora_A, self.adapter.lora_B)
         else:
             output = gptq_gemm(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
             #gptq_pytorch_out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit) + (ax @ eora_b)
