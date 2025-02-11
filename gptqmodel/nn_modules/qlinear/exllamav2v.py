@@ -137,6 +137,8 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
             if self.bias is not None:
                 self.bias.resize_(self.out_features)
 
+        super().post_init()
+
 
     def forward(self, x):
         x_dtype = x.dtype
