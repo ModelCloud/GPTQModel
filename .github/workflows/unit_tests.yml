@@ -212,7 +212,9 @@ jobs:
     steps:
       - name: Print
         run: |
-          ls /monster/data/model
+          ls /monster/data/model/docker
+          echo 000000
+          ls /monster/data/model/docker/pyenv_test
           echo ====
           ls /opt || true
           echo +++++
