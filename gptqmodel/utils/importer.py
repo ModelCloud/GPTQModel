@@ -177,16 +177,15 @@ def select_quant_linear(
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
         allow_backends = format_dict[format]
 
-        allow_quant_linears = backend_dict
+        allow_quant_linears = [{k, v} for k,v in backend_dict.items() if k in allow_backends]
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
-        for k, cls in allow_quant_linears.items():
-            in_allow_backends = k in allow_backends
+        for k, cls in allow_quant_linears:
             validate, err = cls.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
-            if os.environ.get("DEBUG") and in_allow_backends and not validate:
+            if os.environ.get("DEBUG") and not validate:
                 logger.info(f"skip {k} for {str(err)}")
-            if in_allow_backends and validate:
+            if validate:
                 if pack:
                     check_pack_func = issubclass(cls, PackableQuantLinear)
                     if check_pack_func:
