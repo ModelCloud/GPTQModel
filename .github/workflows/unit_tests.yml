@@ -463,6 +463,15 @@ jobs:
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
     steps:
+      - name: Print
+        run: |
+            ls /opt || true
+            echo +++++
+            ls /opt/pyenv || true
+            echo +++++
+            ls /home/ci/models || true
+
+
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
