@@ -53,7 +53,6 @@ from ..utils.model import (
     gptqmodel_post_init,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
-    normalize_tokenizer,
     simple_dispatch_model,
     verify_model_hash,
     verify_sharded_model_hashes,
