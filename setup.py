@@ -261,7 +261,7 @@ if BUILD_CUDA_EXT:
                 extra_link_args=extra_link_args,
                 extra_compile_args=extra_compile_args,
             )
-            # extensions.append(marlin_kernel)
+            extensions.append(marlin_kernel)
         elif not HAS_CUDA_V8:
             print("marlin kernel only supports compute capability >= 8.0, there's no such cuda device, skipped.")
             extensions += [
