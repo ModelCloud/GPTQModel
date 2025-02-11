@@ -26,7 +26,7 @@ from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear, HAS_IPEX
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
@@ -128,6 +128,9 @@ def hf_select_quant_linear(
         device = normalize_device_device_map(None, device_map)
     else:
         device = DEVICE.CPU
+
+    if HAS_IPEX and device in (DEVICE.CPU, DEVICE.XPU):
+        backend = BACKEND("ipex")
 
     return select_quant_linear(
         bits=bits,
