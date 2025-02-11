@@ -19,10 +19,12 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+
 
 logger = setup_logger()
 

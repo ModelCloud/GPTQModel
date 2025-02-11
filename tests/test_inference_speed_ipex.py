@@ -17,12 +17,14 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-from gptqmodel.utils import BACKEND
 from inference_speed import InferenceSpeed
 from parameterized import parameterized
+
+from gptqmodel.utils import BACKEND
 
 
 class TestInferenceSpeedIpex(InferenceSpeed):

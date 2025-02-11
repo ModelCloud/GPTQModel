@@ -15,11 +15,16 @@
 # limitations under the License.
 
 import os
+
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-from gptqmodel import GPTQModel, QuantizeConfig
-from parameterized import parameterized
-import unittest
+import unittest  # noqa: E402
+
+from parameterized import parameterized  # noqa: E402
+
+from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+
 
 class TestTokenicer(unittest.TestCase):
 
