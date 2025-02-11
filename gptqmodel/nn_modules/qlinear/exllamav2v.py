@@ -157,7 +157,7 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
         if self.adapter:
             output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B)
         else:
-            output = gptq_gemm(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits) + (x @ self.adapter.lora_A, self.adapter.lora_B)
+            output = gptq_gemm(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
 
 
 #         #
