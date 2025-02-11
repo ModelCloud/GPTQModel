@@ -201,7 +201,7 @@ def make_quant(
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
 
-    raise ValueError("No compatible quant linear was found for this module: {module}")
+    raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
 
 
 def create_quant_layer(

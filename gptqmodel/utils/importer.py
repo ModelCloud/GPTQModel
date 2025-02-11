@@ -39,7 +39,7 @@ from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 message_logged = False
 logger = setup_logger()
 
-backend_dict = OrderedDict({
+BACKEND_DICT = OrderedDict({
     BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
@@ -50,7 +50,7 @@ backend_dict = OrderedDict({
     BACKEND.TORCH: TorchQuantLinear,
 })
 
-format_dict = {
+FORMAT_DICT = {
     FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
     FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN],
@@ -175,18 +175,15 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_backends = format_dict[format]
-
-        allow_quant_linears = backend_dict
+        allow_quant_linears = [{k, v} for k,v in BACKEND_DICT.items() if k in FORMAT_DICT[format]]
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
-        for k, cls in allow_quant_linears.items():
-            in_allow_backends = k in allow_backends
+        for k, cls in allow_quant_linears:
             validate, err = cls.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
-            if os.environ.get("DEBUG") and in_allow_backends and not validate:
+            if os.environ.get("DEBUG") and not validate:
                 logger.info(f"skip {k} for {str(err)}")
-            if in_allow_backends and validate:
+            if validate:
                 if pack:
                     check_pack_func = issubclass(cls, PackableQuantLinear)
                     if check_pack_func:
