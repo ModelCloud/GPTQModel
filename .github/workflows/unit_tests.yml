@@ -298,7 +298,7 @@ jobs:
       volumes:
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
-        - /monster/data/_ci_/docker/pyenv_test:/opt/pyenv
+        - /home/ci/models/docker/pyenv_test:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
@@ -456,7 +456,7 @@ jobs:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
-        - /monster/data/_ci_/docker/pyenv_test:/opt/pyenv
+        - /home/ci/models/docker/pyenv_test:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
