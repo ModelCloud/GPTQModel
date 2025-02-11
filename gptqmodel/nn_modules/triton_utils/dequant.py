@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,7 +45,7 @@ def dequant_kernel(
     pack_bits: tl.constexpr,
     maxq: tl.constexpr,
     bits: tl.constexpr,
-    outfeatures: tl.constexpr,
+    out_features: tl.constexpr,
     num_groups: tl.constexpr,
     X_BLOCK: tl.constexpr,
 ):
@@ -52,15 +53,15 @@ def dequant_kernel(
     xoffset = tl.program_id(0) * X_BLOCK
     x_index = xoffset + tl.arange(0, X_BLOCK)
     xmask = x_index < numels
-    row_idx = x_index // outfeatures
-    col_idx = x_index % outfeatures
+    row_idx = x_index // out_features
+    col_idx = x_index % out_features
 
     elements_per_feature: tl.constexpr = pack_bits // bits
 
     # Load parameters
     g_idx = tl.load(g_idx_ptr + (row_idx), None, eviction_policy="evict_last")
     qweights = tl.load(
-        qweight_ptr + (col_idx + (outfeatures * (row_idx // elements_per_feature))),
+        qweight_ptr + (col_idx + (out_features * (row_idx // elements_per_feature))),
         None,
     )
 
@@ -72,14 +73,13 @@ def dequant_kernel(
     # tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
     groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
 
-    # TODO: why is triton upscaling dequantized weights to fp32?
-    scales = tl.load(scales_ptr + (col_idx + (outfeatures * groups)), None).to(tl.float16)
+    scales = tl.load(scales_ptr + (col_idx + (out_features * groups)), None).to(tl.float32)
 
     # Unpack weights
     weights = (qweights >> wf_weights) & maxq  # bit shift qweight
 
     # Unpack zeros
-    qzero_ncols: tl.constexpr = outfeatures // elements_per_feature
+    qzero_ncols: tl.constexpr = out_features // elements_per_feature
     qzeros = tl.load(
         qzeros_ptr + ((qzero_ncols * groups) + (col_idx // elements_per_feature)),
         None,
@@ -88,26 +88,22 @@ def dequant_kernel(
     zeros = (qzeros >> wf_zeros) & maxq
 
     # Dequantize
-    weights = weights - zeros
-    # TODO: why is triton upscaling dequantized weights to fp32?
-    weights = weights.to(tl.float16)
-    weights = scales * weights
+    weights = (weights - zeros).to(tl.float32) * scales
 
     tl.store(out_ptr + (x_index), weights, mask=xmask)
 
 
-def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None):
+def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     """
     Launcher for triton dequant kernel.  Only valid for bits = 2, 4, 8
     """
 
     num_groups = scales.shape[0]
-    outfeatures = scales.shape[1]
-    infeatures = g_idx.shape[0]
+    out_features = scales.shape[1]
+    in_features = g_idx.shape[0]
 
-    out = torch.empty((infeatures, outfeatures), device=qweight.device, dtype=torch.float16)
+    out = torch.empty((in_features, out_features), device=qweight.device, dtype=torch.float16)
     numels = out.numel()
-    maxq = 2 ** bits - 1 if maxq is None else maxq
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
     dequant_kernel[grid](
@@ -120,14 +116,14 @@ def dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None):
         pack_bits=pack_bits,
         maxq=maxq,
         bits=bits,
-        outfeatures=outfeatures,
+        out_features=out_features,
         num_groups=num_groups,
     )
     return out
 
 
-def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=None, transpose=False):
-    W = dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq=maxq)
+def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False):
+    W = dequant(qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
     if transpose:
         return input @ W.t()
     return input @ W

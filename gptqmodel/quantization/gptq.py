@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,65 +26,87 @@ import torch.nn as nn
 import transformers
 
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_empty_cache, torch_sync
+from ..utils.torch import torch_sync
 from .quantizer import Quantizer
 
 
 logger = setup_logger()
 
-# TODO do we really need max precision?
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, layer):
-        self.layer = layer
-        self.device = self.layer.weight.device
-        self.layer_copy = self._clone_layer()
+    def __init__(self, module: torch.nn.Module, name: str):
+        self.module = module
+        self.device = self.module.weight.device
+        self.module_copy = self._clone_module()
 
-        self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
-        self.H = torch.zeros((self.columns, self.columns), device=self.device)
+        self.rows, self.columns = self.module_copy.shape[0], self.module_copy.shape[1]
+        # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
         self.quantizer = Quantizer()
 
-    def _clone_layer(self):
-        clone = self.layer.weight.data.clone()
+        # fwd input buffer
+        self.fwd_inputs_buffered = False
+        self.fwd_inputs_buffered_data = []
 
-        if isinstance(self.layer, nn.Conv2d):
+
+    def shape(self):
+        if hasattr(self, "module"):
+            return self.module.weight.shape
+        else:
+            return (0, 0)
+
+    def _clone_module(self):
+        clone = self.module.weight.data.clone()
+
+        if isinstance(self.module, nn.Conv2d):
             clone = clone.flatten(1)
 
-        if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
+        if isinstance(self.module, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
         return clone.float()
 
     def add_batch(self, inp, out):
-        if os.environ.get("DEBUG"):
-            self.inp1 = inp
-            self.out1 = out
+        if self.fwd_inputs_buffered:
+            self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
+        else:
+            self.process_batch(inp)
+
+    def process_batch(self, inp):
+        inp = inp.to(device=self.device)
+        # if os.environ.get("DEBUG"):
+        #     self.inp1 = inp
+        #     self.out1 = out
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
 
-        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
+        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
 
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.module, nn.Conv2d):
             unfold = nn.Unfold(
-                self.layer.kernel_size,
-                dilation=self.layer.dilation,
-                padding=self.layer.padding,
-                stride=self.layer.stride,
+                self.module.kernel_size,
+                dilation=self.module.dilation,
+                padding=self.module.padding,
+                stride=self.module.stride,
             )
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
 
-        self.H *= self.nsamples / (self.nsamples + tmp)
+        if not hasattr(self, "H"):
+            self.H = torch.zeros((self.columns, self.columns), device=self.device)
+        else:
+            self.H *= self.nsamples / (self.nsamples + tmp)
+
         self.nsamples += tmp
         # inp = inp.float()
         inp = math.sqrt(2 / self.nsamples) * inp.float()
@@ -126,18 +149,26 @@ class GPTQ:
         static_groups=False,
     ):
         start = time.time()
+
+        # process buffered inputs
+        for inp in self.fwd_inputs_buffered_data:
+            self.process_batch(inp)
+
+        # release buffer
+        del self.fwd_inputs_buffered_data
+
         if self.device.type not in ["mps", "cpu"]:
-            self.layer.weight.data = self.layer.weight.data.cpu()
+            self.module.weight.data = self.module.weight.data.cpu()
 
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
-        if self.layer_copy is None:
-            W = self._clone_layer()
+        if self.module_copy is None:
+            W = self._clone_module()
         else:
-            W = self.layer_copy
-            self.layer_copy = None
+            W = self.module_copy
+            self.module_copy = None
 
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
@@ -239,12 +270,12 @@ class GPTQ:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            if os.environ.get("DEBUG"):
-                self.layer.weight.data[:, :i2] = Q[:, :i2]
-                self.layer.weight.data[:, i2:] = W[:, i2:]
-
-                logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-                logger.debug(torch.sum(Losses))
+            # if os.environ.get("DEBUG"):
+            #     self.layer.weight.data[:, :i2] = Q[:, :i2]
+            #     self.layer.weight.data[:, i2:] = W[:, i2:]
+            #
+            #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+            #     logger.debug(torch.sum(Losses))
 
         torch_sync(self.device)
 
@@ -267,19 +298,19 @@ class GPTQ:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        if isinstance(self.layer, transformers.Conv1D):
+        if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
-        if Q.shape != self.layer.weight.shape:
-            self.layer.weight.data = Q.cpu().reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+        if Q.shape != self.module.weight.shape:
+            self.module.weight.data = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
         else:
-            self.layer.weight.data = Q.cpu().type_as(self.layer.weight.data)
+            self.module.weight.data = Q.type_as(self.module.weight.data)
 
         # move back to self.dev
-        self.layer.weight.data = self.layer.weight.data.to(device=self.device)
+        self.module.weight.data = self.module.weight.data.to(device=self.device)
 
-        if os.environ.get("DEBUG"):
-            logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+        # if os.environ.get("DEBUG"):
+        #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -292,18 +323,19 @@ class GPTQ:
         return scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
-        if os.environ.get("DEBUG"):
-            self.inp1 = None
-            self.out1 = None
+        # if os.environ.get("DEBUG"):
+        #     self.inp1 = None
+        #     self.out1 = None
+        #     del self.inp1
+        #     del self.out1
 
-        self.H = None
-        self.Losses = None
-        self.Trace = None
+        if hasattr(self, "H"):
+            del self.H
+        del self.quantizer
+        del self.module_copy
+        del self.module
 
-        self.quantizer = None
-        self.layer_copy = None
-
-        torch_empty_cache(self.device)
+        # torch_empty_cache(self.device)
 
 
 __all__ = ["GPTQ"]

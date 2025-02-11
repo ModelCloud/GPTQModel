@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,13 +20,10 @@ import math
 from logging import getLogger
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -59,7 +57,7 @@ def ext_q4_matmul(x, q4, q4_width):
     return output.view(outshape)
 
 
-class ExllamaQuantLinear(BaseQuantLinear):
+class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -79,54 +77,46 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: torch.dtype, bias: bool,  **kwargs,):
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        **kwargs,
+    ):
         if exllama_import_exception is not None:
             raise ValueError(
                 f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
             )
-        self.group_size = group_size if group_size != -1 else infeatures
-        # auto pad
-        self.outfeatures = outfeatures + (-outfeatures % 32)
-        self.infeatures = infeatures + (-infeatures % self.group_size)
-
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=self.infeatures, outfeatures=self.outfeatures,  pack_dtype=pack_dtype, **kwargs)
 
         # backup original values
-        self.original_outfeatures = outfeatures
-        self.original_infeatures = infeatures
+        self.original_out_features = out_features
+        self.original_in_features = in_features
 
-        self.maxq = 2**self.bits - 1
+        # auto pad
+        group_size = group_size if group_size != -1 else in_features
+        out_features = out_features + (-out_features % 32)
+        in_features = in_features + (-in_features % group_size)
+        self.in_features_padding_size = in_features - self.original_in_features
+        self.in_features_padding_shape = (0, self.in_features_padding_size)
 
-        self.register_buffer(
-            "qweight",
-            torch.zeros((self.original_infeatures // 32 * self.bits, self.original_outfeatures), dtype=torch.int32),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(self.original_infeatures / self.group_size),
-                    self.original_outfeatures // 32 * self.bits,
-                ),
-                dtype=torch.int32,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(self.original_infeatures / self.group_size), self.original_outfeatures),
-                dtype=torch.float16,
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(self.original_infeatures)], dtype=torch.int32),
-        )
-
-        if bias:
-            self.register_buffer("bias", torch.zeros(self.original_outfeatures, dtype=torch.float16))
-        else:
-            self.bias = None
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym, desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            register_buffers_in_features=self.original_in_features,
+            register_buffers_out_feature=self.original_out_features,
+            **kwargs)
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -136,16 +126,16 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
     def post_init(self):
         # resize due to padding after model weights have been loaded
-        if self.outfeatures != self.original_outfeatures or self.infeatures != self.original_infeatures:
-            self.qweight.resize_(self.infeatures // 32 * self.bits, self.outfeatures)
+        if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
+            self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
             self.qzeros.resize_(
-                math.ceil(self.infeatures / self.group_size),
-                self.outfeatures // 32 * self.bits
+                math.ceil(self.in_features / self.group_size),
+                self.out_features // self.pack_dtype_bits * self.bits
             )
-            self.scales.resize_((math.ceil(self.infeatures / self.group_size), self.outfeatures),)
-            self.g_idx = torch.tensor([i // self.group_size for i in range(self.infeatures)], dtype=torch.int32, device=self.g_idx.device)
+            self.scales.resize_((math.ceil(self.in_features / self.group_size), self.out_features), )
+            self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
             if self.bias is not None:
-                self.bias.resize_(self.outfeatures)
+                self.bias.resize_(self.out_features)
 
 
         self.width = self.qweight.shape[1]
@@ -159,44 +149,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
             self.qweight.device.index,
         )
 
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().half()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().half()
-
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
-
-        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
-        for row in range(qweight.shape[0]):
-            i = row * (32 // self.bits)
-            for j in range(32 // self.bits):
-                qweight[row] |= intweight[i + j] << (self.bits * j)
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
-
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
-        for col in range(qzeros.shape[1]):
-            i = col * (32 // self.bits)
-            for j in range(32 // self.bits):
-                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
-
-        qzeros = qzeros.astype(np.int32)
-        self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x):
         if x.dtype != torch.float16:
@@ -207,9 +159,9 @@ class ExllamaQuantLinear(BaseQuantLinear):
             x = x.half()
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
-        # if infeatures is padded, we need to pad the input as well
-        if x.size(-1) != self.infeatures:
-            x = F.pad(x, (0, self.infeatures - self.original_infeatures))
+        # if in_features is padded, we need to pad the input as well
+        if x.size(-1) != self.in_features:
+            x = F.pad(x, self.in_features_padding_shape)
 
         out = ext_q4_matmul(x, self.q4, self.width)
 

@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +22,7 @@ import json
 import os
 import re
 from os.path import isfile, join
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import torch
 import transformers
@@ -51,7 +52,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (
     convert_gptq_v2_to_v1_format,
     copy_py_files,
-    find_layers,
+    find_modules,
     get_model_files_size,
     get_moe_layer_modules,
     get_state_dict_for_save,
@@ -60,7 +61,7 @@ from ..utils.model import (
 )
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import CPU
+from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
 
 
 logger = setup_logger()
@@ -88,7 +89,7 @@ def ModelWriter(cls):
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
-            max_shard_size: Optional[str] = None,
+            max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
@@ -187,7 +188,7 @@ def ModelWriter(cls):
                 )
         else:
             model = self.get_model_with_quantize(
-                quantize_config=quantize_config,
+                qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
 
@@ -338,7 +339,7 @@ def ModelWriter(cls):
             config_tokenizer_class = saved_tokenizer_config.get("tokenizer_class")
             # if the tokenizer is fast, but the tokenizer_config.json does not have Fast suffix, add "Fast" suffix
             if (not config_tokenizer_class.endswith("Fast")) and (
-                isinstance(self.tokenizer, PreTrainedTokenizerFast)
+                isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast)
                 ):
                 saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
                 with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
@@ -347,7 +348,7 @@ def ModelWriter(cls):
 
     cls.save_quantized = save_quantized
 
-    def get_model_with_quantize(self, quantize_config, model_id_or_path):
+    def get_model_with_quantize(self, qcfg, model_id_or_path):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -372,32 +373,33 @@ def ModelWriter(cls):
                 _ = get_moe_layer_modules(layer_modules=self.layer_modules,
                                                       num_experts=num_experts)
 
-            layers = find_layers(model)
-            ignore_layers = [self.lm_head] + self.base_modules
+            modules = find_modules(model)
+            ignore_modules = [self.lm_head] + self.base_modules
 
-            for name in list(layers.keys()):
+            for name in list(modules.keys()):
                 # allow loading of quantized lm_head
-                if quantize_config.lm_head and name == self.lm_head:
+                if qcfg.lm_head and name == self.lm_head:
                     continue
 
-                if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in self.layer_modules for ignore_layer in sublist
+                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in self.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd layers only
+                    # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
-                    del layers[name]
+                    del modules[name]
 
             make_quant(
                 model,
-                layers,
-                quantize_config.bits,
-                quantize_config.group_size,
+                modules,
+                qcfg.bits,
+                qcfg.group_size,
                 backend=BACKEND.AUTO,
-                format=quantize_config.format,
+                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=quantize_config.desc_act,
+                desc_act=qcfg.desc_act,
                 pack=True,
+                pack_dtype=qcfg.pack_dtype,
             )
 
         load_checkpoint_in_model_then_tie_weights(

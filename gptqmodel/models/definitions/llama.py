@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +21,7 @@ class LlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
     base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.

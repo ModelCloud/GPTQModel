@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -47,13 +48,12 @@ from ..utils.marlin import (
 from ..utils.model import (
     auto_dtype,
     convert_gptq_v1_to_v2_format,
-    find_layers,
+    find_modules,
     get_checkpoints,
     get_moe_layer_modules,
     gptqmodel_post_init,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
-    normalize_tokenizer,
     simple_dispatch_model,
     verify_model_hash,
     verify_sharded_model_hashes,
@@ -115,15 +115,9 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     if is_local:
         return pretrained_model_id_or_path
     else:
+        # hf_transfer does not accept max_memory arg
+        kwargs.pop('max_memory', None)
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
-
-def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        return normalize_tokenizer(config, tokenizer)
-    except Exception as e:
-        logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
-        return None
 
 
 def ModelLoader(cls):
@@ -191,6 +185,7 @@ def ModelLoader(cls):
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
+        model_init_kwargs["_fast_init"] = cls.require_fast_init
 
         if config.model_type not in SUPPORTED_MODELS:
             raise TypeError(f"{config.model_type} isn't supported yet.")
@@ -209,7 +204,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
         model.eval()
 
-        tokenizer = get_tokenizer(pretrained_model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
@@ -357,7 +352,7 @@ def ModelLoader(cls):
             unsupported = _validate_marlin_compatibility(qcfg)
             if unsupported is None and marlin_compatible:
                 logger.info(
-                    "You passed a model that is compatible with the Marlin kernel. Use `BACKEND.MARLIN` for optimal inference with batching on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
+                    "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
                 )
 
         if qcfg.format == FORMAT.BITBLAS:
@@ -432,6 +427,8 @@ def ModelLoader(cls):
                     elif is_flash_attn_2_available() and not has_attn_implementation:
                         args = {USE_FLASH_ATTENTION_2: True}
 
+                    logger.info("Auto enabling flash attention2")
+
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
             )
@@ -442,28 +439,28 @@ def ModelLoader(cls):
                 cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 
-            layers = find_layers(model)
-            ignore_layers = [cls.lm_head] + cls.base_modules
+            modules = find_modules(model)
+            ignore_modules = [cls.lm_head] + cls.base_modules
 
-            for name in list(layers.keys()):
+            for name in list(modules.keys()):
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if any(name.startswith(ignore_layer) for ignore_layer in ignore_layers) or all(
-                        not name.endswith(ignore_layer) for sublist in cls.layer_modules for ignore_layer in sublist
+                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd layers only
+                    # log non-lm-head quantizerd modules only
                     if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
-                    del layers[name]
+                    del modules[name]
 
             preload_qlinear_kernel = make_quant(
                 model,
-                layers,
+                modules,
                 qcfg.bits,
                 qcfg.group_size,
-                backend=backend.AUTO if (backend == BACKEND.MARLIN and qcfg.format == FORMAT.MARLIN) or backend == BACKEND.BITBLAS else backend,
+                backend=backend,
                 format=qcfg.format,
                 lm_head_name=cls.lm_head,
                 desc_act=qcfg.desc_act,
@@ -475,9 +472,9 @@ def ModelLoader(cls):
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
 
-        load_checkpoint_in_model = False
+        load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format == FORMAT.GPTQ and backend != BACKEND.IPEX:
+        if qcfg.format == FORMAT.GPTQ and backend not in [BACKEND.IPEX]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -494,14 +491,15 @@ def ModelLoader(cls):
                 )
 
             t = time.time()
-            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 cfg=qcfg,
                 qlinear_kernel=preload_qlinear_kernel,
             )
-            logger.info(f"Conversion complete: {time.time()-t}s")
-            load_checkpoint_in_model = True
+            logger.info(f"Conversion complete: {time.time() - t}s")
+
+            load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
 
         if backend == BACKEND.MARLIN and (
@@ -525,7 +523,7 @@ def ModelLoader(cls):
             # If is marlin serialized load then load directly. Otherwise, convert to marlin.
             model = prepare_model_for_marlin_load(
                 model=model,
-                quantize_config=qcfg,
+                qcfg=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 current_model_save_name=model_save_name,
@@ -542,7 +540,7 @@ def ModelLoader(cls):
             # If is bitblas serialized load then load directly. Otherwise, convert to bitblas.
             model = prepare_model_for_bitblas_load(
                 model=model,
-                quantize_config=qcfg,
+                qcfg=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
                 torch_dtype=torch_dtype,
                 model_save_name=model_save_name,
@@ -554,7 +552,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if not load_checkpoint_in_model and backend != BACKEND.MARLIN and backend != BACKEND.BITBLAS:
+        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -597,7 +595,7 @@ def ModelLoader(cls):
 
         model.eval()
 
-        tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if backend == BACKEND.MLX:
             import tempfile

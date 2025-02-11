@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -50,7 +51,6 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import dynamic_get
 from .backend import BACKEND
@@ -110,7 +110,7 @@ def nested_move_to(v, device):
         return v
 
 
-def find_layers(module, layers=None, name=""):
+def find_modules(module, layers=None, name=""):
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
@@ -119,7 +119,7 @@ def find_layers(module, layers=None, name=""):
             return {name: module}
     res = {}
     for name1, child in module.named_children():
-        res.update(find_layers(child, layers=layers, name=name + "." + name1 if name != "" else name1))
+        res.update(find_modules(child, layers=layers, name=name + "." + name1 if name != "" else name1))
     return res
 
 
@@ -163,7 +163,8 @@ def make_quant(
     from_quantized: bool = False,
     pack_dtype: torch.dtype = None,
 ) -> BaseQuantLinear:
-    QuantLinear = select_quant_linear(
+    # returns multiple validated kernels
+    quant_linear_candidates = select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -174,34 +175,57 @@ def make_quant(
         dynamic=dynamic,
         device=device,
         pack_dtype=pack_dtype,
+        multi_select=True,
     )
 
-    if pack:
-        reserve_quant_linear = ExllamaQuantLinear
-    else:
-        reserve_quant_linear = ExllamaV2QuantLinear
+    logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
 
-    # TODO, we need fix here. if select other linears
-    for linear in list(dict.fromkeys([QuantLinear, reserve_quant_linear, TorchQuantLinear])):
+    # loop over actual QLinear init, catch errors and use fallbacks if applicable
+    for linear in quant_linear_candidates:
         try:
-            if linear is not QuantLinear:
-                logger.info(f"Use {QuantLinear} failed, try to use {linear} instead.")
+            # if linear is not selectedQLinear:
+            #     logger.info(f"make_quant: Faild linear: `{selectedQLinear}` failed, trying to use fallback: `{linear}`")
+            # else:
+            #     logger.info("make_quant: Testing linear: {linear}")
 
-            result = create_quant_layer(linear, bits, desc_act, dynamic, group_size, module, names, sym, device
-                                        , lm_head_name, pack_dtype=pack_dtype)
-            return result
+            linear_instance = create_quant_layer(
+                linear=linear,
+                bits=bits,
+                desc_act=desc_act,
+                dynamic=dynamic,
+                group_size=group_size,
+                module=module,
+                names=names,
+                sym=sym,
+                device=device,
+                lm_head_name=lm_head_name,
+                pack_dtype=pack_dtype)
+            logger.info(f"make_quant: Selected linear: `{linear}`.")
+            return linear_instance
         except NotImplementedError as e:
+            logger.info(f"make_quant: Skipped linear: `{linear}`.")
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
 
-    raise ValueError("no support quant linear was found for this module.")
+    raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
 
 
-def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_size: int, module, names, sym: bool, device: DEVICE, lm_head_name: str, pack_dtype: torch.dtype,
+def create_quant_layer(
+        linear: nn.Module,
+        bits: int,
+        desc_act: bool,
+        dynamic,
+        group_size: int,
+        module,
+        names,
+        sym: bool,
+        device: DEVICE,
+        lm_head_name: str,
+        pack_dtype: torch.dtype,
                        ) -> BaseQuantLinear:
-    if isinstance(module, QuantLinear):
-        return QuantLinear
+    if isinstance(module, linear):
+        return linear
     for name, submodule in module.named_modules():
         if name in names:
             ori_layer_device = next(submodule.parameters()).device
@@ -216,42 +240,58 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
                 out_features = submodule.weight.shape[1]
             elif isinstance(submodule, BaseQuantLinear):
                 # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
-                in_features = submodule.infeatures
-                out_features = submodule.outfeatures
+                in_features = submodule.in_features
+                out_features = submodule.out_features
             else:
                 raise NotImplementedError(f"Unsupported module {submodule}")
 
-            # when load a quantized model, device is target device passed in GPTQModel.load()
+            bias = submodule.bias is not None
+
+            # need copies as dynamic config may override these in for loop
+            tmp_bits = bits
+            tmp_group_size = group_size
+            tmp_desc_act = desc_act
+            tmp_sym = sym
+            tmp_pack_dtype = pack_dtype
+
+            # dynamic bits, group_size, sym, pack_dtype for each layer/module
+            if dynamic is not None:
+                overrides = dynamic_get(dynamic=dynamic, module_name=name)
+                # negative module match, skip this module
+                if overrides == False:  # noqa: E712
+                    continue
+
+                # positive module match
+                if overrides:
+                    # override base QuantizeConfig for every quant config key/value
+                    tmp_bits = overrides.get("bits", bits)
+                    tmp_group_size = overrides.get("group_size", group_size)
+                    tmp_desc_act = overrides.get("desc_act", desc_act)
+                    tmp_sym = overrides.get("sym", sym)
+                    tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
+
+            # when loading a quantized model, device is target device passed in GPTQModel.load()
             # check in_features and out_features validate
-            _, err = QuantLinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, infeatures=in_features, outfeatures=out_features, pack_dtype=pack_dtype, device=device)
+            _, err = linear.validate(
+                bits=tmp_bits,
+                group_size=tmp_group_size,
+                desc_act=tmp_desc_act,
+                sym=tmp_sym,
+                pack_dtype=tmp_pack_dtype,
+                in_features=in_features,
+                out_features=out_features,
+                device=device)
             if err is not None:
                 raise err
 
-            bias = submodule.bias is not None
-
-            d_bits = bits
-            d_group_size = group_size
-            d_sym = sym
-            # dynamic bits, group_size, sym for each layer/module
-            if dynamic is not None:
-                if dynamic_get(dynamic=dynamic, layer_name=name) == False:  # noqa: E712
-                    # skip create this quant linear
-                    continue
-
-                for pattern, pattern_dict in dynamic.items():
-                    if re.match(pattern, name):
-                        d_bits = pattern_dict.get("bits", bits)
-                        d_group_size = pattern_dict.get("group_size", group_size)
-                        d_sym = pattern_dict.get("sym", sym)
-                        break
-            new_layer = QuantLinear(
-                bits=d_bits,
-                group_size=d_group_size,
-                desc_act=desc_act,
-                sym=d_sym,
-                infeatures=in_features,
-                outfeatures=out_features,
-                pack_dtype=pack_dtype,
+            new_layer = linear(
+                bits=tmp_bits,
+                group_size=tmp_group_size,
+                desc_act=tmp_desc_act,
+                sym=tmp_sym,
+                in_features=in_features,
+                out_features=out_features,
+                pack_dtype=tmp_pack_dtype,
                 bias=bias,
                 #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
                 name=name,
@@ -259,7 +299,7 @@ def create_quant_layer(QuantLinear, bits: int, desc_act: bool, dynamic, group_si
             )
             new_layer.device = ori_layer_device
             recurse_setattr(module, name, new_layer.to(ori_layer_device))
-    return QuantLinear
+    return linear
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
@@ -303,15 +343,46 @@ def convert_gptq_v1_to_v2_format(
                     elif cfg.pack_dtype == torch.int8:
                         submodule.qzeros.data += 0b01010101
                 elif cfg.bits == 3:
-                    raise Exception("FIX ME")
+                    # range 0 offset
+                    if cfg.pack_dtype == torch.int64:
+                        offset = 0b0010010010010010010010010010010000100100100100100100100100100100
+                    elif cfg.pack_dtype == torch.int32:
+                        offset = 0b00100100100100100100100100100100
+                    elif cfg.pack_dtype == torch.int16:
+                        offset = 0b0010010010010010
+                    elif cfg.pack_dtype == torch.int8:
+                        offset = 0b00100100
+
                     submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] += (
-                        0b00100100100100100100100100100100
+                        offset
                     )
+
+                    # range 1 offset
+                    if cfg.pack_dtype == torch.int64:
+                        offset = 0b1001001001001001001001001001001010010010010010010010010010010010
+                    elif cfg.pack_dtype == torch.int32:
+                        offset = 0b10010010010010010010010010010010
+                    elif cfg.pack_dtype == torch.int16:
+                        offset = 0b1001001001001001
+                    elif cfg.pack_dtype == torch.int8:
+                        offset = 0b10010010
+
                     submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] += (
-                        0b10010010010010010010010010010010
+                        offset
                     )
+
+                    # range 2 offset
+                    if cfg.pack_dtype == torch.int64:
+                        offset = 0b0100100100100100100100100100100101001001001001001001001001001001
+                    elif cfg.pack_dtype == torch.int32:
+                        offset = 0b01001001001001001001001001001001
+                    elif cfg.pack_dtype == torch.int16:
+                        offset = 0b0100100100100100
+                    elif cfg.pack_dtype == torch.int8:
+                        offset = 0b01001001
+
                     submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] += (
-                        0b01001001001001001001001001001001
+                        offset
                     )
                 elif cfg.bits == 4:
                     if cfg.pack_dtype == torch.int64:
@@ -390,22 +461,24 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar):
+def pack_module(name, qModules, quantizers, layers, pbar=None):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
-        pbar.set_description(f"Packing {name}")
+        if pbar:
+            pbar.set_description(f"Packing {name}")
         quantizers[name], scale, zero, g_idx = quantizers[name]
-        layer_device = qlayers[name].device
-        qlayers[name].to(CPU)
+        layer_device = qModules[name].device
+        qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
             layers[name].to(CPU),
             scale.to(CPU),
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        qlayers[name].pack(layers[name], scale, zero, g_idx)
-        qlayers[name].to(layer_device)
-        pbar.progress()
+        qModules[name].pack(layers[name], scale, zero, g_idx)
+        qModules[name].to(layer_device)
+        if pbar:
+            pbar.progress()
 
 
 def pack_model(
@@ -422,7 +495,7 @@ def pack_model(
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
-    QuantLinear = select_quant_linear(
+    quantLinear = select_quant_linear(
         bits=bits,
         dynamic=dynamic,
         group_size=group_size,
@@ -438,8 +511,8 @@ def pack_model(
 
     logger.info("Packing model...")
 
-    layers = find_layers(model)
-    layers = {n: layers[n] for n in quantizers}
+    modules = find_modules(model)
+    modules = {n: modules[n] for n in quantizers}
     make_quant(
         model,
         quantizers,
@@ -453,8 +526,8 @@ def pack_model(
         dynamic=dynamic,
         pack_dtype=pack_dtype,
     )
-    qlayers = find_layers(model, [QuantLinear])
-    names = list(qlayers.keys())
+    qModules = find_modules(model, [quantLinear])
+    names = list(qModules.keys())
 
     if parallel_packing:
         max_workers = 2
@@ -464,13 +537,13 @@ def pack_model(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         with ProgressBar(total=len(names)) as pbar:
             def wrapper(name):
-                pack_layer(name, qlayers, quantizers, layers, QuantLinear, pbar)
+                pack_module(name, qModules, quantizers, modules, pbar)
 
             for _ in executor.map(wrapper, names):
                 pass
 
     logger.info("Model packed.")
-    return QuantLinear
+    return quantLinear
 
 
 def verify_model_hash(file_path: str, verify_hash: str):
@@ -581,8 +654,8 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             if use_act_order:
                 device_to_buffers_size[device]["max_inner_outer_dim"] = max(
                     device_to_buffers_size[device]["max_inner_outer_dim"],
-                    submodule.infeatures,
-                    submodule.outfeatures,
+                    submodule.in_features,
+                    submodule.out_features,
                 )
 
     if model_uses_exllama:
@@ -628,7 +701,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             prepare_buffers(device, buffers["temp_state"], buffers["temp_dq"])
 
         # Using the default from exllama repo here.
-        matmul_recons_thd = 8
+        matmul_recons_thd = 16
         matmul_fused_remap = False
         matmul_no_half2 = False
         set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
@@ -839,35 +912,6 @@ def check_requires_version(requires_version, current_version):
     else:
         return None
 
-def normalize_tokenizer(config, tokenizer):
-    pad_token_id = config.pad_token_id
-    if not pad_token_id:
-        if tokenizer:
-            vocab = tokenizer.get_vocab()
-
-            # auto select the best pad token to use
-            for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
-                token_id = vocab.get(token)
-                if token_id is not None:
-                    pad_token_id = token_id
-                    break
-        else:
-            logger.warning(
-                "Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
-
-        if not pad_token_id and isinstance(config.eos_token_id,
-                                           list):  # Llama-3.1-8B-Instruct's eos_token_id is a list
-            pad_token_id = config.eos_token_id[0]
-        elif not pad_token_id:
-            pad_token_id = config.eos_token_id
-
-    if pad_token_id is None:
-        raise ValueError(
-            "Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
-
-    tokenizer.pad_token_id = pad_token_id
-
-    return tokenizer
 
 class MODALITY(str, Enum):
     TEXT = "text"

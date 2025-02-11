@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,12 +15,11 @@
 # limitations under the License.
 
 import torch
-from accelerate.utils import find_tied_parameters
 
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms, unpack_qzeros
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear, _get_perms
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
-from .model import load_checkpoint_in_model_then_tie_weights, recurse_getattr, recurse_setattr
+from .model import load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .rocm import IS_ROCM
 from .torch import torch_empty_cache
@@ -30,7 +30,7 @@ logger = setup_logger()
 
 def prepare_model_for_marlin_load(
     model,
-    quantize_config: QuantizeConfig,
+    qcfg: QuantizeConfig,
     quant_linear_class,
     torch_dtype,
     current_model_save_name,
@@ -40,10 +40,10 @@ def prepare_model_for_marlin_load(
     load_checkpoint_in_model: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the Marlin format, load it directly.
-    if quantize_config.format == FORMAT.MARLIN:
+    if qcfg.format == FORMAT.MARLIN:
         model_save_name = current_model_save_name
         logger.info(f"Loading a GPTQ model, detected Marlin serialized format at {model_save_name}.")
-        model = convert_to_marlin(model, quant_linear_class, quantize_config, sym, desc_act, repack=False)
+        model = convert_to_marlin(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
         load_checkpoint_in_model_then_tie_weights(
             model,
             dtype=torch_dtype,
@@ -57,7 +57,7 @@ def prepare_model_for_marlin_load(
         # TODO: Avoid loading the model with wrong QuantLinear, and directly use
         # Marlin ones. The repacking can be done directly on the safetensors, just
         # as for AWQ checkpoints.
-        if not load_checkpoint_in_model:
+        if load_checkpoint_in_model:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
@@ -66,26 +66,10 @@ def prepare_model_for_marlin_load(
                 offload_state_dict=True,
                 offload_buffers=True,
             )
+
         # Convert model to marlin, repacking weights into Marlin format.
-        model = convert_to_marlin(model, quant_linear_class, quantize_config, sym, desc_act, repack=True)
+        model = convert_to_marlin(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
 
-        # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-        tied_params = find_tied_parameters(model)
-
-        for weight_group in tied_params:
-            for param_name in weight_group:
-                if isinstance(recurse_getattr(model, param_name), torch.nn.Parameter):
-                    recurse_setattr(
-                        model,
-                        param_name,
-                        torch.nn.Parameter(recurse_getattr(model, param_name).clone()),
-                    )
-                else:
-                    recurse_setattr(
-                        model,
-                        param_name,
-                        recurse_getattr(model, param_name).clone(),
-                    )
 
     return model
 
@@ -112,7 +96,7 @@ def _validate_marlin_compatibility(cfg: QuantizeConfig, throw_error: bool = Fals
 
 @torch.no_grad()
 def convert_to_marlin(
-    model, model_quantlinear, quantization_config: QuantizeConfig, sym: bool, desc_act: bool, repack: bool, strict: bool = False
+    model, model_quantlinear, qcfg: QuantizeConfig, sym: bool, desc_act: bool, repack: bool
 ):
     """
     Converts GPTQ-packed weights to the Marlin format. This assumes that the model already meets Marlin kernel constraints.
@@ -142,50 +126,51 @@ def convert_to_marlin(
                 group_size=module.group_size,
                 sym=sym,
                 desc_act=desc_act,
-                infeatures=module.original_infeatures,
-                outfeatures=module.original_outfeatures,
+                in_features=module.original_in_features,
+                out_features=module.original_out_features,
+                pack_dtype=module.pack_dtype,
                 bias=module.bias is not None,
             )
 
         # workspace is never in the state_dict, thus we need to allocate it manually.
-        new_module.workspace = torch.zeros(new_module.outfeatures // 128 * 16, dtype=torch.int, device=module.device)
+        new_module.workspace = torch.zeros(new_module.out_features // 128 * 16, dtype=module.pack_dtype, device=module.device)
 
         # Dequantize the weight.
         if repack:
             import gptqmodel_marlin_cuda
 
             qweight = module.qweight
-            if new_module.infeatures != new_module.original_infeatures or new_module.outfeatures != new_module.original_outfeatures:
-                padded_qweight = torch.zeros((new_module.infeatures, new_module.outfeatures), dtype=torch.int, device=module.qweight.device)
+            if new_module.in_features != new_module.original_in_features or new_module.out_features != new_module.original_out_features:
+                padded_qweight = torch.zeros((new_module.in_features, new_module.out_features), dtype=torch.int, device=module.qweight.device)
                 padded_qweight[:module.qweight.size(0), :module.qweight.size(1)] = qweight
                 qweight = padded_qweight
 
             marlin_repacked_weight = gptqmodel_marlin_cuda.gptq_repack(qweight)
 
-            if strict:
-                dequantized_qzeros = unpack_qzeros(module.qzeros)
-
-                if not torch.all(dequantized_qzeros == 8):
-                    raise ValueError(
-                        "Marlin kernel is compatible only with checkpoints using symmetric quantization."
-                        "Found non-symmetric quantization for the weight {name}."
-                    )
+            # if strict:
+            #     dequantized_qzeros = unpack_qzeros(module.qzeros)
+            #
+            #     if not torch.all(dequantized_qzeros == 8):
+            #         raise ValueError(
+            #             "Marlin kernel is compatible only with checkpoints using symmetric quantization."
+            #             "Found non-symmetric quantization for the weight {name}."
+            #         )
 
             _, _scale_perm, _scale_perm_single = _get_perms()
 
             s = module.scales.data.clone()
 
-            if new_module.infeatures != new_module.original_infeatures or new_module.outfeatures != new_module.original_outfeatures:
-                padded_s = torch.zeros((s.size(0), new_module.outfeatures), dtype=torch.half, device=s.device)
+            if new_module.in_features != new_module.original_in_features or new_module.out_features != new_module.original_out_features:
+                padded_s = torch.zeros((s.size(0), new_module.out_features), dtype=torch.half, device=s.device)
                 padded_s[:s.size(0), :s.size(1)] = s
                 s = padded_s
 
-            if module.group_size != module.infeatures:
+            if module.group_size != module.in_features:
                 s = s.reshape((1, -1))
                 s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
             else:
                 s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
-            s = s.reshape((-1, new_module.outfeatures)).contiguous()
+            s = s.reshape((-1, new_module.out_features)).contiguous()
 
             new_module.B = marlin_repacked_weight
             new_module.s = s
@@ -205,6 +190,6 @@ def convert_to_marlin(
         torch_empty_cache()
 
     # Set quantization config to be Marlin.
-    quantization_config.runtime_format = FORMAT.MARLIN
+    qcfg.runtime_format = FORMAT.MARLIN
 
     return model

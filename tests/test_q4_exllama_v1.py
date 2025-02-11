@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -1080,6 +1081,8 @@ class TestsQ4ExllamaV1(ModelTest):
         n = 1024
         device = torch.device("cuda:0")
 
+        pack_dtype = torch.int32
+
         linear_class = select_quant_linear(
             bits=4,
             group_size=group_size,
@@ -1087,6 +1090,7 @@ class TestsQ4ExllamaV1(ModelTest):
             sym=True,
             backend=BACKEND.EXLLAMA_V1,
             format=FORMAT.GPTQ,
+            pack_dtype=pack_dtype,
         )
 
         linear = linear_class(
@@ -1094,9 +1098,10 @@ class TestsQ4ExllamaV1(ModelTest):
             group_size=group_size,
             desc_act=False,
             sym=True,
-            infeatures=k,
-            outfeatures=n,
+            in_features=k,
+            out_features=n,
             bias=False,
+            pack_dtype=pack_dtype,
         )
         self.assertTrue(isinstance(linear, ExllamaQuantLinear))
 
@@ -1112,7 +1117,7 @@ class TestsQ4ExllamaV1(ModelTest):
         linear = gptqmodel_post_init(linear, use_act_order=False)
 
         max_inner_outer_dim = max(k, n)
-        max_dq_buffer_size = linear.infeatures * linear.outfeatures
+        max_dq_buffer_size = linear.in_features * linear.out_features
         max_input_len = 2048
         buffers = {
             "temp_state": torch.zeros((max_input_len, max_inner_outer_dim), dtype=torch.float16, device=device),

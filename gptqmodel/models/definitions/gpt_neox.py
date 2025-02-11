@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class GPTNeoXGPTQ(BaseGPTQModel):
     base_modules = ["gpt_neox.embed_in", "gpt_neox.final_layer_norm"]
+    pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"
 
     layers_node = "gpt_neox.layers"

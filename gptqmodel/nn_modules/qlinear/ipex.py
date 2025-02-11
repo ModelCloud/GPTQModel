@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -22,7 +22,7 @@ import torch.nn as nn
 import transformers
 
 from gptqmodel.models._const import DEVICE, PLATFORM
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
@@ -89,7 +89,7 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(BaseQuantLinear):
+class IPEXQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -113,63 +113,36 @@ class IPEXQuantLinear(BaseQuantLinear):
         group_size: int,
         desc_act: bool,
         sym: bool,
-        infeatures: int,
-        outfeatures: int,
-        pack_dtype: torch.dtype,
-        bias: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
         kernel_switch_threshold=128,
         training=False,
-        weight_dtype=None,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            **kwargs)
 
-        if weight_dtype is None:
-            weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
-
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.group_size = group_size
-        self.maxq = 2**self.bits - 1
-        self.weight_dtype = weight_dtype
+        # FIX ME IPEX CPU has no float16 support
+        self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
         self.init_ipex = False
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // 32 * self.bits,
-                ),
-                dtype=torch.int32,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
-                dtype=weight_dtype,
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=weight_dtype))
-        else:
-            self.bias = None
 
         self.kernel_switch_threshold = kernel_switch_threshold
 
         self.training = training
 
         # for training forward
-        self.wf = torch.tensor(list(range(0, 32, self.bits)), dtype=torch.int32).unsqueeze(0)
+        self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -183,8 +156,8 @@ class IPEXQuantLinear(BaseQuantLinear):
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
-                                                                    self.infeatures, self.outfeatures, None, self.bias,
-                                                                    self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
+                                                                         self.in_features, self.out_features, None, self.bias,
+                                                                         self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
 
     def pack(self, linear, scales, zeros, g_idx=None):
         W = linear.weight.data.clone()
@@ -238,7 +211,7 @@ class IPEXQuantLinear(BaseQuantLinear):
 
         if self.wf.device != x.device:
             self.wf = self.wf.to(x.device)
-        out_shape = x.shape[:-1] + (self.outfeatures,)
+        out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         x_dtype = x.dtype
         zeros = torch.bitwise_right_shift(
@@ -270,10 +243,11 @@ class IPEXQuantLinear(BaseQuantLinear):
                 g_idx_i = self.g_idx[i * num_dim : (i + 1) * num_dim]
                 weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
             weights = torch.cat(weights, dim=1)
-        out = torch.matmul(x, weights)
+        out = torch.matmul(x, weights.to(x.dtype))
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            out.add_(self.bias)
 
         return out
 

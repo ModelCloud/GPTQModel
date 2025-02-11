@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +16,7 @@
 
 # -- do not touch
 import os
+import time
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -31,6 +33,7 @@ from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity  # noqa: E402
 from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
 class TestPerplexity(unittest.TestCase):
@@ -128,26 +131,33 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4),
-            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4),
-            (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, 32, False),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, 32, False),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, 32, False),
+            (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4, 32, False),
+            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 32, False),
         ]
     )
-    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int):
+    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
-                group_size=128,
+                group_size=group_size,
                 format=format,
-                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True
+                desc_act=False if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else True,
+                # inject this rule so dynamic logic is checked even if zero matches happen
+                dynamic={
+                    "-:.*mlp\.NEVER_NEGATIVE_MATCH_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
+                    "+:.*mlp\.NEVER_POSITIVE_MATCH_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
+                    ":.*mlp\.NEVER_POSITIVE_MATCH2_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
+                }
             )
         elif method == QUANT_METHOD.AUTO_ROUND:
             quantize_config = AutoRoundQuantizeConfig(
                 bits=bits,
-                group_size=128,
+                group_size=group_size,
                 format=format,
             )
         else:
@@ -161,20 +171,45 @@ class TestPerplexity(unittest.TestCase):
         )
 
         dataset = self.opt_calibration_dataset if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration_dataset
-        model.quantize(dataset, batch_size=128 if IS_ROCM else 256)
+        start = time.time()
+        model.quantize(
+            dataset,
+            batch_size=128 if IS_ROCM else 256,
+            buffered_fwd=buffered_fwd,
+            auto_gc=False, # speed up quant
+        )
+        quant_time = time.time() - start
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
                 tmp_dir,
             )
 
+            # TODO: move to a new test
+            # test upload
+            # model.push_to_hub(
+            #     repo_id="ModelCloud/CiUploadTest",
+            #     quantized_path=tmp_dir,
+            #     private=True,
+            #     exists_ok=True,
+            # )
+
             del model
+            torch_empty_cache()
+
+            # GPTQModel.push_to_hub(
+            #     repo_id="ModelCloud/CiUploadTest",
+            #     quantized_path=tmp_dir,
+            #     private=True,
+            #     exists_ok=True,
+            # )
 
             model = GPTQModel.load(
                 tmp_dir,
                 device_map="auto",
             )
 
+            start = time.time()
             quantized_ppl = self.calculate_avg_ppl(
                 dataset_path,
                 dataset_name,
@@ -183,8 +218,9 @@ class TestPerplexity(unittest.TestCase):
                 model,
                 tokenizer,
             )
+            ppl_time = time.time() - start
 
-            print(f"Format {format}, Quantized PPL: {quantized_ppl}")
+            print(f"Format {format}, Quantized PPL: {quantized_ppl}, Quant Time: {quant_time:.2f}, PPL Time: {ppl_time:.2f}")
 
             # 4090: [wikitext-2-raw-v1, test, text, 512, 512] data split
             # FORMAT.GTPQ and FORMAT.GTPQ_V2 Tinyllama ppl == 8.7863, FORMAT.MARLIN Tinyllama ppl == 9.0036

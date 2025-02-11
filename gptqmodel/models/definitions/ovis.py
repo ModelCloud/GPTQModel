@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,12 +22,14 @@ import torch
 
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
-from ...utils.model import MODALITY
+from ...utils.model import MODALITY, move_to
+from .._const import CPU
 from ..base import BaseGPTQModel
 
 
 class OvisGPTQ(BaseGPTQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
+    pre_lm_head_norm_module = "llm.model.norm"
 
     layers_node = "llm.model.layers"
     layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer"]
@@ -40,6 +43,14 @@ class OvisGPTQ(BaseGPTQModel):
     modality = [MODALITY.IMAGE_TO_TEXT]
 
     IGNORE_ID = -100
+
+    def pre_quantize_generate_hook_start(self):
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, self.quantize_config.device)
+        self.model.vte = move_to(self.model.vte, self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, CPU)
+        self.model.vte = move_to(self.model.vte, CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         text_max_length = 832

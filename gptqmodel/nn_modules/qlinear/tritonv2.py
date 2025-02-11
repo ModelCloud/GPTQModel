@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,16 +17,13 @@
 import math
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
-from . import BaseQuantLinear
+from . import PackableQuantLinear
 
 
 try:
@@ -49,7 +47,7 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 logger = setup_logger()
 
 
-class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -75,47 +73,36 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     dequant and matmul into single kernel.add()
     """
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures, outfeatures, pack_dtype, bias, **kwargs,):
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features,
+        out_features,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        **kwargs,
+    ):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            **kwargs)
 
-        self.padded_infeatures = infeatures + (-infeatures % group_size)
-
-        self.group_size = group_size if group_size != -1 else infeatures
-        self.maxq = 2**self.bits - 1
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((infeatures // self.tensors_per_storage_dtype, outfeatures), dtype=self.pack_dtype),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // self.tensors_per_storage_dtype,
-                ),
-                dtype=self.pack_dtype,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
-                dtype=torch.float16,
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
+        if self.group_size != self.in_features:
+            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
-            self.bias = None
+            self.padded_infeatures = self.in_features
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -130,64 +117,24 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         return cls._validate(**args)
 
     def post_init(self):
-        if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // self.tensors_per_storage_dtype, self.outfeatures)
+        if self.padded_infeatures != self.in_features:
+            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.out_features)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // self.tensors_per_storage_dtype
+                self.out_features // self.pack_factor
             )
-            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().half()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().half()
-
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_dtype)
-
-        qweight = np.zeros((intweight.shape[0] // self.tensors_per_storage_dtype, intweight.shape[1]), dtype=self.pack_np_dtype)
-        for row in range(qweight.shape[0]):
-            i = row * self.tensors_per_storage_dtype
-            for j in range(self.tensors_per_storage_dtype):
-                qweight[row] |= intweight[i + j] << (self.bits * j)
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
-
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.tensors_per_storage_dtype), dtype=self.pack_np_dtype)
-        for col in range(qzeros.shape[1]):
-            i = col * self.tensors_per_storage_dtype
-            for j in range(self.tensors_per_storage_dtype):
-                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
-
-        qzeros = qzeros.astype(self.pack_np_dtype)
-        self.qzeros = torch.from_numpy(qzeros)
-
     def forward(self, x):
-        # if infeatures is padded, we need to pad the input as well
+        # if in_features is padded, we need to pad the input as well
         if x.size(-1) != self.padded_infeatures:
-            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+            x = F.pad(x, (0, self.padded_infeatures - self.in_features))
 
-        out_shape = x.shape[:-1] + (self.outfeatures,)
-        quant_linear_fn = QuantLinearFunction
+        out_shape = x.shape[:-1] + (self.out_features,)
 
-        out = quant_linear_fn.apply(
+        out = QuantLinearFunction.apply(
             x.reshape(-1, x.shape[-1]),
             self.qweight,
             self.scales,
@@ -197,15 +144,16 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
             self.pack_dtype_bits,
             self.maxq,
         )
-        out = out.half().reshape(out_shape)
-        out = out + self.bias if self.bias is not None else out
+        out = out.to(dtype=x.dtype).reshape(out_shape)
+        if self.bias is not None:
+            out.add_(self.bias)
         return out
 
 
 __all__ = ["TritonV2QuantLinear"]
 
-
-def add(x: torch.Tensor, y: torch.Tensor):
+# test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data
+def triton_test_add(x: torch.Tensor, y: torch.Tensor):
     # don't put it on top-level to avoid crash if triton was not installed
     @triton.jit
     def add_kernel(x_ptr,  # *Pointer* to first input vector.
@@ -237,7 +185,7 @@ def triton_xpu_available():
     y = torch.rand(size, device='xpu:0')
 
     try:
-        add(x, y)
+        triton_test_add(x, y)
         return True
     except Exception:
         return False

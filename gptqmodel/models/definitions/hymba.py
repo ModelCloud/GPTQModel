@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,6 +31,7 @@ class HymbaGPTQ(BaseGPTQModel):
                             "attn_gym>=0.0.3.dev5"]
 
     base_modules = ["model.embed_tokens", "model.final_layernorm"]
+    pre_lm_head_norm_module = "model.final_layernorm"
 
     layers_node = "model.layers"
     layer_type = "HymbaDecoderLayer"

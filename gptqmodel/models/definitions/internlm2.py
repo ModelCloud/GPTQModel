@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +22,7 @@ class InternLM2GPTQ(BaseGPTQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
     base_modules = ["model.tok_embeddings", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "InternLM2DecoderLayer"

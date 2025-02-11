@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +17,7 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.importer import backend_dict
+from gptqmodel.utils.importer import BACKEND_DICT
 
 
 class TestOpt(ModelTest):
@@ -24,8 +25,8 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.1894
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
 
-    KERNEL_QUANT = {backend_dict[BACKEND.EXLLAMA_V1]}
-    KERNEL_INFERENCE = {backend_dict[BACKEND.MARLIN]}
+    KERNEL_QUANT = {BACKEND_DICT[BACKEND.EXLLAMA_V1]}
+    KERNEL_INFERENCE = {BACKEND_DICT[BACKEND.MARLIN]}
 
     def test_opt(self):
         self.quant_lm_eval()

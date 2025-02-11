@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +22,7 @@ class ExaoneGPTQ(BaseGPTQModel):
     require_trust_remote_code = True
 
     base_modules = ["transformer.ln_f", "transformer.wte"]
+    pre_lm_head_norm_module = "transformer.ln_f"
 
     layers_node = "transformer.h"
     layer_type = "ExaoneBlock"

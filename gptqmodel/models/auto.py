@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +21,11 @@ import os
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
+    print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
+
+if not os.environ.get("CUDA_DEVICE_ORDER", None):
+    os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
+    print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for compatibililty.")
 
 import sys  # noqa: E402
 
@@ -29,9 +35,11 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import os.path  # noqa: E402
+import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
+import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
@@ -52,6 +60,7 @@ from .definitions.dbrx import DbrxGPTQ  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
+from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
@@ -92,6 +101,11 @@ from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
 
 
+# make quants and inference more determinisitc
+torch.manual_seed(787)
+random.seed(787)
+numpy.random.seed(787)
+
 logger = setup_logger()
 
 MODEL_MAP = {
@@ -120,6 +134,7 @@ MODEL_MAP = {
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
     "stablelm_epoch": StableLMEpochGPTQ,
+    "stablelm": StableLMEpochGPTQ,
     "starcoder2": Starcoder2GPTQ,
     "mixtral": MixtralGPTQ,
     "qwen2": Qwen2GPTQ,
@@ -137,6 +152,7 @@ MODEL_MAP = {
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
+    "deepseek_v3": DeepSeekV3GPTQ,
     "exaone": ExaoneGPTQ,
     "grinmoe": GrinMOEGPTQ,
     "mllama": MLlamaGPTQ,
@@ -367,6 +383,7 @@ class GPTQModel:
         if format == "mlx":
             try:
                 from mlx_lm.utils import save_config, save_weights
+
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
                 raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
@@ -384,4 +401,36 @@ class GPTQModel:
 
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
+
+    # Use HfAPI and not Transformers to do upload
+    @staticmethod
+    def push_to_hub(repo_id: str,
+                    quantized_path: str,  # saved local directory path
+                    private: bool = False,
+                    exists_ok: bool = False,  # set to true if repo already exists
+                    token: Optional[str] = None,
+                    ):
+
+        if not quantized_path:
+            raise RuntimeError("You must pass quantized model path as str to push_to_hub.")
+
+        if not repo_id:
+            raise RuntimeError("You must pass repo_id as str to push_to_hub.")
+
+        from huggingface_hub import HfApi
+        repo_type = "model"
+
+        api = HfApi()
+        # if repo does not exists, create it
+        try:
+            api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
+        except Exception:
+            api.create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
+
+        # upload the quantized save folder
+        api.upload_large_folder(
+            folder_path=quantized_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
 

@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,13 +16,11 @@
 
 import math
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
@@ -29,7 +28,7 @@ from ...models._const import DEVICE, PLATFORM
 
 logger = setup_logger()
 
-class TorchQuantLinear(BaseQuantLinear):
+class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -53,49 +52,28 @@ class TorchQuantLinear(BaseQuantLinear):
         group_size: int,
         sym: bool,
         desc_act: bool,
-        infeatures: int,
-        outfeatures: int,
-        bias: bool,
-        pack_dtype: torch.dtype,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
         **kwargs,
     ):
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=True,
+            **kwargs)
 
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.padded_infeatures = infeatures + (-infeatures % group_size)
-        self.group_size = group_size if group_size != -1 else infeatures
-        self.maxq = 2**self.bits - 1
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((infeatures // self.pack_dtype_bits * self.bits, outfeatures), dtype=self.pack_dtype),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (
-                    math.ceil(infeatures / self.group_size),
-                    outfeatures // self.pack_dtype_bits * self.bits,
-                ),
-                dtype=self.pack_dtype,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (math.ceil(infeatures / self.group_size), outfeatures),
-                dtype=torch.float16,  # Scales are always float16
-            ),
-        )
-        self.register_buffer(
-            "g_idx",
-            torch.tensor([i // self.group_size for i in range(infeatures)], dtype=torch.int32),
-        )
-        if bias:
-            self.register_buffer("bias", torch.zeros((outfeatures), dtype=torch.float16))
+        if self.group_size != self.in_features:
+            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
-            self.bias = None
+            self.padded_infeatures = self.in_features
 
         if self.bits in [2, 4, 8]:
             self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
@@ -110,90 +88,23 @@ class TorchQuantLinear(BaseQuantLinear):
             ).reshape(1, 3, 12)
 
     def post_init(self):
-        if self.padded_infeatures != self.infeatures:
-            self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.outfeatures)
+        if self.padded_infeatures != self.in_features:
+            self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
             self.qzeros.resize_(
                 math.ceil(self.padded_infeatures / self.group_size),
-                self.outfeatures // self.pack_dtype_bits * self.bits
+                self.out_features // self.pack_dtype_bits * self.bits
             )
-            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.outfeatures), )
+            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
 
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().to(dtype=torch.float16)
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().to(dtype=torch.float16)
-
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int32)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_dtype)
-
-        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]), dtype=self.pack_np_dtype)
-        if self.bits in [2, 4, 8]:
-            for row in range(qweight.shape[0]):
-                for j in range(self.tensors_per_storage_dtype):
-                    qweight[row] |= intweight[row * self.tensors_per_storage_dtype + j] << (self.bits * j)
-        elif self.bits == 3:
-            for row in range(qweight.shape[0]):
-                row_offset = row * 10  # Cache row * 10
-                row_offset_plus_10 = row_offset + 10  # Cache row * 10 + 10
-                for j in range(10):
-                    qweight[row] |= intweight[row_offset + j] << (3 * j)
-                qweight[row] |= intweight[row_offset_plus_10] << 30
-                row += 1
-                qweight[row] |= (intweight[row_offset_plus_10] >> 2) & 1
-                for j in range(10):
-                    qweight[row] |= intweight[row_offset + j] << (3 * j + 1)
-                qweight[row] |= intweight[row_offset_plus_10] << 31
-                row += 1
-                qweight[row] |= (intweight[row_offset_plus_10] >> 1) & 0x3
-                for j in range(10):
-                    qweight[row] |= intweight[row_offset + j] << (3 * j + 2)
-
-        self.qweight = torch.from_numpy(qweight.astype(self.pack_np_dtype))
-
-        zeros = zeros.numpy().astype(self.pack_np_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_dtype)
-        if self.bits in [2, 4, 8]:
-            for col in range(qzeros.shape[1]):
-                for j in range(self.tensors_per_storage_dtype):
-                    qzeros[:, col] |= zeros[:, col * self.tensors_per_storage_dtype + j] << (self.bits * j)
-        elif self.bits == 3:
-            for col in range(qzeros.shape[1]):
-                col_offset = col * 10  # Cache col * 10
-                col_offset_plus_10 = col_offset + 10  # Cache col * 10 + 10
-                for j in range(10):
-                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j)
-                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 30
-                col += 1
-                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 2) & 1
-                for j in range(10):
-                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 1)
-                qzeros[:, col] |= zeros[:, col_offset_plus_10] << 31
-                col += 1
-                qzeros[:, col] |= (zeros[:, col_offset_plus_10] >> 1) & 0x3
-                for j in range(10):
-                    qzeros[:, col] |= zeros[:, col_offset + j] << (3 * j + 2)
-
-        self.qzeros = torch.from_numpy(qzeros.astype(self.pack_np_dtype))
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
-            x = F.pad(x, (0, self.padded_infeatures - self.infeatures))
+            x = F.pad(x, (0, self.padded_infeatures - self.in_features))
 
-        out_shape = x.shape[:-1] + (self.outfeatures,)
+        out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         out = self._forward(x, x.dtype, out_shape)
         return out
@@ -204,7 +115,7 @@ class TorchQuantLinear(BaseQuantLinear):
 
         out = torch.matmul(x, weights).reshape(out_shape).to(x_dtype)
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
     # clear gptq only weights: useful in de-quantization
@@ -214,24 +125,24 @@ class TorchQuantLinear(BaseQuantLinear):
         self.g_idx = None
         self.scales = None
 
-    @torch.no_grad()
     def dequantize_weight(self, num_itr=1):
         if self.wf.device != self.qzeros.device:
             self.wf = self.wf.to(self.qzeros.device)
 
         if self.bits in [2, 4, 8]:
+            dtype = torch.int16 if self.bits == 8 else torch.int8
             zeros = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.tensors_per_storage_dtype),
+                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf.unsqueeze(0),
-            ).to(torch.int16 if self.bits == 8 else torch.int8)
-            zeros = torch.bitwise_and(zeros, (2 ** self.bits) - 1).reshape(self.scales.shape)
+            ).to(dtype)
+            zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
 
             weight = torch.bitwise_and(
                 torch.bitwise_right_shift(
-                    torch.unsqueeze(self.qweight, 1).expand(-1, self.tensors_per_storage_dtype, -1),
+                    torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
                     self.wf.unsqueeze(-1),
-                ).to(torch.int16 if self.bits == 8 else torch.int8),
-                (2 ** self.bits) - 1
+                ).to(dtype),
+                self.maxq
             )
         elif self.bits == 3:
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
@@ -281,7 +192,7 @@ def dequantize_model(model: nn.Module):
 
         if isinstance(module, TorchQuantLinear):
             # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.infeatures, module.outfeatures)
+            new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
             new_module.bias = module.bias
 
@@ -294,7 +205,7 @@ def dequantize_model(model: nn.Module):
                 module_name = name
 
             setattr(parent, module_name, new_module)
-            
+
     del model.config.quantization_config
     return model
 

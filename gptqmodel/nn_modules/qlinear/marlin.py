@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -175,53 +176,60 @@ class MarlinQuantLinear(BaseQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
-    def __init__(self, bits: int, group_size: int, desc_act: bool, sym: bool, infeatures: int, outfeatures: int, pack_dtype: torch.dtype,
-                 bias: bool, **kwargs):
+    def __init__(
+        self, bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
             )
 
-        super().__init__(bits=bits, group_size=group_size, sym=sym, desc_act=desc_act, infeatures=infeatures, outfeatures=outfeatures, pack_dtype=pack_dtype, **kwargs)
-
-        self.original_infeatures = infeatures
-        self.original_outfeatures = outfeatures
-
-        self.pack_factor = 32 // bits  # packed into int32
+        self.original_in_features = in_features
+        self.original_out_features = out_features
 
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
 
-        # Normalize group_size
-        if group_size != -1:
-            group_size = group_size
-        else:
-            group_size = infeatures
-
-        self.group_size = group_size
-        self.desc_act = desc_act
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            register_buffers=False,
+            **kwargs)
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
-                                             group_size,
+                                             self.group_size,
                                              is_row_parallel=False):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
             scales_and_zp_input_dim = None
-            scales_and_zp_size = infeatures // group_size
+            scales_and_zp_size = self.in_features // self.group_size
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
             scales_and_zp_input_dim = 0
-            scales_and_zp_size = infeatures // group_size
+            scales_and_zp_size = self.in_features // self.group_size
 
         # Quantized weights
         qweight = Parameter(
             torch.empty(
-                infeatures // self.pack_factor,
-                outfeatures,
+                self.in_features // self.pack_factor,
+                self.out_features,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -239,7 +247,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         # Activation order
         g_idx = Parameter(
             torch.empty(
-                infeatures,
+                self.in_features,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -257,7 +265,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         scales = Parameter(
             torch.empty(
                 scales_and_zp_size,
-                outfeatures,
+                self.out_features,
                 dtype=torch.float16,
             ),
             requires_grad=False,
@@ -274,9 +282,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         qzeros = Parameter(
             torch.empty(
                 scales_and_zp_size,
-                outfeatures // self.pack_factor,
+                self.out_features // self.pack_factor,
                 dtype=torch.int32,
-                # device="meta",
             ),
             requires_grad=False,
         )
@@ -294,12 +301,11 @@ class MarlinQuantLinear(BaseQuantLinear):
         self.register_parameter("g_idx", g_idx)
         self.register_parameter("scales", scales)
         self.register_parameter("qzeros", qzeros)
-        self.infeatures = infeatures
-        self.outfeatures = outfeatures
-        self.is_k_full = marlin_is_k_full(desc_act, is_row_parallel=False)
+
+        self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
         if bias:
-            self.register_buffer("bias", torch.zeros((self.outfeatures), dtype=torch.half))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
         else:
             self.bias = None
 
@@ -332,7 +338,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         device = self.qweight.device
         # Allocate marlin workspace
         self.workspace = marlin_make_workspace(
-            self.outfeatures, device)
+            self.out_features, device)
 
         # Handle sorting for activation reordering if needed.
         if self.desc_act:
@@ -350,8 +356,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         marlin_qweight = gptqmodel_marlin_kernels.gptq_marlin_repack(
             self.qweight,
             self.g_idx_sort_indices,
-            self.infeatures,
-            self.outfeatures,
+            self.in_features,
+            self.out_features,
             self.bits,
             self.pack_dtype_bits)
         replace_tensor(self, "qweight", marlin_qweight)
@@ -359,14 +365,14 @@ class MarlinQuantLinear(BaseQuantLinear):
         # Permute scales from autogptq format to marlin format.
         marlin_scales = marlin_permute_scales(
             self.scales,
-            size_k=self.infeatures,
-            size_n=self.outfeatures,
+            size_k=self.in_features,
+            size_n=self.out_features,
             group_size=self.group_size)
         replace_tensor(self, "scales", marlin_scales)
 
     def forward(self, A: torch.Tensor):
         if A.dtype != torch.float16:
-            A = A.half()
+            A = A.to(torch.float16)
 
         return apply_gptq_marlin_linear(
             input=A.contiguous() if self.is_lm_head else A,
@@ -377,8 +383,8 @@ class MarlinQuantLinear(BaseQuantLinear):
             g_idx_sort_indices=self.g_idx_sort_indices,
             workspace=self.workspace,
             num_bits=self.bits,
-            output_size_per_partition=self.outfeatures,
-            input_size_per_partition=self.infeatures,
+            output_size_per_partition=self.out_features,
+            input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
             bias=self.bias)
 

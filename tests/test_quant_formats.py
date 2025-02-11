@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,9 +24,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import json  # noqa: E402
 import logging  # noqa: E402
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -38,19 +39,18 @@ from gptqmodel.quantization.config import (  # noqa: E402
     QuantizeConfig,
 )
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
 
 
 class TestQuantization(ModelTest):
 
     @classmethod
     def setUpClass(self):
-        self.pretrained_model_id = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
+        self.pretrained_model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct/" #"/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(128))]
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(32))]
 
 
     @parameterized.expand(

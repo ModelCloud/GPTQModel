@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,6 @@
 # limitations under the License.
 
 import os
-import subprocess
 import sys
 import urllib
 import urllib.error
@@ -75,8 +75,11 @@ common_setup_kwargs = {
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
     "url": "https://github.com/ModelCloud/GPTQModel",
+    "project_urls": {
+        "Homepage": "https://github.com/ModelCloud/GPTQModel",
+    },
     "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
-    "platforms": ["linux"],
+    "platforms": ["linux", "windows", "darwin"],
     "classifiers": [
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3",
@@ -84,11 +87,14 @@ common_setup_kwargs = {
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Programming Language :: C++",
         "Intended Audience :: Developers",
         "Intended Audience :: Education",
         "Intended Audience :: Science/Research",
+        "Intended Audience :: Information Technology",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
     ],
 }
 
@@ -115,14 +121,11 @@ def get_version_tag() -> str:
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
     return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
-
-with open('requirements.txt') as f:
-    requirement_list = f.read().splitlines()
-    if os.getenv("CI"):
-        requirements = []
-    else:
-        requirements = requirement_list
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+requirements = []
+if not os.getenv("CI"):
+    with open('requirements.txt') as f:
+        requirements = [line.strip() for line in f if line.strip()]
+        #subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
 
@@ -175,8 +178,7 @@ if BUILD_CUDA_EXT:
             "-std=c++17",
             "-fopenmp",
             "-lgomp",
-            "-DENABLE_BF16"
-            "-Wno-switch-bool",
+            "-DENABLE_BF16",
         ],
         "nvcc": [
             "-O3",
@@ -184,7 +186,6 @@ if BUILD_CUDA_EXT:
             "-DENABLE_BF16",
             "-U__CUDA_NO_HALF_OPERATORS__",
             "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_HALF2_OPERATORS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
@@ -193,12 +194,21 @@ if BUILD_CUDA_EXT:
         ],
     }
 
+    # torch >= 2.6.0 may require extensions to be build with CX11_ABI=1
+    CXX11_ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
+
+    extra_compile_args["cxx"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
+    extra_compile_args["nvcc"] += [ f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}" ]
+
+    # nvidia (nvcc) only compile flags that rocm doesn't support
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
             "--threads",
             "4",
             "-Xfatbin",
             "-compress-all",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
             "--use_fast_math",
         ]
 
@@ -309,7 +319,7 @@ setup(
         "quality": ["ruff==0.4.9", "isort==5.13.2"],
         'vllm': ["vllm>=0.6.4", "flashinfer==0.1.6"],
         'sglang': ["sglang>=0.3.2", "flashinfer==0.1.6"],
-        'bitblas': ["bitblas==0.0.1.dev13"],
+        'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
         'ipex': ["intel_extension_for_pytorch>=2.5.0"],
         'auto_round': ["auto_round>=0.3"],
@@ -327,5 +337,6 @@ setup(
         "bdist_wheel": CachedWheelsCommand,
     },
     ext_modules=extensions,
+    license="Apache 2.0",
     **common_setup_kwargs
 )

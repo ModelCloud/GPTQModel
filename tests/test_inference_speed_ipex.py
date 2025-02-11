@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,13 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
+from inference_speed import InferenceSpeed
+from parameterized import parameterized
 
 from gptqmodel.utils import BACKEND
-from parameterized import parameterized
-from inference_speed import InferenceSpeed
 
 
 class TestInferenceSpeedIpex(InferenceSpeed):

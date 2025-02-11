@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,13 +17,12 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import time  # noqa: E402
 import unittest  # noqa: E402
 
-from parameterized import parameterized  # noqa: E402
 
 # isort: off
 import torch  # noqa: E402
@@ -79,6 +79,7 @@ class TestRepacking(unittest.TestCase):
     k = 2048
     n = 1024 * 100
     group_size = 128
+    pack_dtype = torch.int32
 
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
     print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
@@ -91,8 +92,9 @@ class TestRepacking(unittest.TestCase):
             group_size=self.group_size,
             sym=True,
             desc_act=True,
-            infeatures=self.k,
-            outfeatures=self.n,
+            in_features=self.k,
+            out_features=self.n,
+            pack_dtype=self.pack_dtype,
             bias=False)
 
         qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)

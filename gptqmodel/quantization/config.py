@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -117,20 +118,18 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
         if isinstance(value, dict):
             dict_scale_dtype_to_str(value)
 
-
-def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], layer_name: str, key: str = None,
+def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
-    for pattern, pattern_dict in dynamic.items():
+    for pattern, overrides in dynamic.items():
         if pattern.startswith("-:"):
-            if re.match(pattern.removeprefix("-:"), layer_name):
+            if re.match(pattern.removeprefix("-:"), module_name):
                 return False
-        elif re.match(pattern.removeprefix("+:"), layer_name):
+        elif re.match(pattern.removeprefix("+:"), module_name):
             if key is None:
-                return pattern_dict
+                return overrides
             else:
-                return pattern_dict.get(key, default_value)
+                return overrides.get(key, default_value)
     return default_value
-
 
 @dataclass
 class QuantizeConfig():
@@ -153,8 +152,6 @@ class QuantizeConfig():
     true_sequential: bool = field(default=True)
 
     lm_head: bool = field(default=False)
-    # there are 2 methods for lm_head quantization: high/low gpu vram modes where high will result in lower error loss
-    lm_head_low_gpu_mem_usage: bool = field(default=True)
 
     quant_method: str = field(default=QUANT_METHOD.GPTQ)
 
@@ -179,7 +176,7 @@ class QuantizeConfig():
     # gptq was originally designed to pack quantized weights inside INT32 dtypes
     # allowing using different dtypes used for packing quantized weights
     # affects [`qweights`, `qzeros`]
-    pack_dtype: Optional[Union[str, torch.int64, torch.int32, torch.int16, torch.int8]] = field(default=torch.int32)
+    pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -190,11 +187,11 @@ class QuantizeConfig():
         else:
             if isinstance(self.pack_dtype, str):
                 self.pack_dtype = self.pack_dtype.lower()
-                if not self.pack_dtype in ["int64", "int32", "int16", "int8"]:
+                if self.pack_dtype not in ["int64", "int32", "int16", "int8"]:
                     raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
                 self.pack_dtype = getattr(torch, self.pack_dtype)
             elif isinstance(self.pack_dtype, torch.dtype):
-                if not self.pack_dtype in [torch.int64, torch.int32, torch.int16, torch.int8]:
+                if self.pack_dtype not in [torch.int64, torch.int32, torch.int16, torch.int8]:
                     raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
             else:
                 raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
@@ -395,6 +392,10 @@ class QuantizeConfig():
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
         }
+
+        # simplify: clean keys where the value is None
+        out = {k: v for k, v in out.items() if v is not None}
+
         dict_scale_dtype_to_str(out)
         return out
 

@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +24,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import time  # noqa: E402
 import unittest  # noqa: E402
 
+import threadpoolctl  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 
@@ -30,10 +32,7 @@ from parameterized import parameterized  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: E402
 
 
 def gen_quant4(k, n, groupsize=-1):
@@ -78,14 +77,16 @@ def gen_quant4(k, n, groupsize=-1):
 
 
 class TestRepacking(unittest.TestCase):
-    k = 2048
-    n = 1024 * 100
     group_size = 128
+    k = 7168
+    n = 7168
 
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
     print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
 
+    print("gen_quant: start")
     _, linear, s = gen_quant4(k, n, group_size)
+    print("gen_quant: start...end")
 
     def pack(self, qlinearCls):
         qlinear = qlinearCls(
@@ -93,9 +94,11 @@ class TestRepacking(unittest.TestCase):
             group_size=self.group_size,
             sym=True,
             desc_act=True,
-            infeatures=self.k,
-            outfeatures=self.n,
-            bias=False)
+            in_features=self.k,
+            out_features=self.n,
+            pack_dtype=torch.int32,
+            bias=False,
+        )
 
         qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
 
@@ -103,17 +106,36 @@ class TestRepacking(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [ExllamaQuantLinear, 26.5349],
-            [TritonV2QuantLinear, 26.5268],
-            [TorchQuantLinear, 27.0297],
+            # [ExllamaQuantLinear, 9.63], # A100 Z3: 36.89 # 4090? 26.5349
+            # [TritonV2QuantLinear, 9.67], # A100 Z3: 35.04 # 4090? 26.5268
+            [TorchQuantLinear, 13.819], # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
     def test_pack_speed(self, qlinearCls, expect_time):
-        now = time.time()
-        for i in range(30):
-            self.pack(qlinearCls)
-        time_usage = time.time() - now
-        speed = self.k * self.k / time_usage
-        print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
+        with threadpoolctl.threadpool_limits(limits=1):
+            now = time.time()
+            for i in range(30):
+                self.pack(qlinearCls)
+            time_usage = time.time() - now
+            speed = self.k * self.k / time_usage
+            print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
 
-        self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025)
+            self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025, msg=f"time: {time_usage}")
+
+    @parameterized.expand(
+        [
+            # [ExllamaQuantLinear, 9.63],  # A100 Z3: 36.89 # 4090? 26.5349
+            # [TritonV2QuantLinear, 9.67],  # A100 Z3: 35.04 # 4090? 26.5268
+            [TorchQuantLinear, 10.674],  # A100 Z3 33.56 # 4090? 27.0297
+        ]
+    )
+    def test_pack_speed_2_threads(self, qlinearCls, expect_time):
+        with threadpoolctl.threadpool_limits(limits=2):
+            now = time.time()
+            for i in range(30):
+                self.pack(qlinearCls)
+            time_usage = time.time() - now
+            speed = self.k * self.k / time_usage
+            print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
+
+            self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025, msg=f"time: {time_usage}")

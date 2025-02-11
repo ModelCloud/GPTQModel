@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +17,7 @@
 # -- do not touch
 import os
 import sys
+from typing import Dict, List
 
 
 if sys.platform == "darwin":
@@ -82,6 +84,9 @@ class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
 
+    LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
+    EXPECT_LM_HEAD_LOSS = None
+
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
         if keywords is None:
@@ -126,7 +131,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer):
+    def load_dataset(self, tokenizer, rows: int = 128):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
@@ -134,7 +139,7 @@ class ModelTest(unittest.TestCase):
             tokenized = tokenizer(sample['text'])
             if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
                 datas.append(tokenized)
-                if len(datas) >= 128:
+                if len(datas) >= rows:
                     break
 
         return datas
@@ -336,6 +341,19 @@ class ModelTest(unittest.TestCase):
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+    def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
+        final_log = quant_log[-1]
+        if final_log["module"] == "lm_head":
+            loss_value = float(final_log["loss"])
+            diff_pct = (loss_value / self.EXPECT_LM_HEAD_LOSS) * 100
+            print(f"lm_head loss: {loss_value} diff {diff_pct:.2f}%")
+            negative_pct = 100 * (1 - self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+            positive_pct = 100 * (1 + self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
+                            f"lm_head loss: {loss_value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+        else:
+            raise ValueError("No quantization for lm_head module")
 
     def clear_directory(self, directory_path):
         for item in os.listdir(directory_path):

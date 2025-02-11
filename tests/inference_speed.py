@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +22,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
 import unittest
+
 from transformers import AutoTokenizer
 
 from gptqmodel import GPTQModel
@@ -47,11 +49,15 @@ class InferenceSpeed(unittest.TestCase):
     MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.25
 
-    def inference(self, model_path, backend, tokens_per_second, assert_result=True):
+    def inference(self, model_path, backend, tokens_per_second, assert_result=True, compile=False, warmup_runs=0):
         model = GPTQModel.from_quantized(
             model_path,
             backend=backend,
         )
+
+        if compile:
+            model.compile()
+
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer.pad_token_id = tokenizer.eos_token_id
         inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(
@@ -59,6 +65,35 @@ class InferenceSpeed(unittest.TestCase):
 
         times = []
         tokens = []
+
+        # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
+        if warmup_runs > 0:
+            pb = ProgressBar(range(warmup_runs))
+            for i in pb:
+                pb.set_description(f"warmup run index {i} of {self.NUM_RUNS - 1}")
+                start_time = time.time()
+                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+                times.append(elapsed_time)
+
+                for j in range(result.shape[0]):
+                    new_tokens = result[j][inp['input_ids'].shape[1]:]
+                    new_token_count = len(new_tokens)
+                    tokens.append(new_token_count)
+
+            sum_time = sum(times)
+            sum_tokens = sum(tokens)
+
+            avg_tokens_per_second = round(sum_tokens / sum_time, 2)
+
+            print(f"\n**************** {backend} Warm-up Result Info****************")
+            print(f"Times: {times}")
+            print(f"New Tokens: {tokens}")
+            print(f"Sum Times: {sum_time}")
+            print(f"Sum New Tokens: {sum_tokens}")
+            print(f"New Token Per Second: {avg_tokens_per_second} token/s")
+            print(f"****************  {backend} Warm-up Result Info End****************")
 
         pb = ProgressBar(range(self.NUM_RUNS))
         for i in pb:

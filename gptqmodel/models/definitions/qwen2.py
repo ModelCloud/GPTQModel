@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class Qwen2GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "Qwen2DecoderLayer"

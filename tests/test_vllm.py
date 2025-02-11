@@ -1,4 +1,5 @@
-# Copyright 2025 ModelCloud
+# Copyright 2024-2025 ModelCloud.ai
+# Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,7 +27,6 @@ import sys  # noqa: E402
 import tempfile  # noqa: E402
 
 import torch  # noqa: E402
-from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
