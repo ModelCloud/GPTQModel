@@ -19,6 +19,7 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
 import torch
+
 from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
@@ -36,6 +37,7 @@ from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
+
 
 message_logged = False
 logger = setup_logger()

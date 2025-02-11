@@ -23,13 +23,14 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
-from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
+
+from gptqmodel.adapter.adapter import Adapter
 
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
@@ -38,13 +39,27 @@ from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.marlin import (_validate_marlin_compatibility,
-                            _validate_marlin_device_support, prepare_model_for_marlin_load)
-from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init,
-                           load_checkpoint_in_model_then_tie_weights, make_quant, normalize_tokenizer,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+from ..utils.marlin import (
+    _validate_marlin_compatibility,
+    _validate_marlin_device_support,
+    prepare_model_for_marlin_load,
+)
+from ..utils.model import (
+    auto_dtype,
+    convert_gptq_v1_to_v2_format,
+    find_modules,
+    get_checkpoints,
+    get_moe_layer_modules,
+    gptqmodel_post_init,
+    load_checkpoint_in_model_then_tie_weights,
+    make_quant,
+    normalize_tokenizer,
+    simple_dispatch_model,
+    verify_model_hash,
+    verify_sharded_model_hashes,
+)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
+
 
 logger = setup_logger()
 

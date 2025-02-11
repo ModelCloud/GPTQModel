@@ -22,6 +22,7 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
+
 from gptqmodel.adapter.adapter import Adapter
 
 from ...models._const import DEVICE, PLATFORM

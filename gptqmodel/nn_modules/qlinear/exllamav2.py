@@ -21,11 +21,13 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+
 
 exllama_v2_import_exception = None
 try:

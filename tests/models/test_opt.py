@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from model_test import ModelTest
+
 from gptqmodel import BACKEND
 from gptqmodel.utils.importer import backend_dict
-from model_test import ModelTest
 
 
 class TestOpt(ModelTest):
