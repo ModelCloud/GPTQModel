@@ -262,11 +262,15 @@ class BaseGPTQModel(nn.Module):
                         attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
                         current_length = len(input_ids_buff)
                 else:
-                    input_ids_buff.extend(new_line_input_ids)
+                    if len(input_ids_buff) > 0:
+                        input_ids_buff.extend(new_line_input_ids)
+                        attention_mask_buff.extend(new_line_attention_mask)
+                        current_length += new_line_input_ids_len
+
                     input_ids_buff.extend(input_ids)
-                    attention_mask_buff.extend(new_line_attention_mask)
                     attention_mask_buff.extend(attention_mask)
-                    current_length += len(input_ids) + new_line_input_ids_len
+                    current_length += len(input_ids)
+
 
             if input_ids_buff:
                 padding_length = calibration_dataset_concat_size - len(input_ids_buff)
