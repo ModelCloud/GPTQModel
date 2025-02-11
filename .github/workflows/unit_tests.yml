@@ -561,6 +561,10 @@ jobs:
           uv pip install git+https://github.com/ModelCloud/Tokenicer -U
           uv pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
 
+          if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
+            uv pip install numpy==1.26.3
+          fi
+
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
         run: |
