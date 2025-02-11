@@ -39,7 +39,7 @@ from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 message_logged = False
 logger = setup_logger()
 
-backend_dict = OrderedDict({
+BACKEND_DICT = OrderedDict({
     BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
@@ -50,7 +50,7 @@ backend_dict = OrderedDict({
     BACKEND.TORCH: TorchQuantLinear,
 })
 
-format_dict = {
+FORMAT_DICT = {
     FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
     FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN],
@@ -175,9 +175,9 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_backends = format_dict[format]
+        allow_backends = FORMAT_DICT[format]
 
-        allow_quant_linears = [{k, v} for k,v in backend_dict.items() if k in allow_backends]
+        allow_quant_linears = [{k, v} for k,v in BACKEND_DICT.items() if k in allow_backends]
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
