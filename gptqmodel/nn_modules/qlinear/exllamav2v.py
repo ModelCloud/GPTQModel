@@ -185,14 +185,11 @@ class ExllamaV2VQuantLinear(BaseQuantLinear):
         else:
             output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
 
-        # sync with vllm
-        output = output.reshape(out_shape)
 
-#         #
-#         # if self.adapter:
-#         #     output = self.adapter.apply(x=x, out=output)
-# output
         if self.bias is not None:
             output.add_(self.bias)
+
+        # sync with vllm
+        output = output.reshape(out_shape)
 
         return output.to(dtype=x_dtype)
