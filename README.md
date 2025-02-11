@@ -157,8 +157,9 @@ export GPTQMODEL_USE_MODELSCOPE=True
 ```
 ```py
 from gptqmodel import GPTQModel
-# load Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4 from modelscope
-model = GPTQModel.load("Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4")
+# load Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4 from modelscope
+model = GPTQModel.load("Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4")
+result = model.generate("Uncovering deep insights begins with")[0]
 ```
 
 ### OpenAI API compatible end-point
