@@ -5,7 +5,7 @@ import subprocess  # noqa: E402
 import importlib.util  # noqa: E402
 
 if importlib.util.find_spec("modelscope") is None:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "modelscope>=1.22"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "modelscope>=1.23"])
 
 from models.model_test import ModelTest  # noqa: E402
 from gptqmodel import GPTQModel

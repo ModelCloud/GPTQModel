@@ -151,6 +151,15 @@ model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v
 result = model.generate("Uncovering deep insights begins with")[0]
 ```
 
+To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFace Hub, set an environment variable:
+```shell
+export GPTQMODEL_USE_MODELSCOPE=True
+```
+```py
+from gptqmodel import GPTQModel
+# load Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4 from modelscope
+model = GPTQModel.load("Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4")
+```
 
 ### OpenAI API compatible end-point
 ```py
