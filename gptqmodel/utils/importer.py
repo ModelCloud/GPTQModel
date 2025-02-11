@@ -176,7 +176,7 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = [{k: v} for k,v in BACKEND_DICT.items() if k in FORMAT_DICT[format]]
+        allow_quant_linears = [(k, v) for k,v in BACKEND_DICT.items() if k in FORMAT_DICT[format]]
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
