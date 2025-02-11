@@ -212,6 +212,8 @@ jobs:
     steps:
       - name: Print
         run: |
+          ls /monster/data/model
+          echo ====
           ls /opt || true
           echo +++++
           ls /opt/pyenv || true
