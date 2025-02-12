@@ -19,7 +19,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
@@ -121,13 +120,12 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        out = self._forward(x, x.dtype)
-        out = out.reshape(out_shape)
+        out = self._forward(x, x.dtype, out_shape)
         return out
 
-    def _forward(self, x, x_dtype):
+    def _forward(self, x, x_dtype, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self.dequantize(num_itr=num_itr)
+        weights = self.dequantize_weight(num_itr=num_itr)
 
         out = torch.matmul(x, weights).reshape(out_shape)
 
@@ -148,7 +146,6 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def dequantize_weight(self, num_itr=1):
         if self.bits in [2, 4, 8]:
-            dtype = torch.int16 if self.bits == 8 else torch.int8
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf.unsqueeze(0),

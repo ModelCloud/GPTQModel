@@ -21,7 +21,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 

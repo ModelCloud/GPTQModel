@@ -19,12 +19,10 @@ import os
 from gptqmodel import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora, normalize_adapter
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import unittest  # noqa: E402
-
 
 lora = "lora"
 

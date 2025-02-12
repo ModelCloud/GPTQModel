@@ -20,7 +20,6 @@ import os
 
 from gptqmodel.adapter.adapter import Adapter, normalize_adapter
 
-
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")

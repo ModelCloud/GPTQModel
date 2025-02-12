@@ -20,7 +20,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear

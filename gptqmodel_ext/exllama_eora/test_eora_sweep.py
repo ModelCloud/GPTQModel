@@ -1,7 +1,7 @@
+import pytest
 import torch
 # from eora import fused_concurrent, fused_sequential, cublas_reference, gptq_gemm_eora, gptq_gemm
-from eora import gptq_gemm_lora, gptq_gemm
-import pytest
+from eora import gptq_gemm, gptq_gemm_lora
 
 m = 1
 k = 4096

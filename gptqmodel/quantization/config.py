@@ -24,9 +24,8 @@ from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from packaging import version
-
 from gptqmodel.adapter.adapter import normalize_adapter
+from packaging import version
 
 from ..utils.logger import setup_logger
 

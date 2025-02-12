@@ -23,7 +23,6 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
