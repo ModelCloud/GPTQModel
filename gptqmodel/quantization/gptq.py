@@ -38,7 +38,7 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: torch.nn.Module, name: str):
+    def __init__(self, module: torch.nn.Module):
         self.module = module
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
