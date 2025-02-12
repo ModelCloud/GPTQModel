@@ -931,47 +931,17 @@ class BaseGPTQModel(nn.Module):
         quantized_weights: Dict = None,
         lora_rank: int = 64,
         calibration_enable_gpu_cache: bool = True,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        logger_board: Optional[str] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
         auto_gc: bool = True,
     ) -> List[Dict[str, str]]:
-
         print('Starting EoRA...')
 
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
-        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
-            raise ValueError(
-                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
-            )
-
-        if backend == BACKEND.IPEX:
-            self.quantize_config.format = FORMAT.IPEX
-
-        if self.quantize_config.format == FORMAT.MARLIN:
-            raise ValueError(
-                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
-            )
-
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
-
-
-        # Validate quant linear before quantization starts
-        _ = select_quant_linear(
-            bits=self.quantize_config.bits,
-            dynamic=self.quantize_config.dynamic,
-            group_size=self.quantize_config.group_size,
-            desc_act=self.quantize_config.desc_act,
-            sym=self.quantize_config.sym,
-            backend=backend,
-            device=DEVICE(self.quantize_config.device),
-            pack=True,
-            format=self.quantize_config.format,
-            pack_dtype=self.quantize_config.pack_dtype,
-        )
 
         min_calibration_dataset_size = 256
         min_calibration_dataset_input_ids_avg_length = 256
@@ -985,7 +955,9 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size,)
+        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
+                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
+                                                   batch_size=batch_size)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -1042,14 +1014,12 @@ class BaseGPTQModel(nn.Module):
         layer_input_kwargs = []
         layer_outputs = []
 
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            self.model.to(self.quantize_config.device)
-
         num_batches = len(calibration_dataset)
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
+
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(_, args, kwargs):
             # Positional arguments.
@@ -1079,24 +1049,7 @@ class BaseGPTQModel(nn.Module):
                     one_kwargs[k] = nested_move_to(v, data_device)
             layer_input_kwargs.append(one_kwargs)
 
-            if not self.quantize_config.lm_head or self.quantize_config.lm_head_low_gpu_mem_usage:
-                raise ValueError
-
-        lm_head_inputs = []
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            def store_lm_head_input_hook(_, args, kwargs):
-                # Positional arguments.
-                lm_head_layer_input = []
-                for inp in args:
-                    lm_head_layer_input.append(move_to(inp, data_device))
-                if len(lm_head_layer_input) == 0:
-                    # Some models put hidden_states in kwargs instead of args.
-                    # For example, gptj ...
-                    if kwargs.get("hidden_states") is not None:
-                        lm_head_layer_input.append(move_to(kwargs["hidden_states"], data_device))
-
-                lm_head_inputs.append(lm_head_layer_input)
-                raise ValueError
+            raise ValueError
 
         # move layer to target device
         layers[0] = layers[0].to(self.quantize_config.device)
@@ -1114,20 +1067,21 @@ class BaseGPTQModel(nn.Module):
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            lm_head_handle = layers[0].register_forward_pre_hook(store_lm_head_input_hook, with_kwargs=True)
         is_ovis = self.__class__.__name__ == "OvisGPTQ"
+        self.pre_quantize_generate_hook_start()
         for example in calibration_dataset:
             for k, v in example.items():
+                data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
-                    for i in range(len(v)):
-                        if len(v[i].shape) == 1:
-                            v[i] = v[i].unsqueeze(0)
-                        v[i] = move_to(v[i].to(torch.bfloat16) if is_ovis else v[i], cur_layer_device)
+                    for module_index in range(len(v)):
+                        if len(v[module_index].shape) == 1:
+                            v[module_index] = v[module_index].unsqueeze(0)
+                        v[module_index] = move_to(v[module_index].to(torch.bfloat16) if is_ovis else v[module_index],
+                                                  data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
-                    example[k] = move_to(v, cur_layer_device)
+                    example[k] = move_to(v, data_device)
             try:
                 if is_ovis:
                     self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
@@ -1135,13 +1089,10 @@ class BaseGPTQModel(nn.Module):
                     self.model(**example)
             except ValueError:
                 pass
+        self.pre_quantize_generate_hook_end()
         handle.remove()
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            lm_head_handle.remove()
-        if self.quantize_config.lm_head and not self.quantize_config.lm_head_low_gpu_mem_usage:
-            self.model.to(CPU)
-        else:
-            move_to(layers[0], CPU)
+
+        move_to(layers[0], CPU)
 
         for module_name in self.base_modules:
             module = get_module_by_name_prefix(self.model, module_name)
@@ -1158,29 +1109,33 @@ class BaseGPTQModel(nn.Module):
         if self.dynamic_expert_index is not None:
             num_experts = getattr(self.model.config, self.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=layer_modules,
-                                                    num_experts=num_experts)
-
+                                                  num_experts=num_experts)
 
         layer_count = len(layers)
-        layer_pb = ProgressBar(range(layer_count))
+        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count))
         shared_kv_cache_dict = {}
 
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
         lowrank_dict = {}
-        for i in layer_pb:
-            layer_pb.set_description(f"Construction EoRA for layer {i} of {layer_count - 1}")
-            layer = layers[i]
+        for module_index in quant_modules_pb:
+            is_lm_head_module = module_index >= layer_count
+            if is_lm_head_module:
+                quant_modules_pb.set_description("Quantizing lm_head")
+                module = get_module(self.model, key=self.lm_head)
+                layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
+            else:
+                quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
+                module = layers[module_index]
 
-            if get_device(layer) == CPU and self.quantize_config.device != CPU:
-                move_to(layer, self.quantize_config.device)
+            self.pre_quantize(module)
 
-            cur_layer_device = get_device(layer)
-
-            full = find_modules(layer, name="")
-            modules = layer_modules
+            cur_layer_device = get_device(module)
+            full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
+            modules = [[self.lm_head]] if is_lm_head_module else layer_modules
             for index, names in enumerate(modules):
+                # TODO Need to be consistent with quantization and skip some modules according to dynamic.
                 subset = {n: full[n] for n in names if n in full}
 
                 subset_eigen_scaling_diag_matrix = {}
@@ -1188,6 +1143,7 @@ class BaseGPTQModel(nn.Module):
                     subset_eigen_scaling_diag_matrix[name] = 0
 
                 eigen_nsamples = len(calibration_dataset)
+
                 def hook(name):
 
                     def tmpp(_, input, output):
@@ -1196,15 +1152,16 @@ class BaseGPTQModel(nn.Module):
                             inp = inp.unsqueeze(0)
 
                         tmp = inp.shape[0]
-                        adds = torch.matmul(inp.transpose(1,2), inp)
+                        adds = torch.matmul(inp.transpose(1, 2), inp)
                         adds_sum = torch.sum(adds, dim=0)
 
-                        subset_eigen_scaling_diag_matrix[name] *= eigen_nsamples / (eigen_nsamples+tmp)
+                        subset_eigen_scaling_diag_matrix[name] *= eigen_nsamples / (eigen_nsamples + tmp)
 
                         subset_eigen_scaling_diag_matrix[name] += adds_sum / eigen_nsamples
 
                         del inp, adds, adds_sum, output
                         torch.cuda.empty_cache()
+
                     return tmpp
 
                 handle = []
@@ -1234,21 +1191,23 @@ class BaseGPTQModel(nn.Module):
 
                     with torch.no_grad():
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                        if hasattr(layer, "reuse_kv"):
-                            if layer.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                            layer_output = layer(*layer_input, **additional_layer_inputs)
-                            if shared_kv_cache_dict.get(i) is None:
-                                shared_kv_cache_dict[i] = layer_output[-1]
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                                 **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(module_index) is None:
+                                shared_kv_cache_dict[module_index] = layer_output[-1]
                         else:
-                            layer(*layer_input, **additional_layer_inputs)
+                            module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                  **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
 
                 fwd_end = time.time()
-                fwd_end - fwd_start
+                fwd_time = fwd_end - fwd_start
 
                 for h in handle:
                     h.remove()
@@ -1262,8 +1221,8 @@ class BaseGPTQModel(nn.Module):
                         torch_empty_cache()
 
                 for name_index, name in enumerate(subset):
-                    layer_name = f"{self.layers_node}.{i}.{name}"
-                    layer_pb.set_description(f"Generating EoRA of {name} in layer {i} of {layer_count - 1}")
+                    layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
+                    quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
                     original_weight = subset[name].weight.data
 
@@ -1297,7 +1256,7 @@ class BaseGPTQModel(nn.Module):
                     ##
                     delta_scale = torch.matmul(delta.to(torch.float32), scaling_diag_matrix)
 
-                    r=lora_rank
+                    r = lora_rank
 
                     U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
                     lowrank_r = r
@@ -1310,53 +1269,62 @@ class BaseGPTQModel(nn.Module):
                     B = torch.matmul(truc_u, sqrtS).to(quantized_weight.dtype)
                     A = torch.matmul(sqrtS, truc_v).to(quantized_weight.dtype)
 
-                    comp_weight = quantized_weight + B@A
+                    comp_weight = quantized_weight + B @ A
 
                     subset[name].weight.data = comp_weight.to(subset[name].weight.data.dtype)
 
                     lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(torch.float16)
                     lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(torch.float16)
                     del B, A, quantized_weight, U, S, V, L, Q
+            is_last_quant = module_index == len(quant_modules_pb) - 1
+            if not is_last_quant:
+                for j in range(num_batches):
+                    layer_input = []
+                    for k, layer_inp in enumerate(layer_inputs[j]):
+                        layer_input.append(move_to(layer_inp, cur_layer_device))
 
-            for j in range(num_batches):
-                layer_input = []
-                for k, layer_inp in enumerate(layer_inputs[j]):
-                    layer_input.append(move_to(layer_inp, cur_layer_device))
+                    mask = attention_masks[j]
+                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
 
-                mask = attention_masks[j]
-                layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                    layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
+                    if layer_position_ids is not None:
+                        additional_layer_inputs["position_ids"] = layer_position_ids
+                    for k, v in layer_input_kwargs[j].items():
+                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
-                if layer_position_ids is not None:
-                    additional_layer_inputs["position_ids"] = layer_position_ids
-                for k, v in layer_input_kwargs[j].items():
-                    additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+                    if hasattr(module, "reuse_kv"):
+                        if module.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                if hasattr(layer, "reuse_kv"):
-                    if layer.reuse_kv:
-                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(i - 1)
+                    with torch.no_grad():
+                        layer_output = move_to(
+                            module(*layer_input)[0] if is_lm_head_module else
+                            module(*layer_input, **additional_layer_inputs)[0],
+                            cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
 
-                with torch.no_grad():
-                    layer_output = move_to(
-                        layer(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
+                        del layer_input
+                        del additional_layer_inputs
+                        if num_batches > 1 and j == num_batches - 1:
+                            if auto_gc:
+                                torch_empty_cache()
 
-                del layer_input
-                del additional_layer_inputs
-                if num_batches > 1 and j == num_batches - 1:
-                    if auto_gc:
-                        torch_empty_cache()
+            if not is_lm_head_module:
+                layers[module_index] = self.post_quantize(module)
+            else:
+                self.post_quantize(module)
 
-            move_to(layer, CPU)
-            del layer
+            del module
             del layer_inputs
-            layer_inputs, layer_outputs = (
-                layer_outputs,
-                [],
-            )
+
+            if not is_last_quant:
+                layer_inputs, layer_outputs = (
+                    layer_outputs,
+                    [],
+                )  # TODO: is it really OK to cache only the first positional argument?
+
             if auto_gc:
                 torch_empty_cache()
 
