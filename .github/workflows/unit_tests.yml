@@ -210,18 +210,6 @@ jobs:
         - /home/ci/models/docker/pyenv_test:/opt/pyenv
 
     steps:
-      - name: Print
-        run: |
-          ls /monster/data/model/docker
-          echo 000000
-          ls /monster/data/model/docker/pyenv_test
-          echo ====
-          ls /opt || true
-          echo +++++
-          ls /opt/pyenv || true
-          echo +++++
-          ls /home/ci/models || true
-
       - name: Checkout Codes
         uses: actions/checkout@v4
         with:
