@@ -14,7 +14,6 @@ fake_quant_path = "Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
 eora_path = "Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
-
 calibration_dataset = load_dataset(
     "allenai/c4",
     data_files="en/c4-train.00001-of-01024.json.gz",
@@ -40,9 +39,10 @@ batch_size = 2
 from test_prepare_dataset import construct_ARC
 
 calibration_dataset = construct_ARC(nsamples=1024)
-eora_rank = 128
+lora_rank = 128
 
-GPTQModel.lora_generate(model_id_or_path=model_id, quantize_config=quant_config, quantized_weights=quantized_weights,
-                        calibration_dataset=calibration_dataset, batch_size=batch_size, output_path=eora_path)
-eora_weight = torch.load(eora_path,  map_location='cpu')
+GPTQModel.eora_generate(model_id_or_path=model_id, quantize_config=quant_config, quantized_weights=quantized_weights,
+                        calibration_dataset=calibration_dataset, batch_size=batch_size, output_path=eora_path,
+                        lora_rank=lora_rank)
+eora_weight = torch.load(eora_path, map_location='cpu')
 print(eora_weight)

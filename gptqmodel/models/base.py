@@ -929,7 +929,7 @@ class BaseGPTQModel(nn.Module):
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         batch_size: int = 1,
         quantized_weights: Dict = None,
-        eora_rank: int = 64,
+        lora_rank: int = 64,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
@@ -1297,7 +1297,7 @@ class BaseGPTQModel(nn.Module):
                     ##
                     delta_scale = torch.matmul(delta.to(torch.float32), scaling_diag_matrix)
 
-                    r=eora_rank
+                    r=lora_rank
 
                     U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
                     lowrank_r = r

@@ -444,21 +444,21 @@ class GPTQModel:
         )
 
     @classmethod
-    def lora_generate(cls,
+    def eora_generate(cls,
                       model_id_or_path: str,
                       quantize_config: QuantizeConfig,
                       quantized_weights: Dict[str, torch.Tensor],
                       calibration_dataset: Union[
                           List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
                       output_path: Union[str | os.PathLike],
-                      eora_rank: int = 64,
+                      lora_rank: int = 64,
                       batch_size: int = 1,
                       calibration_enable_gpu_cache: bool = True,
                       auto_gc: bool = True,
                       ):
         model = GPTQModel.load(model_id_or_path, quantize_config)
         eora_weight = model.get_eora(calibration_dataset=calibration_dataset, batch_size=batch_size,
-                                     quantized_weights=quantized_weights, eora_rank=eora_rank,
+                                     quantized_weights=quantized_weights, lora_rank=lora_rank,
                                      calibration_enable_gpu_cache=calibration_enable_gpu_cache, auto_gc=auto_gc)
 
         assert os.path.isfile(output_path), "output_path must be a file"
