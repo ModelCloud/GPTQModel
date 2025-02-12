@@ -90,7 +90,7 @@ class TestTokenicer(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.model.save(tmpdir)
-            verify_json_path = os.path.join(tmpdir, VALIDATE_JSON_FILE_NAME)
+            validate_json_path = os.path.join(tmpdir, VALIDATE_JSON_FILE_NAME)
 
-            result = os.path.isfile(verify_json_path)
-            self.assertTrue(result, f"Save verify file failed: {verify_json_path} does not exist.")
+            result = os.path.isfile(validate_json_path)
+            self.assertTrue(result, f"Save verify file failed: {validate_json_path} does not exist.")
