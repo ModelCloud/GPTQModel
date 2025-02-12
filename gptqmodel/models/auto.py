@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 
+
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
@@ -27,6 +28,7 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
     print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for compatibililty.")
 
 import sys  # noqa: E402
+
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -97,6 +99,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -308,9 +311,10 @@ class GPTQModel:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
-            from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
+
+            from gptqmodel.utils.eval import lm_eval
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 

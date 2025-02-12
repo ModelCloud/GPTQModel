@@ -23,6 +23,7 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
+
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 except BaseException:
@@ -127,6 +128,7 @@ if not os.getenv("CI"):
         #subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 import torch  # noqa: E402
+
 
 if TORCH_CUDA_ARCH_LIST is None:
     HAS_CUDA_V8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))

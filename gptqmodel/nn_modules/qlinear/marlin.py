@@ -21,11 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
+
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.rocm import IS_ROCM
+
 
 marlin_import_exception = None
 try:

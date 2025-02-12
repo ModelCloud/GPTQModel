@@ -28,6 +28,7 @@ from packaging import version
 
 from ..utils.logger import setup_logger
 
+
 logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
