@@ -17,11 +17,14 @@
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLLE_DEVICES"] = "0"
 
 import unittest  # noqa: E402
-
+import tempfile
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+from datasets import load_dataset
+from tokenicer.const import VERIFY_JSON_FILE_NAME
 
 
 class TestTokenicer(unittest.TestCase):
@@ -78,3 +81,17 @@ class TestTokenicer(unittest.TestCase):
             example,
             msg=f"Expected example='{self.example}' but got '{example}'."
         )
+
+    def test_tokenicer_save(self):
+        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
+                                 split="train")
+        calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(32))]
+
+        self.model.quantize(calibration_dataset, batch_size=32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.model.save(tmpdir)
+            verify_json_path = os.path.join(tmpdir, VERIFY_JSON_FILE_NAME)
+
+            result = os.path.isfile(verify_json_path)
+            self.assertTrue(result, f"Save verify file failed: {verify_json_path} does not exist.")

@@ -977,6 +977,8 @@ class BaseGPTQModel(nn.Module):
         else:
             self.save_pretrained(save_dir, **kwargs)
 
+        self.tokenizer.save(save_dir)
+
     def compile(self, backend="inductor", mode="max-autotune"):
         if not self.quantized:
             logger.warning("model is not quantized, skip compiling...")
