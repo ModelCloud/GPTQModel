@@ -27,8 +27,8 @@ from parameterized import parameterized  # noqa: E402
 
 
 class TestsQ4Torch(ModelTest):
-    GENERATE_EVAL_SIZE_MIN = 5
-    GENERATE_EVAL_SIZE_MAX = 10
+    GENERATE_EVAL_SIZE_MIN = 20
+    GENERATE_EVAL_SIZE_MAX = 20
     model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     @parameterized.expand(
