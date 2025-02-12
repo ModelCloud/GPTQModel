@@ -1126,7 +1126,7 @@ class BaseGPTQModel(nn.Module):
                 module = get_module(self.model, key=self.lm_head)
                 layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
+                quant_modules_pb.set_description(f"Construction EoRA for layer {module_index} of {layer_count - 1}")
                 module = layers[module_index]
 
             self.pre_quantize(module)
@@ -1171,7 +1171,6 @@ class BaseGPTQModel(nn.Module):
                     else:
                         handle.append(subset[name].register_forward_hook(hook(name)))
 
-                fwd_start = time.time()
                 for j in range(num_batches):
                     layer_input = []
                     for k, layer_inp in enumerate(layer_inputs[j]):
@@ -1206,9 +1205,6 @@ class BaseGPTQModel(nn.Module):
                     del layer_input
                     del additional_layer_inputs
 
-                fwd_end = time.time()
-                fwd_time = fwd_end - fwd_start
-
                 for h in handle:
                     h.remove()
 
@@ -1222,7 +1218,7 @@ class BaseGPTQModel(nn.Module):
 
                 for name_index, name in enumerate(subset):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
-                    quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
+                    quant_modules_pb.set_description(f"Generating EoRA of {name} in layer {module_index} of {layer_count - 1}")
 
                     original_weight = subset[name].weight.data
 
