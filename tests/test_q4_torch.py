@@ -17,20 +17,18 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import torch  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-
 
 class TestsQ4Torch(ModelTest):
-    GENERATE_EVAL_SIZE_MIN = 5
-    GENERATE_EVAL_SIZE_MAX = 10
+    GENERATE_EVAL_SIZE_MIN = 20
+    GENERATE_EVAL_SIZE_MAX = 20
     model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
     @parameterized.expand(

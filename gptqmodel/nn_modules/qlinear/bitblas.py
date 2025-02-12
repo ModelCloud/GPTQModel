@@ -30,7 +30,6 @@ from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
 
-
 logger = setup_logger()
 
 BITBLAS_TARGET = None

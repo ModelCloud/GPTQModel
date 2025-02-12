@@ -61,7 +61,6 @@ from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
-
 logger = setup_logger()
 
 
@@ -119,6 +118,7 @@ def find_modules(module, layers=None, name=""):
     for layer in layers:
         if isinstance(module, layer):
             return {name: module}
+
     res = {}
     for name1, child in module.named_children():
         res.update(find_modules(child, layers=layers, name=name + "." + name1 if name != "" else name1))

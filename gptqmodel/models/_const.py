@@ -25,7 +25,6 @@ from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
 from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
-
 CPU = device("cpu")
 CUDA = device("cuda")
 CUDA_0 = device("cuda:0")
@@ -178,3 +177,5 @@ SUPPORTED_MODELS = [
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
 
 EXPERT_INDEX_PLACEHOLDER = "{expert_index}"
+
+CALIBRATION_DATASET_CONCAT_CHAR = " "

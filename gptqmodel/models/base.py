@@ -31,6 +31,7 @@ from tokenicer import Tokenicer
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -38,32 +39,14 @@ from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (
-    MODALITY,
-    check_to_quantized,
-    find_modules,
-    get_device,
-    get_module,
-    get_module_by_name_prefix,
-    get_moe_layer_modules,
-    move_to,
-    nested_move_to,
-    pack_model,
-)
+from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
+                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
-from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
-from .writer import (
-    QUANT_LOG_DAMP,
-    QUANT_LOG_FWD_TIME,
-    QUANT_LOG_LAYER,
-    QUANT_LOG_LOSS,
-    QUANT_LOG_MODULE,
-    QUANT_LOG_TIME,
-    ModelWriter,
-)
-
+from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
+                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
 
 # pytorch 2.6.0 fixes many compilation errors
 PYTORCH_MIN_VERFSION_WITH_COMPILE = Version("2.6.0")
@@ -142,6 +125,7 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
+        self.compiled = False # set to True while compile() is triggered successfully
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         if tokenizer is not None:
@@ -171,6 +155,8 @@ class BaseGPTQModel(nn.Module):
     def prepare_dataset(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
     ):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
@@ -217,6 +203,72 @@ class BaseGPTQModel(nn.Module):
                 }
             )
 
+        if calibration_dataset_concat_size:
+            concatenated_data = []
+            input_ids_buff = []
+            attention_mask_buff = []
+            current_length = 0
+
+            new_line = self.tokenizer(CALIBRATION_DATASET_CONCAT_CHAR, return_tensors="pt")
+            new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
+            new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
+            new_line_input_ids_len = len(new_line_input_ids)
+
+            for example in new_calibration_dataset:
+                input_ids = example["input_ids"][0]
+                attention_mask = example["attention_mask"][0]
+
+                if current_length + len(input_ids) + new_line_input_ids_len >= calibration_dataset_concat_size:
+                    if len(input_ids_buff) > 0:
+                        remaining_space = calibration_dataset_concat_size - current_length
+                        # if there is remaining space, add the remaining input to the current block
+                        if remaining_space > 0:
+                            input_ids_buff.extend(new_line_input_ids)
+                            input_ids_buff.extend(input_ids[:remaining_space - new_line_input_ids_len])
+                            attention_mask_buff.extend(new_line_attention_mask)
+                            attention_mask_buff.extend(attention_mask[:remaining_space - new_line_input_ids_len])
+
+                            concatenated_data.append({
+                                "input_ids": [input_ids_buff],
+                                "attention_mask": [attention_mask_buff]
+                            })
+                        else:
+                            # if there is no remaining space, add the current block to the concatenated data
+                            concatenated_data.append({
+                                "input_ids": [input_ids_buff],
+                                "attention_mask": [attention_mask_buff]
+                            })
+
+                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
+                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
+                        current_length = len(input_ids_buff)
+                    else:
+                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
+                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
+                        current_length = len(input_ids_buff)
+                else:
+                    if len(input_ids_buff) > 0:
+                        input_ids_buff.extend(new_line_input_ids)
+                        attention_mask_buff.extend(new_line_attention_mask)
+                        current_length += new_line_input_ids_len
+
+                    input_ids_buff.extend(input_ids)
+                    attention_mask_buff.extend(attention_mask)
+                    current_length += len(input_ids)
+
+
+            if input_ids_buff:
+                padding_length = calibration_dataset_concat_size - len(input_ids_buff)
+                if padding_length > 0:
+                    input_ids_buff.extend([self.tokenizer.pad_token_id] * padding_length)
+                    attention_mask_buff.extend([0] * padding_length)
+                concatenated_data.append({
+                    "input_ids": [input_ids_buff],
+                    "attention_mask": [attention_mask_buff]
+                })
+
+            new_calibration_dataset = concatenated_data
+
         new_calibration_dataset_batched = [
             collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
             for start in range(0, len(new_calibration_dataset), batch_size)
@@ -228,6 +280,8 @@ class BaseGPTQModel(nn.Module):
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -306,7 +360,9 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset, batch_size,)
+        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
+                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
+                                                   batch_size=batch_size)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
@@ -622,8 +678,19 @@ class BaseGPTQModel(nn.Module):
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                         mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
 
-                    gptq[name] = GPTQ(subset[name])
-                    gptq[name].quantizer.configure(
+                    tmp = GPTQ(subset[name])
+                    gptq[name] = tmp
+
+                    # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
+                    # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
+                    # all sub-modules within a single layer needs to store all the inputs.
+                    # deepseek has massive # of sub-modules per layer, causing vram pressure
+                    # buffered mode is slower due to gpu<->cpu movement
+                    if buffered_fwd: # TODO tweak this number for masive MoE
+                        logger.info(f"Experimental: enabling fwd buffered mode for: `{name}`")
+                        tmp.fwd_inputs_buffered = True
+
+                    tmp.quantizer.configure(
                         bits,
                         perchannel=True,
                         sym=sym,
@@ -1372,6 +1439,7 @@ class BaseGPTQModel(nn.Module):
             return self
 
         if Version(torch.__version__) < PYTORCH_MIN_VERFSION_WITH_COMPILE:
+            self.compiled = False
             logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
             return self
 
@@ -1381,12 +1449,22 @@ class BaseGPTQModel(nn.Module):
 
         try:
             self.model = torch.compile(self.model, fullgraph=True, backend=backend, mode=mode)
+            self.compiled = True
         except Exception as e:
             logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
             try:
                 self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+                self.compiled = True
             except Exception as e:
+                self.compiled = False
                 logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
+
+        # trigger kernel compilation hooks
+        if self.compiled:
+            modules = find_modules(self.model, layers=[BaseQuantLinear])
+            for name in modules.keys():
+                modules[name].compile()
+
         return self
 
     def serve(self,

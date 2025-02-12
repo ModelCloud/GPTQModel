@@ -16,7 +16,6 @@
 
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -25,9 +24,8 @@ import subprocess  # noqa: E402
 import sys  # noqa: E402
 
 import torch  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
-
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 
 
 class TestLoadSglang(ModelTest):

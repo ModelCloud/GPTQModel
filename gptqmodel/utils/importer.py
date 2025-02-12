@@ -39,7 +39,6 @@ from . import BACKEND
 from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
-
 message_logged = False
 logger = setup_logger()
 

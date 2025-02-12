@@ -28,7 +28,6 @@ from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 
-
 exllama_import_exception = None
 try:
     from gptqmodel_exllama_kernels import make_q4, q4_matmul

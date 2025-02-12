@@ -27,7 +27,6 @@ from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 
-
 try:
     import triton
     import triton.language as tl

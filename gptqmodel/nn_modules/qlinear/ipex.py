@@ -28,7 +28,6 @@ from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
 
-
 logger = setup_logger()
 
 BITS_DTYPE_MAPPING = {
