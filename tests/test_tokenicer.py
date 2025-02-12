@@ -23,7 +23,9 @@ import tempfile
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from datasets import load_dataset
-from tokenicer.const import VALIDATE_JSON_FILE_NAME
+import json
+from tokenicer.const import VALIDATE_JSON_FILE_NAME, VALIDATE_ENCODE_PARAMS
+from tokenicer.config import ValidateConfig
 
 
 class TestTokenicer(unittest.TestCase):
@@ -94,3 +96,19 @@ class TestTokenicer(unittest.TestCase):
 
             result = os.path.isfile(validate_json_path)
             self.assertTrue(result, f"Save verify file failed: {validate_json_path} does not exist.")
+
+            with open(validate_json_path, 'r', encoding='utf-8') as f:
+                data = json.loads(f.read())
+
+            config = ValidateConfig.from_dict(data)
+
+            validate = True
+            for data in config.data:
+                input = data.input
+                tokenized = self.tokenizer.encode_plus(input, **VALIDATE_ENCODE_PARAMS)["input_ids"].tolist()[0]
+                if data.output != tokenized:
+                    validate = False
+                    break
+
+            self.assertTrue(validate, f"Expected validate='True' but got '{validate}'.")
+
