@@ -80,7 +80,7 @@ class ModelTest(unittest.TestCase):
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
     INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
-    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country", "the city"]
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
 

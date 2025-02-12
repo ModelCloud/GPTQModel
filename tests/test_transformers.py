@@ -24,7 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa
 
 class TestTransformersIntegration(unittest.TestCase):
     INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
-    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country", "the city"]
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
 
     def _test_load_quantized_model_gptq_v1(self, device_map):
         model_id_or_path = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
