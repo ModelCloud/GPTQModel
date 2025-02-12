@@ -275,8 +275,12 @@ class BaseQuantLinear(nn.Module):
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
-    # override me
+    # override me, to perform post-weight load to device init
     def post_init(self):
+        pass
+
+    # override me, to perform any torch.compile logic on the kernel pre forward
+    def compile(self):
         pass
 
 class PackableQuantLinear(BaseQuantLinear):

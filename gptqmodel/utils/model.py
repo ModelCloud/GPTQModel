@@ -39,14 +39,8 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from ..models._const import (
-    CPU,
-    DEVICE,
-    EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
-    EXPERT_INDEX_PLACEHOLDER,
-    SUPPORTED_MODELS,
-    SUPPORTS_MODULE_TYPES,
-)
+from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
+                             EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -58,7 +52,6 @@ from .importer import select_quant_linear
 from .logger import setup_logger
 from .progress import ProgressBar
 from .torch import torch_empty_cache
-
 
 logger = setup_logger()
 
@@ -117,6 +110,7 @@ def find_modules(module, layers=None, name=""):
     for layer in layers:
         if isinstance(module, layer):
             return {name: module}
+
     res = {}
     for name1, child in module.named_children():
         res.update(find_modules(child, layers=layers, name=name + "." + name1 if name != "" else name1))

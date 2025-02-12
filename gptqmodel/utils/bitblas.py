@@ -26,7 +26,6 @@ from .model import load_checkpoint_in_model_then_tie_weights
 from .progress import ProgressBar
 from .torch import torch_empty_cache
 
-
 logger = setup_logger()
 
 def prepare_model_for_bitblas_load(
