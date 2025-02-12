@@ -23,7 +23,7 @@ import tempfile
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from datasets import load_dataset
-from tokenicer.const import VERIFY_JSON_FILE_NAME
+from tokenicer.const import VALIDATE_JSON_FILE_NAME
 
 
 class TestTokenicer(unittest.TestCase):
@@ -90,7 +90,7 @@ class TestTokenicer(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.model.save(tmpdir)
-            verify_json_path = os.path.join(tmpdir, VERIFY_JSON_FILE_NAME)
+            verify_json_path = os.path.join(tmpdir, VALIDATE_JSON_FILE_NAME)
 
             result = os.path.isfile(verify_json_path)
             self.assertTrue(result, f"Save verify file failed: {verify_json_path} does not exist.")
