@@ -133,6 +133,7 @@ MODEL_MAP = {
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
     "stablelm_epoch": StableLMEpochGPTQ,
+    "stablelm": StableLMEpochGPTQ,
     "starcoder2": Starcoder2GPTQ,
     "mixtral": MixtralGPTQ,
     "qwen2": Qwen2GPTQ,
@@ -195,7 +196,8 @@ class GPTQModel:
             patch_vllm()
 
         is_quantized = False
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
+                   "quantization_config"):
             is_quantized = True
         else:
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
@@ -441,3 +443,26 @@ class GPTQModel:
             repo_type=repo_type,
         )
 
+    @classmethod
+    def eora_generate(cls,
+                      model_id_or_path: str,
+                      quantize_config: QuantizeConfig,
+                      quantized_weights: Dict[str, torch.Tensor],
+                      calibration_dataset: Union[
+                          List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+                      output_path: Union[str | os.PathLike],
+                      lora_rank: int = 64,
+                      batch_size: int = 1,
+                      calibration_enable_gpu_cache: bool = True,
+                      auto_gc: bool = True,
+                      ):
+        model = GPTQModel.load(model_id_or_path, quantize_config)
+        eora_weight = model.get_eora(calibration_dataset=calibration_dataset, batch_size=batch_size,
+                                     quantized_weights=quantized_weights, lora_rank=lora_rank,
+                                     calibration_enable_gpu_cache=calibration_enable_gpu_cache, auto_gc=auto_gc)
+
+        assert os.path.isfile(output_path), "output_path must be a file"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        torch.save(eora_weight, output_path)
+        return

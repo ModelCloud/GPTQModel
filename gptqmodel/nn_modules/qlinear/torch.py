@@ -71,22 +71,12 @@ class TorchQuantLinear(PackableQuantLinear):
             register_buffers=True,
             **kwargs)
 
+        self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
+
         if self.group_size != self.in_features:
             self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
         else:
             self.padded_infeatures = self.in_features
-
-        if self.bits in [2, 4, 8]:
-            self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
-        elif self.bits == 3:
-            self.wf = torch.tensor(
-                [
-                    [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
-                    [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
-                    [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
-                ],
-                dtype=torch.int32,
-            ).reshape(1, 3, 12)
 
     def post_init(self):
         if self.padded_infeatures != self.in_features:
@@ -99,8 +89,30 @@ class TorchQuantLinear(PackableQuantLinear):
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
+        if self.bits in [2, 4, 8]:
+            self.register_buffer(
+                "wf",
+                torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0).to(device=self.g_idx.device),
+            )
+        elif self.bits == 3:
+            self.register_buffer(
+                "wf",
+                torch.tensor(
+                    [
+                        [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
+                        [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
+                        [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
+                    ],
+                    dtype=torch.int32,
+                ).reshape(1, 3, 12).to(device=self.g_idx.device)
+            )
         super().post_init()
 
+        self.wf = self.wf.to(device=self.qweight.device)
+
+    def compile(self):
+        # compile dequantize
+        self.dequantize = torch.compile(self.dequantize)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
@@ -133,22 +145,18 @@ class TorchQuantLinear(PackableQuantLinear):
         self.scales = None
 
     def dequantize_weight(self, num_itr=1):
-        if self.wf.device != self.qzeros.device:
-            self.wf = self.wf.to(self.qzeros.device)
-
         if self.bits in [2, 4, 8]:
-            dtype = torch.int16 if self.bits == 8 else torch.int8
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf.unsqueeze(0),
-            ).to(dtype)
+            ).to(self.dequant_dtype)
             zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
 
             weight = torch.bitwise_and(
                 torch.bitwise_right_shift(
                     torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
                     self.wf.unsqueeze(-1),
-                ).to(dtype),
+                ).to(self.dequant_dtype),
                 self.maxq
             )
         elif self.bits == 3:
@@ -200,7 +208,7 @@ def dequantize_model(model: nn.Module):
         if isinstance(module, TorchQuantLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
+            new_module.weight = nn.Parameter(module.dequantize().T.detach().to("cpu", torch.float16))
             new_module.bias = module.bias
 
             # Replace the module in the model

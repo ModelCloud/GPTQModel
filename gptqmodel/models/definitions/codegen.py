@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class CodeGenGPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.ln_f"]
+    pre_lm_head_norm_module = "transformer.ln_f"
 
     layers_node = "transformer.h"
     layer_type = "CodeGenBlock"

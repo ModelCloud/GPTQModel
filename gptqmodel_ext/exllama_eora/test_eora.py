@@ -1,8 +1,6 @@
-import time
-
 import torch
 # from eora import fused_concurrent, fused_sequential, cublas_reference, gptq_gemm_eora, gptq_gemm
-from eora import gptq_gemm, gptq_gemm_eora
+from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_lora
 
 m = 1
 k = 4096
@@ -27,5 +25,5 @@ ax = x @ eora_a
 
 def test_eora_kernel():
     gptq_pytorch_out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit) + (ax @ eora_b)
-    gptq_eora_fused_out = gptq_gemm_eora(x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
+    gptq_eora_fused_out = gptq_gemm_lora(x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
     torch.testing.assert_close(gptq_pytorch_out, gptq_eora_fused_out, rtol=0.05, atol=0.5)  # 5 % relative tolerance, 0.5 absolute tolerance

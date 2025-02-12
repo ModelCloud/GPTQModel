@@ -23,12 +23,13 @@ import torch
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to
-from ..base import BaseGPTQModel
 from .._const import CPU
+from ..base import BaseGPTQModel
 
 
 class OvisGPTQ(BaseGPTQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
+    pre_lm_head_norm_module = "llm.model.norm"
 
     layers_node = "llm.model.layers"
     layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer"]
@@ -81,6 +82,7 @@ class OvisGPTQ(BaseGPTQModel):
     def prepare_dataset(
             self,
             calibration_dataset,
+            calibration_dataset_concat_size,
             batch_size: int = 1,
             tokenizer=None, ):
         calib_data = []

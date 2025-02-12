@@ -17,17 +17,21 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
+import unittest  # noqa: E402
 
-from gptqmodel.integration import integration  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
+import transformers  # noqa: E402
+from packaging.version import Version  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 
-class TestTransformersIntegration(ModelTest):
+class TestTransformersIntegration(unittest.TestCase):
+    INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
+
 
     @classmethod
-    def setUpClass(self):
-        integration.patch_hf()
+    def setUpClass(cls):
+        assert Version(transformers.__version__) > Version("4.48.99")
 
     def _test_load_quantized_model_gptq_v1(self, device_map):
         model_id_or_path = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
@@ -79,3 +83,26 @@ class TestTransformersIntegration(ModelTest):
 
     def test_quantize_cuda(self):
         self._test_quantize(device_map="cuda")
+
+    def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
+        # gptqmodel can auto init tokenizer internally
+        if keywords is None:
+            keywords = self.INFERENCE_RESULT_KEYWORDS
+        if tokenizer is None:
+            tokenizer = model.tokenizer
+
+        generated = self.generate(model, tokenizer, prompt).lower()
+        for k in keywords:
+            if k.lower() in generated:
+                self.assertTrue(True)
+                return
+        self.assertTrue(False, f"none of keywords were found in generated: {generated}")
+
+    def generate(self, model, tokenizer, prompt=None):
+        if prompt is None:
+            prompt = self.INFERENCE_PROMPT
+        inp = tokenizer(prompt, return_tensors="pt").to(model.device)
+        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=10, max_new_tokens=30)
+        output = tokenizer.decode(res[0])
+        print(f"Result is: >>\n{output}\n<<")
+        return output

@@ -331,11 +331,11 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
         k += 32;
     }
 
+    for (int r = offset_r; r < end_r; r++) {
 #pragma unroll
-    for (int j = 0; j < 4; ++j) {
+        for (int j = 0; j < 4; ++j) {
 #pragma unroll
-        for (int m = 0; m < m_count; m++) {
-            for (int r = offset_r; r < end_r; r++) {
+            for (int m = 0; m < m_count; m++) {
                 auto a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
                 auto a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
                 float product = a1 * a2;
@@ -2101,7 +2101,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
   return c;
 }
 
-torch::Tensor gptq_gemm_eora(torch::Tensor a, torch::Tensor b_q_weight,
+torch::Tensor gptq_gemm_lora(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
                         bool use_exllama, int64_t bit,

@@ -1,7 +1,7 @@
 import time
 
 import torch
-from eora import gptq_gemm, gptq_gemm_eora
+from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_lora
 
 m = 8
 k = 4096
@@ -71,30 +71,30 @@ def benchmark_gptq_kernel(m, weight, zeros, scales, idx, x, eora_b, eora_a):
     print(f"pytorch LORA baseline: {pytorch_lora_time} msec")
 
     ax = (x @ eora_a)
-    out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit)
+    out = gptq_gemm(x, weight, zeros, scales, idx, bit)
     for i in range(warmup_iterations):
-        out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit)
+        out = gptq_gemm(x, weight, zeros, scales, idx, bit)
     torch.cuda.synchronize()
     tick = time.time()
     for i in range(total_iterations):
-        out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit)
+        out = gptq_gemm(x, weight, zeros, scales, idx, bit)
     torch.cuda.synchronize()
     print(f"gptq: {(time.time() - tick) / total_iterations * 1000} msec")
 
     tick = time.time()
     for i in range(total_iterations):
-        out = gptq_gemm(x, weight, zeros, scales, idx, use_exllama, bit) + (ax @ eora_b)
+        out = gptq_gemm(x, weight, zeros, scales, idx, bit) + (ax @ eora_b)
     torch.cuda.synchronize()
     gptq_lora_pytorch_time = (time.time() - tick) / total_iterations * 1000
     print(f"gptq + pytorch for LORA: {gptq_lora_pytorch_time} msec")
 
     # gptq+eora kernel
     for i in range(warmup_iterations):
-        gptq_eora_out = gptq_gemm_eora(x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
+        gptq_eora_out = gptq_gemm_lora(x, weight, zeros, scales, idx, bit, ax, eora_b)
     torch.cuda.synchronize()
     tick = time.time()
     for i in range(total_iterations):
-        gptq_eora_out = gptq_gemm_eora(x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
+        gptq_eora_out = gptq_gemm_lora(x, weight, zeros, scales, idx, bit, ax, eora_b)
     torch.cuda.synchronize()
     gptq_fused_kernel_time = (time.time() - tick) / total_iterations * 1000
     print(f"gptq eora kernel: {gptq_fused_kernel_time} msec")
@@ -105,5 +105,5 @@ def benchmark_gptq_kernel(m, weight, zeros, scales, idx, x, eora_b, eora_a):
 
 
 benchmark_pytorch_reference(W, x, eora_b, eora_a)
-for i in range(1, 10):
+for i in range(1, 50):
     benchmark_gptq_kernel(i, weight, zeros, scales, idx, x, eora_b, eora_a)

@@ -12,6 +12,7 @@ class TeleChat2GPTQ(BaseGPTQModel):
     layer_type = "TelechatBlock"
     layers_node = "transformer.h"
     base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
+    pre_lm_head_norm_module = "transformer.ln_f"
 
     """
     If other frameworks are used for inference (such as VLLM),

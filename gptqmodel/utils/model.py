@@ -111,6 +111,7 @@ def find_modules(module, layers=None, name=""):
     for layer in layers:
         if isinstance(module, layer):
             return {name: module}
+
     res = {}
     for name1, child in module.named_children():
         res.update(find_modules(child, layers=layers, name=name + "." + name1 if name != "" else name1))
@@ -208,7 +209,7 @@ def make_quant(
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
 
-    raise ValueError("No compatible quant linear was found for this module: {module}")
+    raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
 
 
 def create_quant_layer(
@@ -923,35 +924,6 @@ def check_requires_version(requires_version, current_version):
     else:
         return None
 
-def normalize_tokenizer(config, tokenizer):
-    pad_token_id = config.pad_token_id
-    if not pad_token_id:
-        if tokenizer:
-            vocab = tokenizer.get_vocab()
-
-            # auto select the best pad token to use
-            for token in ["<|finetune_right_pad_id|>", "<|pad|>", "<pad>", "<|unk|>", "<unk>"]:
-                token_id = vocab.get(token)
-                if token_id is not None:
-                    pad_token_id = token_id
-                    break
-        else:
-            logger.warning(
-                "Model config does not have pad token mapped. Please pass in tokenizer to `quantize()` so GPTQModel can auto-select the best pad token.")
-
-        if not pad_token_id and isinstance(config.eos_token_id,
-                                           list):  # Llama-3.1-8B-Instruct's eos_token_id is a list
-            pad_token_id = config.eos_token_id[0]
-        elif not pad_token_id:
-            pad_token_id = config.eos_token_id
-
-    if pad_token_id is None:
-        raise ValueError(
-            "Calibration data requires model's `pad_token_id` or `eos_token_id` to be set: actual = `None`.")
-
-    tokenizer.pad_token_id = pad_token_id
-
-    return tokenizer
 
 class MODALITY(str, Enum):
     TEXT = "text"

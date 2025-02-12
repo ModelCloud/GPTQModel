@@ -24,6 +24,7 @@ SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly
 
 class Gemma2GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "Gemma2DecoderLayer"
