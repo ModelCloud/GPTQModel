@@ -41,11 +41,8 @@ from test_prepare_dataset import construct_ARC
 
 calibration_dataset = construct_ARC(nsamples=1024)
 eora_rank = 128
-model = GPTQModel.load(model_id, quant_config)
 
-eora_weight = model.get_eora(calibration_dataset, batch_size, quantized_weights, eora_rank)
-
-torch.save(eora_weight, eora_path)
-
+GPTQModel.lora_generate(model_id_or_path=model_id, quantize_config=quant_config, quantized_weights=quantized_weights,
+                        calibration_dataset=calibration_dataset, batch_size=batch_size, output_path=eora_path)
 eora_weight = torch.load(eora_path,  map_location='cpu')
 print(eora_weight)
