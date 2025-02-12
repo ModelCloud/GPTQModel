@@ -315,7 +315,6 @@ def ModelWriter(cls):
 
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
-            self.tokenizer.save(save_dir)
 
             # fixed this issue: https://github.com/huggingface/transformers/issues/35832
             saved_tokenizer_config = get_tokenizer_config(save_dir)
