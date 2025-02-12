@@ -26,7 +26,6 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
