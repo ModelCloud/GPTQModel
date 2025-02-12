@@ -296,7 +296,7 @@ class BaseGPTQModel(nn.Module):
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        calibration_dataset_concat_size: Optional[int] = None,
+        calibration_dataset_concat_size: Optional[int] = 2048,
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
