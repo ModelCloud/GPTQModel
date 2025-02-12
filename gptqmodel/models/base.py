@@ -30,17 +30,6 @@ from packaging.version import Version
 from tokenicer import Tokenicer
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
-from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
-from .loader import ModelLoader
-from .writer import (
-    QUANT_LOG_DAMP,
-    QUANT_LOG_FWD_TIME,
-    QUANT_LOG_LAYER,
-    QUANT_LOG_LOSS,
-    QUANT_LOG_MODULE,
-    QUANT_LOG_TIME,
-    ModelWriter,
-)
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
@@ -63,6 +52,18 @@ from ..utils.model import (
 )
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
+from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from .loader import ModelLoader
+from .writer import (
+    QUANT_LOG_DAMP,
+    QUANT_LOG_FWD_TIME,
+    QUANT_LOG_LAYER,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_MODULE,
+    QUANT_LOG_TIME,
+    ModelWriter,
+)
+
 
 # pytorch 2.6.0 fixes many compilation errors
 PYTORCH_MIN_VERFSION_WITH_COMPILE = Version("2.6.0")
