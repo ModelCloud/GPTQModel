@@ -794,7 +794,7 @@ class BaseGPTQModel(nn.Module):
                     ## Assign the quantized weight to the weight
                     gptq[name].layer.weight.data = quantized_weight.to(device=gptq[name].device)
                     ## Offload the quantized weight to CPU for EoRA
-                    quantized_weights['model.layers.%d.%s' % (index, name)] = quantized_weight.cpu()
+                    quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
 
 
                     if task is not None:
