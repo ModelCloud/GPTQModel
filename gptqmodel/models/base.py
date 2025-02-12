@@ -361,7 +361,9 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset, calibration_dataset_concat_size, batch_size)
+        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
+                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
+                                                   batch_size=batch_size)
 
         # Calculate the average length of the average input_ids
         total_input_ids_length = 0
