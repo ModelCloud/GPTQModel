@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import math
-from distutils.version import LooseVersion
 
 import torch
 import torch.nn as nn
@@ -25,7 +24,6 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
-
 
 logger = setup_logger()
 
@@ -107,9 +105,9 @@ class TorchQuantLinear(PackableQuantLinear):
                 ).reshape(1, 3, 12).to(device=self.g_idx.device)
             )
 
+    def compile(self):
         # compile dequantize
-        if LooseVersion(torch.__version__) >= LooseVersion("2.5.0"):
-            self.dequantize = torch.compile(self.dequantize)
+        self.dequantize = torch.compile(self.dequantize)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
