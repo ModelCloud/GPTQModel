@@ -607,7 +607,6 @@ class BaseGPTQModel(nn.Module):
                     sym = self.quantize_config.sym
                     mse = self.quantize_config.mse
 
-
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
                         layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
@@ -679,8 +678,8 @@ class BaseGPTQModel(nn.Module):
                             layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
                             if shared_kv_cache_dict.get(module_index) is None:
                                 shared_kv_cache_dict[module_index] = layer_output[-1]
-                            else:
-                                module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                        else:
+                            module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -787,18 +786,18 @@ class BaseGPTQModel(nn.Module):
                         if module.reuse_kv:
                             additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                with torch.no_grad():
-                    layer_output = move_to(
-                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
+                    with torch.no_grad():
+                        layer_output = move_to(
+                            module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
+                            cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
 
-                    del layer_input
-                    del additional_layer_inputs
-                    if num_batches > 1 and j == num_batches - 1:
-                        if auto_gc:
-                            torch_empty_cache()
+                        del layer_input
+                        del additional_layer_inputs
+                        if num_batches > 1 and j == num_batches - 1:
+                            if auto_gc:
+                                torch_empty_cache()
 
             if not is_lm_head_module:
                 layers[module_index] = self.post_quantize(module)
