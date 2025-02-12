@@ -17,7 +17,6 @@
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLLE_DEVICES"] = "0"
 
 import unittest  # noqa: E402
 import tempfile
