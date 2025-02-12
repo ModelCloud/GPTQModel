@@ -549,12 +549,6 @@ jobs:
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
-          if [ "${{ matrix.test_script }}" == "test_transformers" ]; then
-            echo "===== install transformers from git ====="
-            uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-            uv pip install -U git+https://github.com/huggingface/peft.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-            uv pip install -U git+https://github.com/huggingface/optimum.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-          fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
@@ -566,6 +560,15 @@ jobs:
           echo "===== install dist/whl ====="
           uv pip install git+https://github.com/ModelCloud/Tokenicer -U
           uv pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
+
+          if [ "${{ matrix.test_script }}" == "test_transformers" ]; then
+            echo "===== install peft from git ====="
+            uv pip install -U git+https://github.com/huggingface/peft.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+            echo "===== install optimum from git ====="
+            uv pip install -U git+https://github.com/huggingface/optimum.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+            echo "===== install transformers from git ====="
+            uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+          fi
 
           if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
             uv pip install numpy==1.26.3
