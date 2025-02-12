@@ -29,7 +29,6 @@ from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import Quantizer
 
-
 logger = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False
