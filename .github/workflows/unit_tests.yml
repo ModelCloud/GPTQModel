@@ -562,8 +562,6 @@ jobs:
           uv pip install dist/*.whl -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
 
           if [ "${{ matrix.test_script }}" == "test_transformers" ]; then
-            echo "===== install peft from git ====="
-            uv pip install -U git+https://github.com/huggingface/peft.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
             echo "===== install optimum from git ====="
             uv pip install -U git+https://github.com/huggingface/optimum.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
             echo "===== install transformers from git ====="
