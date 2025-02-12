@@ -566,6 +566,7 @@ jobs:
             uv pip install -U git+https://github.com/huggingface/optimum.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
+            uv pip install torch==2.5.1 # fix optimum will install torch 2.6.0
           fi
 
           if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
