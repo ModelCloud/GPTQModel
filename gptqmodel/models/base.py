@@ -692,7 +692,7 @@ class BaseGPTQModel(nn.Module):
                         sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
                         mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
 
-                    tmp = GPTQ(subset[name], name=name)
+                    tmp = GPTQ(subset[name])
                     gptq[name] = tmp
 
                     # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
