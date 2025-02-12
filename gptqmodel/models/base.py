@@ -52,7 +52,7 @@ from ..utils.model import (
 )
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
-from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES, CALIBRATION_DATASET_CONCAT_CHAR
 from .loader import ModelLoader
 from .writer import (
     QUANT_LOG_DAMP,
@@ -171,7 +171,8 @@ class BaseGPTQModel(nn.Module):
     def prepare_dataset(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
-        calibration_dataset_concat_size: Optional[int] = 2048,
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
     ):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
@@ -224,7 +225,7 @@ class BaseGPTQModel(nn.Module):
             attention_mask_buff = []
             current_length = 0
 
-            new_line = self.tokenizer(" ", return_tensors="pt")
+            new_line = self.tokenizer(CALIBRATION_DATASET_CONCAT_CHAR, return_tensors="pt")
             new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
             new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
             new_line_input_ids_len = len(new_line_input_ids)
@@ -296,7 +297,8 @@ class BaseGPTQModel(nn.Module):
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        calibration_dataset_concat_size: Optional[int] = 2048,
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
