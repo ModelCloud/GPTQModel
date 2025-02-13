@@ -204,6 +204,8 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook =  processor.preprocess_fwd_hook(name)
                         else:
+                            # TODO FIXME: do we even need to hook into modules that are not quantizable?
+                            assert(f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
                             handle.append(subset[name].register_forward_hook(processor.preprocess_fwd_hook(name)))
 
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
