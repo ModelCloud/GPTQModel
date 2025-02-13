@@ -27,7 +27,7 @@ class LoopProcessor:
     def create_task(self, name: str):
         pass
 
-    def task_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass
 
     # do work and return processor state which will be merged into looper state

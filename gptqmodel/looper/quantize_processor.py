@@ -54,7 +54,7 @@ class GPTQProcessor(LoopProcessor):
         )
         return tmp
 
-    def task_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             g = gptq[name]  # noqa: F821
