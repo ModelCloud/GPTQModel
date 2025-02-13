@@ -277,7 +277,6 @@ class BaseGPTQModel(nn.Module):
 
         return new_calibration_dataset_batched
 
-    @torch.no_grad()
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
@@ -292,7 +291,7 @@ class BaseGPTQModel(nn.Module):
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
         auto_gc: bool = True,
-    ) -> List[Dict[str, str]]:
+    ) -> Tuple[List[Dict[str, str]], Dict[str, torch.Tensor]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
@@ -618,6 +617,7 @@ class BaseGPTQModel(nn.Module):
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
+        quantized_weights = {}
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
             if is_lm_head_module:
@@ -737,16 +737,17 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                    # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                    if hasattr(module, "reuse_kv"):
-                        if module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                    with torch.no_grad():
+                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(module_index) is None:
-                            shared_kv_cache_dict[module_index] = layer_output[-1]
-                    else:
-                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(module_index) is None:
+                                shared_kv_cache_dict[module_index] = layer_output[-1]
+                        else:
+                            module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -783,12 +784,19 @@ class BaseGPTQModel(nn.Module):
 
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
-                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
+                    ## Need to return the quantized_weight for offloading
+                    scale, zero, g_idx, duration, avg_loss, damp_percent, quantized_weight = gptq[name].quantize(
                         percdamp=damp_percent,
                         group_size=group_size,
                         actorder=desc_act,
                         static_groups=static_groups,
                     )
+                    ## Assign the quantized weight to the weight
+                    gptq[name].layer.weight.data = quantized_weight.to(device=gptq[name].device)
+                    ## Offload the quantized weight to CPU for EoRA
+                    quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
+
+
                     if task is not None:
                         task.get_logger().report_scalar(
                             title='Quantization Loss',
@@ -846,11 +854,12 @@ class BaseGPTQModel(nn.Module):
                         if module.reuse_kv:
                             additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                    layer_output = move_to(
-                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
+                    with torch.no_grad():
+                        layer_output = move_to(
+                            module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
+                            cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
 
                     del layer_input
                     del additional_layer_inputs
@@ -910,7 +919,8 @@ class BaseGPTQModel(nn.Module):
         if auto_gc:
             torch_empty_cache()
 
-        return self.quant_log
+        ## need to return quantized_weight for EoRA
+        return self.quant_log, quantized_weights
 
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):

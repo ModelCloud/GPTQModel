@@ -110,7 +110,7 @@ def evalplus_make_table(results):
 
 def lm_eval(
         model=None,
-        model_args: str = "",
+        model_args: Union[str, dict] = "",
         model_name: Optional[str] = "hf",
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,

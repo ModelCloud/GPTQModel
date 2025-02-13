@@ -19,6 +19,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
@@ -40,7 +41,7 @@ class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
-
+    SUPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
 
@@ -54,6 +55,7 @@ class TorchQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs,
     ):
         super().__init__(
@@ -65,6 +67,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -104,6 +107,11 @@ class TorchQuantLinear(PackableQuantLinear):
                 ).reshape(1, 3, 12).to(device=self.g_idx.device)
             )
 
+        print(f"Call super post_init()")
+        super().post_init()
+
+        self.wf = self.wf.to(device=self.qweight.device)
+
     def compile(self):
         # compile dequantize
         self.dequantize = torch.compile(self.dequantize)
@@ -114,18 +122,22 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        out = self._forward(x, x.dtype)
-        out = out.reshape(out_shape)
+        out = self._forward(x, x.dtype, out_shape)
         return out
 
-    def _forward(self, x, x_dtype):
+    def _forward(self, x, x_dtype, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self.dequantize(num_itr=num_itr)
+        weights = self.dequantize_weight(num_itr=num_itr)
 
-        out = torch.matmul(x, weights).to(x_dtype)
+        out = torch.matmul(x, weights).reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+
+        return out.to(x_dtype)
 
     # clear gptq only weights: useful in de-quantization
     def _empty_gptq_only_weights(self):
@@ -134,8 +146,8 @@ class TorchQuantLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-    def dequantize(self, num_itr=1):
-        if self.bits in [4, 8, 2]:
+    def dequantize_weight(self, num_itr=1):
+        if self.bits in [2, 4, 8]:
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf.unsqueeze(0),

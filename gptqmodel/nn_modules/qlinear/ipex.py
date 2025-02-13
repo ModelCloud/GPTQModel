@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
@@ -101,7 +102,7 @@ class IPEXQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-
+    SUPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
 
@@ -115,6 +116,7 @@ class IPEXQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         kernel_switch_threshold=128,
         training=False,
         **kwargs,
@@ -128,6 +130,7 @@ class IPEXQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -244,6 +247,10 @@ class IPEXQuantLinear(PackableQuantLinear):
         out = torch.matmul(x, weights.to(x.dtype))
         out = out.to(x_dtype)
         out = out.reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
 
