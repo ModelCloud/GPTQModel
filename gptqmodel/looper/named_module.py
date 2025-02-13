@@ -11,6 +11,8 @@ class NamedModule(torch.nn.Module):
         self.full_name = full_name
         self.layer_index = layer_index
 
+        self.state = {}
+
     def __getattr__(self, item: str):
         if item == "name":
             return self.name
@@ -19,4 +21,4 @@ class NamedModule(torch.nn.Module):
         elif item == "layer_index":
             return self.layer_index
 
-        return self.module.__getattr__(item)
+        return getattr(self.module, item)
