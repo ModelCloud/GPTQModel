@@ -8,11 +8,11 @@ from gptqmodel import QuantizeConfig
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, calibration_data, quantize_config: QuantizeConfig):
+    def __init__(self, calibration_data, qcfg: QuantizeConfig):
         self.inputs_cache: List[Tensor] = []
         self.tasks = []
         self.calibration_data = calibration_data
-        self.quantize_config = quantize_config
+        self.qcfg = qcfg
 
 
     # called first

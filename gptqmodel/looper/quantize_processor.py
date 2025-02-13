@@ -13,10 +13,10 @@ from gptqmodel.utils.progress import ProgressBar
 
 logger = setup_logger()
 
-class QuantizeProcessor(LoopProcessor):
-    def __init__(self, calibration_data, quantize_config: QuantizeConfig):
+class GPTQProcessor(LoopProcessor):
+    def __init__(self, calibration_data, qcfg: QuantizeConfig):
 
-        super().__init__(calibration_data, quantize_config)
+        super().__init__(calibration_data=calibration_data, qcfg=qcfg)
         self.durations = []
         self.avg_losses = []
         self.module_names = []
@@ -26,15 +26,15 @@ class QuantizeProcessor(LoopProcessor):
         pass
 
     def create_task(self, module: Module, name: str, layer_name: str, buffered_fwd: bool):
-        bits = self.quantize_config.bits
-        sym = self.quantize_config.sym
-        mse = self.quantize_config.mse
+        bits = self.qcfg.bits
+        sym = self.qcfg.sym
+        mse = self.qcfg.mse
 
         # dynamic overrides
-        if self.quantize_config.dynamic is not None:
-            bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
-            sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
-            mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
+        if self.qcfg.dynamic is not None:
+            bits = self.qcfg.dynamic_get(layer_name, "bits", bits)
+            sym = self.qcfg.dynamic_get(layer_name, "sym", sym)
+            mse = self.qcfg.dynamic_get(layer_name, "mse", mse)
 
         tmp = GPTQ(module)
 
@@ -66,17 +66,17 @@ class QuantizeProcessor(LoopProcessor):
         # pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
         gptq = self.tasks
 
-        group_size = self.quantize_config.group_size
-        desc_act = self.quantize_config.desc_act
-        damp_percent = self.quantize_config.damp_percent
-        static_groups = self.quantize_config.static_groups
+        group_size = self.qcfg.group_size
+        desc_act = self.qcfg.desc_act
+        damp_percent = self.qcfg.damp_percent
+        static_groups = self.qcfg.static_groups
 
         # dynamic overrides
-        if self.quantize_config.dynamic is not None:
-            group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
-            desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
-            damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", damp_percent)
-            static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
+        if self.qcfg.dynamic is not None:
+            group_size = self.qcfg.dynamic_get(layer_name, "group_size", group_size)
+            desc_act = self.qcfg.dynamic_get(layer_name, "desc_act", desc_act)
+            damp_percent = self.qcfg.dynamic_get(layer_name, "damp_percent", damp_percent)
+            static_groups = self.qcfg.dynamic_get(layer_name, "static_groups", static_groups)
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
@@ -112,8 +112,8 @@ class QuantizeProcessor(LoopProcessor):
         stat = {QUANT_LOG_LAYER: module_index, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                 QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
                 QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
-        if self.quantize_config.dynamic is not None:
-            stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
+        if self.qcfg.dynamic is not None:
+            stat["dynamic"] = self.qcfg.dynamic_get(layer_name=layer_name)
 
         self.quant_log.append(stat)
         logger.info(stat)
