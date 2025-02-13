@@ -196,7 +196,7 @@ class ModuleLooper():
                         sub_module._gptqmodel_parent_name = layer_name
                         sub_module._gptqmodel_parent_index = module_index
 
-                        processor.preprocess(subset[name], buffered_fwd)
+                        processor.preprocess(sub_module, buffered_fwd)
 
                     for name in skipped_modules:
                         subset.pop(name)
