@@ -55,8 +55,10 @@ class Lora(Adapter):
                 from huggingface_hub import hf_hub_download
                 result = self.parse_url(self.path)
                 if len(result) == 3:
-                    lora_path = hf_hub_download(repo_id=result[0],revision =result[1], filename=result[2])
+                    print(f"downloading adapter from huggingface. repo: {result[0]} revision: {result[1]} file: {result[2]}")
+                    lora_path = hf_hub_download(repo_id=result[0], revision=result[1], filename=result[2])
                 elif len(result) == 1:
+                    print(f"downloading adapter from link `{self.path}`")
                     import requests
                     response = requests.get(self.path, stream=True)
                     lora_path = "lora.safetensors"
