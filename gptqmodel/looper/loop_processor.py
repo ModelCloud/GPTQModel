@@ -1,14 +1,19 @@
-from typing import Dict, List
-
+from typing import Dict, List, Tuple, Callable
+import torch
 from torch import Tensor
 from torch.nn import Module
 
+from gptqmodel import QuantizeConfig
+
+
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    inputs_cache: List[Tensor] = []
-
-    def __init__(self, calibration_data):
+    def __init__(self, calibration_data, quantize_config: QuantizeConfig):
+        self.inputs_cache: List[Tensor] = []
+        self.tasks = []
         self.calibration_data = calibration_data
+        self.quantize_config = quantize_config
+
 
     # called first
     def preprocess(self, module: Module):
@@ -18,6 +23,12 @@ class LoopProcessor:
     # may be called multiple times due to batch
     def receive_inputs(self, inputs: Tensor):
         self.inputs_cache += inputs
+
+    def create_task(self, name: str):
+        pass
+
+    def task_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        pass
 
     # do work and return processor state which will be merged into looper state
     def process(self, module: Module, state: Dict[str, ]):
