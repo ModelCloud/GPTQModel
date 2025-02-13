@@ -180,6 +180,8 @@ class ModuleLooper():
 
                 for index, names in enumerate(modules):
                     subset = {n: full[n] for n in names if n in full}
+                    if not subset:
+                        raise ValueError("no matched module was found, is this module quantable?")
                     skipped_modules = []
 
                     for name in subset:
