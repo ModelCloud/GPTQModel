@@ -4,6 +4,7 @@ from typing import Tuple
 import torch
 from torch import nn
 
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
@@ -193,12 +194,9 @@ class ModuleLooper():
                                 continue
 
                         # gptq task is created and stored inside processor
-                        sub_module = subset[name]
-                        sub_module._gptqmodel_name = name
-                        sub_module._gptqmodel_full_name = layer_name
-                        sub_module._gptqmodel_layer_index = module_index
-
-                        processor.preprocess(sub_module, buffered_fwd)
+                        named_mdule = NamedModule(subset[name], name=name, full_name=layer_name, layer_index=module_index)
+                        subset[name] = named_mdule
+                        processor.preprocess(named_mdule, buffered_fwd)
 
                     for name in skipped_modules:
                         subset.pop(name)

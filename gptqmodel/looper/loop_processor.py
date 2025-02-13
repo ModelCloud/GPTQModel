@@ -4,6 +4,7 @@ from torch import Tensor
 from torch.nn import Module
 
 from gptqmodel import QuantizeConfig
+from gptqmodel.looper.named_module import NamedModule
 
 
 # LoopProcessor is a singleton(), not per module instance
@@ -16,7 +17,7 @@ class LoopProcessor:
 
 
     # called first
-    def preprocess(self, module: Module, **kwargs):
+    def preprocess(self, module: NamedModule, **kwargs):
         pass
 
     # called after every module generate
@@ -31,16 +32,16 @@ class LoopProcessor:
         pass
 
     # do work and return processor state which will be merged into looper state
-    def process(self, module: Module, state: Dict[str, ]) -> Dict[str, Any]:
+    def process(self, module: NamedModule, state: Dict[str, ]) -> Dict[str, Any]:
         pass
 
     # step after `process` and before post_process generate()
-    def post_process(self, module: Module, state: Dict[str,]):
+    def post_process(self, module: NamedModule, state: Dict[str,]):
         pass
 
     def clear_input(self):
         self.inputs_cache = []
 
     # last step, after all loop processor is called
-    def finalize(self, module:Module, state: Dict[str,]):
+    def finalize(self, module: NamedModule, state: Dict[str,]):
         pass
