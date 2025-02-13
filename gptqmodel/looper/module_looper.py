@@ -180,9 +180,11 @@ class ModuleLooper():
                 attention_masks, layer_input_kwargs, layer_inputs, layer_outputs, position_ids = processor.inputs_cache
 
                 for index, names in enumerate(modules):
-                    subset = {n: full[n] for n in names if n in full}
-                    if not subset:
-                        raise ValueError("no matched module was found, is this module quantable?")
+                    subset = {}
+                    for n in names:
+                        assert n in full, f"module {n} has wrong type, check your config"
+                        subset[n] = full[n]
+
                     skipped_modules = []
 
                     for name in subset:
