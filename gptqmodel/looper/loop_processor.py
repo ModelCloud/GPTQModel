@@ -3,9 +3,12 @@ from typing import Dict, List
 from torch import Tensor
 from torch.nn import Module
 
-
+# LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     inputs_cache: List[Tensor] = []
+
+    def __init__(self, calibration_data):
+        self.calibration_data = calibration_data
 
     # called first
     def preprocess(self, module: Module):
