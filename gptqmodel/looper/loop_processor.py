@@ -31,8 +31,8 @@ class LoopProcessor:
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass
 
-    # do work and return processor state which will be merged into looper state
-    def process(self, module: NamedModule, state: Dict[str, ]) -> Dict[str, Any]:
+    # do work and return processor.self state which will updated/merged
+    def process(self, module: NamedModule):
         pass
 
     # step after `process` and before post_process generate()

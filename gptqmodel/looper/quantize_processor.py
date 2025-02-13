@@ -3,7 +3,6 @@ import torch
 from gptqmodel import QuantizeConfig
 from gptqmodel.looper.loop_processor import LoopProcessor
 from torch.nn import Module
-from torch import Tensor
 
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
@@ -59,7 +58,7 @@ class GPTQProcessor(LoopProcessor):
             g.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: NamedModule, state: Dict[str, ], pb: ProgressBar , fwd_time: int):
+    def process(self, module: NamedModule, pb: ProgressBar):
         # pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
         gptq = self.tasks
 
@@ -77,7 +76,7 @@ class GPTQProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        scale, zero, g_idx, duration, avg_loss, damp_percent, q_full_weight = gptq[module.name].quantize(
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent  = gptq[module.name].quantize(
             percdamp=damp_percent,
             group_size=group_size,
             actorder=desc_act,
@@ -109,7 +108,7 @@ class GPTQProcessor(LoopProcessor):
 
         stat = {QUANT_LOG_LAYER: module.layer_index, QUANT_LOG_MODULE: module.name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                 QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
-                QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
+                QUANT_LOG_FWD_TIME: f"{module.state.get("fwd_time"):.3f}"}
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
@@ -124,22 +123,29 @@ class GPTQProcessor(LoopProcessor):
         # )
         gptq[module.name].free()
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        return {
+        module.state.update({
+            "wq": wq, # fp16, not int4 qweight
             "scale": scale,
             "zero": zero,
             "g_idx": g_idx,
-            "duration": duration,
-            "avg_loss": avg_loss,
-            "damp_percent": damp_percent,
-            "q_full_weight": q_full_weight,
-        }
+            "duration": duration, # stat
+            "avg_loss": avg_loss, # stat
+            "damp_percent": damp_percent, # stat
+        })
 
     def post_process(self, module: NamedModule, state: Dict[str,]):
-        module.weight.data = state["q_full_weight"] # module.layer.weight or module.weight?
+        # prepare for module.foward post generate
+        module.weight.data = state["wq"] # module.layer.weight or module.weight?
         pass
 
     def clear_input(self):
         self.inputs_cache = []
 
     def finalize(self, module: NamedModule, state: Dict[str,]):
-        pass
+        # generate complete, safe to move to cpu
+        module.weight.data = None
+        wq = module.state["wq"]
+        wq = wq.cpu()
+        module.weight.data = wq
+        module.state["wq"] = wq
+

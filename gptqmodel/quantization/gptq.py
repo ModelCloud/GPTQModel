@@ -300,13 +300,20 @@ class GPTQ:
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
-        if Q.shape != self.module.weight.shape:
-            self.module.weight.data = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        else:
-            self.module.weight.data = Q.type_as(self.module.weight.data)
+        # if Q.shape != self.module.weight.shape:
+        #     self.module.weight.data = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+        # else:
+        #     self.module.weight.data = Q.type_as(self.module.weight.data)
+        #
+        # # move back to self.dev
+        # self.module.weight.data = self.module.weight.data.to(device=self.device)
 
-        # move back to self.dev
-        self.module.weight.data = self.module.weight.data.to(device=self.device)
+        if Q.shape != self.module.weight.shape:
+            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+        else:
+            Q = Q.type_as(self.module.weight.data)
+
+        Q = Q.to(device=self.device)
 
         # if os.environ.get("DEBUG"):
         #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
@@ -319,7 +326,7 @@ class GPTQ:
         zero = torch.cat(zero, dim=1)
 
         duration = time.time() - start
-        return scale, zero, g_idx, duration, avg_loss, percdamp, Q
+        return Q, scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
         # if os.environ.get("DEBUG"):

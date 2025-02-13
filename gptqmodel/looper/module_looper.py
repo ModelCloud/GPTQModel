@@ -20,9 +20,6 @@ class ModuleLooper():
         self.processors = []
         self.model = None
 
-        self.state = dict()
-        pass
-
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)
@@ -254,6 +251,8 @@ class ModuleLooper():
                     fwd_end = time.time()
                     fwd_time = fwd_end - fwd_start
 
+                    module.state.update({"fwd_time": fwd_time})
+
                     for h in handle:
                         h.remove()
 
@@ -261,12 +260,10 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = None
 
+                    for name_index, name in enumerate(subset):
+                        processor.process(module=subset[name])
+
                     if index == len(layer_modules) - 1:
                         if auto_gc:
                             torch_empty_cache()
-
-                    for name_index, name in enumerate(subset):
-                        # TODO This doesn't update the state correctly.
-                        # We want forloop{ state.update(A_processor) -> state.update(B_processor)}
-                        self.state.update(processor.process(module, self.state))
 
