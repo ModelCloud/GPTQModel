@@ -137,9 +137,9 @@ class TorchQuantLinear(PackableQuantLinear):
             original_first_dim = x.shape[0]
             x = F.pad(x, pad_size, "constant", 0)  # pad with 0
 
-        now = time.time()
+        # now = time.time()
         out = self._forward(x, x.dtype)
-        print(f"out forward time={time.time()-now}")
+        # print(f"out forward time={time.time()-now}")
 
         if self.compile_forward:
             # restore shape
