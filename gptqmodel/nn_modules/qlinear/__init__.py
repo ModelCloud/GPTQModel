@@ -163,7 +163,7 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
             # )
 
-    # all kernels should override this method
+    # override me, to perform post-weight load to device init
     def post_init(self):
         if self.adapter is not None:
             self.adapter.post_init(weight_key=self.name, device=self.qweight.device)
@@ -325,10 +325,6 @@ class BaseQuantLinear(nn.Module):
 
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
-
-    # override me, to perform post-weight load to device init
-    def post_init(self):
-        pass
 
     # override me, to perform any torch.compile logic on the kernel pre forward
     def compile(self):
