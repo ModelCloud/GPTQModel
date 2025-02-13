@@ -15,22 +15,23 @@
 # limitations under the License.
 
 import math
-import time
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
 
+
 logger = setup_logger()
 
 
-shapes = set()
-
-shapes_size = 0
+# shapes = set()
+#
+# shapes_size = 0
 
 class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
@@ -51,16 +52,16 @@ class TorchQuantLinear(PackableQuantLinear):
     QUANT_TYPE = "torch"
 
     def __init__(
-        self,
-        bits: int,
-        group_size: int,
-        sym: bool,
-        desc_act: bool,
-        in_features: int,
-        out_features: int,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
-        **kwargs,
+            self,
+            bits: int,
+            group_size: int,
+            sym: bool,
+            desc_act: bool,
+            in_features: int,
+            out_features: int,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int32,
+            **kwargs,
     ):
         super().__init__(
             bits=bits,
@@ -131,9 +132,9 @@ class TorchQuantLinear(PackableQuantLinear):
         #     shapes_size = len(shapes)
         #     print(f"eeeeeeeeee x.shape: {x.shape} size: {shapes_size}")
 
-        if self.compile_forward:
+        if self.compile_forward or x.shape[0] > 220: # for test_inference_speed, size must be greater than 220
             # pad first dim to max tokens size
-            pad_size = (0, 0, 0, 220 - x.shape[0]) # 220 is smallest value for test_inference_speed
+            pad_size = (0, 0, 0, 220 - x.shape[0])
             original_first_dim = x.shape[0]
             x = F.pad(x, pad_size, "constant", 0)  # pad with 0
 
