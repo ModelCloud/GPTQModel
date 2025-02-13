@@ -75,6 +75,10 @@ class InferenceSpeed(unittest.TestCase):
                 elapsed_time = end_time - start_time
                 times.append(elapsed_time)
 
+                # for i in range(len(result)):
+                #     print("---")
+                #     print(tokenizer.decode(result[i]).replace("\n", "\\n"))
+
                 for j in range(result.shape[0]):
                     new_tokens = result[j][inp['input_ids'].shape[1]:]
                     new_token_count = len(new_tokens)
@@ -99,6 +103,12 @@ class InferenceSpeed(unittest.TestCase):
             start_time = time.time()
             result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
             end_time = time.time()
+
+            # for i in range(len(result)):
+            #     print("---")
+            #     print(tokenizer.decode(result[i]).replace("\n", "\\n"))
+
+
             elapsed_time = end_time - start_time
             times.append(elapsed_time)
 
