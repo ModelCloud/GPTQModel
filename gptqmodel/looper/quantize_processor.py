@@ -15,7 +15,6 @@ logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
     def __init__(self, calibration_data, qcfg: QuantizeConfig):
-
         super().__init__(calibration_data=calibration_data, qcfg=qcfg)
         self.durations = []
         self.avg_losses = []

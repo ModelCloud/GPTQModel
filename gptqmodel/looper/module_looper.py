@@ -190,8 +190,8 @@ class ModuleLooper():
                                 skipped_modules.append(name)
                                 continue
 
-                        processor.tasks[name] = processor.create_task(name, layer_name, self.quantize_config)
-
+                        # gptq task is created and stored inside processor
+                        processor.preprocess(subset[name], name, layer_name, buffered_fwd)
 
                     for name in skipped_modules:
                         subset.pop(name)
