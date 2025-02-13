@@ -5,6 +5,8 @@ from typing import Dict, Union
 import safetensors
 import torch
 
+LORA_MERGED_WEIGHT_PATHS = [None, ""]
+
 # TODO FIX ME: cache of adapter tensors loaded from disk
 adapter_load_cache = None
 
@@ -19,7 +21,7 @@ class Adapter():
         pass
 
     # override me
-    def post_init(self, weight_key: str, device: torch.device):
+    def post_init(self, weight_key: str, device: torch.device, **kwargs):
         pass
 
 
@@ -36,7 +38,13 @@ class Lora(Adapter):
         #out = out + ((x @ self.lora_A) @ self.lora_B)
         return out.add_((x @ self.lora_A) @ self.lora_B)
 
-    def post_init(self, weight_key: str, device:torch.device):
+    def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
+        # we need since lora A/B weights may be merged into model tensors and not separate
+        if lora_A is not None and lora_B is not None:
+            print(f"Adapter has preloaded lora_A and lora_B")
+            self.lora_A, self.lora_B = lora_A, lora_B
+            return
+
         global adapter_load_cache
         if adapter_load_cache is None:
             if os.path.isfile(self.path):

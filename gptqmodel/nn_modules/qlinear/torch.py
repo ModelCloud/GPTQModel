@@ -106,6 +106,8 @@ class TorchQuantLinear(PackableQuantLinear):
                     dtype=torch.int32,
                 ).reshape(1, 3, 12).to(device=self.g_idx.device)
             )
+
+        print(f"Call super post_init()")
         super().post_init()
 
         self.wf = self.wf.to(device=self.qweight.device)

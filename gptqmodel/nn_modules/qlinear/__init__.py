@@ -22,7 +22,7 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
-from gptqmodel.adapter.adapter import Adapter
+from gptqmodel.adapter.adapter import Adapter, LORA_MERGED_WEIGHT_PATHS
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -137,18 +137,21 @@ class BaseQuantLinear(nn.Module):
 
         # load adapter if any
         if adapter is not None:
-            # self.register_buffer(
-            #     "lora_A",
-            #     t.zeros((in_features, 128), dtype=t.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-            # )
-            #
-            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-            # self.register_buffer(
-            #     "lora_B",
-            #     t.zeros((128, out_features), dtype=t.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-            # )
+            if adapter.path in LORA_MERGED_WEIGHT_PATHS:
+                print(f"Adapter (merged weights) lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
 
-            print(f"Adapter lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
+                # pre allocate buffers so accelerate can auto-bind merged weights in same tensor file as model
+                self.register_buffer(
+                    "lora_A",
+                    t.zeros((in_features, adapter.rank), dtype=t.float16),
+                )
+
+                self.register_buffer(
+                    "lora_B",
+                    t.zeros((adapter.rank, out_features), dtype=t.float16),
+                )
+            else:
+                print(f"Adapter lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
 
             # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
             # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
@@ -166,7 +169,11 @@ class BaseQuantLinear(nn.Module):
     # override me, to perform post-weight load to device init
     def post_init(self):
         if self.adapter is not None:
-            self.adapter.post_init(weight_key=self.name, device=self.qweight.device)
+            self.adapter.post_init(
+                weight_key=self.name,
+                device=self.qweight.device,
+                lora_A=getattr(self, "lora_A", None),
+                lora_B=getattr(self, "lora_B", None))
 
     @classmethod
     # custom quant linear class can override this and add custom checks
