@@ -5,7 +5,7 @@ from torch.nn import Module
 
 
 class LoopProcessor:
-    inputs_cache = []
+    inputs_cache: List[Tensor] = []
 
     # called first
     def preprocess(self, module: Module):
