@@ -134,12 +134,12 @@ class GPTQProcessor(LoopProcessor):
             "q_full_weight": q_full_weight,
         }
 
-    def post_process(self, module: Module, state: Dict[str,]):
-        module.q_full_weight
+    def post_process(self, module: NamedModule, state: Dict[str,]):
+        module.weight.data = state["q_full_weight"] # module.layer.weight or module.weight?
         pass
 
     def clear_input(self):
         self.inputs_cache = []
 
-    def finalize(self, module:Module, state: Dict[str,]):
+    def finalize(self, module: NamedModule, state: Dict[str,]):
         pass
