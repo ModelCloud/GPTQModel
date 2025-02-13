@@ -2,6 +2,7 @@ import torch
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.eora import get_eora
+from gptqmodel.models.auto import EVAL
 
 bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
@@ -15,6 +16,7 @@ quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
 fake_quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
 eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128/eora.pt"
 eora_path2 = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
+eora_path3 = "/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/eora.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
 flag1 = False
@@ -38,12 +40,16 @@ if flag1:
 # test post-quant inference
 flag2 = False
 if flag2:
-  model = GPTQModel.load(quant_path)
+  # model = GPTQModel.load(quant_path)
 
-  result = model.generate("Uncovering deep insights begins with")[0]
-  print(result)
+  # result = model.generate("Uncovering deep insights begins with")[0]
+  # result = model.generate("Uncovering deep insights begins with")[0]
+  # print(result)
   # lm_eval_results = GPTQModel.eval(quant_path, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
   # print(lm_eval_results)
+  lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
+  print(lm_eval_results)
+
 
 # torch.save(quantized_weights, fake_quant_path)
 
@@ -128,8 +134,8 @@ if flag4:
 
   torch.save(eora_weight, eora_path2)
 
-eora_weight = torch.load(eora_path2,  map_location='cpu')
-print(eora_weight)
+eora_weight = torch.load(eora_path3,  map_location='cpu')
+
 
 save = True
 if save:
@@ -173,8 +179,8 @@ if save:
   json_object = json.dumps(lowrank_config, indent=4)
 
   # Writing to the adapter_config.json
-  with open(f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf-v2/adapter_config.json", "w") as outfile:
+  with open(f"/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/adapter_config.json", "w") as outfile:
       outfile.write(json_object)
   ## save the lowrank weight
 
-  save_file(eora_weight, f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf-v2/adapter_model.safetensors")
+  save_file(eora_weight, f"/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/adapter_model.safetensors")
