@@ -25,7 +25,7 @@ class GPTQProcessor(LoopProcessor):
     def preprocess(self, module: Module):
         pass
 
-    def create_task(self, module: Module, name: str, layer_name: str, buffered_fwd: bool):
+    def preprocess(self, module: Module, name: str, layer_name: str, buffered_fwd: bool):
         bits = self.qcfg.bits
         sym = self.qcfg.sym
         mse = self.qcfg.mse

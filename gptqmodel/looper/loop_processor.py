@@ -16,7 +16,7 @@ class LoopProcessor:
 
 
     # called first
-    def preprocess(self, module: Module):
+    def preprocess(self, module: Module, name: str, layer_name: str, **kwargs):
         pass
 
     # called after every module generate
