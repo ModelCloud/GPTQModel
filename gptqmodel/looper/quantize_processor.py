@@ -72,10 +72,10 @@ class GPTQProcessor(LoopProcessor):
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
-            group_size = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "group_size", group_size)
-            desc_act = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "desc_act", desc_act)
-            damp_percent = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "damp_percent", damp_percent)
-            static_groups = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "static_groups", static_groups)
+            group_size = self.qcfg.dynamic_get(module._gptqmodel_full_name, "group_size", group_size)
+            desc_act = self.qcfg.dynamic_get(module._gptqmodel_full_name, "desc_act", desc_act)
+            damp_percent = self.qcfg.dynamic_get(module._gptqmodel_full_name, "damp_percent", damp_percent)
+            static_groups = self.qcfg.dynamic_get(module._gptqmodel_full_name, "static_groups", static_groups)
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
@@ -107,13 +107,13 @@ class GPTQProcessor(LoopProcessor):
         #     )
         self.durations.append(duration)
         self.avg_losses.append(avg_loss)
-        self.module_names.append(f"layer-{module._gptqmodel_parent_index}-{module._gptqmodel_name}")
+        self.module_names.append(f"layer-{module._gptqmodel_layer_index}-{module._gptqmodel_name}")
 
-        stat = {QUANT_LOG_LAYER: module._gptqmodel_parent_index, QUANT_LOG_MODULE: module._gptqmodel_name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+        stat = {QUANT_LOG_LAYER: module._gptqmodel_layer_index, QUANT_LOG_MODULE: module._gptqmodel_name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                 QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
                 QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
         if self.qcfg.dynamic is not None:
-            stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module._gptqmodel_parent_name)
+            stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module._gptqmodel_full_name)
 
         self.quant_log.append(stat)
         logger.info(stat)

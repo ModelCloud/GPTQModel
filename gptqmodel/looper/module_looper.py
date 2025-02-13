@@ -193,8 +193,8 @@ class ModuleLooper():
                         # gptq task is created and stored inside processor
                         sub_module = subset[name]
                         sub_module._gptqmodel_name = name
-                        sub_module._gptqmodel_parent_name = layer_name
-                        sub_module._gptqmodel_parent_index = module_index
+                        sub_module._gptqmodel_full_name = layer_name
+                        sub_module._gptqmodel_layer_index = module_index
 
                         processor.preprocess(sub_module, buffered_fwd)
 
