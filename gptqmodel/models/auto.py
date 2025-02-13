@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 
 from gptqmodel.adapter.adapter import Adapter, normalize_adapter
+from ..eora.eora_generate import eora_generate
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -241,14 +242,16 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseGPTQModel:
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
+                   "quantization_config"):
             logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if quantize_config and quantize_config.dynamic:
-            logger.warning("GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
+            logger.warning(
+                "GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
@@ -368,7 +371,8 @@ class GPTQModel:
                     output_file=output_file,
                     backend=backend
                 )
-                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted,
+                                       "results_path": result_path}
             print('--------evalplus Eval Result---------')
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
@@ -395,7 +399,8 @@ class GPTQModel:
 
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
-                raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+                raise ValueError(
+                    "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
             mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config)
 
@@ -457,9 +462,9 @@ class GPTQModel:
                       auto_gc: bool = True,
                       ):
         model = GPTQModel.load(model_id_or_path, quantize_config)
-        eora_weight = model.get_eora(calibration_dataset=calibration_dataset, batch_size=batch_size,
-                                     quantized_weights=quantized_weights, lora_rank=lora_rank,
-                                     calibration_enable_gpu_cache=calibration_enable_gpu_cache, auto_gc=auto_gc)
+        eora_weight = eora_generate(model=model, calibration_dataset=calibration_dataset, batch_size=batch_size,
+                                    quantized_weights=quantized_weights, lora_rank=lora_rank,
+                                    calibration_enable_gpu_cache=calibration_enable_gpu_cache, auto_gc=auto_gc)
 
         assert os.path.isfile(output_path), "output_path must be a file"
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
