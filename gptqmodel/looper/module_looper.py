@@ -176,53 +176,46 @@ class ModuleLooper():
             full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
             modules = [[self.lm_head]] if is_lm_head_module else layer_modules
 
-            for index, names in enumerate(modules):
-                subset = {n: full[n] for n in names if n in full}
-                if not subset:
-                    raise ValueError("no matched module was found, is this module quantable?")
-                skipped_modules = []
+            for processor in self.processors:
+                attention_masks, layer_input_kwargs, layer_inputs, layer_outputs, position_ids = processor.inputs_cache
 
-                for name in subset:
-                    if self.quantize_config.dynamic is not None:
-                        if self.quantize_config.dynamic_get(layer_name=layer_name) == False:  # noqa: E712
-                            logger.info(f"skip module: {layer_name}")
+                for index, names in enumerate(modules):
+                    subset = {n: full[n] for n in names if n in full}
+                    if not subset:
+                        raise ValueError("no matched module was found, is this module quantable?")
+                    skipped_modules = []
 
-                            skipped_modules.append(name)
-                            continue
+                    for name in subset:
+                        if self.quantize_config.dynamic is not None:
+                            if self.quantize_config.dynamic_get(layer_name=layer_name) == False:  # noqa: E712
+                                logger.info(f"skip module: {layer_name}")
 
-                    # gptq task is created and stored inside processor
-                    named_module = NamedModule(subset[name], name=name, full_name=layer_name, layer_index=module_index)
-                    subset[name] = named_module
-                    for processor in self.processors:
-                        processor.preprocess(named_module, buffered_fwd)
+                                skipped_modules.append(name)
+                                continue
 
-                for name in skipped_modules:
-                    subset.pop(name)
+                        # gptq task is created and stored inside processor
+                        named_mdule = NamedModule(subset[name], name=name, full_name=layer_name, layer_index=module_index)
+                        subset[name] = named_mdule
+                        processor.preprocess(named_mdule, buffered_fwd)
 
-                # For continue "for index, names in enumerate(modules)" instead of "for processor in self.processors"
-                continue_module_loop = False
-                for processor in self.processors:
+                    for name in skipped_modules:
+                        subset.pop(name)
+
                     if len(processor.tasks) == 0:
-                        continue_module_loop = True
-                        break
-                if continue_module_loop:
-                    continue
+                        continue
 
+                    handle = []
+                    for name in subset:
+                        if hasattr(subset[name], 'forward_hook'):
+                            subset[name].forward_hook =  processor.preprocess_fwd_hook(name)
+                        else:
+                            # TODO FIXME: do we even need to hook into modules that are not quantizable?
+                            assert(f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
+                            handle.append(subset[name].register_forward_hook(processor.preprocess_fwd_hook(name)))
 
-                handle = []
-                for name in subset:
-                    if hasattr(subset[name], 'forward_hook'):
-                        subset[name].forward_hook = processor.preprocess_fwd_hook(name)
-                    else:
-                        # TODO FIXME: do we even need to hook into modules that are not quantizable?
-                        assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
-                        handle.append(subset[name].register_forward_hook(processor.preprocess_fwd_hook(name)))
-
-                # logger.info(f"layer-{i}: Begin Forward() Pass")
-                fwd_start = time.time()
-                for j in range(processor.num_batches):
-                    for processor in self.processors:
-                        attention_masks, layer_input_kwargs, layer_inputs, layer_outputs, position_ids = processor.inputs_cache
+                    # logger.info(f"layer-{i}: Begin Forward() Pass")
+                    fwd_start = time.time()
+                    for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
                             layer_input.append(move_to(layer_inp, cur_layer_device))
@@ -243,8 +236,7 @@ class ModuleLooper():
                             # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                             if hasattr(module, "reuse_kv"):
                                 if module.reuse_kv:
-                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
-                                        module_index - 1)
+                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
                                 layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                                      **additional_layer_inputs)
@@ -257,21 +249,22 @@ class ModuleLooper():
                         del layer_input
                         del additional_layer_inputs
 
-                fwd_end = time.time()
-                fwd_time = fwd_end - fwd_start
+                    fwd_end = time.time()
+                    fwd_time = fwd_end - fwd_start
 
-                for h in handle:
-                    h.remove()
+                    for h in handle:
+                        h.remove()
 
-                for name in subset:
-                    if hasattr(subset[name], 'forward_hook'):
-                        subset[name].forward_hook = None
+                    for name in subset:
+                        if hasattr(subset[name], 'forward_hook'):
+                            subset[name].forward_hook = None
 
-                if index == len(layer_modules) - 1:
-                    if auto_gc:
-                        torch_empty_cache()
+                    if index == len(layer_modules) - 1:
+                        if auto_gc:
+                            torch_empty_cache()
 
-                for name_index, name in enumerate(subset):
-                    for processor in self.processors:
+                    for name_index, name in enumerate(subset):
+                        # TODO This doesn't update the state correctly.
+                        # We want forloop{ state.update(A_processor) -> state.update(B_processor)}
                         self.state.update(processor.process(module, self.state))
 
