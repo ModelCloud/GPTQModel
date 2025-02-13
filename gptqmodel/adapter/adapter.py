@@ -51,8 +51,15 @@ class Lora(Adapter):
                 adapter_load_cache = safetensors.torch.load_file(self.path)
                 print(f"Adapter `{self.path}` tensors loaded from disk")  # {adapter_load_cache}
             else:
-                # TODO FIX ME add hf.co/huggingface.co download support
-                raise Exception("Need to add HF support")
+                from huggingface_hub import HfApi, hf_hub_download
+                files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora.safetensors"]]
+
+                if files:
+                    path = hf_hub_download(repo_id=self.path, filename=files[0])
+                    adapter_load_cache = safetensors.torch.load_file(path)
+                    print(f"Adapter tensors loaded from `{self.path}`")
+                else:
+                    raise Exception(f"There's no lora.safetensors or eora.safetensors on repo `{self.path}`")
 
         lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
         lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
