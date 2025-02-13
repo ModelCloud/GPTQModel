@@ -11,15 +11,12 @@ class NamedModule(torch.nn.Module):
         self.full_name = full_name
         self.layer_index = layer_index
 
-    def __getattr__(self, item):
-        try:
-            if item == "name":
-                return self.name
-            elif item == "full_name":
-                return self.full_name
-            elif item == "layer_index":
-                return self.layer_index
+    def __getattr__(self, item: str):
+        if item == "name":
+            return self.name
+        elif item == "full_name":
+            return self.full_name
+        elif item == "layer_index":
+            return self.layer_index
 
-            return self.module.__getattr__(item)
-        except Exception:
-            return getattr(self.model, item)
+        return self.module.__getattr__(item)
