@@ -61,7 +61,7 @@ class GPTQProcessor(LoopProcessor):
             g.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: Module, name: str, layer_name: str, module_index: int, state: Dict[str, ], pb: ProgressBar , fwd_time: int):
+    def process(self, module: Module, state: Dict[str, ], pb: ProgressBar , fwd_time: int):
         # pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
         gptq = self.tasks
 
@@ -72,23 +72,24 @@ class GPTQProcessor(LoopProcessor):
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
-            group_size = self.qcfg.dynamic_get(layer_name, "group_size", group_size)
-            desc_act = self.qcfg.dynamic_get(layer_name, "desc_act", desc_act)
-            damp_percent = self.qcfg.dynamic_get(layer_name, "damp_percent", damp_percent)
-            static_groups = self.qcfg.dynamic_get(layer_name, "static_groups", static_groups)
+            group_size = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "group_size", group_size)
+            desc_act = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "desc_act", desc_act)
+            damp_percent = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "damp_percent", damp_percent)
+            static_groups = self.qcfg.dynamic_get(module._gptqmodel_parent_name, "static_groups", static_groups)
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        scale, zero, g_idx, duration, avg_loss, damp_percent, quantized_weight = gptq[name].quantize(
+        scale, zero, g_idx, duration, avg_loss, damp_percent, q_full_weight = gptq[module._gptqmodel_name].quantize(
             percdamp=damp_percent,
             group_size=group_size,
             actorder=desc_act,
             static_groups=static_groups,
         )
         ## Assign the quantized weight to the weight
-        gptq[name].layer.weight.data = quantized_weight.to(device=gptq[name].device)
+        #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
+
         ## Offload the quantized weight to CPU for EoRA
-        quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
+        #quantized_weights['model.layers.%d.%s' % (module_index, name)] = q_full_weights.cpu()
 
         # if task is not None:
         #     task.get_logger().report_scalar(
@@ -106,13 +107,13 @@ class GPTQProcessor(LoopProcessor):
         #     )
         self.durations.append(duration)
         self.avg_losses.append(avg_loss)
-        self.module_names.append(f"layer-{module_index}-{name}")
+        self.module_names.append(f"layer-{module._gptqmodel_parent_index}-{module._gptqmodel_name}")
 
-        stat = {QUANT_LOG_LAYER: module_index, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+        stat = {QUANT_LOG_LAYER: module._gptqmodel_parent_index, QUANT_LOG_MODULE: module._gptqmodel_name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                 QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
                 QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
         if self.qcfg.dynamic is not None:
-            stat["dynamic"] = self.qcfg.dynamic_get(layer_name=layer_name)
+            stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module._gptqmodel_parent_name)
 
         self.quant_log.append(stat)
         logger.info(stat)
@@ -123,7 +124,7 @@ class GPTQProcessor(LoopProcessor):
         #     move_to(zero, CPU),
         #     move_to(g_idx, CPU),
         # )
-        gptq[name].free()
+        gptq[module._gptqmodel_name].free()
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         return {
             "scale": scale,
@@ -132,10 +133,11 @@ class GPTQProcessor(LoopProcessor):
             "duration": duration,
             "avg_loss": avg_loss,
             "damp_percent": damp_percent,
-            "quantized_weight": quantized_weight,
+            "q_full_weight": q_full_weight,
         }
 
     def post_process(self, module: Module, state: Dict[str,]):
+        module.q_full_weight
         pass
 
     def clear_input(self):

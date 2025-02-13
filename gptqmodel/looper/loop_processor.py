@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Callable
+from typing import Dict, List, Tuple, Callable, Any
 import torch
 from torch import Tensor
 from torch.nn import Module
@@ -16,7 +16,7 @@ class LoopProcessor:
 
 
     # called first
-    def preprocess(self, module: Module, name: str, layer_name: str, **kwargs):
+    def preprocess(self, module: Module, **kwargs):
         pass
 
     # called after every module generate
@@ -31,7 +31,7 @@ class LoopProcessor:
         pass
 
     # do work and return processor state which will be merged into looper state
-    def process(self, module: Module, state: Dict[str, ]):
+    def process(self, module: Module, state: Dict[str, ]) -> Dict[str, Any]:
         pass
 
     # step after `process` and before post_process generate()
