@@ -199,15 +199,12 @@ class ModuleLooper():
                     if len(processor.tasks) == 0:
                         continue
 
-                    def add_batch(name):
-                        return processor.task_hook(name)
-
                     handle = []
                     for name in subset:
                         if hasattr(subset[name], 'forward_hook'):
-                            subset[name].forward_hook = add_batch(name)
+                            subset[name].forward_hook =  processor.task_hook(name)
                         else:
-                            handle.append(subset[name].register_forward_hook(add_batch(name)))
+                            handle.append(subset[name].register_forward_hook(processor.task_hook(name)))
 
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
                     fwd_start = time.time()
