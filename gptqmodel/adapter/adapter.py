@@ -4,6 +4,7 @@ from typing import Dict, Union
 
 import safetensors
 import torch
+from urllib.parse import urlparse, unquote
 
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
 
@@ -48,18 +49,33 @@ class Lora(Adapter):
         global adapter_load_cache
         if adapter_load_cache is None:
             if os.path.isfile(self.path):
-                adapter_load_cache = safetensors.torch.load_file(self.path)
-                print(f"Adapter `{self.path}` tensors loaded from disk")  # {adapter_load_cache}
+                lora_path = self.path
+                print(f"loading adapter `{self.path}` tensors from disk")  # {adapter_load_cache}
+            elif self.path.startswith("http"):
+                from huggingface_hub import hf_hub_download
+                result = self.parse_url(self.path)
+                if len(result) == 3:
+                    lora_path = hf_hub_download(repo_id=result[0],revision =result[1], filename=result[2])
+                elif len(result) == 1:
+                    import requests
+                    response = requests.get(self.path, stream=True)
+                    lora_path = "lora.safetensors"
+                    with open(lora_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                else:
+                    raise Exception(f"lora path is invalid: `{self.path}`")
             else:
                 from huggingface_hub import HfApi, hf_hub_download
                 files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora.safetensors"]]
 
                 if files:
-                    path = hf_hub_download(repo_id=self.path, filename=files[0])
-                    adapter_load_cache = safetensors.torch.load_file(path)
+                    lora_path = hf_hub_download(repo_id=self.path, filename=files[0])
                     print(f"Adapter tensors loaded from `{self.path}`")
                 else:
                     raise Exception(f"There's no lora.safetensors or eora.safetensors on repo `{self.path}`")
+
+            adapter_load_cache = safetensors.torch.load_file(lora_path)
 
         lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
         lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
@@ -79,6 +95,22 @@ class Lora(Adapter):
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+
+    def parse_url(self, url: str):
+        parsed_url = urlparse(url)
+
+        if parsed_url.netloc.endswith("huggingface.co") or parsed_url.netloc.endswith("hf.co"):
+            parts = parsed_url.path.strip("/").split("/")
+
+            if "blob" in parts:
+                idx = parts.index("blob")
+                repo_id = "/".join(parts[:idx])
+                rev = parts[idx + 1]
+                filename = parts[idx + 2].split("?")[0] # remove ?download=true
+                return [repo_id, rev, filename]
+        else:
+            return [url]
+        return []
 
     def to_dict(self):
         return {
