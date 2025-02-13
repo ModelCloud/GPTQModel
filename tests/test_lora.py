@@ -60,7 +60,25 @@ class Test(ModelTest):
         tokens = model.generate("Capital of France is")[0]
         result = model.tokenizer.decode(tokens)
         print(f"Result: {result}")
-        assert "paris" in result.lower()
+        self.assertIn("paris", result.lower())
+
+    @parameterized.expand([
+        BACKEND.EXLLAMA_V2V,
+    ])
+    def test_download(self, backend: BACKEND):
+        adapter = Lora(path="https://huggingface.co/sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors", rank=128)
+
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            adapter=adapter,
+            backend=backend,
+            device_map="auto",
+        )
+
+        tokens = model.generate("Capital of France is")[0]
+        result = model.tokenizer.decode(tokens)
+        print(f"Result: {result}")
+        self.assertIn("paris", result.lower())
 
     # def test_lm_eval_from_path(self):
     #     adapter = Lora(path=self.lora_path, rank=128)
