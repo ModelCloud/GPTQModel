@@ -121,10 +121,14 @@ class GPTQProcessor(LoopProcessor):
         #     move_to(zero, CPU),
         #     move_to(g_idx, CPU),
         # )
+        w = module.weight.data
+        self.module.weight.data = None # Processor should fix this
+
         gptq[module.name].free()
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
-            "wq": wq, # fp16, not int4 qweight
+            "w": w, # fp16, non-quantized weight
+            "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
             "scale": scale,
             "zero": zero,
             "g_idx": g_idx,

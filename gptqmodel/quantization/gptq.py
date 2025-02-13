@@ -326,6 +326,7 @@ class GPTQ:
         zero = torch.cat(zero, dim=1)
 
         duration = time.time() - start
+
         return Q, scale, zero, g_idx, duration, avg_loss, percdamp
 
     def free(self):
