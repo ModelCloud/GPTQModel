@@ -1301,11 +1301,11 @@ class BaseGPTQModel(nn.Module):
                         )
                         layer_outputs.append([layer_output])
 
-                        del layer_input
-                        del additional_layer_inputs
-                        if num_batches > 1 and j == num_batches - 1:
-                            if auto_gc:
-                                torch_empty_cache()
+                    del layer_input
+                    del additional_layer_inputs
+                    if num_batches > 1 and j == num_batches - 1:
+                        if auto_gc:
+                            torch_empty_cache()
 
             if not is_lm_head_module:
                 layers[module_index] = self.post_quantize(module)
