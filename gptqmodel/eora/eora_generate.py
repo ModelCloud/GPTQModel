@@ -200,7 +200,7 @@ def eora_generate(
                                               num_experts=num_experts)
 
     layer_count = len(layers)
-    quant_modules_pb = ProgressBar(range(1))
+    quant_modules_pb = ProgressBar(range(layer_count + 1 if model.quantize_config.lm_head else layer_count))
     shared_kv_cache_dict = {}
 
     # replace linear with hooked linear
