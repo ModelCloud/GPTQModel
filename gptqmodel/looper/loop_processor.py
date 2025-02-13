@@ -15,13 +15,13 @@ class LoopProcessor:
         pass
 
     # do work and return processor state which will be merged into looper state
-    def process(self, state: Dict[str, ]):
+    def process(self, module: Module, state: Dict[str, ]):
         pass
 
     # step after `process` and before post_process generate()
-    def post_process(self, state: Dict[str,]):
+    def post_process(self, module: Module, state: Dict[str,]):
         pass
 
     # last step, after all loop processor is called
-    def finalize(self, state: Dict[str,]):
+    def finalize(self, module:Module, state: Dict[str,]):
         pass
