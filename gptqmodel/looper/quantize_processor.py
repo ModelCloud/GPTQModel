@@ -21,19 +21,16 @@ class GPTQProcessor(LoopProcessor):
         self.module_names = []
         self.quant_log = []
 
-    def preprocess(self, module: Module):
-        pass
-
-    def preprocess(self, module: Module, name: str, layer_name: str, buffered_fwd: bool):
+    def preprocess(self, module: Module, buffered_fwd: bool):
         bits = self.qcfg.bits
         sym = self.qcfg.sym
         mse = self.qcfg.mse
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
-            bits = self.qcfg.dynamic_get(layer_name, "bits", bits)
-            sym = self.qcfg.dynamic_get(layer_name, "sym", sym)
-            mse = self.qcfg.dynamic_get(layer_name, "mse", mse)
+            bits = self.qcfg.dynamic_get(module._gptqmodel_full_name, "bits", bits)
+            sym = self.qcfg.dynamic_get(module._gptqmodel_full_nam, "sym", sym)
+            mse = self.qcfg.dynamic_get(module._gptqmodel_full_nam, "mse", mse)
 
         tmp = GPTQ(module)
 
@@ -43,7 +40,7 @@ class GPTQProcessor(LoopProcessor):
         # deepseek has massive # of sub-modules per layer, causing vram pressure
         # buffered mode is slower due to gpu<->cpu movement
         if buffered_fwd:  # TODO tweak this number for masive MoE
-            logger.info(f"Experimental: enabling fwd buffered mode for: `{name}`")
+            logger.info(f"Experimental: enabling fwd buffered mode for: `{module._gptqmodel_name}`")
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
