@@ -10,15 +10,10 @@ class NamedModule(torch.nn.Module):
         self.name = name
         self.full_name = full_name
         self.layer_index = layer_index
+        self.state = {} # state is dict to store all temp data used in processor
 
-        self.state = {}
+    def __getattr__(self, name: str):
+        if name in ["name", "full_name", "layer_index", "state"]:
+            return getattr(self, name)
 
-    def __getattr__(self, item: str):
-        if item == "name":
-            return self.name
-        elif item == "full_name":
-            return self.full_name
-        elif item == "layer_index":
-            return self.layer_index
-
-        return getattr(self.module, item)
+        return getattr(self.module, name)
