@@ -158,23 +158,23 @@ class IPEXQuantLinear(PackableQuantLinear):
                                                                          self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
 
     def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
+        W = linear.weight.data
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
+            W = W.T
 
         self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
 
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
+        scales = scales.T.contiguous()
+        zeros = zeros.T.contiguous()
         scale_zeros = zeros * scales
         self.scales = scales.clone().to(dtype=linear.weight.dtype)
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=linear.weight.dtype)
 
         intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
-        intweight = intweight.t().contiguous()
+        intweight = intweight.T.contiguous()
         intweight = intweight.numpy().astype(np.uint32)
 
         qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
