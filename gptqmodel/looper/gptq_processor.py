@@ -179,22 +179,22 @@ class GPTQProcessor(LoopProcessor):
         # TODO FIX: remove this? eora process need to override fwd in post_process so it can do wq + (A @ B)
         module.weight.data = module.state.pop("wq").cpu()
 
-    def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
+    def model_finalize(self, model: BaseGPTQModel, **kwargs):
         backend = kwargs.pop("backend")
-        gptq_model.qlinear_kernel = pack_model(
-            model=gptq_model.model,
+        model.qlinear_kernel = pack_model(
+            model=model.model,
             quantizers=self.quantizers,
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
             backend=backend,
             desc_act=self.qcfg.desc_act,
             format=self.qcfg.format,
-            lm_head_name=gptq_model.lm_head,
+            lm_head_name=model.lm_head,
             dynamic=self.qcfg.dynamic,
             parallel_packing=self.qcfg.parallel_packing,
             pack_dtype=self.qcfg.pack_dtype,
         )
-        gptq_model.quantized = True
+        model.quantized = True
 
         del self.quantizers
 

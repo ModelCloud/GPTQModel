@@ -377,7 +377,7 @@ class ModuleLooper():
             from gptqmodel.utils.plotly import create_plotly
 
         for reverse_p in reversed(self.processors):
-            reverse_p.model_finalize(self.gptq_model, **kwargs)
+            reverse_p.model_finalize(model=self.gptq_model, **kwargs)
 
             if reverse_p.logger_task is not None:
                 x = list(range(layer_count))

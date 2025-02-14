@@ -73,5 +73,5 @@ class LoopProcessor:
         pass
 
     # last step, after all loop processor is called
-    def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
+    def model_finalize(self, model: BaseGPTQModel, **kwargs):
         pass
