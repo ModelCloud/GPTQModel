@@ -39,6 +39,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 CPU = torch.device("cpu")
+HF_OPTIMUM = "hf_optimum"
 
 class GPTQ:
     def __init__(self, module: torch.nn.Module, qcfg: Optional[QuantizeConfig]=None):
@@ -46,7 +47,7 @@ class GPTQ:
             self.module = module.module
             name = module.name
         else:
-            name = "hf_optimum"
+            name = HF_OPTIMUM
             self.module = NamedModule(module, name=name, full_name=name,layer_index=0)
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device

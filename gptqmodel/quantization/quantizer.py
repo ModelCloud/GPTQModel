@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.quantization import QuantizeConfig
+from .gptq import HF_OPTIMUM
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
@@ -53,7 +54,7 @@ class Quantizer(nn.Module):
         bits:int=4, # for hf compat
         sym:bool=False, # for hf compat
     ):
-        if self.name == "hf_optimum":
+        if self.name == HF_OPTIMUM:
             self.qcfg.bits = bits
             self.qcfg.sym = sym
 
