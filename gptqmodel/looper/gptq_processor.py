@@ -174,6 +174,9 @@ class GPTQProcessor(LoopProcessor):
         # prepare for module.foward post generate
         module.weight.data = module.state["wq"] # module.layer.weight or module.weight?
 
+        # clean up dicts
+        self.quantizers.pop(module.full_name)
+
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
         # TODO FIX: remove this? eora process need to override fwd in post_process so it can do wq + (A @ B)
