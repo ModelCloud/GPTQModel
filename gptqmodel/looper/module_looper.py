@@ -20,9 +20,6 @@ class ModuleLooper():
         self.processors = []
         self.model = None
 
-    def __getattr__(self, item):
-        getattr(self.model, item)
-
     def cache_inputs(self, layers, auto_gc, calibration_dataset, calibration_enable_gpu_cache):
         layer_inputs = []
         attention_masks = []
