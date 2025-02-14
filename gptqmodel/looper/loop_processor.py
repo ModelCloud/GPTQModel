@@ -51,7 +51,8 @@ class LoopProcessor:
     def receive_layer_input(self, layer_input: List[Tensor]):
         self.inputs_cache.layer_inputs.append(layer_input)
 
-    def clear_layer_inputs(self):
+    def clear_cache_data(self):
+        self.tasks = {}
         del self.inputs_cache.layer_inputs
         self.inputs_cache.layer_inputs = []
 

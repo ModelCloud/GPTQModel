@@ -91,7 +91,7 @@ class GPTQProcessor(LoopProcessor):
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             print("tmp")
             # gptq is mutable.
-            g = gptq[name]  # noqa: F821
+            g = self.tasks[name]  # noqa: F821
             g.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
@@ -144,8 +144,8 @@ class GPTQProcessor(LoopProcessor):
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
         stat = {QUANT_LOG_LAYER: module.layer_index, QUANT_LOG_MODULE: module.name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
-                QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
-                QUANT_LOG_FWD_TIME: f"{module.state.get('fwd_time'):.3f}"}
+                QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",}
+                # QUANT_LOG_FWD_TIME: f"{module.state.get('fwd_time'):.3f}"}
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
@@ -159,17 +159,18 @@ class GPTQProcessor(LoopProcessor):
             move_to(g_idx, CPU),
         )
         w = module.weight.data
-        module.weight.data = None # Processor should fix this
+        # TODO FIXME data can't set to None
+        # module.weight.data = None # Processor should fix this
 
         gptq[module.name].free()
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        module.state[module.full_name] = {
+        module.state.update({
             "w": w, # fp16, non-quantized weight
             "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
             STAT_GPTQ_DURATION: duration, # stat
             STAT_GPTQ_AVG_LOSS: avg_loss, # stat
             STAT_GPTQ_DAMP_PERCENT: damp_percent, # stat
-        }
+        })
 
     def post_process(self, module: NamedModule):
         # prepare for module.foward post generate

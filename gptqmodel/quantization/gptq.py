@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 import transformers
 
+from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import Quantizer
@@ -37,8 +38,8 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: torch.nn.Module):
-        self.module = module
+    def __init__(self, module: NamedModule):
+        self.module = module.module
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
 

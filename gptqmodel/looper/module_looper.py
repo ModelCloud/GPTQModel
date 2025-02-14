@@ -354,8 +354,7 @@ class ModuleLooper():
                 else:
                     self.gptq_model.post_quantize(module)
 
-                del processor.tasks
-                processor.clear_layer_inputs()
+                processor.clear_cache_data()
 
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
