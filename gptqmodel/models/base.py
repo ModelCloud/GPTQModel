@@ -374,8 +374,8 @@ class BaseGPTQModel(nn.Module):
             logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
                            f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
-        from gptqmodel.looper.module_looper import ModuleLooper
         from gptqmodel.looper.gptq_processor import GPTQProcessor
+        from gptqmodel.looper.module_looper import ModuleLooper
         processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
         module_looper = ModuleLooper(self, processors=processors)
         return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,

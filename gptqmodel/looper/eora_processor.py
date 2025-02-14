@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Tuple
 
 import torch
-
 from gptqmodel import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.looper.loop_processor import LoopProcessor
@@ -28,10 +27,9 @@ from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_L
                                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
+from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from torch.nn import Module
-
 
 logger = setup_logger()
 

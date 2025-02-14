@@ -17,15 +17,12 @@
 from typing import Callable, List, Tuple
 
 import torch
-from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
+from gptqmodel.quantization.config import QuantizeConfig
 from torch import Tensor
 from torch.nn import Module
-
-from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
-from gptqmodel.utils.progress import ProgressBar
 
 
 # LoopProcessor is a singleton(), not per module instance

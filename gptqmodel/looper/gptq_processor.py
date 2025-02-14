@@ -25,11 +25,10 @@ from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_L
                                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
+from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to, pack_model
 from torch.nn import Module
-
 
 logger = setup_logger()
 
