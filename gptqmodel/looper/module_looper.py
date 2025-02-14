@@ -171,7 +171,7 @@ class ModuleLooper():
 
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
-            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{module_index}.{name}"
+
             if is_lm_head_module:
                 quant_modules_pb.set_description("Quantizing lm_head")
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
@@ -210,7 +210,10 @@ class ModuleLooper():
                     gpu_memorys.append(gpu_memory)
                     cpu_memorys.append(cpu_memory)
 
-                layer_inputs, layer_input_kwargs, position_ids, attention_masks = processor.inputs_cache
+                layer_inputs = processor.inputs_cache.layer_inputs
+                layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
+                position_ids = processor.inputs_cache.position_ids
+                attention_masks = processor.inputs_cache.attention_masks
 
                 for index, names in enumerate(modules):
                     subset = {}
@@ -221,6 +224,7 @@ class ModuleLooper():
                     skipped_modules = []
 
                     for name in subset:
+                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{module_index}.{name}"
                         if self.gptq_model.quantize_config.dynamic is not None:
                             if self.gptq_model.quantize_config.dynamic_get(layer_name=layer_name) == False:  # noqa: E712
                                 logger.info(f"skip module: {layer_name}")
@@ -229,10 +233,10 @@ class ModuleLooper():
                                 continue
 
                         # gptq task is created and stored inside processor
-                        named_mdule = NamedModule(subset[name], name=name, full_name=layer_name,
+                        named_module = NamedModule(subset[name], name=name, full_name=layer_name,
                                                   layer_index=module_index)
-                        subset[name] = named_mdule
-                        processor.preprocess(named_mdule, buffered_fwd)
+                        subset[name] = named_module
+                        processor.preprocess(named_module, buffered_fwd)
 
                     for name in skipped_modules:
                         subset.pop(name)
@@ -302,7 +306,7 @@ class ModuleLooper():
                     for name_index, name in enumerate(subset):
                         processor.process(module=subset[name])
 
-                    processor.post_process(module=subset[name])
+                        processor.post_process(module=subset[name])
 
                     if index == len(layer_modules) - 1:
                         if auto_gc:
@@ -365,8 +369,8 @@ class ModuleLooper():
         # logger.info(f"Quantization summary:\n{self.quant_log}")
         # for module_log in self.quant_log:
         #     logger.info(module_log)
-        for processor in self.processors:
-            processor.model_finalize(self.gptq_model, **kwargs)
+        for reverse_p in reversed(self.processors):
+            reverse_p.model_finalize(self.gptq_model, **kwargs)
 
             if processor.logger_task is not None:
                 x = list(range(layer_count))

@@ -45,7 +45,7 @@ class LoopProcessor:
     # called after every module generate
     # may be called multiple times due to batch
     def receive_layer_input(self, layer_input: List[Tensor]):
-        self.inputs_cache.layer_inputs += layer_input
+        self.inputs_cache.layer_inputs.append(layer_input)
 
     def clear_layer_inputs(self):
         del self.inputs_cache.layer_inputs

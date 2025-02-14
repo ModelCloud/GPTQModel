@@ -277,6 +277,123 @@ class BaseGPTQModel(nn.Module):
 
         return new_calibration_dataset_batched
 
+    def q(
+        self,
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
+        batch_size: int = 1,
+        calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+        buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+        auto_gc: bool = True,
+    ) -> Tuple[List[Dict[str, str]], Dict[str, torch.Tensor]]:
+        if self.quantized:
+            raise EnvironmentError("quantize() is called a model that is already quantized")
+
+        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
+            raise ValueError(
+                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
+            )
+
+        if backend == BACKEND.IPEX:
+            self.quantize_config.format = FORMAT.IPEX
+
+        if self.quantize_config.format == FORMAT.MARLIN:
+            raise ValueError(
+                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
+            )
+
+        if len(calibration_dataset) == 0:
+            raise ValueError("Calibration dataset must not be empty.")
+
+        if logger_board == "clearml":
+            try:
+                from clearml import Task
+                from random_word import RandomWords
+
+                from ..utils.plotly import create_plotly
+            except ImportError as _:
+                raise ImportError(
+                    "The logger_board is set to 'clearml', but required dependencies are missing. "
+                    "Please install them by running: pip install gptqmodel[logger]"
+                )
+            task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
+        else:
+            task = None
+
+        # Validate quant linear before quantization starts
+        _ = select_quant_linear(
+            bits=self.quantize_config.bits,
+            dynamic=self.quantize_config.dynamic,
+            group_size=self.quantize_config.group_size,
+            desc_act=self.quantize_config.desc_act,
+            sym=self.quantize_config.sym,
+            backend=backend,
+            device=DEVICE(self.quantize_config.device),
+            pack=True,
+            format=self.quantize_config.format,
+            pack_dtype=self.quantize_config.pack_dtype,
+        )
+
+        # Use the provided tokenizer if one is passed to quantize()
+        if tokenizer is not None:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+
+        min_calibration_dataset_size = 256
+        min_calibration_dataset_input_ids_avg_length = 256
+
+        if len(calibration_dataset) < min_calibration_dataset_size:
+            logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                           f"Current: {len(calibration_dataset)}.")
+
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
+
+        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
+                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
+                                                   batch_size=batch_size)
+
+        # Calculate the average length of the average input_ids
+        total_input_ids_length = 0
+        max_input_id_length = 0
+        for row in calibration_dataset:
+            input_ids = row["input_ids"]
+            if isinstance(input_ids, torch.Tensor):
+                if input_ids.dim() <= 2:
+                    input_ids_length = input_ids.shape[-1]
+                else:
+                    raise ValueError(
+                        "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
+                            input_ids.dim()))
+            else:
+                input_ids_length = len(input_ids)
+
+            if input_ids_length > max_input_id_length:
+                max_input_id_length = input_ids_length
+            total_input_ids_length += input_ids_length
+        avg = total_input_ids_length / len(calibration_dataset)
+
+        if avg < min_calibration_dataset_input_ids_avg_length:
+            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
+                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+
+        from gptqmodel.looper.module_looper import ModuleLooper
+        from gptqmodel.looper.gptq_processor import GPTQProcessor
+        processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
+        module_looper = ModuleLooper(self, processors=processors)
+        module_looper.loop()
+
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],

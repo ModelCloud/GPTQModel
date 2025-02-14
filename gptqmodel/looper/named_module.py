@@ -36,17 +36,17 @@ class NamedModule(torch.nn.Module):
         self.state = {} # state is dict to store all temp data used in processor
 
         # store original in/out features since weight.data will changed later on
-        if isinstance(module.module, nn.Linear):
-            in_features = module.module.in_features
-            out_features = module.module.out_features
-        elif isinstance(module.module, nn.Conv2d):
-            in_features = module.module.in_channels
-            out_features = module.module.out_channels
-        elif isinstance(module.module, transformers.pytorch_utils.Conv1D):
-            in_features = module.module.weight.shape[0]
-            out_features = module.module.weight.shape[1]
+        if isinstance(module, nn.Linear):
+            in_features = module.in_features
+            out_features = module.out_features
+        elif isinstance(module, nn.Conv2d):
+            in_features = module.in_channels
+            out_features = module.out_channels
+        elif isinstance(module, transformers.pytorch_utils.Conv1D):
+            in_features = module.weight.shape[0]
+            out_features = module.weight.shape[1]
         else:
-            raise NotImplementedError(f"Unsupported module.module type: `{type(module.module)}`")
+            raise NotImplementedError(f"Unsupported module.module type: `{type(module)}`")
 
         self.state.update({
             "in_features": in_features,
@@ -64,7 +64,7 @@ class NamedModule(torch.nn.Module):
         }
 
     def __getattr__(self, name: str):
-        if name in ["stats", "module", "name", "full_name", "layer_index", "state"]:
-            return getattr(self, name)
-
-        return getattr(self.module, name)
+        try:
+            return super().__getattr__(name)
+        except Exception:
+            return getattr(self.module, name)
