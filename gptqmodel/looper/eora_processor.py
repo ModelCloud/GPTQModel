@@ -174,8 +174,9 @@ class EoraProcessor(LoopProcessor):
         B = torch.matmul(truc_u, sqrtS).to(quantized_weight.dtype)
         A = torch.matmul(sqrtS, truc_v).to(quantized_weight.dtype)
 
-        # comp_weight = quantized_weight + B @ A
-        # module.weight.data = comp_weight.to(module.weight.data.dtype)
+        # override module weight with computed weight with B@A delta
+        comp_weight = quantized_weight + B @ A
+        module.weight.data = comp_weight.to(module.weight.data.dtype)
 
         # lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(dtype=torch.float16)
         # lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(dtype=torch.float16)
@@ -195,28 +196,20 @@ class EoraProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
-            "lora_A": A.to(dtype=torch.float16),
-            "lora_B": B.to(dtype=torch.float16),
+            "lora_A": A.to(dtype=torch.float16, device=CPU),
+            "lora_B": B.to(dtype=torch.float16, device=CPU),
         })
 
         del B, A, quantized_weight, U, S, V, L, Q
 
-        # TODO FIX ME...we need to override forward here
-
     def post_process(self, module: NamedModule):
-        # prepare for module.foward post generate
-        module.weight.data = module.state["wq"] # module.layer.weight or module.weight?
+        pass
 
     def submodule_finalize(self, module: NamedModule):
-        # generate complete, safe to move to cpu
-        module.state.update({
-            "lora_A": module.state.get("lora_A").cpu(),
-            "lora_B": module.state.get("lora_B").cpu(),
-        })
+        pass
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.eigen_scaling_diag_matrix
-
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
