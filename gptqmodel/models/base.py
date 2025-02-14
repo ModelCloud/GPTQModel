@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -777,9 +778,7 @@ class BaseGPTQModel(nn.Module):
                 skipped_modules = []
                 gptq = {}
                 for name in subset:
-                    bits = self.quantize_config.bits
-                    sym = self.quantize_config.sym
-                    mse = self.quantize_config.mse
+                    qcfg_clone = copy.deepcopy(self.quantize_config)
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
@@ -791,11 +790,15 @@ class BaseGPTQModel(nn.Module):
                             skipped_modules.append(name)
                             continue
 
-                        bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
-                        sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
-                        mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
+                        qcfg_clone.bits = self.quantize_config.dynamic_get(layer_name, "bits", qcfg_clone.bits)
+                        qcfg_clone.sym = self.quantize_config.dynamic_get(layer_name, "sym", qcfg_clone.sym)
+                        qcfg_clone.mse = self.quantize_config.dynamic_get(layer_name, "mse", qcfg_clone.mse)
+                        qcfg_clone.group_size = self.quantize_config.dynamic_get(layer_name, "group_size", qcfg_clone.group_size)
+                        qcfg_clone.desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", qcfg_clone.desc_act)
+                        qcfg_clone.damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", qcfg_clone.damp_percent)
+                        qcfg_clone.static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", qcfg_clone.static_groups)
 
-                    tmp = GPTQ(subset[name])
+                    tmp = GPTQ(module=subset[name], qcfg=qcfg_clone)
                     gptq[name] = tmp
 
                     # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
@@ -808,10 +811,7 @@ class BaseGPTQModel(nn.Module):
                         tmp.fwd_inputs_buffered = True
 
                     tmp.quantizer.configure(
-                        bits,
                         perchannel=True,
-                        sym=sym,
-                        mse=mse,
                     )
 
                 for name in skipped_modules:
@@ -887,27 +887,10 @@ class BaseGPTQModel(nn.Module):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
                     quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
-                    group_size = self.quantize_config.group_size
-                    desc_act = self.quantize_config.desc_act
-                    damp_percent = self.quantize_config.damp_percent
-                    static_groups = self.quantize_config.static_groups
-
-                    # dynamic overrides
-                    if self.quantize_config.dynamic is not None:
-                        group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
-                        desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
-                        damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", damp_percent)
-                        static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
-
-
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     ## Need to return the quantized_weight for offloading
-                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
-                        percdamp=damp_percent,
-                        group_size=group_size,
-                        actorder=desc_act,
-                        static_groups=static_groups,
-                    )
+                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize()
+
                     ## Assign the quantized weight to the weight
                     gptq[name].module.weight.data = quantized_weight.to(device=gptq[name].device)
                     ## Offload the quantized weight to CPU for EoRA

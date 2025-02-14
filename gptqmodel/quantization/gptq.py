@@ -20,6 +20,7 @@ import math
 import os
 import sys
 import time
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -39,9 +40,9 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: NamedModule, qcfg: QuantizeConfig):
+    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig]=None):
         self.module = module.module
-        self.qcfg = qcfg
+        self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
 
@@ -115,19 +116,6 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
-    # wrapper for backward compat with optimum
-    # TODO: mark for deprecation
-    def fasterquant(
-        self,
-        blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
-    ):
-        return self.hf_quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
-
     # public api exposed to hf
     def hf_quantize(
         self,
@@ -138,17 +126,18 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
-        return self.quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
+        self.qcfg.group_size = group_size
+        self.qcfg.damp_percent = percdamp
+        self.qcfg.damp_auto_increment = damp_auto_increment
+        self.qcfg.desc_act = actorder
+        self.qcfg.static_groups = static_groups
+
+        return self.quantize(blocksize=blocksize)
 
     @torch.inference_mode()
     def quantize(
         self,
         blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
     ):
         start = time.time()
 
@@ -185,19 +174,19 @@ class GPTQ:
         zero = []
         now_idx = 1
 
-        if static_groups:
+        if self.qcfg.static_groups:
             import copy
 
             groups = []
-            for i in range(0, self.columns, group_size):
+            for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i : (i + group_size)], weight=True)
+                quantizer.find_params(W[:, i : (i + self.qcfg.group_size)], weight=True)
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
                 groups.append(quantizer)
 
-        if actorder:
+        if self.qcfg.desc_act:
             perm = torch.argsort(torch.diag(H), descending=True)
             W = W[:, perm]
             H = H[perm][:, perm]
@@ -206,9 +195,10 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        while 1 > percdamp > 0:
+        damp_percent =  self.qcfg.damp_percent
+        while 1 > damp_percent > 0:
             try:
-                damp = percdamp * torch.mean(torch.diag(H))
+                damp = damp_percent * torch.mean(torch.diag(H))
                 diag = torch.arange(self.columns, device=self.device)
                 H[diag, diag] += damp
 
@@ -218,15 +208,15 @@ class GPTQ:
                 Hinv = H
                 break
             except torch._C._LinAlgError as e:
-                if damp_auto_increment != 0:
-                    logger.warning(f"Current damp={percdamp:.5f} is too low, increased by {damp_auto_increment:.5f}")
-                    percdamp += damp_auto_increment
+                if  self.qcfg.damp_auto_increment != 0:
+                    logger.warning(f"Current damp={damp_percent:.5f} is too low, increased by { self.qcfg.damp_auto_increment:.5f}")
+                    damp_percent +=  self.qcfg.damp_auto_increment
                 else:
-                    logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error. ")
+                    logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
                     raise e
 
-        if not (0 < percdamp < 1):
-            raise ValueError(f"damp_percent must between 0 and 1. current is {percdamp}")
+        if not (0 < damp_percent < 1):
+            raise ValueError(f"damp_percent must between 0 and 1. current is {damp_percent}")
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
