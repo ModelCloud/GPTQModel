@@ -354,36 +354,36 @@ class PackableQuantLinear(BaseQuantLinear):
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=t.float16)
 
-        intweight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
-        intweight = intweight.T.contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
+        int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
+        int_weight = int_weight.T.contiguous()
+        int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
-        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
+        qweight = np.zeros((int_weight.shape[0] // self.pack_dtype_bits * self.bits, int_weight.shape[1]),
                            dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for row in range(qweight.shape[0]):
                 for j in range(self.pack_factor):
-                    qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
+                    qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
             i = 0
             row = 0
             while row < qweight.shape[0]:
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i))
+                    qweight[row] |= int_weight[j] << (3 * (j - i))
                 i += 10
-                qweight[row] |= intweight[i] << 30
+                qweight[row] |= int_weight[i] << 30
                 row += 1
-                qweight[row] |= (intweight[i] >> 2) & 1
+                qweight[row] |= (int_weight[i] >> 2) & 1
                 i += 1
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 1)
+                    qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
                 i += 10
-                qweight[row] |= intweight[i] << 31
+                qweight[row] |= int_weight[i] << 31
                 row += 1
-                qweight[row] |= (intweight[i] >> 1) & 0x3
+                qweight[row] |= (int_weight[i] >> 1) & 0x3
                 i += 1
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 2)
+                    qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
 
