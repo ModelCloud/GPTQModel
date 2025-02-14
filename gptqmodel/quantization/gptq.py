@@ -319,7 +319,7 @@ class GPTQ:
 
         duration = time.time() - start
 
-        return Q, scale, zero, g_idx, duration, avg_loss, self.qcfg.damp_percent
+        return Q, scale, zero, g_idx, duration, avg_loss, damp_percent
 
     def free(self):
         # if os.environ.get("DEBUG"):
