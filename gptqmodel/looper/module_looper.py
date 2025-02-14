@@ -25,12 +25,6 @@ class ModuleLooper():
         self.processors: List[LoopProcessor] = []
         self.model = None
 
-    def __getattr__(self, item):
-        try:
-            return super().__getattr__(item)
-        except Exception:
-            return getattr(self.model, item)
-
     def cache_inputs(self, layers, auto_gc, calibration_dataset, calibration_enable_gpu_cache):
         layer_inputs = []
         attention_masks = []
