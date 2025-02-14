@@ -170,8 +170,7 @@ class GPTQ:
             W = self.module_copy
             self.module_copy = None
 
-        if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
+        self.quantizer.find_params(W, weight=True)
 
         H = self.H
         del self.H

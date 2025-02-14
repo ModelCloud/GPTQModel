@@ -385,7 +385,6 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in subset:
                             reverse_p.submodule_finalize(subset[name])
-
                 del module
 
                 if auto_gc:

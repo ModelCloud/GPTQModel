@@ -141,15 +141,13 @@ class Quantizer(nn.Module):
             self.zero = self.zero.unsqueeze(0)
 
     def quantize(self, x):
-        if self.ready():
-            return quantize(x, self.scale, self.zero, self.maxq)
-        return x
+        return quantize(x, self.scale, self.zero, self.maxq)
 
-    def enabled(self):
-        return self.maxq > 0
+    # def enabled(self):
+    #     return self.maxq > 0
 
-    def ready(self):
-        return torch.all(self.scale != 0)
+    # def ready(self):
+    # return torch.all(self.scale != 0)
 
 
 __all__ = ["Quantizer"]
