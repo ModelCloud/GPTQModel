@@ -174,9 +174,7 @@ class GPTQProcessor(LoopProcessor):
 
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
-        module.weight.data = None
-        wq = module.state.pop("wq").cpu()
-        module.weight.data = wq
+        module.weight.data = module.state.pop("wq").cpu()
 
     def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
         backend = kwargs.pop("backend")
