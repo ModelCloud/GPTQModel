@@ -378,10 +378,12 @@ class ModuleLooper():
                 cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
                 loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
                 time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
-                processor.logger_task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-                processor.logger_task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-                processor.logger_task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-                processor.logger_task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+
+                with processor.logger_task.get_logger() as l:
+                    l.report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+                    l.report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+                    l.report_plotly('avg_loss', 'avg_loss', loss_fig)
+                    l.report_plotly('quant_time', 'quant_time', time_fig)
 
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
