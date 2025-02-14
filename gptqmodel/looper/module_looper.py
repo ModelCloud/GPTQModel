@@ -23,6 +23,7 @@ from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import STAT_GPTQ_FWD_TIME, NamedModule
 from gptqmodel.models import BaseGPTQModel
+from gptqmodel.models._const import SUPPORTS_MODULE_TYPES
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
@@ -129,7 +130,27 @@ class ModuleLooper():
                           attention_masks=attention_masks)
 
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, **kwargs):
-        # TODO: lm_head quantize
+        if self.gptq_model.quantize_config.lm_head:
+            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
+                tied_keys = self.gptq_model.model._tied_weights_keys
+                for item in tied_keys:
+                    if self.gptq_model.lm_head in item:
+                        raise NotImplementedError("quantizing lm_head with tied weights has not been supported "
+                                                  "currently")
+
+            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:
+                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
+
+            if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
+                                          f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
+
+            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            if self.gptq_model.quantize_config.dynamic is None:
+                self.gptq_model.quantize_config.dynamic = {self.gptq_model.lm_head: lm_head_quant_config}
+            elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default_value=None) is None:
+                self.gptq_model.quantize_config.dynamic[self.gptq_model.lm_head] = lm_head_quant_config
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
