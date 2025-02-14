@@ -48,6 +48,7 @@ class GPTQ:
         else:
             name = HF_OPTIMUM
             self.module = NamedModule(module, name=name, full_name=name,layer_index=0)
+
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
@@ -96,7 +97,7 @@ class GPTQ:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
 
-        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
+        if issubclass(type(self.module), nn.Module) or issubclass(type(self.module), transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
