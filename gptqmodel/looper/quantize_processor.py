@@ -5,10 +5,13 @@ from gptqmodel.looper.loop_processor import LoopProcessor
 from torch.nn import Module
 
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.models import BaseGPTQModel
 from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
 from gptqmodel.quantization import GPTQ
+from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.model import move_to
 from gptqmodel.utils.progress import ProgressBar
 
 logger = setup_logger()
@@ -20,6 +23,7 @@ class GPTQProcessor(LoopProcessor):
         self.avg_losses = []
         self.module_names = []
         self.quant_log = []
+        self.quantizers = {}
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         bits = self.qcfg.bits
@@ -58,7 +62,7 @@ class GPTQProcessor(LoopProcessor):
             g.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: NamedModule, pb: ProgressBar):
+    def process(self, module: NamedModule):
         # pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
         gptq = self.tasks
 
@@ -108,48 +112,60 @@ class GPTQProcessor(LoopProcessor):
 
         stat = {QUANT_LOG_LAYER: module.layer_index, QUANT_LOG_MODULE: module.name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                 QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
-                QUANT_LOG_FWD_TIME: f"{module.state.get("fwd_time"):.3f}"}
+                QUANT_LOG_FWD_TIME: f"{module.state.get('fwd_time'):.3f}"}
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
         self.quant_log.append(stat)
         logger.info(stat)
 
-        # quantizers[layer_name] = (
-        #     gptq[name].quantizer.to(CPU),
-        #     move_to(scale, CPU),
-        #     move_to(zero, CPU),
-        #     move_to(g_idx, CPU),
-        # )
+        self.quantizers[module.full_name] = (
+            gptq[module.name].quantizer.to(CPU),
+            move_to(scale, CPU),
+            move_to(zero, CPU),
+            move_to(g_idx, CPU),
+        )
         w = module.weight.data
-        self.module.weight.data = None # Processor should fix this
+        module.weight.data = None # Processor should fix this
 
         gptq[module.name].free()
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        module.state.update({
+        module.state[module.full_name] = {
             "w": w, # fp16, non-quantized weight
             "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
-            "scale": scale,
-            "zero": zero,
-            "g_idx": g_idx,
             "duration": duration, # stat
             "avg_loss": avg_loss, # stat
             "damp_percent": damp_percent, # stat
-        })
+        }
 
-    def post_process(self, module: NamedModule, state: Dict[str,]):
+    def post_process(self, module: NamedModule):
         # prepare for module.foward post generate
-        module.weight.data = state["wq"] # module.layer.weight or module.weight?
-        pass
+        module.weight.data = module.state["wq"] # module.layer.weight or module.weight?
 
-    def clear_input(self):
-        self.inputs_cache = []
-
-    def finalize(self, module: NamedModule, state: Dict[str,]):
+    def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
         module.weight.data = None
         wq = module.state["wq"]
         wq = wq.cpu()
         module.weight.data = wq
         module.state["wq"] = wq
+
+    def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
+        backend = kwargs.pop("backend")
+        gptq_model.qlinear_kernel = gptq_model.pack_model(
+            model=gptq_model.model,
+            quantizers=self.quantizers,
+            bits=self.qcfg.bits,
+            group_size=self.qcfg.group_size,
+            backend=backend,
+            desc_act=self.qcfg.desc_act,
+            format=self.qcfg.format,
+            lm_head_name=gptq_model.lm_head,
+            dynamic=self.qcfg.dynamic,
+            parallel_packing=self.qcfg.parallel_packing,
+            pack_dtype=self.qcfg.pack_dtype,
+        )
+        gptq_model.quantized = True
+
+        del self.quantizers
 

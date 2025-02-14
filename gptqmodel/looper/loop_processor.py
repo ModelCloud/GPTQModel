@@ -6,6 +6,7 @@ from torch.nn import Module
 from gptqmodel import QuantizeConfig
 from gptqmodel.looper.module_looper import InputCache
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.models import BaseGPTQModel
 
 
 # LoopProcessor is a singleton(), not per module instance
@@ -48,5 +49,9 @@ class LoopProcessor:
         pass
 
     # last step, after all loop processor is called
-    def finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule):
+        pass
+
+    # last step, after all loop processor is called
+    def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
         pass

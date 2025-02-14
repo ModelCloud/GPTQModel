@@ -114,8 +114,11 @@ class ModuleLooper():
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
-    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, ):
+    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, **kwargs):
         # TODO: lm_head quantize
+
+        forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
+        self.gptq_model.model.config.use_cache = False
 
         layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
@@ -319,9 +322,35 @@ class ModuleLooper():
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
                     for reverse_p in reversed(self.processors):
-                        reverse_p.finalize(module)
+                        reverse_p.submodule_finalize(module)
 
                 del module
 
                 if auto_gc:
                     torch_empty_cache()
+
+        # logger.info(f"Quantization summary:\n{self.quant_log}")
+        # for module_log in self.quant_log:
+        #     logger.info(module_log)
+        # if task is not None:
+        #     x = list(range(layer_count))
+        #     gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+        #     cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+        #     loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
+        #     time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
+        #     task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+        #     task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+        #     task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+        #     task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+
+        for processor in self.processors:
+            processor.model_finalize(self.gptq_model, **kwargs)
+
+        self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+        self.gptq_model.quantized = True
+        if auto_gc:
+            torch_empty_cache()
+
+        # TODO return
+        # return self.gptq_model.quant_log
