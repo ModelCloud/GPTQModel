@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 import transformers
 
-from .. import QuantizeConfig
+from gptqmodel.quantization import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync

@@ -19,7 +19,7 @@
 import torch
 import torch.nn as nn
 
-from .. import QuantizeConfig
+from gptqmodel.quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
@@ -48,7 +48,7 @@ class Quantizer(nn.Module):
         maxshrink=0.8,
         trits=False,
     ):
-        self.maxq = torch.tensor(2**bits - 1)
+        self.maxq = torch.tensor(2**self.qcfg.bits - 1)
         self.perchannel = perchannel
         self.grid = grid
         self.maxshrink = maxshrink
