@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 import transformers
 
+from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
@@ -38,15 +39,16 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: NamedModule):
+    def __init__(self, module: NamedModule, qcfg: QuantizeConfig):
         self.module = module.module
+        self.qcfg = qcfg
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
 
         self.rows, self.columns = self.module_copy.shape[0], self.module_copy.shape[1]
         # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
-        self.quantizer = Quantizer()
+        self.quantizer = Quantizer(qcfg=qcfg)
 
         # fwd input buffer
         self.fwd_inputs_buffered = False

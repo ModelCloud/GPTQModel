@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import copy
 from typing import Callable, Tuple
 
 import torch
@@ -56,17 +56,21 @@ class GPTQProcessor(LoopProcessor):
             self.logger_task = None
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
-        bits = self.qcfg.bits
-        sym = self.qcfg.sym
-        mse = self.qcfg.mse
+        qcfg_clone = copy.deepcopy(self.qcfg)
+
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
-            bits = self.qcfg.dynamic_get(module.full_name, "bits", bits)
-            sym = self.qcfg.dynamic_get(module.full_name, "sym", sym)
-            mse = self.qcfg.dynamic_get(module.full_name, "mse", mse)
+            qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
+            qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
+            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
 
-        tmp = GPTQ(module)
+            qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
+            qcfg_clone.desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", qcfg_clone.desc_act)
+            qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
+            qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
+
+        tmp = GPTQ(module, qcfg=qcfg_clone)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
@@ -78,10 +82,8 @@ class GPTQProcessor(LoopProcessor):
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
-            bits,
+            qcfg=qcfg_clone,
             perchannel=True,
-            sym=sym,
-            mse=mse,
         )
         self.tasks[module.name] = tmp
         return tmp
@@ -97,25 +99,15 @@ class GPTQProcessor(LoopProcessor):
         # pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
         gptq = self.tasks
 
-        group_size = self.qcfg.group_size
-        desc_act = self.qcfg.desc_act
-        damp_percent = self.qcfg.damp_percent
-        static_groups = self.qcfg.static_groups
-
-        # dynamic overrides
-        if self.qcfg.dynamic is not None:
-            group_size = self.qcfg.dynamic_get(module.full_name, "group_size", group_size)
-            desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", desc_act)
-            damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", damp_percent)
-            static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", static_groups)
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[module.name].quantize(
-            percdamp=damp_percent,
-            group_size=group_size,
-            actorder=desc_act,
-            static_groups=static_groups,
+        g = gptq[module.name]
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize(
+            percdamp=g.qcfg.damp_percent,
+            group_size=g.qcfg.group_size,
+            actorder=g.qcfg.desc_act,
+            static_groups=g.qcfg.static_groups,
         )
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)

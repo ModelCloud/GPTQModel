@@ -19,6 +19,7 @@
 import torch
 import torch.nn as nn
 
+from .. import QuantizeConfig
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
@@ -32,26 +33,23 @@ def quantize(x, scale, zero, maxq):
 
 
 class Quantizer(nn.Module):
-    def __init__(self, shape=1):
+    def __init__(self, qcfg: QuantizeConfig, shape=1):
         super(Quantizer, self).__init__()
+
+        self.qcfg = qcfg
         self.register_buffer("maxq", torch.tensor(0))
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
 
     def configure(
         self,
-        bits,
         perchannel=False,
-        sym=True,
-        mse=0.0,  # 2.4
         grid=100,
         maxshrink=0.8,
         trits=False,
     ):
         self.maxq = torch.tensor(2**bits - 1)
         self.perchannel = perchannel
-        self.sym = sym
-        self.mse = mse
         self.grid = grid
         self.maxshrink = maxshrink
         if trits:
@@ -80,7 +78,7 @@ class Quantizer(nn.Module):
         xmin = torch.minimum(x.min(1)[0], tmp)
         xmax = torch.maximum(x.max(1)[0], tmp)
 
-        if self.sym:
+        if self.qcfg.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
             tmp = xmin < 0
             if torch.any(tmp):
@@ -94,23 +92,23 @@ class Quantizer(nn.Module):
             self.zero = xmin
         else:
             self.scale = (xmax - xmin) / self.maxq
-            if self.sym:
+            if self.qcfg.sym:
                 self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
             else:
                 self.zero = torch.round(-xmin / self.scale)
 
-        if self.mse > 0.0:
+        if self.qcfg.mse > 0.0:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
                 xmin1 = p * xmin
                 xmax1 = p * xmax
                 scale1 = (xmax1 - xmin1) / self.maxq
-                zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
+                zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
                 q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
                 q -= x
                 q.abs_()
-                q.pow_(self.mse)
+                q.pow_(self.qcfg.mse)
                 err = torch.sum(q, 1)
                 tmp = err < best
                 if torch.any(tmp):
