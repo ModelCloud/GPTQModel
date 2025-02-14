@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.quantization import QuantizeConfig
-from .gptq import HF_OPTIMUM
+from ..quantization.gptq import HF_OPTIMUM
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
