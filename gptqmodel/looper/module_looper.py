@@ -173,7 +173,7 @@ class ModuleLooper():
             full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
             modules = [[self.lm_head]] if is_lm_head_module else layer_modules
 
-            for processor in self.processors:
+            for p_index, processor in self.processors:
                 layer_inputs, layer_input_kwargs, position_ids, attention_masks = processor.inputs_cache
 
                 for index, names in enumerate(modules):
@@ -265,15 +265,14 @@ class ModuleLooper():
                     for name_index, name in enumerate(subset):
                         processor.process(module=subset[name])
 
+                    processor.post_process(module=subset[name])
+
                     if index == len(layer_modules) - 1:
                         if auto_gc:
                             torch_empty_cache()
 
-                    processor.post_process(module=subset[name])
-
-
-                is_last_quant = module_index == len(quant_modules_pb) - 1
-                if not is_last_quant:
+                is_last_module = module_index == len(quant_modules_pb) - 1
+                if not is_last_module:
                     for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
@@ -307,6 +306,7 @@ class ModuleLooper():
                             if auto_gc:
                                 torch_empty_cache()
 
+                # TODO move to processor?
                 if not is_lm_head_module:
                     layers[module_index] = self.post_quantize(module)
                 else:
@@ -315,6 +315,11 @@ class ModuleLooper():
                 del module
                 del processor.tasks
                 processor.clear_layer_inputs()
+
+                # if last processor, we need to call finalize in reverse
+                if p_index == len(self.processors) - 1:
+                    for reverse_p in reversed(self.processors):
+                        reverse_p.finalize(module)
 
                 if auto_gc:
                     torch_empty_cache()
