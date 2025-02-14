@@ -29,7 +29,6 @@ from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                                    get_moe_layer_modules, move_to, nested_move_to)
-from gptqmodel.utils.plotly import create_plotly
 from gptqmodel.utils.progress import ProgressBar
 from gptqmodel.utils.torch import torch_empty_cache
 
@@ -372,17 +371,20 @@ class ModuleLooper():
         # logger.info(f"Quantization summary:\n{self.quant_log}")
         # for module_log in self.quant_log:
         #     logger.info(module_log)
+        if any(p.logger_task for p in self.processors):
+            from gptqmodel.utils.plotly import create_plotly
+
         for reverse_p in reversed(self.processors):
             reverse_p.model_finalize(self.gptq_model, **kwargs)
 
-            if processor.logger_task is not None:
+            if reverse_p.logger_task is not None:
                 x = list(range(layer_count))
                 gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
                 cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
                 loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
                 time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
 
-                with processor.logger_task.get_logger() as l:
+                with reverse_p.logger_task.get_logger() as l:
                     l.report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
                     l.report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
                     l.report_plotly('avg_loss', 'avg_loss', loss_fig)
