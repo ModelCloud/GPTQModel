@@ -138,7 +138,7 @@ class BaseQuantLinear(nn.Module):
         # load adapter if any
         if adapter is not None:
             if adapter.path in LORA_MERGED_WEIGHT_PATHS:
-                print(f"Adapter (merged weights) lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
+                print(f"Adapter (merged weights) lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
 
                 # pre allocate buffers so accelerate can auto-bind merged weights in same tensor file as model
                 self.register_buffer(
@@ -151,7 +151,7 @@ class BaseQuantLinear(nn.Module):
                     t.zeros((adapter.rank, out_features), dtype=t.float16),
                 )
             else:
-                print(f"Adapter lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
+                print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
 
             # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
             # EoRA need to preallocate buffers for Lora_A and B weights so HF can load

@@ -13,7 +13,6 @@ adapter_load_cache = None
 
 @dataclass
 class Adapter():
-    name: str
     path: str
     rank: int
 
@@ -25,15 +24,23 @@ class Adapter():
     def post_init(self, weight_key: str, device: torch.device, **kwargs):
         pass
 
+    # override me
+    @classmethod
+    def name(cls) -> str:
+        pass
+
 
 @dataclass
 class Lora(Adapter):
-    name: str = "lora"
     path: str = field(default=None)
     rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
 
     lora_A: torch.Tensor = None
     lora_B: torch.Tensor = None
+
+    @classmethod
+    def name(cls) -> str:
+        return "lora"
 
     def apply(self, x: torch.Tensor, out: torch.Tensor):
         #out = out + ((x @ self.lora_A) @ self.lora_B)
@@ -86,8 +93,8 @@ class Lora(Adapter):
         if len(adapter_load_cache) == 0:
             adapter_load_cache = None
 
-        print(f"Adapter: {self.name}, loaded lora_A shape: {lora_A.shape}")
-        print(f"Adapter: {self.name}, loaded lora_B shape: {lora_B.shape}")
+        print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
+        print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
         if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
             print(
                 f"Warning: lora_A and lora_B tensors should be `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
@@ -116,7 +123,7 @@ class Lora(Adapter):
 
     def to_dict(self):
         return {
-            "name": self.name,
+            "name": self.name(),
             "path": self.path,
             "rank": self.rank
         }
