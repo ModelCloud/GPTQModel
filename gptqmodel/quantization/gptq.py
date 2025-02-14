@@ -32,6 +32,7 @@ from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import Quantizer
 
+
 logger = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -40,8 +41,13 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig]=None):
-        self.module = module.module
+    def __init__(self, module: torch.nn.Module, qcfg: Optional[QuantizeConfig]=None):
+        if isinstance(module, NamedModule):
+            self.module = module.module
+            name = module.name
+        else:
+            name = "hf_optimum"
+            self.module = NamedModule(module, name=name, full_name=name,layer_index=0)
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
@@ -49,7 +55,8 @@ class GPTQ:
         self.rows, self.columns = self.module_copy.shape[0], self.module_copy.shape[1]
         # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
-        self.quantizer = Quantizer(qcfg=qcfg)
+
+        self.quantizer = Quantizer(qcfg=self.qcfg, name=name)
 
         # fwd input buffer
         self.fwd_inputs_buffered = False

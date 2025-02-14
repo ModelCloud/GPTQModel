@@ -30,7 +30,6 @@ from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to, pack_model
 from torch.nn import Module
 
-from gptqmodel.utils.plotly import create_plotly
 
 logger = setup_logger()
 
@@ -84,6 +83,7 @@ class GPTQProcessor(LoopProcessor):
     def log_plotly(self):
         task = self.logger_task
         if task is not None:
+            from gptqmodel.utils.plotly import create_plotly
             x = list(range(self.layer_count))
             gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
             cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")

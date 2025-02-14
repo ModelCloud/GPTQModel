@@ -33,7 +33,7 @@ def quantize(x, scale, zero, maxq):
 
 
 class Quantizer(nn.Module):
-    def __init__(self, qcfg: QuantizeConfig, shape=1):
+    def __init__(self, qcfg: QuantizeConfig, shape=1, name: str=None):
         super(Quantizer, self).__init__()
 
         self.qcfg = qcfg
@@ -41,13 +41,22 @@ class Quantizer(nn.Module):
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
 
+        self.name=name
+
+    # FIXME, optimum shouldn't call this directly, it should call hf_configure
     def configure(
         self,
         perchannel=False,
         grid=100,
         maxshrink=0.8,
         trits=False,
+        bits:int=4, # for hf compat
+        sym:bool=False, # for hf compat
     ):
+        if self.name == "hf_optimum":
+            self.qcfg.bits = bits
+            self.qcfg.sym = sym
+
         self.maxq = torch.tensor(2**self.qcfg.bits - 1)
         self.perchannel = perchannel
         self.grid = grid
