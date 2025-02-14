@@ -27,12 +27,13 @@ from torch.nn import Module
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig):
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig,logger_board:str=""):
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = []
         self.calibration_dataset = calibration_dataset
         self.qcfg = qcfg
 
+        self.logger_task=None
 
     # called first
     def preprocess(self, module: NamedModule, **kwargs):

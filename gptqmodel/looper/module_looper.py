@@ -25,9 +25,11 @@ from gptqmodel.looper.named_module import STAT_GPTQ_FWD_TIME, NamedModule
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
+from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                                    get_moe_layer_modules, move_to, nested_move_to)
+from gptqmodel.utils.plotly import create_plotly
 from gptqmodel.utils.progress import ProgressBar
 from gptqmodel.utils.torch import torch_empty_cache
 
@@ -182,8 +184,6 @@ class ModuleLooper():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
 
-            # TODO log clearml
-
             self.gptq_model.pre_quantize(module)
 
             cur_layer_device = get_device(module)
@@ -191,6 +191,25 @@ class ModuleLooper():
             modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
             for p_index, processor in enumerate(self.processors):
+                if processor.logger_task is not None:
+                    gpu_memory = get_gpu_usage_memory()
+                    cpu_memory = get_cpu_usage_memory()
+                    processor.logger_task.get_logger().report_scalar(
+                        title='GPU Memory',
+                        series='GPU Memory',
+                        value=gpu_memory,
+                        iteration=module_index,
+                    )
+
+                    processor.logger_task.get_logger().report_scalar(
+                        title='CPU Memory',
+                        series='CPU Memory',
+                        value=cpu_memory,
+                        iteration=module_index,
+                    )
+                    gpu_memorys.append(gpu_memory)
+                    cpu_memorys.append(cpu_memory)
+
                 layer_inputs, layer_input_kwargs, position_ids, attention_masks = processor.inputs_cache
 
                 for index, names in enumerate(modules):
@@ -346,19 +365,20 @@ class ModuleLooper():
         # logger.info(f"Quantization summary:\n{self.quant_log}")
         # for module_log in self.quant_log:
         #     logger.info(module_log)
-        # if task is not None:
-        #     x = list(range(layer_count))
-        #     gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-        #     cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-        #     loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
-        #     time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
-        #     task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-        #     task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-        #     task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-        #     task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
-
         for processor in self.processors:
             processor.model_finalize(self.gptq_model, **kwargs)
+
+            if processor.logger_task is not None:
+                x = list(range(layer_count))
+                gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+                cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+                loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
+                time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
+                processor.logger_task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+                processor.logger_task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+                processor.logger_task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+                processor.logger_task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 

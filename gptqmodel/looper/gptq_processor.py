@@ -32,13 +32,28 @@ from torch.nn import Module
 logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig):
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board=""):
         super().__init__(calibration_dataset=calibration_dataset, qcfg=qcfg)
         self.durations = []
         self.avg_losses = []
         self.module_names = []
         self.quant_log = []
         self.quantizers = {}
+
+        if logger_board == "clearml":
+            try:
+                from clearml import Task
+                from random_word import RandomWords
+
+                from ..utils.plotly import create_plotly
+            except ImportError as _:
+                raise ImportError(
+                    "The logger_board is set to 'clearml', but required dependencies are missing. "
+                    "Please install them by running: pip install gptqmodel[logger]"
+                )
+            self.logger_task = Task.init(project_name='GPTQModel', task_name=f'GPTQProcessor-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
+        else:
+            self.logger_task = None
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         bits = self.qcfg.bits
