@@ -178,6 +178,7 @@ class GPTQProcessor(LoopProcessor):
         # generate complete, safe to move to cpu
         # TODO FIX: remove this? eora process need to override fwd in post_process so it can do wq + (A @ B)
         module.weight.data = module.state.pop("wq").cpu()
+        module.state.pop("w") # no need for original weights now
 
     def model_finalize(self, model: BaseGPTQModel, **kwargs):
         backend = kwargs.pop("backend")
