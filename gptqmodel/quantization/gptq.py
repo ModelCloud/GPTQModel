@@ -28,6 +28,7 @@ import transformers
 
 from gptqmodel.quantization import QuantizeConfig
 from ..looper.named_module import NamedModule
+from ..nn_modules.hooked_linear import HookedLinear
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import Quantizer, HF_OPTIMUM
@@ -40,7 +41,7 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: torch.nn.Module, qcfg: Optional[QuantizeConfig]=None):
+    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
         if isinstance(module, NamedModule):
             self.module = module.module
             name = module.name
@@ -95,7 +96,7 @@ class GPTQ:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
 
-        if isinstance(self.module.module, torch.nn.Linear) or isinstance(self.module, transformers.Conv1D):
+        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
