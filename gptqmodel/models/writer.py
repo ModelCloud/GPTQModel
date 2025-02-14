@@ -48,12 +48,13 @@ from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
 
 logger = setup_logger()
 
-QUANT_LOG_LAYER = "layer"
-QUANT_LOG_MODULE = "module"
+PROCESS_LOG_NAME = "process"
+PROCESS_LOG_LAYER = "layer"
+PROCESS_LOG_MODULE = "module"
 QUANT_LOG_LOSS = "loss"
 QUANT_LOG_DAMP = "damp"
-QUANT_LOG_TIME = "time"
-QUANT_LOG_FWD_TIME = "fwd_time"
+PROCESS_LOG_TIME = "time"
+PROCESS_LOG_FWD_TIME = "fwd_time"
 
 def ModelWriter(cls):
 
@@ -80,9 +81,9 @@ def ModelWriter(cls):
         if self.quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
-                w.writerow([QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME])
-                w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
-                              entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in self.quant_log])
+                w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
+                w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
+                              entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024

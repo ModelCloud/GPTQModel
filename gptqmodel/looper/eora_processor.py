@@ -13,8 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import copy
-from dataclasses import dataclass, field
+import time
 from typing import Callable, Tuple
 
 import torch
@@ -23,9 +24,8 @@ from gptqmodel.adapter.adapter import Lora
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
-                                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
-from gptqmodel.quantization import GPTQ
+from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
+                                     PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
@@ -110,7 +110,7 @@ class EoraProcessor(LoopProcessor):
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
-            inp = input[0].detach().to(dtype=torch.float32) # TODO FIX ME: Do we really need to detach?
+            inp = input[0].to(dtype=torch.float32) # Original code had .detach() but it should not be needed
             if inp.dim() == 2:
                 inp = inp.unsqueeze(0)
 
@@ -131,6 +131,7 @@ class EoraProcessor(LoopProcessor):
 
         self.pb.set_description(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
 
+        start = time.time()
         original_weight = module.state.get("w")
         quantized_weight = module.state.get("wq")
 
@@ -181,13 +182,17 @@ class EoraProcessor(LoopProcessor):
         # lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(dtype=torch.float16)
         # lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(dtype=torch.float16)
 
+        duration = time.time() - start
         self.durations.append(duration)
-        self.avg_losses.append(avg_loss)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stat = {QUANT_LOG_LAYER: module.layer_index, QUANT_LOG_MODULE: module.name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
-                QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
-                QUANT_LOG_FWD_TIME: f"{self.fwd_time:.3f}"}
+        stat = {
+            PROCESS_LOG_NAME: self.name(),
+            PROCESS_LOG_LAYER: module.layer_index,
+            PROCESS_LOG_MODULE: module.name,
+            PROCESS_LOG_TIME: f"{duration:.3f}",
+            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}"
+        }
 
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)

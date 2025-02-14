@@ -21,8 +21,8 @@ from gptqmodel import QuantizeConfig
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
-                                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
+from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
+                                     PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
@@ -165,9 +165,16 @@ class GPTQProcessor(LoopProcessor):
         self.avg_losses.append(avg_loss)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stat = {QUANT_LOG_LAYER: module.layer_index, QUANT_LOG_MODULE: module.name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
-                QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
-                QUANT_LOG_FWD_TIME: f"{self.fwd_time:.3f}"}
+        stat = {
+            PROCESS_LOG_NAME:  self.name(),
+            PROCESS_LOG_LAYER: module.layer_index,
+            PROCESS_LOG_MODULE: module.name,
+            QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+            QUANT_LOG_DAMP: f"{damp_percent:.5f}",
+            PROCESS_LOG_TIME: f"{duration:.3f}",
+            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+        }
+
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
