@@ -34,7 +34,7 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokeni
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
+from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, EoraConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
@@ -288,6 +288,7 @@ class BaseGPTQModel(nn.Module):
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
+        eora_config: Optional[EoraConfig] = None,
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
@@ -311,21 +312,6 @@ class BaseGPTQModel(nn.Module):
 
         if len(calibration_dataset) == 0:
             raise ValueError("Calibration dataset must not be empty.")
-
-        if logger_board == "clearml":
-            try:
-                from clearml import Task
-                from random_word import RandomWords
-
-                from ..utils.plotly import create_plotly
-            except ImportError as _:
-                raise ImportError(
-                    "The logger_board is set to 'clearml', but required dependencies are missing. "
-                    "Please install them by running: pip install gptqmodel[logger]"
-                )
-            task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
-        else:
-            task = None
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
@@ -393,7 +379,8 @@ class BaseGPTQModel(nn.Module):
         from gptqmodel.looper.gptq_processor import GPTQProcessor
         processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
         module_looper = ModuleLooper(self, processors=processors)
-        return module_looper.loop(backend=backend)
+        return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,
+                                  auto_gc=auto_gc, backend=backend)
 
     def quantize_old(
         self,

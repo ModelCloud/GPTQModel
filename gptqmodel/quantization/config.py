@@ -510,3 +510,11 @@ class BaseQuantizeConfig(QuantizeConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
+
+
+@dataclass
+class EoraConfig:
+    output_path: str
+    rank: int = field(default=64)
+    # If None, the calibration_dataset of quantize is used.
+    calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]] = field(default=None)
