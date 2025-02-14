@@ -225,5 +225,6 @@ class GPTQProcessor(LoopProcessor):
 
         super().finalize(model=model, **kwargs)
 
-    def name(self) -> str:
+    @classmethod
+    def name(cls) -> str:
         return "gptq"

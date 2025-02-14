@@ -92,5 +92,6 @@ class LoopProcessor:
         del self.inputs_cache
         del self.calibration_dataset
 
-    def name(self) -> str:
+    @classmethod
+    def name(cls) -> str:
         pass

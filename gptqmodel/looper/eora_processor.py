@@ -215,5 +215,6 @@ class EoraProcessor(LoopProcessor):
         del self.eigen_scaling_diag_matrix
         super().finalize(model=model, **kwargs)
 
-    def name(self) -> str:
+    @classmethod
+    def name(cls) -> str:
         return "eora"
