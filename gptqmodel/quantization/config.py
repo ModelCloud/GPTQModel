@@ -180,6 +180,7 @@ class QuantizeConfig():
 
     # pending used field
     adapter: Optional[Dict] = field(default=None)
+    eora_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = field(default=None)
 
     def __post_init__(self):
         fields_info = fields(self)

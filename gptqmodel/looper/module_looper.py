@@ -18,6 +18,8 @@ import time
 from typing import List
 
 import torch
+
+from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.input_cache import InputCache
 
 from gptqmodel.looper.loop_processor import LoopProcessor
@@ -381,7 +383,7 @@ class ModuleLooper():
             logger.info(f"Quantization summary:\n{reverse_p.log}")
 
             processor_name = reverse_p.name()
-            total_log[processor_name]= reverse_p.log
+            total_log[processor_name] = reverse_p.log
             if processor_name == "gptq":
                 self.gptq_model.quant_log = reverse_p.log
 

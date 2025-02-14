@@ -34,7 +34,7 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokeni
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, EoraConfig
+from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
@@ -288,7 +288,6 @@ class BaseGPTQModel(nn.Module):
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
-        eora_config: Optional[EoraConfig] = None,
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
