@@ -1,18 +1,16 @@
 import time
 from collections import namedtuple
-from typing import Tuple, List
+from typing import List
 
 import torch
-from torch import nn
-
 from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule, STAT_GPTQ_FWD_TIME
+from gptqmodel.looper.named_module import STAT_GPTQ_FWD_TIME, NamedModule
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import get_module_by_name_prefix, get_device, move_to, nested_move_to, get_moe_layer_modules, \
-    get_module, find_modules
+from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
+                                   get_moe_layer_modules, move_to, nested_move_to)
 from gptqmodel.utils.progress import ProgressBar
 from gptqmodel.utils.torch import torch_empty_cache
 

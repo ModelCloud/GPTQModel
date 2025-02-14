@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 
 from gptqmodel.adapter.adapter import Adapter, normalize_adapter
+
 from ..eora.eora_generate import eora_generate
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):

@@ -1,12 +1,12 @@
-import torch
-from typing import Union, List, Dict, Optional
+from typing import Dict, List, Optional, Union
 
-from gptqmodel.models._const import SUPPORTS_MODULE_TYPES, CPU
+import torch
+from gptqmodel.models._const import CPU, SUPPORTS_MODULE_TYPES
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import get_module, get_module_by_name_prefix, get_device, move_to, nested_move_to, \
-    get_moe_layer_modules, find_modules
+from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
+                                   get_moe_layer_modules, move_to, nested_move_to)
 from gptqmodel.utils.progress import ProgressBar
 from gptqmodel.utils.torch import torch_empty_cache
 

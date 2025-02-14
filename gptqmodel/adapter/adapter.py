@@ -1,10 +1,10 @@
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Union
+from urllib.parse import urlparse
 
 import safetensors
 import torch
-from urllib.parse import urlparse, unquote
 
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
 
