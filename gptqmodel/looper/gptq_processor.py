@@ -26,7 +26,7 @@ from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_L
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import move_to
+from gptqmodel.utils.model import move_to, pack_model
 from torch.nn import Module
 
 logger = setup_logger()
@@ -87,9 +87,7 @@ class GPTQProcessor(LoopProcessor):
         return tmp
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
-        print("preprocess_fwd_hook",name)
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-            print("tmp")
             # gptq is mutable.
             g = self.tasks[name]  # noqa: F821
             g.add_batch(inp[0].data, out.data)  # noqa: F821
@@ -183,7 +181,7 @@ class GPTQProcessor(LoopProcessor):
 
     def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
         backend = kwargs.pop("backend")
-        gptq_model.qlinear_kernel = gptq_model.pack_model(
+        gptq_model.qlinear_kernel = pack_model(
             model=gptq_model.model,
             quantizers=self.quantizers,
             bits=self.qcfg.bits,

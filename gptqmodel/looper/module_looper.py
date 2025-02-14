@@ -314,6 +314,7 @@ class ModuleLooper():
                             torch_empty_cache()
 
                 is_last_module = module_index == len(quant_modules_pb) - 1
+                layer_outputs = []
                 if not is_last_module:
                     for j in range(processor.num_batches):
                         layer_input = []
@@ -340,7 +341,7 @@ class ModuleLooper():
                                 module(*layer_input, **additional_layer_inputs)[0],
                                 cur_layer_device if calibration_enable_gpu_cache else CPU,
                             )
-                            processor.receive_layer_input([layer_output])
+                            layer_outputs.append([layer_output])
 
                         del layer_input
                         del additional_layer_inputs
@@ -355,6 +356,8 @@ class ModuleLooper():
                     self.gptq_model.post_quantize(module)
 
                 processor.clear_cache_data()
+
+                processor.receive_layer_inputs(layer_outputs)
 
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:

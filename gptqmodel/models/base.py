@@ -392,7 +392,7 @@ class BaseGPTQModel(nn.Module):
         from gptqmodel.looper.gptq_processor import GPTQProcessor
         processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
         module_looper = ModuleLooper(self, processors=processors)
-        module_looper.loop()
+        module_looper.loop(backend=backend)
 
     def quantize(
         self,
