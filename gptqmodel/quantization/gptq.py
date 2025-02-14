@@ -95,7 +95,7 @@ class GPTQ:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
 
-        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
+        if isinstance(self.module.module, torch.nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
@@ -121,6 +121,18 @@ class GPTQ:
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
+
+    # FIXME, optimum needs fasterquant, we need to remove it
+    def fasterquant(
+        self,
+        blocksize=128,
+        percdamp=0.01,
+        damp_auto_increment=0.0015,
+        group_size=-1,
+        actorder=False,
+        static_groups=False,
+    ):
+        return self.hf_quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
 
     # public api exposed to hf
     def hf_quantize(
