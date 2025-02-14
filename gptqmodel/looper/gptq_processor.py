@@ -58,7 +58,6 @@ class GPTQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         qcfg_clone = copy.deepcopy(self.qcfg)
 
-
         # dynamic overrides
         if self.qcfg.dynamic is not None:
             qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
@@ -70,7 +69,7 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
-        tmp = GPTQ(module, qcfg=qcfg_clone)
+        tmp = GPTQ(module=module, qcfg=qcfg_clone)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
@@ -82,7 +81,6 @@ class GPTQProcessor(LoopProcessor):
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
-            qcfg=qcfg_clone,
             perchannel=True,
         )
         self.tasks[module.name] = tmp
@@ -103,6 +101,7 @@ class GPTQProcessor(LoopProcessor):
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         g = gptq[module.name]
+        # TOO FIX ME, quantize does NOT need to pass any args! Check HF compat!
         wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize(
             percdamp=g.qcfg.damp_percent,
             group_size=g.qcfg.group_size,
