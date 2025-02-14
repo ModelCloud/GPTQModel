@@ -26,7 +26,7 @@ class ModuleLooper():
         self.processors = processors
         self.gptq_model = model
 
-    def cache_inputs(self, layers, auto_gc, calibration_dataset, calibration_enable_gpu_cache):
+    def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache):
         layer_inputs = []
         attention_masks = []
         position_ids = []
@@ -82,7 +82,7 @@ class ModuleLooper():
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
         is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
         self.gptq_model.pre_quantize_generate_hook_start()
-        for example in calibration_dataset:
+        for example in calibration_data:
             for k, v in example.items():
                 data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
@@ -125,8 +125,8 @@ class ModuleLooper():
         for processor in self.gptq_model.processors:
             processor.num_batches = len(processor.calibration_dataset)
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
-                                       calibration_dataset=processor.calibration_dataset,
-                                       calibration_enable_gpu_cache=calibration_enable_gpu_cache)
+                                            calibration_data=processor.calibration_dataset,
+                                            calibration_enable_gpu_cache=calibration_enable_gpu_cache)
             processor.receive_input_cache(input_cache)
 
         layer_modules = self.gptq_model.layer_modules
