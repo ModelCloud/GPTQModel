@@ -17,8 +17,8 @@ from gptqmodel.utils.progress import ProgressBar
 logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
-    def __init__(self, calibration_data, qcfg: QuantizeConfig):
-        super().__init__(calibration_data=calibration_data, qcfg=qcfg)
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig):
+        super().__init__(calibration_dataset=calibration_dataset, qcfg=qcfg)
         self.durations = []
         self.avg_losses = []
         self.module_names = []

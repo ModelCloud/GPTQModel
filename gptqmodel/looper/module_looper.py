@@ -5,6 +5,7 @@ from typing import Tuple, List
 import torch
 from torch import nn
 
+from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
@@ -17,8 +18,6 @@ from gptqmodel.utils.progress import ProgressBar
 from gptqmodel.utils.torch import torch_empty_cache
 
 logger = setup_logger()
-
-InputCache = namedtuple("InputCache", ['layer_inputs', 'layer_input_kwargs', 'position_ids', 'attention_masks'])
 
 
 class ModuleLooper():
@@ -67,7 +66,7 @@ class ModuleLooper():
             raise ValueError
 
         # move layer to target device
-        layers[0] = layers[0].to(self.gptq_model.model.quantize_config.device)
+        layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.base_modules:
             module = get_module_by_name_prefix(self.gptq_model.model, module_name)
@@ -122,7 +121,7 @@ class ModuleLooper():
 
         layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
-        for processor in self.gptq_model.processors:
+        for processor in self.processors:
             processor.num_batches = len(processor.calibration_dataset)
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
                                             calibration_data=processor.calibration_dataset,
@@ -177,7 +176,7 @@ class ModuleLooper():
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
             modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
-            for p_index, processor in enumerate(self.gptq_model.processors):
+            for p_index, processor in enumerate(self.processors):
                 layer_inputs, layer_input_kwargs, position_ids, attention_masks = processor.inputs_cache
 
                 for index, names in enumerate(modules):

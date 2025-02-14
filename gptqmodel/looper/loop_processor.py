@@ -3,18 +3,18 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 
-from gptqmodel import QuantizeConfig
-from gptqmodel.looper.module_looper import InputCache
+from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
 
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, calibration_data, qcfg: QuantizeConfig):
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig):
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = []
-        self.calibration_data = calibration_data
+        self.calibration_dataset = calibration_dataset
         self.qcfg = qcfg
 
 
