@@ -88,8 +88,9 @@ class LoopProcessor:
         pass
 
     # last step, after all loop processor is called
-    def model_finalize(self, model: BaseGPTQModel, **kwargs):
-        pass
+    def finalize(self, model: BaseGPTQModel, **kwargs):
+        del self.inputs_cache
+        del self.calibration_dataset
 
     def name(self) -> str:
         pass

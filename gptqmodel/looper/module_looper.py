@@ -384,12 +384,12 @@ class ModuleLooper():
                 logger.info(module_log)
             reverse_p.log_plotly()
 
-            reverse_p.model_finalize(model=self.gptq_model, **kwargs)
+            reverse_p.finalize(model=self.gptq_model, **kwargs)
 
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
-        self.gptq_model.quantized = True
+
         if auto_gc:
             torch_empty_cache()
 

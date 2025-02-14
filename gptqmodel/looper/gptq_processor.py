@@ -201,7 +201,8 @@ class GPTQProcessor(LoopProcessor):
         module.weight.data = module.state.pop("wq").cpu()
         module.state.pop("w") # no need for original weights now
 
-    def model_finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseGPTQModel, **kwargs):
+
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
             model=model.model,
@@ -216,9 +217,13 @@ class GPTQProcessor(LoopProcessor):
             parallel_packing=self.qcfg.parallel_packing,
             pack_dtype=self.qcfg.pack_dtype,
         )
+
+        # set quantized state
         model.quantized = True
 
         del self.quant_result
+
+        super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
         return "gptq"
