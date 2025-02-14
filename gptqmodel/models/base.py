@@ -576,7 +576,7 @@ class BaseGPTQModel(nn.Module):
 
             self.qlinear_kernel = pack_model(
                 model=self.model,
-                quantizers=quantizers,
+                quant_result=quantizers,
                 bits=self.quantize_config.bits,
                 dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
@@ -1018,7 +1018,7 @@ class BaseGPTQModel(nn.Module):
 
         self.qlinear_kernel = pack_model(
             model=self.model,
-            quantizers=quantizers,
+            quant_result=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
             backend=backend,

@@ -476,12 +476,12 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quantizers, layers, pbar=None):
+def pack_module(name, qModules, quant_result, layers, pbar=None):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         if pbar:
             pbar.set_description(f"Packing {name}")
-        quantizers[name], scale, zero, g_idx = quantizers[name]
+        scale, zero, g_idx = quant_result[name]
         layer_device = qModules[name].device
         qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
@@ -498,7 +498,7 @@ def pack_module(name, qModules, quantizers, layers, pbar=None):
 
 def pack_model(
     model,
-    quantizers,
+    quant_result: Dict[str, Tuple],
     bits,
     group_size,
     backend: BACKEND,
@@ -536,10 +536,10 @@ def pack_model(
     logger.info("Packing model...")
 
     modules = find_modules(model)
-    modules = {n: modules[n] for n in quantizers}
+    modules = {n: modules[n] for n in quant_result}
     make_quant(
         model,
-        names=quantizers,
+        names=quant_result,
         qcfg=qcfg,
         backend=backend,
         lm_head_name=lm_head_name,
@@ -556,7 +556,7 @@ def pack_model(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         with ProgressBar(total=len(names)) as pbar:
             def wrapper(name):
-                pack_module(name, qModules, quantizers, modules, pbar)
+                pack_module(name, qModules, quant_result, modules, pbar)
 
             for _ in executor.map(wrapper, names):
                 pass

@@ -32,13 +32,13 @@ from torch.nn import Module
 logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board=""):
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board: str = ""):
         super().__init__(calibration_dataset=calibration_dataset, qcfg=qcfg)
         self.durations = []
         self.avg_losses = []
         self.module_names = []
         self.quant_log = []
-        self.quantizers = {}
+        self.quant_result = {}
 
         if logger_board == "clearml":
             try:
@@ -150,8 +150,7 @@ class GPTQProcessor(LoopProcessor):
         self.quant_log.append(stat)
         logger.info(stat)
 
-        self.quantizers[module.full_name] = (
-            gptq[module.name].quantizer.to(CPU),
+        self.quant_result[module.full_name] = (
             move_to(scale, CPU),
             move_to(zero, CPU),
             move_to(g_idx, CPU),
@@ -174,9 +173,6 @@ class GPTQProcessor(LoopProcessor):
         # prepare for module.foward post generate
         module.weight.data = module.state["wq"] # module.layer.weight or module.weight?
 
-        # clean up dicts
-        self.quantizers.pop(module.full_name)
-
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
         # TODO FIX: remove this? eora process need to override fwd in post_process so it can do wq + (A @ B)
@@ -187,7 +183,7 @@ class GPTQProcessor(LoopProcessor):
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
             model=model.model,
-            quantizers=self.quantizers,
+            quant_result=self.quant_result,
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
             backend=backend,
@@ -200,5 +196,5 @@ class GPTQProcessor(LoopProcessor):
         )
         model.quantized = True
 
-        del self.quantizers
+        del self.quant_result
 
