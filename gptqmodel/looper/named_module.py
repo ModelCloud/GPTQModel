@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
+from typing import Dict, Any
 
 import torch
 import transformers
@@ -64,7 +64,10 @@ class NamedModule(torch.nn.Module):
         }
 
     def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except Exception:
-            return getattr(self.module, name)
+        return getattr(self.module, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in ["module", "name", "full_name", "layer_index", "state"]:
+            self.__dict_[name] = value
+        else:
+            self.module.__dict_[name] = value
