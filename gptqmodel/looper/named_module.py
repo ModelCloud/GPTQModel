@@ -68,6 +68,6 @@ class NamedModule(torch.nn.Module):
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name in ["module", "name", "full_name", "layer_index", "state"]:
-            self.__dict_[name] = value
+            self.__dict__[name] = value
         else:
-            self.module.__dict_[name] = value
+            self.module.__dict__[name] = value
