@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import os
 
+from gptqmodel.adapter.adapter import Adapter, normalize_adapter
+
+from ..eora.eora_generate import eora_generate
+
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
@@ -182,6 +186,10 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        # normalize config to cfg instance
+        if isinstance(quantize_config, Dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
@@ -190,7 +198,8 @@ class GPTQModel:
             patch_vllm()
 
         is_quantized = False
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
+                   "quantization_config"):
             is_quantized = True
         else:
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
@@ -234,14 +243,16 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseGPTQModel:
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
+                   "quantization_config"):
             logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if quantize_config and quantize_config.dynamic:
-            logger.warning("GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
+            logger.warning(
+                "GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
@@ -258,6 +269,7 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
+            adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             # verify weight files matches predefined hash during loading
             # usage: hash_format:hash_value, example: md5:ugkdh232
@@ -265,6 +277,10 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ) -> BaseGPTQModel:
+        # normalize adapter to instance
+        adapter = normalize_adapter(adapter)
+
+        print(f"from_quantized: adapter: {adapter}")
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
 
         if isinstance(backend, str):
@@ -277,6 +293,7 @@ class GPTQModel:
             backend=backend,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,
+            adapter=adapter,
             **kwargs,
         )
 
@@ -355,7 +372,8 @@ class GPTQModel:
                     output_file=output_file,
                     backend=backend
                 )
-                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted,
+                                       "results_path": result_path}
             print('--------evalplus Eval Result---------')
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
@@ -382,7 +400,8 @@ class GPTQModel:
 
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
-                raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+                raise ValueError(
+                    "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
             mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config)
 
@@ -430,3 +449,26 @@ class GPTQModel:
             repo_type=repo_type,
         )
 
+    @classmethod
+    def eora_generate(cls,
+                      model_id_or_path: str,
+                      quantize_config: QuantizeConfig,
+                      quantized_weights: Dict[str, torch.Tensor],
+                      calibration_dataset: Union[
+                          List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+                      output_path: Union[str | os.PathLike],
+                      lora_rank: int = 64,
+                      batch_size: int = 1,
+                      calibration_enable_gpu_cache: bool = True,
+                      auto_gc: bool = True,
+                      ):
+        model = GPTQModel.load(model_id_or_path, quantize_config)
+        eora_weight = eora_generate(model=model, calibration_dataset=calibration_dataset, batch_size=batch_size,
+                                    quantized_weights=quantized_weights, lora_rank=lora_rank,
+                                    calibration_enable_gpu_cache=calibration_enable_gpu_cache, auto_gc=auto_gc)
+
+        assert os.path.isfile(output_path), "output_path must be a file"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        torch.save(eora_weight, output_path)
+        return

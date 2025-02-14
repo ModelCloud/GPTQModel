@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
+from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
@@ -207,6 +208,7 @@ def ModelLoader(cls):
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
+            adapter: Optional[Adapter] = None,
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
@@ -284,6 +286,9 @@ def ModelLoader(cls):
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
+
+        if adapter is not None:
+            qcfg.adapter = adapter
 
         qcfg.calculate_bits_per_weight()
 
@@ -440,18 +445,13 @@ def ModelLoader(cls):
 
             preload_qlinear_kernel = make_quant(
                 model,
-                modules,
-                qcfg.bits,
-                qcfg.group_size,
+                names=modules,
+                qcfg=qcfg,
                 backend=backend,
-                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=qcfg.desc_act,
-                sym=qcfg.sym,
-                dynamic=qcfg.dynamic,
                 device=device,
-                pack_dtype=qcfg.pack_dtype,
             )
+
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
 

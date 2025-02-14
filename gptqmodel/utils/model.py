@@ -33,12 +33,14 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -140,23 +142,26 @@ def get_module(module, key):
         module = getattr(module, name, None)
     return module
 
-
 def make_quant(
     module,
     names,
-    bits: int,
-    group_size: int,
+    qcfg: QuantizeConfig,
     backend: BACKEND,
-    format: str | FORMAT,
     lm_head_name: str,
-    desc_act: bool = False,
-    sym: bool = True,
     pack: bool = False,
-    dynamic=None,
     device: DEVICE = None,
     from_quantized: bool = False,
-    pack_dtype: torch.dtype = None,
 ) -> BaseQuantLinear:
+
+    bits = qcfg.bits
+    group_size =qcfg.group_size
+    extension = qcfg.adapter
+    format = qcfg.format
+    desc_act = qcfg.desc_act
+    sym = qcfg.sym
+    dynamic = qcfg.dynamic
+    pack_dtype = qcfg.pack_dtype
+
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
         bits=bits,
@@ -170,6 +175,7 @@ def make_quant(
         device=device,
         pack_dtype=pack_dtype,
         multi_select=True,
+        adapter=extension,
     )
 
     logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
@@ -193,7 +199,9 @@ def make_quant(
                 sym=sym,
                 device=device,
                 lm_head_name=lm_head_name,
-                pack_dtype=pack_dtype)
+                pack_dtype=pack_dtype,
+                adapter=qcfg.adapter,
+            )
             logger.info(f"make_quant: Selected linear: `{linear}`.")
             return linear_instance
         except NotImplementedError as e:
@@ -217,82 +225,95 @@ def create_quant_layer(
         device: DEVICE,
         lm_head_name: str,
         pack_dtype: torch.dtype,
+        adapter: Optional[Adapter] = None,
+
                        ) -> BaseQuantLinear:
     if isinstance(module, linear):
         return linear
     for name, submodule in module.named_modules():
-        if name in names:
-            ori_layer_device = next(submodule.parameters()).device
-            if isinstance(submodule, nn.Linear):
-                in_features = submodule.in_features
-                out_features = submodule.out_features
-            elif isinstance(submodule, nn.Conv2d):
-                in_features = submodule.in_channels
-                out_features = submodule.out_channels
-            elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
-                in_features = submodule.weight.shape[0]
-                out_features = submodule.weight.shape[1]
-            elif isinstance(submodule, BaseQuantLinear):
-                # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
-                in_features = submodule.in_features
-                out_features = submodule.out_features
-            else:
-                raise NotImplementedError(f"Unsupported module {submodule}")
+        # skip non-quantized modules
+        if name not in names:
+            continue
 
-            bias = submodule.bias is not None
+        ori_layer_device = next(submodule.parameters()).device
+        if isinstance(submodule, NamedModule):
+            in_features = submodule.state.get("in_features")
+            out_features = submodule.state.get("out_features")
+        elif isinstance(submodule, nn.Linear):
+            in_features = submodule.in_features
+            out_features = submodule.out_features
+        elif isinstance(submodule, nn.Conv2d):
+            in_features = submodule.in_channels
+            out_features = submodule.out_channels
+        elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
+            in_features = submodule.weight.shape[0]
+            out_features = submodule.weight.shape[1]
+        elif isinstance(submodule, BaseQuantLinear):
+            # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
+            in_features = submodule.in_features
+            out_features = submodule.out_features
+        else:
+            raise NotImplementedError(f"Unsupported module {submodule}")
 
-            # need copies as dynamic config may override these in for loop
-            tmp_bits = bits
-            tmp_group_size = group_size
-            tmp_desc_act = desc_act
-            tmp_sym = sym
-            tmp_pack_dtype = pack_dtype
+        bias = submodule.bias is not None
 
-            # dynamic bits, group_size, sym, pack_dtype for each layer/module
-            if dynamic is not None:
-                overrides = dynamic_get(dynamic=dynamic, module_name=name)
-                # negative module match, skip this module
-                if overrides == False:  # noqa: E712
-                    continue
+        # need copies as dynamic config may override these in for loop
+        tmp_bits = bits
+        tmp_group_size = group_size
+        tmp_desc_act = desc_act
+        tmp_sym = sym
+        tmp_pack_dtype = pack_dtype
 
-                # positive module match
-                if overrides:
-                    # override base QuantizeConfig for every quant config key/value
-                    tmp_bits = overrides.get("bits", bits)
-                    tmp_group_size = overrides.get("group_size", group_size)
-                    tmp_desc_act = overrides.get("desc_act", desc_act)
-                    tmp_sym = overrides.get("sym", sym)
-                    tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
+        # dynamic bits, group_size, sym, pack_dtype for each layer/module
+        if dynamic is not None:
+            overrides = dynamic_get(dynamic=dynamic, module_name=name)
+            # negative module match, skip this module
+            if overrides == False:  # noqa: E712
+                continue
 
-            # when loading a quantized model, device is target device passed in GPTQModel.load()
-            # check in_features and out_features validate
-            _, err = linear.validate(
-                bits=tmp_bits,
-                group_size=tmp_group_size,
-                desc_act=tmp_desc_act,
-                sym=tmp_sym,
-                pack_dtype=tmp_pack_dtype,
-                in_features=in_features,
-                out_features=out_features,
-                device=device)
-            if err is not None:
-                raise err
+            # positive module match
+            if overrides:
+                # override base QuantizeConfig for every quant config key/value
+                tmp_bits = overrides.get("bits", bits)
+                tmp_group_size = overrides.get("group_size", group_size)
+                tmp_desc_act = overrides.get("desc_act", desc_act)
+                tmp_sym = overrides.get("sym", sym)
+                tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
 
-            new_layer = linear(
-                bits=tmp_bits,
-                group_size=tmp_group_size,
-                desc_act=tmp_desc_act,
-                sym=tmp_sym,
-                in_features=in_features,
-                out_features=out_features,
-                pack_dtype=tmp_pack_dtype,
-                bias=bias,
-                #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
-                name=name,
-                lm_head_name=lm_head_name,
-            )
-            new_layer.device = ori_layer_device
-            recurse_setattr(module, name, new_layer.to(ori_layer_device))
+        # when loading a quantized model, device is target device passed in GPTQModel.load()
+        # check in_features and out_features validate
+        _, err = linear.validate(
+            bits=tmp_bits,
+            group_size=tmp_group_size,
+            desc_act=tmp_desc_act,
+            sym=tmp_sym,
+            pack_dtype=tmp_pack_dtype,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
+        )
+        if err is not None:
+            raise err
+
+
+
+        new_layer = linear(
+            bits=tmp_bits,
+            group_size=tmp_group_size,
+            desc_act=tmp_desc_act,
+            sym=tmp_sym,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=tmp_pack_dtype,
+            bias=bias,
+            #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+            name=name,
+            lm_head_name=lm_head_name,
+            adapter=adapter,
+        )
+        new_layer.device = ori_layer_device
+        recurse_setattr(module, name, new_layer.to(ori_layer_device))
     return linear
 
 # public/stable api exposed to transformer/optimum
@@ -455,12 +476,12 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quantizers, layers, pbar=None):
+def pack_module(name, qModules, quant_result, layers, pbar=None):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         if pbar:
             pbar.set_description(f"Packing {name}")
-        quantizers[name], scale, zero, g_idx = quantizers[name]
+        scale, zero, g_idx = quant_result[name]
         layer_device = qModules[name].device
         qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
@@ -477,7 +498,7 @@ def pack_module(name, qModules, quantizers, layers, pbar=None):
 
 def pack_model(
     model,
-    quantizers,
+    quant_result: Dict[str, Tuple],
     bits,
     group_size,
     backend: BACKEND,
@@ -489,6 +510,15 @@ def pack_model(
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        format=format,
+        desc_act=desc_act,
+        sym=sym,
+        dynamic=dynamic,
+        pack_dtype=pack_dtype,
+    )
     quantLinear = select_quant_linear(
         bits=bits,
         dynamic=dynamic,
@@ -506,19 +536,14 @@ def pack_model(
     logger.info("Packing model...")
 
     modules = find_modules(model)
-    modules = {n: modules[n] for n in quantizers}
+    modules = {n: modules[n] for n in quant_result}
     make_quant(
         model,
-        quantizers,
-        bits,
-        group_size,
+        names=quant_result,
+        qcfg=qcfg,
         backend=backend,
-        format=format,
         lm_head_name=lm_head_name,
-        desc_act=desc_act,
         pack=True,
-        dynamic=dynamic,
-        pack_dtype=pack_dtype,
     )
     qModules = find_modules(model, [quantLinear])
     names = list(qModules.keys())
@@ -531,7 +556,7 @@ def pack_model(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         with ProgressBar(total=len(names)) as pbar:
             def wrapper(name):
-                pack_module(name, qModules, quantizers, modules, pbar)
+                pack_module(name, qModules, quant_result, modules, pbar)
 
             for _ in executor.map(wrapper, names):
                 pass

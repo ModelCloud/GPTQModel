@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -277,7 +278,6 @@ class BaseGPTQModel(nn.Module):
 
         return new_calibration_dataset_batched
 
-    @torch.no_grad()
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
@@ -292,7 +292,110 @@ class BaseGPTQModel(nn.Module):
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
         auto_gc: bool = True,
-    ) -> List[Dict[str, str]]:
+    ) -> Dict[str, List[Dict[str, str]]]:
+        if self.quantized:
+            raise EnvironmentError("quantize() is called a model that is already quantized")
+
+        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
+            raise ValueError(
+                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
+            )
+
+        if backend == BACKEND.IPEX:
+            self.quantize_config.format = FORMAT.IPEX
+
+        if self.quantize_config.format == FORMAT.MARLIN:
+            raise ValueError(
+                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
+            )
+
+        if len(calibration_dataset) == 0:
+            raise ValueError("Calibration dataset must not be empty.")
+
+        # Validate quant linear before quantization starts
+        _ = select_quant_linear(
+            bits=self.quantize_config.bits,
+            dynamic=self.quantize_config.dynamic,
+            group_size=self.quantize_config.group_size,
+            desc_act=self.quantize_config.desc_act,
+            sym=self.quantize_config.sym,
+            backend=backend,
+            device=DEVICE(self.quantize_config.device),
+            pack=True,
+            format=self.quantize_config.format,
+            pack_dtype=self.quantize_config.pack_dtype,
+        )
+
+        # Use the provided tokenizer if one is passed to quantize()
+        if tokenizer is not None:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+
+        min_calibration_dataset_size = 256
+        min_calibration_dataset_input_ids_avg_length = 256
+
+        if len(calibration_dataset) < min_calibration_dataset_size:
+            logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                           f"Current: {len(calibration_dataset)}.")
+
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
+
+        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
+                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
+                                                   batch_size=batch_size)
+
+        # Calculate the average length of the average input_ids
+        total_input_ids_length = 0
+        max_input_id_length = 0
+        for row in calibration_dataset:
+            input_ids = row["input_ids"]
+            if isinstance(input_ids, torch.Tensor):
+                if input_ids.dim() <= 2:
+                    input_ids_length = input_ids.shape[-1]
+                else:
+                    raise ValueError(
+                        "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
+                            input_ids.dim()))
+            else:
+                input_ids_length = len(input_ids)
+
+            if input_ids_length > max_input_id_length:
+                max_input_id_length = input_ids_length
+            total_input_ids_length += input_ids_length
+        avg = total_input_ids_length / len(calibration_dataset)
+
+        if avg < min_calibration_dataset_input_ids_avg_length:
+            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
+                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+
+        from gptqmodel.looper.module_looper import ModuleLooper
+        from gptqmodel.looper.gptq_processor import GPTQProcessor
+        processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
+        module_looper = ModuleLooper(self, processors=processors)
+        return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,
+                                  auto_gc=auto_gc, backend=backend)
+
+    def quantize_old(
+        self,
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
+        batch_size: int = 1,
+        calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+        buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+        auto_gc: bool = True,
+    ) -> Tuple[List[Dict[str, str]], Dict[str, torch.Tensor]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
@@ -460,7 +563,7 @@ class BaseGPTQModel(nn.Module):
 
             self.qlinear_kernel = pack_model(
                 model=self.model,
-                quantizers=quantizers,
+                quant_result=quantizers,
                 bits=self.quantize_config.bits,
                 dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
@@ -618,6 +721,7 @@ class BaseGPTQModel(nn.Module):
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
+        quantized_weights = {}
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
             if is_lm_head_module:
@@ -660,9 +764,7 @@ class BaseGPTQModel(nn.Module):
                 skipped_modules = []
                 gptq = {}
                 for name in subset:
-                    bits = self.quantize_config.bits
-                    sym = self.quantize_config.sym
-                    mse = self.quantize_config.mse
+                    qcfg_clone = copy.deepcopy(self.quantize_config)
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
@@ -674,11 +776,15 @@ class BaseGPTQModel(nn.Module):
                             skipped_modules.append(name)
                             continue
 
-                        bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
-                        sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
-                        mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
+                        qcfg_clone.bits = self.quantize_config.dynamic_get(layer_name, "bits", qcfg_clone.bits)
+                        qcfg_clone.sym = self.quantize_config.dynamic_get(layer_name, "sym", qcfg_clone.sym)
+                        qcfg_clone.mse = self.quantize_config.dynamic_get(layer_name, "mse", qcfg_clone.mse)
+                        qcfg_clone.group_size = self.quantize_config.dynamic_get(layer_name, "group_size", qcfg_clone.group_size)
+                        qcfg_clone.desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", qcfg_clone.desc_act)
+                        qcfg_clone.damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", qcfg_clone.damp_percent)
+                        qcfg_clone.static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", qcfg_clone.static_groups)
 
-                    tmp = GPTQ(subset[name])
+                    tmp = GPTQ(module=subset[name], qcfg=qcfg_clone)
                     gptq[name] = tmp
 
                     # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
@@ -691,10 +797,7 @@ class BaseGPTQModel(nn.Module):
                         tmp.fwd_inputs_buffered = True
 
                     tmp.quantizer.configure(
-                        bits,
                         perchannel=True,
-                        sym=sym,
-                        mse=mse,
                     )
 
                 for name in skipped_modules:
@@ -737,16 +840,17 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                    # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                    if hasattr(module, "reuse_kv"):
-                        if module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                    with torch.no_grad():
+                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(module_index) is None:
-                            shared_kv_cache_dict[module_index] = layer_output[-1]
-                    else:
-                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(module_index) is None:
+                                shared_kv_cache_dict[module_index] = layer_output[-1]
+                        else:
+                            module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -769,26 +873,16 @@ class BaseGPTQModel(nn.Module):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
                     quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
-                    group_size = self.quantize_config.group_size
-                    desc_act = self.quantize_config.desc_act
-                    damp_percent = self.quantize_config.damp_percent
-                    static_groups = self.quantize_config.static_groups
-
-                    # dynamic overrides
-                    if self.quantize_config.dynamic is not None:
-                        group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
-                        desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
-                        damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", damp_percent)
-                        static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
-
-
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
-                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
-                        percdamp=damp_percent,
-                        group_size=group_size,
-                        actorder=desc_act,
-                        static_groups=static_groups,
-                    )
+                    ## Need to return the quantized_weight for offloading
+                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize()
+
+                    ## Assign the quantized weight to the weight
+                    gptq[name].module.weight.data = quantized_weight.to(device=gptq[name].device)
+                    ## Offload the quantized weight to CPU for EoRA
+                    quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
+
+
                     if task is not None:
                         task.get_logger().report_scalar(
                             title='Quantization Loss',
@@ -846,11 +940,12 @@ class BaseGPTQModel(nn.Module):
                         if module.reuse_kv:
                             additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                    layer_output = move_to(
-                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
+                    with torch.no_grad():
+                        layer_output = move_to(
+                            module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
+                            cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
 
                     del layer_input
                     del additional_layer_inputs
@@ -892,7 +987,7 @@ class BaseGPTQModel(nn.Module):
 
         self.qlinear_kernel = pack_model(
             model=self.model,
-            quantizers=quantizers,
+            quant_result=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
             backend=backend,
@@ -910,7 +1005,8 @@ class BaseGPTQModel(nn.Module):
         if auto_gc:
             torch_empty_cache()
 
-        return self.quant_log
+        ## need to return quantized_weight for EoRA
+        return self.quant_log, quantized_weights
 
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
