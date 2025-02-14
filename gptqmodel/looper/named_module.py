@@ -20,11 +20,6 @@ import torch
 import transformers
 from torch import nn
 
-STAT_GPTQ_FWD_TIME = "stat_fwd_time"
-STAT_GPTQ_DAMP_PERCENT = "stat_damp_percent"
-STAT_GPTQ_AVG_LOSS = "stat_avg_loss"
-STAT_GPTQ_DURATION = "stat_duration"
-
 class NamedModule(torch.nn.Module):
     def __init__(self, module: torch.nn.Module, name: str, full_name:str, layer_index: int) -> None:
         super().__init__()

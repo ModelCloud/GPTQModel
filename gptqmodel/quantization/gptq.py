@@ -195,7 +195,7 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        damp_percent =  self.qcfg.damp_percent
+        damp_percent = self.qcfg.damp_percent
         while 1 > damp_percent > 0:
             try:
                 damp = damp_percent * torch.mean(torch.diag(H))
@@ -232,21 +232,21 @@ class GPTQ:
                 w = W1[:, i]
                 d = Hinv1[i, i]
 
-                if group_size != -1:
-                    if not static_groups:
-                        if (i1 + i) % group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + group_size)], weight=True)
+                if self.qcfg.group_size != -1:
+                    if not self.qcfg.static_groups:
+                        if (i1 + i) % self.qcfg.group_size == 0:
+                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
 
-                        if ((i1 + i) // group_size) - now_idx == -1:
+                        if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                             scale.append(self.quantizer.scale)
                             zero.append(self.quantizer.zero)
                             now_idx += 1
                     else:
                         idx = i1 + i
-                        if actorder:
+                        if self.qcfg.desc_act:
                             idx = perm[idx]
 
-                        self.quantizer = groups[idx // group_size]
+                        self.quantizer = groups[idx // self.qcfg.group_size]
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
@@ -276,16 +276,16 @@ class GPTQ:
             print("Losses sum item:", torch.sum(Losses).item())
             raise ValueError("Quantization failed due to NaN loss")
 
-        group_size = group_size if group_size != -1 else self.columns
+        group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
-        if static_groups and actorder:
+        if self.qcfg.static_groups and self.qcfg.desc_act:
             g_idx = [perm[i] // group_size for i in range(self.columns)]
         else:
             g_idx = [i // group_size for i in range(self.columns)]
 
         g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
 
-        if actorder:
+        if self.qcfg.desc_act:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
@@ -319,7 +319,7 @@ class GPTQ:
 
         duration = time.time() - start
 
-        return Q, scale, zero, g_idx, duration, avg_loss, percdamp
+        return Q, scale, zero, g_idx, duration, avg_loss, self.qcfg.damp_percent
 
     def free(self):
         # if os.environ.get("DEBUG"):

@@ -24,6 +24,9 @@ from gptqmodel.models import BaseGPTQModel
 from torch import Tensor
 from torch.nn import Module
 
+from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
+from gptqmodel.utils.progress import ProgressBar
+
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
@@ -37,7 +40,16 @@ class LoopProcessor:
         # looper should bypass generate + hooks if this is false
         self.require_fwd = require_fwd
 
+        self.pb = None
         self.logger_task = None
+        self.fwd_time = None
+        self.layer_count = None
+
+    def collect_memory_info(self, layer_index: int):
+        pass
+
+    def log_plotly(self):
+        pass
 
     # called first
     def preprocess(self, module: NamedModule, **kwargs):

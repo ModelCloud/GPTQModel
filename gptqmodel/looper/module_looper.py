@@ -21,7 +21,7 @@ import torch
 from gptqmodel.looper.input_cache import InputCache
 
 from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import STAT_GPTQ_FWD_TIME, NamedModule
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.models._const import SUPPORTS_MODULE_TYPES
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -175,15 +175,13 @@ class ModuleLooper():
             layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
 
-        quantizers = {}
-
         layer_count = len(layers)
         quant_modules_pb = ProgressBar(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
-        gpu_memorys = []
-        cpu_memorys = []
-        durations = []
-        avg_losses = []
-        module_names = []
+
+        for processor in self.processors:
+            processor.layer_count = layer_count
+            processor.pb = quant_modules_pb
+
         shared_kv_cache_dict = {}
 
         # replace linear with hooked linear
@@ -211,24 +209,7 @@ class ModuleLooper():
             modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
             for p_index, processor in enumerate(self.processors):
-                if processor.logger_task is not None:
-                    gpu_memory = get_gpu_usage_memory()
-                    cpu_memory = get_cpu_usage_memory()
-                    processor.logger_task.get_logger().report_scalar(
-                        title='GPU Memory',
-                        series='GPU Memory',
-                        value=gpu_memory,
-                        iteration=module_index,
-                    )
-
-                    processor.logger_task.get_logger().report_scalar(
-                        title='CPU Memory',
-                        series='CPU Memory',
-                        value=cpu_memory,
-                        iteration=module_index,
-                    )
-                    gpu_memorys.append(gpu_memory)
-                    cpu_memorys.append(cpu_memory)
+                processor.collect_memory_info(module_index)
 
                 layer_inputs = processor.inputs_cache.layer_inputs
                 layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
@@ -315,8 +296,7 @@ class ModuleLooper():
                     fwd_end = time.time()
                     fwd_time = fwd_end - fwd_start
 
-                    # TODO fix me: don't use string
-                    # module.state.update({STAT_GPTQ_FWD_TIME: fwd_time})
+                    processor.fwd_time = fwd_time
 
                     for h in handle:
                         h.remove()
@@ -390,27 +370,13 @@ class ModuleLooper():
                 if auto_gc:
                     torch_empty_cache()
 
-        # logger.info(f"Quantization summary:\n{self.quant_log}")
-        # for module_log in self.quant_log:
-        #     logger.info(module_log)
-        if any(p.logger_task for p in self.processors):
-            from gptqmodel.utils.plotly import create_plotly
-
         for reverse_p in reversed(self.processors):
+            logger.info(f"Quantization summary:\n{reverse_p.quant_log}")
+            for module_log in reverse_p.quant_log:
+                logger.info(module_log)
+            reverse_p.log_plotly()
+
             reverse_p.model_finalize(model=self.gptq_model, **kwargs)
-
-            if reverse_p.logger_task is not None:
-                x = list(range(layer_count))
-                gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-                cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-                loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
-                time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
-
-                with reverse_p.logger_task.get_logger() as l:
-                    l.report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-                    l.report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-                    l.report_plotly('avg_loss', 'avg_loss', loss_fig)
-                    l.report_plotly('quant_time', 'quant_time', time_fig)
 
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
