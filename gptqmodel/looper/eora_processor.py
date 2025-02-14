@@ -20,6 +20,7 @@ from typing import Callable, Tuple
 import torch
 
 from gptqmodel import QuantizeConfig
+from gptqmodel.adapter.adapter import Lora
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
@@ -29,7 +30,6 @@ from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.device import get_gpu_usage_memory, get_cpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import move_to, pack_model
 from torch.nn import Module
 
 
@@ -161,6 +161,7 @@ class EoraProcessor(LoopProcessor):
         ##
         delta_scale = torch.matmul(delta.to(torch.float32), scaling_diag_matrix)
 
+        assert(isinstance(self.qcfg.adapter, Lora))
         r = self.qcfg.adapter.rank
 
         U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
