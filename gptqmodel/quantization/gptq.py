@@ -28,7 +28,6 @@ import transformers
 
 from gptqmodel.quantization import QuantizeConfig
 from ..looper.named_module import NamedModule
-from ..nn_modules.hooked_linear import HookedLinear
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import Quantizer, HF_OPTIMUM
@@ -47,7 +46,7 @@ class GPTQ:
             name = module.name
         else:
             name = HF_OPTIMUM
-            self.module = NamedModule(module, name=name, full_name=name,layer_index=0)
+            self.module = module
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
@@ -97,7 +96,7 @@ class GPTQ:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
 
-        if issubclass(type(self.module), nn.Module) or issubclass(type(self.module), transformers.Conv1D):
+        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
