@@ -27,11 +27,15 @@ from torch.nn import Module
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig,logger_board:str=""):
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board:str="", require_fwd: bool = True):
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = []
         self.calibration_dataset = calibration_dataset
         self.qcfg = qcfg
+
+        # if processor require fwd generate and hooks, set this to true
+        # looper should bypass generate + hooks if this is false
+        self.require_fwd = require_fwd
 
         self.logger_task=None
 
