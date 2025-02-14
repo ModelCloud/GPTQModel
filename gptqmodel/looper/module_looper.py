@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.named_module import NamedModule, STAT_GPTQ_FWD_TIME
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
@@ -257,7 +257,8 @@ class ModuleLooper():
                     fwd_end = time.time()
                     fwd_time = fwd_end - fwd_start
 
-                    module.state.update({"fwd_time": fwd_time})
+                    # TODO fix me: don't use string
+                    module.state.update({STAT_GPTQ_FWD_TIME: fwd_time})
 
                     for h in handle:
                         h.remove()

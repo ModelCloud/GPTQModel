@@ -1,8 +1,13 @@
+from typing import Dict
 
 import torch
 import transformers
 from torch import nn
 
+STAT_GPTQ_FWD_TIME = "stat_fwd_time"
+STAT_GPTQ_DAMP_PERCENT = "stat_damp_percent"
+STAT_GPTQ_AVG_LOSS = "stat_avg_loss"
+STAT_GPTQ_DURATION = "stat_duration"
 
 class NamedModule(torch.nn.Module):
     def __init__(self, module: torch.nn.Module, name: str, full_name:str, layer_index: int) -> None:
@@ -32,8 +37,18 @@ class NamedModule(torch.nn.Module):
             "out_features": out_features,
         })
 
+    # return stats for mo
+    def stats(self) -> Dict[str, float]:
+        # -1 means no stats have yet to gathered for the stat property
+        return {
+            STAT_GPTQ_DURATION: self.state.get(STAT_GPTQ_DURATION, -1),
+            STAT_GPTQ_AVG_LOSS: self.state.get(STAT_GPTQ_AVG_LOSS, -1),
+            STAT_GPTQ_DAMP_PERCENT: self.state.get(STAT_GPTQ_DAMP_PERCENT, -1),
+            STAT_GPTQ_FWD_TIME: self.state.get(STAT_GPTQ_FWD_TIME, -1),
+        }
+
     def __getattr__(self, name: str):
-        if name in ["module", "name", "full_name", "layer_index", "state"]:
+        if name in ["stats", "module", "name", "full_name", "layer_index", "state"]:
             return getattr(self, name)
 
         return getattr(self.module, name)

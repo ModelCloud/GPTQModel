@@ -4,7 +4,7 @@ from gptqmodel import QuantizeConfig
 from gptqmodel.looper.loop_processor import LoopProcessor
 from torch.nn import Module
 
-from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.named_module import NamedModule, STAT_GPTQ_DURATION, STAT_GPTQ_AVG_LOSS, STAT_GPTQ_DAMP_PERCENT
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
                      QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
@@ -133,9 +133,9 @@ class GPTQProcessor(LoopProcessor):
         module.state[module.full_name] = {
             "w": w, # fp16, non-quantized weight
             "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
-            "duration": duration, # stat
-            "avg_loss": avg_loss, # stat
-            "damp_percent": damp_percent, # stat
+            STAT_GPTQ_DURATION: duration, # stat
+            STAT_GPTQ_AVG_LOSS: avg_loss, # stat
+            STAT_GPTQ_DAMP_PERCENT: damp_percent, # stat
         }
 
     def post_process(self, module: NamedModule):
