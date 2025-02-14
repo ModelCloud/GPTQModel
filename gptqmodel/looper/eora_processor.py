@@ -100,16 +100,15 @@ class EoraProcessor(LoopProcessor):
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
-        qcfg_clone = copy.deepcopy(self.qcfg)
+        adapter_cfg = copy.deepcopy(self.qcfg.adapter)
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
-            qcfg_clone.adapter = self.qcfg.dynamic_get(module.full_name, "adapter", qcfg_clone.adapter)
+            adapter_cfg.adapter = self.qcfg.dynamic_get(module.full_name, "adapter", adapter_cfg)
 
-        tmp = GPTQ(module=module, qcfg=qcfg_clone)
-
-        self.tasks[module.name] = tmp
-        return tmp
+        # hack store property inside module
+        module.adapter_cfg = adapter_cfg
+        return
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
@@ -130,6 +129,8 @@ class EoraProcessor(LoopProcessor):
         return tmp
 
     def process(self, module: NamedModule):
+        adapter_cfg = module.adapter_cfg
+
         self.pb.set_description(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
 
         original_weight = module.state.get("w")
@@ -161,11 +162,11 @@ class EoraProcessor(LoopProcessor):
         ##
         delta_scale = torch.matmul(delta.to(torch.float32), scaling_diag_matrix)
 
-        assert(isinstance(self.qcfg.adapter, Lora))
-        r = self.qcfg.adapter.rank
+        assert(isinstance(adapter_cfg, Lora))
+        rank = adapter_cfg.rank
 
         U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
-        lowrank_r = r
+        lowrank_r = rank
         truc_s = S[:lowrank_r]
         truc_u = U[:, :lowrank_r]
         truc_v = torch.matmul(V[:lowrank_r, :], scaling_matrix_inv)
@@ -189,6 +190,7 @@ class EoraProcessor(LoopProcessor):
         stat = {QUANT_LOG_LAYER: module.layer_index, QUANT_LOG_MODULE: module.name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
                 QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}",
                 QUANT_LOG_FWD_TIME: f"{self.fwd_time:.3f}"}
+
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
