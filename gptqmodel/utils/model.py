@@ -40,6 +40,7 @@ from transformers import AutoConfig, PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -235,7 +236,10 @@ def create_quant_layer(
             continue
 
         ori_layer_device = next(submodule.parameters()).device
-        if isinstance(submodule, nn.Linear):
+        if isinstance(submodule, NamedModule):
+            in_features = submodule.state.get("in_features")
+            out_features = submodule.state.get("out_features")
+        elif isinstance(submodule, nn.Linear):
             in_features = submodule.in_features
             out_features = submodule.out_features
         elif isinstance(submodule, nn.Conv2d):
