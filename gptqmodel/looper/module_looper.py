@@ -215,8 +215,8 @@ class ModuleLooper():
                 position_ids = processor.inputs_cache.position_ids
                 attention_masks = processor.inputs_cache.attention_masks
 
+                subset = {}
                 for index, names in enumerate(modules):
-                    subset = {}
                     for n in names:
                         assert n in full, f"module {n} has wrong type, check your config"
                         subset[n] = full[n]
@@ -233,10 +233,12 @@ class ModuleLooper():
                                 continue
 
                         # gptq task is created and stored inside processor
-                        named_module = NamedModule(subset[name], name=name, full_name=layer_name,
-                                                  layer_index=module_index)
-                        subset[name] = named_module
-                        processor.preprocess(named_module, buffered_fwd)
+                        if not isinstance(subset[name], NamedModule):
+                            named_module = NamedModule(subset[name], name=name, full_name=layer_name,
+                                                      layer_index=module_index)
+                            subset[name] = named_module
+
+                        processor.preprocess(subset[name], buffered_fwd)
 
                     for name in skipped_modules:
                         subset.pop(name)
@@ -294,7 +296,7 @@ class ModuleLooper():
                     fwd_time = fwd_end - fwd_start
 
                     # TODO fix me: don't use string
-                    module.state.update({STAT_GPTQ_FWD_TIME: fwd_time})
+                    # module.state.update({STAT_GPTQ_FWD_TIME: fwd_time})
 
                     for h in handle:
                         h.remove()
@@ -359,7 +361,8 @@ class ModuleLooper():
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
                     for reverse_p in reversed(self.processors):
-                        reverse_p.submodule_finalize(module)
+                        for name in subset:
+                            reverse_p.submodule_finalize(subset[name])
 
                 del module
 

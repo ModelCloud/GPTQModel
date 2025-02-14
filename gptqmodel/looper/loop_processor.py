@@ -29,7 +29,7 @@ from torch.nn import Module
 class LoopProcessor:
     def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board:str="", require_fwd: bool = True):
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
-        self.tasks = []
+        self.tasks = {}
         self.calibration_dataset = calibration_dataset
         self.qcfg = qcfg
 
@@ -37,7 +37,7 @@ class LoopProcessor:
         # looper should bypass generate + hooks if this is false
         self.require_fwd = require_fwd
 
-        self.logger_task=None
+        self.logger_task = None
 
     # called first
     def preprocess(self, module: NamedModule, **kwargs):
@@ -54,9 +54,6 @@ class LoopProcessor:
     def clear_layer_inputs(self):
         del self.inputs_cache.layer_inputs
         self.inputs_cache.layer_inputs = []
-
-    def create_task(self, name: str):
-        pass
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass

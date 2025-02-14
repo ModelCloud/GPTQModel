@@ -83,10 +83,13 @@ class GPTQProcessor(LoopProcessor):
             sym=sym,
             mse=mse,
         )
+        self.tasks[module.name] = tmp
         return tmp
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        print("preprocess_fwd_hook",name)
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+            print("tmp")
             # gptq is mutable.
             g = gptq[name]  # noqa: F821
             g.add_batch(inp[0].data, out.data)  # noqa: F821
@@ -110,7 +113,7 @@ class GPTQProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent  = gptq[module.name].quantize(
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[module.name].quantize(
             percdamp=damp_percent,
             group_size=group_size,
             actorder=desc_act,
