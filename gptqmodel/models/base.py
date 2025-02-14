@@ -902,14 +902,14 @@ class BaseGPTQModel(nn.Module):
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     ## Need to return the quantized_weight for offloading
-                    scale, zero, g_idx, duration, avg_loss, damp_percent, quantized_weight = gptq[name].quantize(
+                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
                         percdamp=damp_percent,
                         group_size=group_size,
                         actorder=desc_act,
                         static_groups=static_groups,
                     )
                     ## Assign the quantized weight to the weight
-                    gptq[name].layer.weight.data = quantized_weight.to(device=gptq[name].device)
+                    gptq[name].module.weight.data = quantized_weight.to(device=gptq[name].device)
                     ## Offload the quantized weight to CPU for EoRA
                     quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
 
