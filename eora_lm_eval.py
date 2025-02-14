@@ -4,11 +4,13 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import unittest
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from tests.models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
-import unittest
+from tests.models.model_test import ModelTest  # noqa: E402
+
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"

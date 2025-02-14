@@ -1,18 +1,17 @@
-from typing import Callable, Tuple, Dict
+from typing import Callable, Tuple
+
 import torch
 from gptqmodel import QuantizeConfig
 from gptqmodel.looper.loop_processor import LoopProcessor
-from torch.nn import Module
-
-from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.named_module import STAT_GPTQ_AVG_LOSS, STAT_GPTQ_DAMP_PERCENT, STAT_GPTQ_DURATION, NamedModule
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.models.writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
-                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
+                                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME)
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to
-from gptqmodel.utils.progress import ProgressBar
+from torch.nn import Module
 
 logger = setup_logger()
 
@@ -133,9 +132,9 @@ class GPTQProcessor(LoopProcessor):
         module.state[module.full_name] = {
             "w": w, # fp16, non-quantized weight
             "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
-            "duration": duration, # stat
-            "avg_loss": avg_loss, # stat
-            "damp_percent": damp_percent, # stat
+            STAT_GPTQ_DURATION: duration, # stat
+            STAT_GPTQ_AVG_LOSS: avg_loss, # stat
+            STAT_GPTQ_DAMP_PERCENT: damp_percent, # stat
         }
 
     def post_process(self, module: NamedModule):
@@ -145,10 +144,8 @@ class GPTQProcessor(LoopProcessor):
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
         module.weight.data = None
-        wq = module.state["wq"]
-        wq = wq.cpu()
+        wq = module.state.pop("wq").cpu()
         module.weight.data = wq
-        module.state["wq"] = wq
 
     def model_finalize(self, gptq_model: BaseGPTQModel, **kwargs):
         backend = kwargs.pop("backend")

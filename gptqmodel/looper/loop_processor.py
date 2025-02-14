@@ -1,12 +1,12 @@
-from typing import Dict, List, Tuple, Callable, Any
-import torch
-from torch import Tensor
-from torch.nn import Module
+from typing import Callable, List, Tuple
 
+import torch
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
+from torch import Tensor
+from torch.nn import Module
 
 
 # LoopProcessor is a singleton(), not per module instance
