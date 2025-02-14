@@ -30,8 +30,7 @@ from gptqmodel.quantization import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
-from .quantizer import Quantizer
-
+from .quantizer import Quantizer, HF_OPTIMUM
 
 logger = setup_logger()
 
@@ -39,7 +38,6 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 CPU = torch.device("cpu")
-HF_OPTIMUM = "hf_optimum"
 
 class GPTQ:
     def __init__(self, module: torch.nn.Module, qcfg: Optional[QuantizeConfig]=None):

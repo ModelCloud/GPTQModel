@@ -20,11 +20,11 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.quantization import QuantizeConfig
-from ..quantization.gptq import HF_OPTIMUM
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
 
+HF_OPTIMUM = "hf_optimum"
 
 def quantize(x, scale, zero, maxq):
     if maxq < 0:
