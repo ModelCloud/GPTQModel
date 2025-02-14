@@ -18,7 +18,7 @@ from parameterized import parameterized
 def test_load(backend: BACKEND):
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"    
     quant_model_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
-    lora_path = "/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
+    lora_path = "/home/shihyangl/llama3.2-1b-4bit-group128-eora_test-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc"
 
     adapter = Lora(path=lora_path, rank=128)
 
@@ -39,7 +39,7 @@ def test_load(backend: BACKEND):
 
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"    
 # quant_model_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
-# lora_path = "/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
+# lora_path = "/home/shihyangl/llama3.2-1b-4bit-group128-eora_test-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc"
 
 # adapter = EoRA(lora_path=lora_path, rank=128)
 

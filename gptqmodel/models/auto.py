@@ -20,7 +20,7 @@ import os
 
 from gptqmodel.adapter.adapter import Adapter, normalize_adapter
 
-from ..eora.eora_generate import eora_generate
+from ..eora_test.eora_generate import eora_generate
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'

@@ -219,7 +219,7 @@ if BUILD_CUDA_EXT:
             ],
             extra_link_args=extra_link_args,
             extra_compile_args=extra_compile_args,
-            #include_dirs=[os.path.abspath("."), os.path.abspath("eora")],
+            #include_dirs=[os.path.abspath("."), os.path.abspath("eora_test")],
             # extra_compile_args={
             #     'cxx': ['-std=c++20'],
             #     'nvcc': ['-std=c++20'],

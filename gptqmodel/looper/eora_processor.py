@@ -220,4 +220,4 @@ class EoraProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
-        return "eora"
+        return "eora_test"

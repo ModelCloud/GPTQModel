@@ -2,16 +2,16 @@ import torch
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 
-# from gptqmodel.eora import get_eora, get_eora_optimize
+# from gptqmodel.eora_test import get_eora, get_eora_optimize
 
 
 bit = 4
 model_id = "meta-llama/Llama-3.2-1B"
 model = None
 
-quant_path = "Llama-3.2-1B-gptqmodel-4bit"
-fake_quant_path = "Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
-eora_path = "Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
+quant_path = "../../Llama-3.2-1B-gptqmodel-4bit"
+fake_quant_path = "../../Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
+eora_path = "Llama-3.2-1B-gptqmodel-4bit-eora_test-rank-128-v2/eora_test.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
 calibration_dataset = load_dataset(

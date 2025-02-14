@@ -14,7 +14,7 @@ from tests.models.model_test import ModelTest  # noqa: E402
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
-    lora_path = "/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
+    lora_path = "/home/shihyangl/llama3.2-1b-4bit-group128-eora_test-rank128-c4-v2/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805

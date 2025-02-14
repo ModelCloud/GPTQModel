@@ -28,7 +28,7 @@ def get_eora(model_id, quant_config, data_name, quantized_weights, eora_nsamples
     model = model.model
     ## not quite sure if this is needed for other type of model besides LLaMA
     model.seqlen = 2048
-    ## prepare eora dataloader
+    ## prepare eora_test dataloader
     dataloader = get_loaders(data_name=data_name, nsamples=eora_nsamples, seqlen=model.seqlen, model=model_id)
 
     use_cache = model.config.use_cache

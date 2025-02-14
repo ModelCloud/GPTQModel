@@ -76,13 +76,13 @@ class Lora(Adapter):
                     raise Exception(f"lora path is invalid: `{self.path}`")
             else:
                 from huggingface_hub import HfApi, hf_hub_download
-                files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora.safetensors"]]
+                files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora_test.safetensors"]]
 
                 if files:
                     lora_path = hf_hub_download(repo_id=self.path, filename=files[0])
                     print(f"Adapter tensors loaded from `{self.path}`")
                 else:
-                    raise Exception(f"There's no lora.safetensors or eora.safetensors on repo `{self.path}`")
+                    raise Exception(f"There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
 
             adapter_load_cache = safetensors.torch.load_file(lora_path)
 

@@ -1,7 +1,7 @@
 import torch
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
-from gptqmodel.eora import get_eora
+from gptqmodel.eora_test import get_eora
 from gptqmodel.models.auto import EVAL
 
 bit = 4
@@ -14,9 +14,9 @@ model = None
 
 quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit"
 fake_quant_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-fakequantized/qw.pt"
-eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128/eora.pt"
-eora_path2 = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-v2/eora.pt"
-eora_path3 = "/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/eora.pt"
+eora_path = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora_test-rank-128/eora_test.pt"
+eora_path2 = "/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora_test-rank-128-v2/eora_test.pt"
+eora_path3 = "/home/shihyangl/llama3.2-1b-4bit-group128-eora_test-rank128-c4-v2/eora_test.pt"
 quant_config = QuantizeConfig(bits=bit, group_size=128)
 
 flag1 = False
@@ -116,11 +116,11 @@ if save:
   json_object = json.dumps(lowrank_config, indent=4)
 
   # Writing to the adapter_config.json
-  with open(f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf/adapter_config.json", "w") as outfile:
+  with open(f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora_test-rank-128-hf/adapter_config.json", "w") as outfile:
       outfile.write(json_object)
   ## save the lowrank weight
 
-  save_file(eora_weight, f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora-rank-128-hf/adapter_model.safetensors")
+  save_file(eora_weight, f"/home/shihyangl/gptqmodel_save/Llama-3.2-1B-gptqmodel-4bit-eora_test-rank-128-hf/adapter_model.safetensors")
 
 flag4 = False
 if flag4:
@@ -179,8 +179,8 @@ if save:
   json_object = json.dumps(lowrank_config, indent=4)
 
   # Writing to the adapter_config.json
-  with open(f"/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/adapter_config.json", "w") as outfile:
+  with open(f"/home/shihyangl/llama3.2-1b-4bit-group128-eora_test-rank128-c4-v2/adapter_config.json", "w") as outfile:
       outfile.write(json_object)
   ## save the lowrank weight
 
-  save_file(eora_weight, f"/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-c4-v2/adapter_model.safetensors")
+  save_file(eora_weight, f"/home/shihyangl/llama3.2-1b-4bit-group128-eora_test-rank128-c4-v2/adapter_model.safetensors")

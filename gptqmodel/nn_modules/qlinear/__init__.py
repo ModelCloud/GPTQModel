@@ -157,13 +157,13 @@ class BaseQuantLinear(nn.Module):
             # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
             # self.register_buffer(
             #     "lora_A",
-            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
             #
             # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
             # self.register_buffer(
             #     "lora_B",
-            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
     # override me, to perform post-weight load to device init

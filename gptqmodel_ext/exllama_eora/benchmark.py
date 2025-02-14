@@ -88,7 +88,7 @@ def benchmark_gptq_kernel(m, weight, zeros, scales, idx, x, eora_b, eora_a):
     gptq_lora_pytorch_time = (time.time() - tick) / total_iterations * 1000
     print(f"gptq + pytorch for LORA: {gptq_lora_pytorch_time} msec")
 
-    # gptq+eora kernel
+    # gptq+eora_test kernel
     for i in range(warmup_iterations):
         gptq_eora_out = gptq_gemm_lora(x, weight, zeros, scales, idx, bit, ax, eora_b)
     torch.cuda.synchronize()
