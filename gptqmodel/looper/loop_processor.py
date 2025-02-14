@@ -4,13 +4,14 @@ from torch import Tensor
 from torch.nn import Module
 
 from gptqmodel import QuantizeConfig
+from gptqmodel.looper.module_looper import InputCache
 from gptqmodel.looper.named_module import NamedModule
 
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     def __init__(self, calibration_data, qcfg: QuantizeConfig):
-        self.inputs_cache: List[Tensor] = []
+        self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = []
         self.calibration_data = calibration_data
         self.qcfg = qcfg
@@ -20,10 +21,17 @@ class LoopProcessor:
     def preprocess(self, module: NamedModule, **kwargs):
         pass
 
+    def receive_input_cache(self, input_cache: InputCache):
+        self.inputs_cache = input_cache
+
     # called after every module generate
     # may be called multiple times due to batch
-    def receive_inputs(self, inputs: Tensor):
-        self.inputs_cache += inputs
+    def receive_layer_input(self, layer_input: List[Tensor]):
+        self.inputs_cache.layer_inputs += layer_input
+
+    def clear_layer_inputs(self):
+        del self.inputs_cache.layer_inputs
+        self.inputs_cache.layer_inputs = []
 
     def create_task(self, name: str):
         pass
@@ -36,12 +44,12 @@ class LoopProcessor:
         pass
 
     # step after `process` and before post_process generate()
-    def post_process(self, module: NamedModule, state: Dict[str,]):
+    def post_process(self, module: NamedModule):
         pass
 
     def clear_input(self):
         self.inputs_cache = []
 
     # last step, after all loop processor is called
-    def finalize(self, module: NamedModule, state: Dict[str,]):
+    def finalize(self, module: NamedModule):
         pass

@@ -1,9 +1,11 @@
 import time
-from typing import Tuple
+from collections import namedtuple
+from typing import Tuple, List
 
 import torch
 from torch import nn
 
+from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
@@ -15,9 +17,12 @@ from gptqmodel.utils.torch import torch_empty_cache
 
 logger = setup_logger()
 
+InputCache = namedtuple("InputCache", ['layer_inputs', 'layer_input_kwargs', 'position_ids', 'attention_masks'])
+
+
 class ModuleLooper():
     def __init__(self, ):
-        self.processors = []
+        self.processors: List[LoopProcessor] = []
         self.model = None
 
     def __getattr__(self, item):
@@ -31,7 +36,6 @@ class ModuleLooper():
         attention_masks = []
         position_ids = []
         layer_input_kwargs = []
-        layer_outputs = []
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
@@ -112,18 +116,20 @@ class ModuleLooper():
                 move_to(module, ori_outside_layer_module_devices[module_name])
         if auto_gc:
             torch_empty_cache()
-        return attention_masks, layer_input_kwargs, layer_inputs, layer_outputs, position_ids
+        return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
+                          attention_masks=attention_masks)
 
-    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True , buffered_fwd=False,):
+    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, ):
         # TODO: lm_head quantize
 
         layers = get_module_by_name_prefix(self.model, self.layers_node)
 
         for processor in self.processors:
             processor.num_batches = len(processor.calibration_dataset)
-            inputs = self.cache_inputs(layers=layers,auto_gc=auto_gc, calibration_dataset=processor.calibration_dataset,
-                                                 calibration_enable_gpu_cache=calibration_enable_gpu_cache)
-            processor.receive_inputs(inputs)
+            input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
+                                       calibration_dataset=processor.calibration_dataset,
+                                       calibration_enable_gpu_cache=calibration_enable_gpu_cache)
+            processor.receive_input_cache(input_cache)
 
         layer_modules = self.layer_modules
 
@@ -174,7 +180,7 @@ class ModuleLooper():
             modules = [[self.lm_head]] if is_lm_head_module else layer_modules
 
             for processor in self.processors:
-                attention_masks, layer_input_kwargs, layer_inputs, layer_outputs, position_ids = processor.inputs_cache
+                layer_inputs, layer_input_kwargs, position_ids, attention_masks = processor.inputs_cache
 
                 for index, names in enumerate(modules):
                     subset = {}
@@ -193,7 +199,8 @@ class ModuleLooper():
                                 continue
 
                         # gptq task is created and stored inside processor
-                        named_mdule = NamedModule(subset[name], name=name, full_name=layer_name, layer_index=module_index)
+                        named_mdule = NamedModule(subset[name], name=name, full_name=layer_name,
+                                                  layer_index=module_index)
                         subset[name] = named_mdule
                         processor.preprocess(named_mdule, buffered_fwd)
 
@@ -206,10 +213,10 @@ class ModuleLooper():
                     handle = []
                     for name in subset:
                         if hasattr(subset[name], 'forward_hook'):
-                            subset[name].forward_hook =  processor.preprocess_fwd_hook(name)
+                            subset[name].forward_hook = processor.preprocess_fwd_hook(name)
                         else:
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
-                            assert(f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
+                            assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
                             handle.append(subset[name].register_forward_hook(processor.preprocess_fwd_hook(name)))
 
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
@@ -235,7 +242,8 @@ class ModuleLooper():
                             # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                             if hasattr(module, "reuse_kv"):
                                 if module.reuse_kv:
-                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
+                                        module_index - 1)
 
                                 layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                                      **additional_layer_inputs)
@@ -267,3 +275,52 @@ class ModuleLooper():
                         if auto_gc:
                             torch_empty_cache()
 
+                    processor.post_process(module=subset[name])
+
+
+                is_last_quant = module_index == len(quant_modules_pb) - 1
+                if not is_last_quant:
+                    for j in range(processor.num_batches):
+                        layer_input = []
+                        for k, layer_inp in enumerate(layer_inputs[j]):
+                            layer_input.append(move_to(layer_inp, cur_layer_device))
+
+                        mask = attention_masks[j]
+                        layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+
+                        additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                        layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
+                        if layer_position_ids is not None:
+                            additional_layer_inputs["position_ids"] = layer_position_ids
+                        for k, v in layer_input_kwargs[j].items():
+                            additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+
+                        with torch.no_grad():
+                            layer_output = move_to(
+                                module(*layer_input)[0] if is_lm_head_module else
+                                module(*layer_input, **additional_layer_inputs)[0],
+                                cur_layer_device if calibration_enable_gpu_cache else CPU,
+                            )
+                            processor.receive_layer_input([layer_output])
+
+                        del layer_input
+                        del additional_layer_inputs
+                        if processor.num_batches > 1 and j == processor.num_batches - 1:
+                            if auto_gc:
+                                torch_empty_cache()
+
+                if not is_lm_head_module:
+                    layers[module_index] = self.post_quantize(module)
+                else:
+                    self.post_quantize(module)
+
+                del module
+                del processor.tasks
+                processor.clear_layer_inputs()
+
+                if auto_gc:
+                    torch_empty_cache()
