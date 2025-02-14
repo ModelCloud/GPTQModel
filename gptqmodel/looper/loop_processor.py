@@ -47,9 +47,6 @@ class LoopProcessor:
     def post_process(self, module: NamedModule):
         pass
 
-    def clear_input(self):
-        self.inputs_cache = []
-
     # last step, after all loop processor is called
     def finalize(self, module: NamedModule):
         pass

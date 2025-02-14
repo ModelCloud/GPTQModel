@@ -7,6 +7,7 @@ from torch import nn
 
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.models import BaseGPTQModel
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
@@ -21,9 +22,9 @@ InputCache = namedtuple("InputCache", ['layer_inputs', 'layer_input_kwargs', 'po
 
 
 class ModuleLooper():
-    def __init__(self, ):
-        self.processors: List[LoopProcessor] = []
-        self.model = None
+    def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
+        self.processors = processors
+        self.gptq_model = model
 
     def cache_inputs(self, layers, auto_gc, calibration_dataset, calibration_enable_gpu_cache):
         layer_inputs = []
@@ -66,10 +67,10 @@ class ModuleLooper():
             raise ValueError
 
         # move layer to target device
-        layers[0] = layers[0].to(self.quantize_config.device)
+        layers[0] = layers[0].to(self.gptq_model.model.quantize_config.device)
         ori_outside_layer_module_devices = {}
-        for module_name in self.base_modules:
-            module = get_module_by_name_prefix(self.model, module_name)
+        for module_name in self.gptq_model.base_modules:
+            module = get_module_by_name_prefix(self.gptq_model.model, module_name)
 
             if module is None:
                 continue
@@ -79,11 +80,11 @@ class ModuleLooper():
                 move_to(module, cur_layer_device)
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        is_ovis = self.__class__.__name__ == "OvisGPTQ"
-        self.pre_quantize_generate_hook_start()
+        is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
+        self.gptq_model.pre_quantize_generate_hook_start()
         for example in calibration_dataset:
             for k, v in example.items():
-                data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
+                data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
                     for module_index in range(len(v)):
                         if len(v[module_index].shape) == 1:
@@ -96,16 +97,16 @@ class ModuleLooper():
                     example[k] = move_to(v, data_device)
             try:
                 if is_ovis:
-                    self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
+                    self.gptq_model.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
                 else:
-                    self.model(**example)
+                    self.gptq_model.model(**example)
             except ValueError:
                 pass
-        self.pre_quantize_generate_hook_end()
+        self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
         move_to(layers[0], CPU)
-        for module_name in self.base_modules:
-            module = get_module_by_name_prefix(self.model, module_name)
+        for module_name in self.gptq_model.base_modules:
+            module = get_module_by_name_prefix(self.gptq_model.model, module_name)
             if module is not None:
                 move_to(module, ori_outside_layer_module_devices[module_name])
         if auto_gc:
@@ -116,30 +117,30 @@ class ModuleLooper():
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, ):
         # TODO: lm_head quantize
 
-        layers = get_module_by_name_prefix(self.model, self.layers_node)
+        layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
-        for processor in self.processors:
+        for processor in self.gptq_model.processors:
             processor.num_batches = len(processor.calibration_dataset)
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
                                        calibration_dataset=processor.calibration_dataset,
                                        calibration_enable_gpu_cache=calibration_enable_gpu_cache)
             processor.receive_input_cache(input_cache)
 
-        layer_modules = self.layer_modules
+        layer_modules = self.gptq_model.layer_modules
 
-        if not self.quantize_config.true_sequential:
+        if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
         # dynamic expert layer index for model defs
-        if self.dynamic_expert_index is not None:
-            num_experts = getattr(self.model.config, self.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+        if self.gptq_model.dynamic_expert_index is not None:
+            num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
+            layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
 
         quantizers = {}
 
         layer_count = len(layers)
-        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count))
+        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
         gpu_memorys = []
         cpu_memorys = []
         durations = []
@@ -148,15 +149,15 @@ class ModuleLooper():
         shared_kv_cache_dict = {}
 
         # replace linear with hooked linear
-        replace_linear_with_hooked_linear(self.model)
+        replace_linear_with_hooked_linear(self.gptq_model.model)
 
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
-            layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
+            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{module_index}.{name}"
             if is_lm_head_module:
                 quant_modules_pb.set_description("Quantizing lm_head")
-                module = get_module(self.model, key=self.lm_head)
-                layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
+                module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+                layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
                 quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
                 module = layers[module_index]
@@ -167,13 +168,13 @@ class ModuleLooper():
 
             # TODO log clearml
 
-            self.pre_quantize(module)
+            self.gptq_model.pre_quantize(module)
 
             cur_layer_device = get_device(module)
-            full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
-            modules = [[self.lm_head]] if is_lm_head_module else layer_modules
+            full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
+            modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
-            for processor in self.processors:
+            for processor in self.gptq_model.processors:
                 layer_inputs, layer_input_kwargs, position_ids, attention_masks = processor.inputs_cache
 
                 for index, names in enumerate(modules):
@@ -185,8 +186,8 @@ class ModuleLooper():
                     skipped_modules = []
 
                     for name in subset:
-                        if self.quantize_config.dynamic is not None:
-                            if self.quantize_config.dynamic_get(layer_name=layer_name) == False:  # noqa: E712
+                        if self.gptq_model.quantize_config.dynamic is not None:
+                            if self.gptq_model.quantize_config.dynamic_get(layer_name=layer_name) == False:  # noqa: E712
                                 logger.info(f"skip module: {layer_name}")
 
                                 skipped_modules.append(name)
@@ -308,9 +309,9 @@ class ModuleLooper():
                                 torch_empty_cache()
 
                 if not is_lm_head_module:
-                    layers[module_index] = self.post_quantize(module)
+                    layers[module_index] = self.gptq_model.post_quantize(module)
                 else:
-                    self.post_quantize(module)
+                    self.gptq_model.post_quantize(module)
 
                 del module
                 del processor.tasks
