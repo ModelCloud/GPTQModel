@@ -278,7 +278,7 @@ class BaseGPTQModel(nn.Module):
 
         return new_calibration_dataset_batched
 
-    def q(
+    def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
@@ -292,7 +292,7 @@ class BaseGPTQModel(nn.Module):
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
         auto_gc: bool = True,
-    ) -> Tuple[List[Dict[str, str]], Dict[str, torch.Tensor]]:
+    ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
@@ -393,9 +393,9 @@ class BaseGPTQModel(nn.Module):
         from gptqmodel.looper.gptq_processor import GPTQProcessor
         processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
         module_looper = ModuleLooper(self, processors=processors)
-        module_looper.loop(backend=backend)
+        return module_looper.loop(backend=backend)
 
-    def quantize(
+    def quantize_old(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
