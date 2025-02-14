@@ -35,12 +35,12 @@ from gptqmodel.utils.plotly import create_plotly
 logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board: str = ""):
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig):
         super().__init__(calibration_dataset=calibration_dataset, qcfg=qcfg)
-        self.quant_log = []
+
         self.quant_result = {}
 
-        if logger_board == "clearml":
+        if self.logger_board == "clearml":
             try:
                 from clearml import Task
                 from random_word import RandomWords
@@ -172,7 +172,7 @@ class GPTQProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
-        self.quant_log.append(stat)
+        self.log.append(stat)
         logger.info(stat)
 
         self.quant_result[module.full_name] = (
@@ -220,3 +220,5 @@ class GPTQProcessor(LoopProcessor):
 
         del self.quant_result
 
+    def name(self) -> str:
+        return "gptq"

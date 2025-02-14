@@ -30,15 +30,18 @@ from gptqmodel.utils.progress import ProgressBar
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board:str="", require_fwd: bool = True):
-        self.inputs_cache: InputCache = InputCache(None, None, None, None)
-        self.tasks = {}
+    def __init__(self, calibration_dataset, qcfg: QuantizeConfig, logger_board: str = "", require_fwd: bool = True):
         self.calibration_dataset = calibration_dataset
         self.qcfg = qcfg
+        self.logger_board = logger_board
 
         # if processor require fwd generate and hooks, set this to true
         # looper should bypass generate + hooks if this is false
         self.require_fwd = require_fwd
+
+        self.log = []
+        self.inputs_cache: InputCache = InputCache(None, None, None, None)
+        self.tasks = {}
 
         self.pb = None
         self.logger_task = None
@@ -86,4 +89,7 @@ class LoopProcessor:
 
     # last step, after all loop processor is called
     def model_finalize(self, model: BaseGPTQModel, **kwargs):
+        pass
+
+    def name(self) -> str:
         pass

@@ -370,9 +370,17 @@ class ModuleLooper():
                 if auto_gc:
                     torch_empty_cache()
 
+        total_log = {}
+
         for reverse_p in reversed(self.processors):
-            logger.info(f"Quantization summary:\n{reverse_p.quant_log}")
-            for module_log in reverse_p.quant_log:
+            logger.info(f"Quantization summary:\n{reverse_p.log}")
+
+            processor_name = reverse_p.name()
+            total_log[processor_name]= reverse_p.log
+            if processor_name == "gptq":
+                self.gptq_model.quant_log = reverse_p.log
+
+            for module_log in reverse_p.log:
                 logger.info(module_log)
             reverse_p.log_plotly()
 
@@ -385,5 +393,4 @@ class ModuleLooper():
         if auto_gc:
             torch_empty_cache()
 
-        # TODO return
-        # return self.gptq_model.quant_log
+        return total_log
