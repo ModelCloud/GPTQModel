@@ -16,22 +16,21 @@
 
 import copy
 import time
-from typing import Callable, Tuple, Optional
+from typing import Callable, Optional, Tuple
 
 import torch
-from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.eora.eora import eora_compute_lora, eora_process_input
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                                     PROCESS_LOG_NAME, PROCESS_LOG_TIME)
+from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER,
+                                     PROCESS_LOG_MODULE, PROCESS_LOG_NAME, PROCESS_LOG_TIME)
+from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to
-from gptqmodel.utils.torch import torch_sync, torch_new_stream_ctx
-
+from gptqmodel.utils.torch import torch_new_stream_ctx, torch_sync
 from torch.nn import Module
 
 logger = setup_logger()

@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import copy
-from typing import Callable, Tuple, Optional
+from typing import Callable, Optional, Tuple
 
 import torch
 from gptqmodel import QuantizeConfig
@@ -28,9 +28,8 @@ from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to, pack_model
+from gptqmodel.utils.torch import torch_new_stream_ctx, torch_sync
 from torch.nn import Module
-
-from gptqmodel.utils.torch import torch_sync, torch_new_stream_ctx
 
 logger = setup_logger()
 
