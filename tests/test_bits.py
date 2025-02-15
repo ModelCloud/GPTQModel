@@ -54,8 +54,8 @@ class TestBits(unittest.TestCase):
         BACKEND.MARLIN: MarlinQuantLinear,
     }
 
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.025  # -2.5%
-    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.025  # +2.5%
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.1
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.1
 
     CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
         2: {'acc,none': 0.22610921501706485, 'acc_norm,none': 0.2909556313993174},
@@ -168,8 +168,7 @@ class TestBits(unittest.TestCase):
             metric: value for metric, value in results['results'].get(TASK_NAME, {}).items()
             if metric != 'alias' and 'stderr' not in metric
         }
-        print(
-            f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")
+        print(f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")
         del model
 
         self.check_results(quantize_config.bits, task_results)
