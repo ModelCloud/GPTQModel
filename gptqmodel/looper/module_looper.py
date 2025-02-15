@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import copy
 import time
 from typing import List
 
@@ -159,7 +159,7 @@ class ModuleLooper():
                 prev_processor = self.processors[p_index - 1]
                 processor.set_calibration_dataset(prev_processor.calibration_dataset)
                 # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
-                processor.receive_input_cache(prev_processor.inputs_cache)
+                processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
                 continue
 
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
