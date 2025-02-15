@@ -16,7 +16,7 @@
 
 import copy
 import time
-from typing import Callable, Tuple
+from typing import Callable, Tuple, Optional
 
 import torch
 from gptqmodel.quantization.config import QuantizeConfig
@@ -38,69 +38,20 @@ logger = setup_logger()
 
 
 class EoraProcessor(LoopProcessor):
-    def __init__(self, calibration_dataset, qcfg: QuantizeConfig):
-        super().__init__(calibration_dataset=calibration_dataset, qcfg=qcfg)
-
-        if self.logger_board == "clearml":
-            try:
-                from clearml import Task
-                from random_word import RandomWords
-
-                from ..utils.plotly import create_plotly
-            except ImportError as _:
-                raise ImportError(
-                    "The logger_board is set to 'clearml', but required dependencies are missing. "
-                    "Please install them by running: pip install gptqmodel[logger]"
-                )
-            self.logger_task = Task.init(project_name='GPTQModel', task_name=f'EoraProcessor-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
-        else:
-            self.logger_task = None
-
-        self.gpu_memorys = []
-        self.cpu_memorys = []
-        self.durations = []
-        self.avg_losses = []
-        self.module_names = []
+    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset,
+                 calibration_dataset_concat_size: Optional[int], batch_size: int,
+                 logger_board: str = "", require_fwd: bool = True):
+        super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
+                         logger_board, require_fwd)
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix = {}
 
+    def set_calibration_dataset(self, calibration_dataset):
+        self.calibration_dataset = calibration_dataset
+        self.num_batches = len(calibration_dataset)
 
-    def collect_memory_info(self, layer_index: int):
-        if self.logger_task is not None:
-            gpu_memory = get_gpu_usage_memory()
-            cpu_memory = get_cpu_usage_memory()
-            self.logger_task.get_logger().report_scalar(
-                title='GPU Memory',
-                series='GPU Memory',
-                value=gpu_memory,
-                iteration=layer_index,
-            )
-
-            self.logger_task.get_logger().report_scalar(
-                title='CPU Memory',
-                series='CPU Memory',
-                value=cpu_memory,
-                iteration=layer_index,
-            )
-            self.gpu_memorys.append(gpu_memory)
-            self.cpu_memorys.append(cpu_memory)
-
-    def log_plotly(self):
-        task = self.logger_task
-        if task is not None:
-            from gptqmodel.utils.plotly import create_plotly
-            x = list(range(self.layer_count))
-            gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-            cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-            loss_fig = create_plotly(x=self.module_names, y=self.avg_losses, xaxis_title="layer", yaxis_title="loss")
-            time_fig = create_plotly(x=self.module_names, y=self.durations, xaxis_title="layer", yaxis_title="time")
-            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
-
-    def preprocess(self, module: NamedModule, buffered_fwd: bool):
+    def preprocess(self, module: NamedModule, **kwargs):
         adapter_cfg = copy.deepcopy(self.qcfg.adapter)
 
         # dynamic overrides
@@ -195,6 +146,15 @@ class EoraProcessor(LoopProcessor):
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.eigen_scaling_diag_matrix
         super().finalize(model=model, **kwargs)
+
+    def verify_calibration_dataset(self, processor_index: int) -> bool:
+        if self.calibration_dataset is None:
+            if processor_index == 0:
+                raise ValueError("EoraProcessor's calibration_dataset must be provided.")
+            else:
+                return False
+        return True
+
 
     @classmethod
     def name(cls) -> str:

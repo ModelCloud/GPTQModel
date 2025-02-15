@@ -156,18 +156,21 @@ class ModuleLooper():
         layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
         for p_index, processor in enumerate(self.processors):
-            if p_index > 0 and not processor.calibration_dataset:
+            if not processor.verify_calibration_dataset(p_index):
                 prev_processor = self.processors[p_index - 1]
-                processor.num_batches = len(prev_processor.calibration_dataset)
+                processor.set_calibration_dataset(prev_processor.calibration_dataset)
                 # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
                 processor.receive_input_cache(prev_processor.inputs_cache)
                 continue
 
-            processor.num_batches = len(processor.calibration_dataset)
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
                                             calibration_data=processor.calibration_dataset,
                                             calibration_enable_gpu_cache=calibration_enable_gpu_cache)
             processor.receive_input_cache(input_cache)
+
+        # release calibration_dataset
+        for processor in self.processors:
+            del processor.calibration_dataset
 
         layer_modules = self.gptq_model.layer_modules
 
@@ -244,7 +247,7 @@ class ModuleLooper():
                                                       layer_index=module_index)
                             subset[name] = named_module
 
-                        processor.preprocess(subset[name], buffered_fwd)
+                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
 
                     for name in skipped_modules:
                         subset.pop(name)

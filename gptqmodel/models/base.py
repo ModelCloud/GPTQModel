@@ -309,9 +309,6 @@ class BaseGPTQModel(nn.Module):
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
-        if len(calibration_dataset) == 0:
-            raise ValueError("Calibration dataset must not be empty.")
-
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
@@ -334,53 +331,22 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
-        min_calibration_dataset_size = 256
-        min_calibration_dataset_input_ids_avg_length = 256
-
-        if len(calibration_dataset) < min_calibration_dataset_size:
-            logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                           f"Current: {len(calibration_dataset)}.")
-
         if self.quantize_config.format == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
-                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
-                                                   batch_size=batch_size)
-
-        # Calculate the average length of the average input_ids
-        total_input_ids_length = 0
-        max_input_id_length = 0
-        for row in calibration_dataset:
-            input_ids = row["input_ids"]
-            if isinstance(input_ids, torch.Tensor):
-                if input_ids.dim() <= 2:
-                    input_ids_length = input_ids.shape[-1]
-                else:
-                    raise ValueError(
-                        "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
-                            input_ids.dim()))
-            else:
-                input_ids_length = len(input_ids)
-
-            if input_ids_length > max_input_id_length:
-                max_input_id_length = input_ids_length
-            total_input_ids_length += input_ids_length
-        avg = total_input_ids_length / len(calibration_dataset)
-
-        if avg < min_calibration_dataset_input_ids_avg_length:
-            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
-                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
-
         from gptqmodel.looper.gptq_processor import GPTQProcessor
         from gptqmodel.looper.module_looper import ModuleLooper
-        processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
+        processors = [
+            GPTQProcessor(self.tokenizer, self.quantize_config, calibration_dataset, calibration_dataset_concat_size,
+                          batch_size, logger_board)]
 
         if self.quantize_config.adapter:
             from gptqmodel.looper.eora_processor import EoraProcessor
-            processors.append(EoraProcessor(self.quantize_config.eora_calibration_dataset, self.quantize_config))
+            processors.append(
+                EoraProcessor(self.tokenizer, self.quantize_config, self.quantize_config.eora_calibration_dataset,
+                              calibration_dataset_concat_size, batch_size, logger_board))
 
         module_looper = ModuleLooper(self, processors=processors)
         return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,
