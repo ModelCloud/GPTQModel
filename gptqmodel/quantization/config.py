@@ -249,13 +249,8 @@ class QuantizeConfig():
         else:
             self.meta = {}
 
-        # validate and normalize extension
-        if self.adapter is not None:
-            if isinstance(self.adapter, dict):
-                raise ValueError("`adapter` must be a dictionary")
-
-            # adapter normalize
-            self.adapter = normalize_adapter(self.adapter)
+        # adapter normalize
+        self.adapter = normalize_adapter(self.adapter)
 
         print(f"adapter: {self.adapter}")
 

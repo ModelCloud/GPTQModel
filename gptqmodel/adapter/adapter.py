@@ -141,7 +141,7 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
     if not isinstance(adapter, Dict):
         raise ValueError("Invalid adapter config: `adapter`.")
 
-    adapter_type = adapter.get("name")
+    adapter_type = adapter.pop("name", None)
     if adapter_type is None:
         raise ValueError(f"Invalid adapter class `{adapter_type}`: expected = `{ADAPTER_MAPPING}`.")
 
