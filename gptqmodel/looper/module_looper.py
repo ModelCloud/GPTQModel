@@ -133,8 +133,7 @@ class ModuleLooper():
                 tied_keys = self.gptq_model.model._tied_weights_keys
                 for item in tied_keys:
                     if self.gptq_model.lm_head in item:
-                        raise NotImplementedError("quantizing lm_head with tied weights has not been supported "
-                                                  "currently")
+                        raise NotImplementedError("quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`.")
 
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
             if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:
