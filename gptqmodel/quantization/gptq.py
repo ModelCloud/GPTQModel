@@ -150,8 +150,9 @@ class GPTQ:
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
         self.qcfg.static_groups = static_groups
-
-        return self.quantize(blocksize=blocksize)
+        (Q, scale, zero, g_idx, duration, avg_loss, damp_percent) = self.quantize(blocksize=blocksize)
+        self.module.weight.data = Q
+        return scale, zero, g_idx, duration, avg_loss, damp_percent
 
     @torch.inference_mode()
     def quantize(
