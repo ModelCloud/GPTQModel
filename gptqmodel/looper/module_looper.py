@@ -159,8 +159,10 @@ class ModuleLooper():
 
         for p_index, processor in enumerate(self.processors):
             if p_index > 0 and not processor.calibration_dataset:
+                prev_processor = self.processors[p_index - 1]
+                processor.num_batches = len(prev_processor.calibration_dataset)
                 # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
-                processor.receive_input_cache(self.processors[p_index - 1].inputs_cache)
+                processor.receive_input_cache(prev_processor.inputs_cache)
                 continue
 
             processor.num_batches = len(processor.calibration_dataset)
@@ -370,7 +372,7 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in subset:
                             reverse_p.submodule_finalize(subset[name])
-                del module
+                    del module
 
                 if auto_gc:
                     torch_empty_cache()
