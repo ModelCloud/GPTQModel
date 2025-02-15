@@ -76,6 +76,9 @@ class EoraProcessor(LoopProcessor):
 
         # hack store property inside module
         module.adapter_cfg = adapter_cfg
+
+        self.eigen_scaling_diag_matrix[module.name] = 0
+
         return
 
     def is_skipped(self, module: NamedModule) -> bool:
@@ -88,7 +91,7 @@ class EoraProcessor(LoopProcessor):
                 input=input,
                 name=name,
                 eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
-                sample_size=len(self.calibration_dataset)
+                sample_size=self.num_batches
             )
         return tmp
 

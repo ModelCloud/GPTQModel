@@ -248,7 +248,7 @@ class ModuleLooper():
                     for name in skipped_modules:
                         subset.pop(name)
 
-                    if len(processor.tasks) == 0:
+                    if len(subset) == 0:
                         continue
 
                     handle = []
@@ -321,6 +321,7 @@ class ModuleLooper():
                 is_last_module = module_index == len(quant_modules_pb) - 1
                 layer_outputs = []
                 if not is_last_module:
+                    print("xxxx", type(processor), cur_layer_device, get_device(module))
                     for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
@@ -355,10 +356,11 @@ class ModuleLooper():
                                 torch_empty_cache()
 
                 # TODO move to processor?
-                if not is_lm_head_module:
-                    layers[module_index] = self.gptq_model.post_quantize(module)
-                else:
-                    self.gptq_model.post_quantize(module)
+                if p_index == len(self.processors) - 1:
+                    if not is_lm_head_module:
+                        layers[module_index] = self.gptq_model.post_quantize(module)
+                    else:
+                        self.gptq_model.post_quantize(module)
 
                 processor.clear_cache_data()
 

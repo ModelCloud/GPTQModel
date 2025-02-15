@@ -268,18 +268,7 @@ class LoopProcessor:
             self.cpu_memorys.append(cpu_memory)
 
     def log_plotly(self):
-        task = self.logger_task
-        if task is not None:
-            from gptqmodel.utils.plotly import create_plotly
-            x = list(range(self.layer_count))
-            gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-            cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-            loss_fig = create_plotly(x=self.module_names, y=self.avg_losses, xaxis_title="layer", yaxis_title="loss")
-            time_fig = create_plotly(x=self.module_names, y=self.durations, xaxis_title="layer", yaxis_title="time")
-            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+        pass
 
     def set_calibration_dataset(self, calibration_dataset):
         pass

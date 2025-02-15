@@ -50,14 +50,14 @@ class NamedModule(torch.nn.Module):
         })
 
     # return stats for mo
-    def stats(self) -> Dict[str, float]:
-        # -1 means no stats have yet to gathered for the stat property
-        return {
-            STAT_GPTQ_DURATION: self.state.get(STAT_GPTQ_DURATION, -1),
-            STAT_GPTQ_AVG_LOSS: self.state.get(STAT_GPTQ_AVG_LOSS, -1),
-            STAT_GPTQ_DAMP_PERCENT: self.state.get(STAT_GPTQ_DAMP_PERCENT, -1),
-            STAT_GPTQ_FWD_TIME: self.state.get(STAT_GPTQ_FWD_TIME, -1),
-        }
+    # def stats(self) -> Dict[str, float]:
+    #     # -1 means no stats have yet to gathered for the stat property
+    #     return {
+    #         STAT_GPTQ_DURATION: self.state.get(STAT_GPTQ_DURATION, -1),
+    #         STAT_GPTQ_AVG_LOSS: self.state.get(STAT_GPTQ_AVG_LOSS, -1),
+    #         STAT_GPTQ_DAMP_PERCENT: self.state.get(STAT_GPTQ_DAMP_PERCENT, -1),
+    #         STAT_GPTQ_FWD_TIME: self.state.get(STAT_GPTQ_FWD_TIME, -1),
+    #     }
 
     def __getattr__(self, name: str):
         return getattr(self.module, name)
