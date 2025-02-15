@@ -240,6 +240,7 @@ class ModuleLooper():
                             named_module = NamedModule(subset[name], name=name, full_name=layer_name,
                                                       layer_index=module_index)
                             subset[name] = named_module
+                            full[name] = named_module
 
                         processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
                         # some modules are skipped

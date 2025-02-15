@@ -105,7 +105,7 @@ class EoraProcessor(LoopProcessor):
         eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix[module.name]
 
         w = module.state.pop("w")
-        wq: torch.Tensor = module.state.get("wq"),
+        wq: torch.Tensor = module.state["wq"]
 
         A, B, computed_wq = eora_compute_lora(
             w=w,
