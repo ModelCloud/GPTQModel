@@ -290,9 +290,7 @@ class LoopProcessor:
         self.inputs_cache.layer_inputs = layer_inputs
 
     def clear_cache_data(self):
-        del self.tasks
         self.tasks = {}
-        del self.inputs_cache.layer_inputs
         self.inputs_cache.layer_inputs = []
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
