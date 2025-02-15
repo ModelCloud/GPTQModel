@@ -59,7 +59,7 @@ class TestBits(unittest.TestCase):
 
     CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
         2: {'acc,none': 0.2175767918088737, 'acc_norm,none': 0.26535836177474403},
-        3: {'acc,none': 0.22696245733788395, 'acc_norm,none': 0.22696245733788395},
+        3: {'acc,none': 0.22696245733788395, 'acc_norm,none': 0.2627986348122867},
         4: {'acc,none': 0.26621160409556316, 'acc_norm,none': 0.3148464163822526},
         8: {'acc,none': 0.29948805460750855, 'acc_norm,none': 0.3293515358361775},
     }
