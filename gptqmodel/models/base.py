@@ -377,6 +377,11 @@ class BaseGPTQModel(nn.Module):
         from gptqmodel.looper.gptq_processor import GPTQProcessor
         from gptqmodel.looper.module_looper import ModuleLooper
         processors = [GPTQProcessor(calibration_dataset, self.quantize_config)]
+
+        if self.quantize_config.adapter:
+            from gptqmodel.looper.eora_processor import EoraProcessor
+            processors.append(EoraProcessor(self.quantize_config.eora_calibration_dataset, self.quantize_config))
+
         module_looper = ModuleLooper(self, processors=processors)
         return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,
                                   auto_gc=auto_gc, backend=backend)
