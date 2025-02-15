@@ -86,7 +86,11 @@ class Lora(Adapter):
 
             adapter_load_cache = safetensors.torch.load_file(lora_path)
 
-        weight_key = weight_key.lower().removeprefix("model.")
+        weight_key = weight_key.lower()
+
+        # hack for HF Auto compat
+        if not f"{weight_key}.lora_A.weight" in adapter_load_cache:
+            weight_key = weight_key.removeprefix("model.")
 
         #print(f"loaded lora weight keys: {adapter_load_cache.keys()}")
         lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T

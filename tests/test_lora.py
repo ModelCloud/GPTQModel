@@ -80,16 +80,16 @@ class Test(ModelTest):
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
 
-    # def test_lm_eval_from_path(self):
-    #     adapter = Lora(path=self.lora_path, rank=128)
-    #     task_results = self.lm_eval(None, extra_args={"backend":"exllama_v2v", "adapter": adapter.to_dict()})
-    #     self.check_results(task_results)
-    #
-    # def test_lm_eval_from_model(self):
-    #     model = GPTQModel.load(
-    #         self.NATIVE_MODEL_ID,
-    #         adapter=self.adapter,
-    #         backend=BACKEND.EXLLAMA_V2V,
-    #     )
-    #     task_results = self.lm_eval(model)
-    #     self.check_results(task_results)
+    def test_lm_eval_from_path(self):
+        adapter = Lora(path=self.lora_path, rank=128)
+        task_results = self.lm_eval(None, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
+        self.check_results(task_results)
+
+    def test_lm_eval_from_model(self):
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            adapter=self.adapter,
+            # backend=BACKEND.EXLLAMA_V2V,
+        )
+        task_results = self.lm_eval(model)
+        self.check_results(task_results)
