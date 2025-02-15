@@ -30,6 +30,7 @@ from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PR
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.torch import torch_new_stream, torch_sync
 from torch.nn import Module
 
 logger = setup_logger()
@@ -128,18 +129,33 @@ class EoraProcessor(LoopProcessor):
 
         eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix[module.name]
 
-        wq = module.state.get("wq"),
+        w = module.state.pop("w")
+        wq: torch.Tensor = module.state.get("wq"),
 
         A, B, computed_wq = eora_compute_lora(
-            w=module.state.get("w"),
+            w=w,
             wq=wq,
             module=module,
             eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
             rank=module.adapter_cfg.rank
         )
 
+        del w
+
+        # wq is currently on GPU, stream to CPU if possible
+        stream = torch_new_stream()
+        if stream:
+            wq_copy = torch.zeros_like(wq, device=CPU, pin_memory=True)
+            with torch.cuda.stream(stream):
+                wq_copy.copy_(wq, non_blocking=True)
+
+            module.state.update({
+                "wq": wq_copy,
+                "streaming": True,
+            })
+
         # override module weight with computed weight with B@A delta
-        module.weight.data = computed_wq.to(module.weight.data.dtype)
+        module.weight.data = computed_wq.to(dtype=module.weight.data.dtype)
 
         # lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(dtype=torch.float16)
         # lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(dtype=torch.float16)
@@ -172,7 +188,8 @@ class EoraProcessor(LoopProcessor):
         pass
 
     def submodule_finalize(self, module: NamedModule):
-        pass
+        if module.state.pop("streaming", False):
+            torch_sync()
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.eigen_scaling_diag_matrix

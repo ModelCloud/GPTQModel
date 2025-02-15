@@ -18,7 +18,6 @@ import time
 from typing import List
 
 import torch
-from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
@@ -26,7 +25,6 @@ from gptqmodel.models import BaseGPTQModel
 from gptqmodel.models._const import SUPPORTS_MODULE_TYPES
 from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                                    get_moe_layer_modules, move_to, nested_move_to)

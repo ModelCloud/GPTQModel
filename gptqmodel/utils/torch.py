@@ -39,6 +39,13 @@ try:
 except BaseException:
     pass
 
+def torch_new_stream():
+    if HAS_CUDA:
+        return torch.cuda.Stream()
+    if HAS_XPU:
+        return torch.xpu.Stream()
+    return None
+
 def torch_sync(device: torch.device = None):
     # check all backends
     if device is None:

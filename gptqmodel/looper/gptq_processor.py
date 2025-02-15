@@ -198,7 +198,7 @@ class GPTQProcessor(LoopProcessor):
         })
 
     def post_process(self, module: NamedModule):
-        # prepare for module.foward post generate
+        # prepare for module.forward post generate
         module.weight.data = module.state["wq"] # module.layer.weight or module.weight?
 
     def submodule_finalize(self, module: NamedModule):
