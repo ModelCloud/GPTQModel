@@ -92,21 +92,28 @@ class TestBits(unittest.TestCase):
         # quantize
         model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        dataset = [
-            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
+        dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         calibration_dataset = [tokenizer(example) for example in dataset]
+
+        errors = []
         for quant_backend in self.pack_backends:
             supports_bits = self.QLINEAR_DICT[quant_backend].SUPPORTS_BITS
             for bits in supports_bits:
-                print("-----------------------quant-----------------------")
+                print(f"-----------------------quant backend: {quant_backend}-- bits: {bits} ---------------------")
                 quantize_config = QuantizeConfig(bits=bits, group_size=128, sym=True, desc_act=False)
                 print(f"bits: {quantize_config.bits}, quant_backend: {quant_backend} start quant")
                 try:
                     self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
                 except Exception:
-                    print(f"bits:  {quantize_config.bits}, quant_backend: {quant_backend} An error occurred")
+                    error_log=f"bits:  {quantize_config.bits}, quant_backend: {quant_backend} An error occurred"
+                    print(error_log)
+                    errors.append(error_log)
+
                     traceback.print_exc()
+
                     continue
+
+        self.assertTrue(len(errors) == 0, '\n'.join(errors))
 
     def quant_and_eval(self, calibration_dataset, model_id, quant_backend, quantize_config, tokenizer):
         model = GPTQModel.load(
@@ -127,11 +134,7 @@ class TestBits(unittest.TestCase):
                     # Skip inference_backend that does not support the current bits
                     continue
 
-                try:
-                    self.eval(inference_backend, quant_backend, quantize_config, tmp_dir)
-                except Exception:
-                    traceback.print_exc()
-                    continue
+                self.eval(inference_backend, quant_backend, quantize_config, tmp_dir)
 
     def eval(self, inference_backend, quant_backend, quantize_config, tmp_dir):
         print("-----------------------eval-----------------------")
