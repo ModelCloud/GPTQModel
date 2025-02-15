@@ -223,6 +223,7 @@ class ModuleLooper():
                 position_ids = processor.inputs_cache.position_ids
                 attention_masks = processor.inputs_cache.attention_masks
 
+                processed_subset = {}
                 for index, names in enumerate(modules):
                     subset = {}
                     for n in names:
@@ -311,6 +312,7 @@ class ModuleLooper():
 
                     for name_index, name in enumerate(subset):
                         processor.process(module=subset[name])
+                        processed_subset[name] = subset[name]
 
                         processor.post_process(module=subset[name])
 
@@ -368,8 +370,8 @@ class ModuleLooper():
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
                     for reverse_p in reversed(self.processors):
-                        for name in subset:
-                            reverse_p.submodule_finalize(subset[name])
+                        for name in processed_subset:
+                            reverse_p.submodule_finalize(processed_subset[name])
                     del module
 
                 if auto_gc:
