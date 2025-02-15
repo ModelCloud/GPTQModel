@@ -21,6 +21,7 @@ from typing import Callable, Tuple
 import torch
 from gptqmodel import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora
+from gptqmodel.eora.eora import eora_compute_lora, eora_process_input, process_input
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
@@ -110,74 +111,35 @@ class EoraProcessor(LoopProcessor):
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
-            inp = input[0].to(dtype=torch.float32) # Original code had .detach() but it should not be needed
-            if inp.dim() == 2:
-                inp = inp.unsqueeze(0)
-
-            tmp = inp.shape[0]
-            adds = torch.matmul(inp.transpose(1, 2), inp)
-            adds_sum = torch.sum(adds, dim=0)
-
-            nsamples = len(self.calibration_dataset)
-
-            self.subset_eigen_scaling_diag_matrix[name] *= nsamples / (nsamples + tmp)
-            self.subset_eigen_scaling_diag_matrix[name] += adds_sum / nsamples
-
-            del inp, adds, adds_sum, output
+            eora_process_input(
+                input=input,
+                name=name,
+                eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
+                sample_size=len(self.calibration_dataset)
+            )
         return tmp
 
     def process(self, module: NamedModule):
-        adapter_cfg = module.adapter_cfg
+        assert (isinstance(module.adapter_cfg, Lora))
 
         self.pb.set_description(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
 
         start = time.time()
-        original_weight = module.state.get("w")
-        quantized_weight = module.state.get("wq")
 
-        dev = original_weight.device
-        delta = original_weight - quantized_weight
+        eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix[module.name]
 
-        ## save this later for SVD
-        raw_scaling_diag_matrix = self.subset_eigen_scaling_diag_matrix.pop(module.name).to(torch.float64).to(device=dev)
+        wq = module.state.get("wq"),
 
-        L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
-        if (L < 0).any().item():
-            print(f"found negative eigenvalues in {module.name}")
-            minimum = torch.min(L[L > 0])
-            L[L < 0] = minimum
-
-        sqrtEigenvalues = torch.sqrt(L)
-        scaling_diag_matrix = Q @ torch.diag(sqrtEigenvalues)
-        try:
-            scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
-        except Exception:
-            print("Warning: scaling_diag_matrix is not full rank!")
-            scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(dev)
-            scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
-
-        scaling_diag_matrix = scaling_diag_matrix.float()
-        scaling_matrix_inv = scaling_matrix_inv.float()
-        ##
-        delta_scale = torch.matmul(delta.to(torch.float32), scaling_diag_matrix)
-
-        assert(isinstance(adapter_cfg, Lora))
-        rank = adapter_cfg.rank
-
-        U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
-        lowrank_r = rank
-        truc_s = S[:lowrank_r]
-        truc_u = U[:, :lowrank_r]
-        truc_v = torch.matmul(V[:lowrank_r, :], scaling_matrix_inv)
-        truc_sigma = torch.diag(truc_s)
-
-        sqrtS = torch.sqrt(truc_sigma)
-        B = torch.matmul(truc_u, sqrtS).to(quantized_weight.dtype)
-        A = torch.matmul(sqrtS, truc_v).to(quantized_weight.dtype)
+        A, B, computed_wq = eora_compute_lora(
+            w=module.state.get("w"),
+            wq=wq,
+            module=module,
+            eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
+            rank=module.adapter_cfg.rank
+        )
 
         # override module weight with computed weight with B@A delta
-        comp_weight = quantized_weight + B @ A
-        module.weight.data = comp_weight.to(module.weight.data.dtype)
+        module.weight.data = computed_wq.to(module.weight.data.dtype)
 
         # lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(dtype=torch.float16)
         # lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(dtype=torch.float16)
@@ -205,8 +167,6 @@ class EoraProcessor(LoopProcessor):
             "lora_A": A.to(dtype=torch.float16, device=CPU),
             "lora_B": B.to(dtype=torch.float16, device=CPU),
         })
-
-        del B, A, quantized_weight, U, S, V, L, Q
 
     def post_process(self, module: NamedModule):
         pass
