@@ -144,7 +144,7 @@ def get_module(module, key):
 
 def make_quant(
     module,
-    names,
+    quant_result: Dict[str, Dict[str, Any]],
     qcfg: QuantizeConfig,
     backend: BACKEND,
     lm_head_name: str,
@@ -195,7 +195,7 @@ def make_quant(
                 dynamic=dynamic,
                 group_size=group_size,
                 module=module,
-                names=names,
+                quant_result=quant_result,
                 sym=sym,
                 device=device,
                 lm_head_name=lm_head_name,
@@ -220,7 +220,7 @@ def create_quant_layer(
         dynamic,
         group_size: int,
         module,
-        names,
+        quant_result: Dict[str, Dict[str, Any]],
         sym: bool,
         device: DEVICE,
         lm_head_name: str,
@@ -232,7 +232,7 @@ def create_quant_layer(
         return linear
     for name, submodule in module.named_modules():
         # skip non-quantized modules
-        if name not in names:
+        if name not in quant_result:
             continue
 
         ori_layer_device = next(submodule.parameters()).device
@@ -295,8 +295,6 @@ def create_quant_layer(
         )
         if err is not None:
             raise err
-
-
 
         new_layer = linear(
             bits=tmp_bits,
@@ -481,7 +479,8 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
     with tctl.threadpool_limits(limits=1):
         if pbar:
             pbar.set_description(f"Packing {name}")
-        scale, zero, g_idx = quant_result[name]
+        r = quant_result[name]
+        scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device
         qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
@@ -498,7 +497,7 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
 
 def pack_model(
     model,
-    quant_result: Dict[str, Tuple],
+    quant_result: Dict[str, Dict[str, Any]],
     bits,
     group_size,
     backend: BACKEND,
@@ -539,7 +538,7 @@ def pack_model(
     modules = {n: modules[n] for n in quant_result}
     make_quant(
         model,
-        names=quant_result,
+        quant_result=quant_result,
         qcfg=qcfg,
         backend=backend,
         lm_head_name=lm_head_name,

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, List, Tuple, Optional, Union, Dict
+from typing import Callable, List, Tuple, Optional, Union, Dict, Any
 
 import torch
 from gptqmodel.looper.input_cache import InputCache
@@ -37,9 +37,12 @@ class LoopProcessor:
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True):
+
+        # result is total collection of all module results mapped by module.full_name
+        self._results: Dict[str, Any] = {}
+
         self.tokenizer = tokenizer
         self.qcfg = qcfg
-
 
         # if processor require fwd generate and hooks, set this to true
         # looper should bypass generate + hooks if this is false
@@ -121,6 +124,16 @@ class LoopProcessor:
             self.num_batches = len(calibration_dataset)
 
         self.calibration_dataset = calibration_dataset
+
+    def result_save(self, key: str, value: Any):
+        assert(self.result_get(key) is not None, f"key: {key} already exists in `self.result`")
+        self._results[key] = value
+
+    def result_get(self, key: str, default: Any = None) -> Any:
+        return self._results.get(key, default)
+
+    def results(self):
+        return self._results
 
     def prepare_dataset(
             self,
@@ -311,6 +324,7 @@ class LoopProcessor:
     # last step, after all loop processor is called
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.inputs_cache
+        del self._results
 
     def release_calibration_dataset(self):
         del self.calibration_dataset

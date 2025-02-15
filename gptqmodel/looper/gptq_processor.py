@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import copy
 from typing import Callable, Tuple, Optional
 
@@ -42,7 +43,6 @@ class GPTQProcessor(LoopProcessor):
 
         self.avg_losses = []
 
-        self.quant_result = {}
         self.streaming = False
 
     def log_plotly(self):
@@ -174,17 +174,17 @@ class GPTQProcessor(LoopProcessor):
                 zero_copy.copy_(zero, non_blocking=True)
                 g_idx_copy.copy_(g_idx, non_blocking=True)
 
-                self.quant_result[module.full_name] = (
-                    scale_copy,
-                    zero_copy,
-                    g_idx_copy
-                )
+                self.result_save(module.full_name, {
+                    "scale": scale_copy,
+                    "zero": zero_copy,
+                    "g_idx": g_idx_copy,
+                })
         else:
-            self.quant_result[module.full_name] = (
-                move_to(scale, CPU),
-                move_to(zero, CPU),
-                move_to(g_idx, CPU),
-            )
+            self.result_save(module.full_name, {
+                "scale": move_to(scale, CPU),
+                "zero": move_to(zero, CPU),
+                "g_idx": move_to(g_idx, CPU),
+            })
 
         w = module.weight.data
         # TODO FIXME data can't set to None
@@ -216,7 +216,7 @@ class GPTQProcessor(LoopProcessor):
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
             model=model.model,
-            quant_result=self.quant_result,
+            quant_result=self.results(),
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
             backend=backend,
@@ -231,7 +231,6 @@ class GPTQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        del self.quant_result
 
         super().finalize(model=model, **kwargs)
 
