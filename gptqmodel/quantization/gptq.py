@@ -168,8 +168,8 @@ class GPTQ:
         # release buffer
         del self.fwd_inputs_buffered_data
 
-        if self.device.type not in ["mps", "cpu"]:
-            self.module.weight.data = self.module.weight.data.cpu()
+        # if self.device.type not in ["mps", "cpu"]:
+        #     self.module.weight.data = self.module.weight.data.cpu()
 
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
