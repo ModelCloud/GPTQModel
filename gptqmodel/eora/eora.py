@@ -12,9 +12,8 @@ from typing import Dict, Tuple
 
 import torch
 from gptqmodel.looper.named_module import NamedModule
-from torch import Tensor
-
 from gptqmodel.utils.logger import setup_logger
+from torch import Tensor
 
 logger = setup_logger()
 
@@ -41,11 +40,11 @@ def eora_compute_lora(
     delta = w - wq
 
     # save this later for SVD
-    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.double().to(device=w.device)
+    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=w.device)
 
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
     if (L < 0).any().item():
-        logger.warn(f"Found negative eigenvalues in {module.name}")
+        logger.warn(f"Found negative eigenvalues in `{module.name}`. Please increase your calibration data set for EoRA.")
         minimum = torch.min(L[L > 0])
         L[L < 0] = minimum
 

@@ -25,7 +25,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from parameterized import parameterized  # noqa: E402
 
 
 class Test(ModelTest):
@@ -44,11 +43,11 @@ class Test(ModelTest):
             "allenai/c4",
             data_files="en/c4-train.00001-of-01024.json.gz",
             split="train"
-        ).select(range(4))["text"]
+        ).select(range(64))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             quant_config = QuantizeConfig(
-                bits=8,
+                bits=2,
                 group_size=32,
                 adapter=Lora(
                     path=os.path.join(tmpdir, "lora_adapter.safetensors"),
@@ -59,7 +58,7 @@ class Test(ModelTest):
             model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
 
             # increase `batch_size` to match gpu/vram specs to speed up quantization
-            model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
+            model.quantize(calibration_dataset, batch_size=8, auto_gc=False)
             # print("log", l)
             # model.quantize_old(calibration_dataset, batch_size=2)
 

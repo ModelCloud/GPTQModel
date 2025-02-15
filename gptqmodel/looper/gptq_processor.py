@@ -28,7 +28,7 @@ from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to, pack_model
-from gptqmodel.utils.torch import torch_new_stream_ctx, torch_sync
+from gptqmodel.utils.torch import torch_sync
 from torch.nn import Module
 
 logger = setup_logger()
@@ -114,7 +114,6 @@ class GPTQProcessor(LoopProcessor):
         self.pb.set_description(f"Quantizing {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
         gptq = self.tasks
 
-
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         g = gptq[module.name]
@@ -189,6 +188,9 @@ class GPTQProcessor(LoopProcessor):
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
         torch_sync()
+        # stream = torch_new_stream()
+        # if stream:
+        #     stream.synchronize()
 
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(

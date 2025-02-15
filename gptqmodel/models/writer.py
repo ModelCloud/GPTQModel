@@ -28,7 +28,8 @@ import torch
 import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
-from safetensors.torch import save_file as safe_save, save_file
+from safetensors.torch import save_file
+from safetensors.torch import save_file as safe_save
 from transformers import AutoConfig, PreTrainedTokenizerFast
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config

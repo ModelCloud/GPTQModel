@@ -93,12 +93,15 @@ def get_device(obj: torch.Tensor | nn.Module):
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
         if stream:
+            # we cannot support changing dtype and stream at the same time
+            assert dtype is None, f"streaming does not support changing dtype: actual = `{dtype}"
             if not isinstance(obj, torch.Tensor):
                 raise NotImplementedError(
                     f"Streaming `move_to` is not supported for non-Tensors: actual = `{obj.__class__.__name__}`")
 
             if device == CPU:
-                obj_copy = torch.zeros_like(obj, dtype=dtype, device=CPU, pin_memory=True)
+                # print(f" streaming from non-CPU to CPU...nonblocking")
+                obj_copy = torch.zeros_like(obj, device=CPU, pin_memory=True)
                 streamCtx = torch_new_stream_ctx()
                 if streamCtx:
                     # use streaming context with pinned cpu memory
@@ -107,12 +110,12 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
                     return obj_copy
                 else:
                     # does not support streaming context
-                    obj = obj.to(device=device, dtype=dtype, non_blocking=True)
+                    obj = obj.to(device=device, non_blocking=True)
             else:
                 # cpu to non-cpu or non-cpu to non-cpu  uses normal .to() api
-                obj = obj.to(device=device, dtype=dtype, non_blocking=True)
+                obj = obj.to(device=device, non_blocking=True)
         else:
-            obj = obj.to(device=device, dtype=dtype, non_blocking=True)
+            obj = obj.to(device=device, dtype=dtype, non_blocking=False)
 
     return obj
 

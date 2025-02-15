@@ -125,7 +125,7 @@ class LoopProcessor:
         self.calibration_dataset = calibration_dataset
 
     def result_save(self, key: str, value: Any):
-        assert(self.result_get(key) is not None, f"key: {key} already exists in `self.result`")
+        assert self.result_get(key) is None, f"key: {key} already exists in `self.result`"
         self._results[key] = value
 
     def result_get(self, key: str, default: Any = None) -> Any:

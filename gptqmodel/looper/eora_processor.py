@@ -17,7 +17,7 @@
 import copy
 import os
 import time
-from typing import Callable, Optional, Tuple, Dict
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from gptqmodel.adapter.adapter import Lora
@@ -31,7 +31,7 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to
-from gptqmodel.utils.torch import torch_new_stream_ctx, torch_sync
+from gptqmodel.utils.torch import torch_sync
 from torch.nn import Module
 
 logger = setup_logger()
@@ -97,7 +97,7 @@ class EoraProcessor(LoopProcessor):
         return tmp
 
     def process(self, module: NamedModule):
-        assert(isinstance(module.adapter_cfg, Lora))
+        assert isinstance(module.adapter_cfg, Lora)
 
         self.pb.set_description(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
 
@@ -149,8 +149,8 @@ class EoraProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {
-            "lora_A.weight": move_to(A, device=CPU, dtype=torch.float16, stream=True), # A.to(dtype=torch.float16, device=CPU),
-            "lora_B.weight": move_to(B, device=CPU, dtype=torch.float16, stream=True), # B.to(dtype=torch.float16, device=CPU),
+            "lora_A.weight": move_to(A.to(dtype=torch.float16), device=CPU, stream=True), # A.to(dtype=torch.float16, device=CPU),
+            "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=True), # B.to(dtype=torch.float16, device=CPU),
             # "streaming": True,
         })
 
@@ -165,6 +165,9 @@ class EoraProcessor(LoopProcessor):
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
         torch_sync()
+        # stream = torch_new_stream()
+        # if stream:
+        #     stream.synchronize()
 
         del self.eigen_scaling_diag_matrix
 
