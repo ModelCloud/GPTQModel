@@ -285,23 +285,23 @@ class BaseQuantLinear(nn.Module):
 
 class PackableQuantLinear(BaseQuantLinear):
     def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data
+        W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.T
+            W = W.t()
 
         self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
 
-        scales = scales.T.contiguous()
-        zeros = zeros.T.contiguous()
+        scales = scales.t().contiguous()
+        zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales
         self.scales = scales.clone().to(dtype=t.float16)
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=t.float16)
 
         intweight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
-        intweight = intweight.T.contiguous()
+        intweight = intweight.t().contiguous()
         intweight = intweight.numpy().astype(self.pack_np_math_dtype)
 
         qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
