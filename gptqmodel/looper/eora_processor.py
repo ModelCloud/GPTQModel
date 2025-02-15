@@ -21,7 +21,7 @@ from typing import Callable, Tuple
 import torch
 from gptqmodel import QuantizeConfig
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.eora.eora import eora_compute_lora, eora_process_input, process_input
+from gptqmodel.eora.eora import eora_compute_lora, eora_process_input
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
