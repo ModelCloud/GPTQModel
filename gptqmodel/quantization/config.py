@@ -416,13 +416,14 @@ class QuantizeConfig():
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_JSON: self.format,
+            # torch.dtype convert to string
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
-            ADAPTER_FIELD: self.adapter,
+            ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
 
         # simplify: clean keys where the value is None or empty [list, dict]
-        out = {k: v for k, v in out.items() if v is not None and (v != [] or v != {})}
+        out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
 
         dict_scale_dtype_to_str(out)
         return out
