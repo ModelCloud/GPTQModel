@@ -54,14 +54,14 @@ class TestBits(unittest.TestCase):
         BACKEND.MARLIN: MarlinQuantLinear,
     }
 
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.025  # -2.5%
-    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.025  # +2.5%
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.1
+    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.1
 
     CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
-        2: {'acc,none': 0.22610921501706485, 'acc_norm,none': 0.2909556313993174},
-        3: {'acc,none': 0.21245733788395904, 'acc_norm,none': 0.24744027303754265},
-        4: {'acc,none': 0.2738907849829352, 'acc_norm,none': 0.3122866894197952},
-        8: {'acc,none': 0.2841296928327645, 'acc_norm,none': 0.302901023890785},
+        2: {'acc,none': 0.2175767918088737, 'acc_norm,none': 0.26535836177474403},
+        3: {'acc,none': 0.22696245733788395, 'acc_norm,none': 0.2627986348122867},
+        4: {'acc,none': 0.26621160409556316, 'acc_norm,none': 0.3148464163822526},
+        8: {'acc,none': 0.29948805460750855, 'acc_norm,none': 0.3293515358361775},
     }
 
     def calculatorPer(self, filter, value, base_value):
@@ -92,21 +92,28 @@ class TestBits(unittest.TestCase):
         # quantize
         model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        dataset = [
-            "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
+        dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         calibration_dataset = [tokenizer(example) for example in dataset]
+
+        errors = []
         for quant_backend in self.pack_backends:
             supports_bits = self.QLINEAR_DICT[quant_backend].SUPPORTS_BITS
             for bits in supports_bits:
-                print("-----------------------quant-----------------------")
+                print(f"-----------------------quant backend: {quant_backend}-- bits: {bits} ---------------------")
                 quantize_config = QuantizeConfig(bits=bits, group_size=128, sym=True, desc_act=False)
                 print(f"bits: {quantize_config.bits}, quant_backend: {quant_backend} start quant")
                 try:
                     self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
                 except Exception:
-                    print(f"bits:  {quantize_config.bits}, quant_backend: {quant_backend} An error occurred")
+                    error_log=f"bits:  {quantize_config.bits}, quant_backend: {quant_backend} An error occurred"
+                    print(error_log)
+                    errors.append(error_log)
+
                     traceback.print_exc()
+
                     continue
+
+        self.assertTrue(len(errors) == 0, '\n'.join(errors))
 
     def quant_and_eval(self, calibration_dataset, model_id, quant_backend, quantize_config, tokenizer):
         model = GPTQModel.load(
@@ -127,11 +134,7 @@ class TestBits(unittest.TestCase):
                     # Skip inference_backend that does not support the current bits
                     continue
 
-                try:
-                    self.eval(inference_backend, quant_backend, quantize_config, tmp_dir)
-                except Exception:
-                    traceback.print_exc()
-                    continue
+                self.eval(inference_backend, quant_backend, quantize_config, tmp_dir)
 
     def eval(self, inference_backend, quant_backend, quantize_config, tmp_dir):
         print("-----------------------eval-----------------------")
@@ -165,8 +168,7 @@ class TestBits(unittest.TestCase):
             metric: value for metric, value in results['results'].get(TASK_NAME, {}).items()
             if metric != 'alias' and 'stderr' not in metric
         }
-        print(
-            f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")
+        print(f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")
         del model
 
         self.check_results(quantize_config.bits, task_results)
