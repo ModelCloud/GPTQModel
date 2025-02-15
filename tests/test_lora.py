@@ -38,12 +38,12 @@ class Test(ModelTest):
         cls.adapter = Lora(path=cls.lora_path, rank=128)
 
     @parameterized.expand([
-        BACKEND.EXLLAMA_V2V,
-        # BACKEND.TORCH,
+        # BACKEND.EXLLAMA_V2V,
+        #BACKEND.TORCH,
         # BACKEND.CUDA,
         # BACKEND.TRITON,
         # BACKEND.EXLLAMA_V1,
-        # # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
+        BACKEND.EXLLAMA_V2,
         # BACKEND.MARLIN,
         # # (BACKEND.IPEX), <-- not tested yet
         # # (BACKEND.BITBLAS, <-- not tested yet
@@ -63,7 +63,7 @@ class Test(ModelTest):
         self.assertIn("paris", result.lower())
 
     @parameterized.expand([
-        BACKEND.EXLLAMA_V2V,
+        BACKEND.EXLLAMA_V2,
     ])
     def test_download(self, backend: BACKEND):
         adapter = Lora(path="https://huggingface.co/sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors", rank=128)

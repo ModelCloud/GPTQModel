@@ -1,0 +1,80 @@
+# Copyright 2025 ModelCloud
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# -- do not touch
+import os
+import tempfile
+
+from datasets import load_dataset
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
+
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel.adapter.adapter import Lora  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+
+
+class Test(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
+
+    NATIVE_ARC_CHALLENGE_ACC = 0.3567
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+
+    @classmethod
+    def setUpClass(cls):
+        pass
+
+    def test_quant_and_eora(self):
+        calibration_dataset = load_dataset(
+            "allenai/c4",
+            data_files="en/c4-train.00001-of-01024.json.gz",
+            split="train"
+        ).select(range(4))["text"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            quant_config = QuantizeConfig(
+                bits=8,
+                group_size=32,
+                adapter=Lora(
+                    path=os.path.join(tmpdir, "lora_adapter.safetensors"),
+                    rank=512,
+                )
+            )
+
+            model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
+
+            # increase `batch_size` to match gpu/vram specs to speed up quantization
+            model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
+            # print("log", l)
+            # model.quantize_old(calibration_dataset, batch_size=2)
+
+            model.save(tmpdir)
+
+            # test post-quant inference
+            model = GPTQModel.load(
+                model_id_or_path=tmpdir,
+                backend=BACKEND.AUTO,
+            )
+            tokens = model.generate("Capital of France is")[0]
+            result = model.tokenizer.decode(tokens)
+            print(f"Result: {result}")
+            self.assertIn("paris", result.lower())
+
+
+
+

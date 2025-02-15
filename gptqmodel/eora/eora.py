@@ -8,15 +8,18 @@
 
 # EoRA arXiv: https://arxiv.org/abs/2410.21271v2
 
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple
 
 import torch
 from gptqmodel.looper.named_module import NamedModule
 from torch import Tensor
 
+from gptqmodel.utils.logger import setup_logger
 
-def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, Any], sample_size: int):
-    inp = input[0].to(dtype=torch.float32)  # TODO: detach?
+logger = setup_logger()
+
+def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.float32], sample_size: int):
+    inp = input[0].to(dtype=torch.float32)
     if inp.dim() == 2:
         inp = inp.unsqueeze(0)
 
@@ -33,16 +36,16 @@ def eora_compute_lora(
         w: Tensor, # w: original fp16 weights,
         wq: Tensor, # wq: is gptq (smoothed) fp16 weights, before packing
         module: NamedModule,
-        eigen_scaling_diag_matrix: Any,
+        eigen_scaling_diag_matrix: torch.float32,
         rank: int) -> Tuple[Tensor, Tensor, Tensor]:
     delta = w - wq
 
     # save this later for SVD
-    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=w.device)
+    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.double().to(device=w.device)
 
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
     if (L < 0).any().item():
-        print(f"found negative eigenvalues in {module.name}")
+        logger.warn(f"Found negative eigenvalues in {module.name}")
         minimum = torch.min(L[L > 0])
         L[L < 0] = minimum
 
@@ -52,7 +55,7 @@ def eora_compute_lora(
     try:
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
     except Exception:
-        print("Warning: scaling_diag_matrix is not full rank!") # TODO: assert?
+        logger.warn("`scaling_diag_matrix` is not full rank!") # TODO: assert?
         scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(w.device)
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
 

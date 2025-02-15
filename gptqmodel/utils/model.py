@@ -90,7 +90,7 @@ def get_device(obj: torch.Tensor | nn.Module):
     return next(obj.parameters()).device
 
 
-def move_to(obj: torch.Tensor | nn.Module, device: torch.device, stream: bool = False):
+def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
         if stream:
             if not isinstance(obj, torch.Tensor):
@@ -98,7 +98,7 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, stream: bool = 
                     f"Streaming `move_to` is not supported for non-Tensors: actual = `{obj.__class__.__name__}`")
 
             if device == CPU:
-                obj_copy = torch.zeros_like(obj, device=CPU, pin_memory=True)
+                obj_copy = torch.zeros_like(obj, dtype=dtype, device=CPU, pin_memory=True)
                 streamCtx = torch_new_stream_ctx()
                 if streamCtx:
                     # use streaming context with pinned cpu memory
@@ -107,21 +107,21 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, stream: bool = 
                     return obj_copy
                 else:
                     # does not support streaming context
-                    obj = obj.to(device=device, non_blocking=True)
+                    obj = obj.to(device=device, dtype=dtype, non_blocking=True)
             else:
                 # cpu to non-cpu or non-cpu to non-cpu  uses normal .to() api
-                obj = obj.to(device=device, non_blocking=True)
+                obj = obj.to(device=device, dtype=dtype, non_blocking=True)
         else:
-            obj = obj.to(device=device, non_blocking=True)
+            obj = obj.to(device=device, dtype=dtype, non_blocking=True)
 
     return obj
 
 
-def nested_move_to(v, device, stream: bool = False):
+def nested_move_to(v, device, dtype: torch.dtype = None, stream: bool = False):
     if isinstance(v, torch.Tensor):
-        return move_to(v, device=device, stream=stream)
+        return move_to(v, device=device, dtype=dtype, stream=stream)
     elif isinstance(v, (list, tuple)):
-        return type(v)([nested_move_to(e, device=device, stream=stream) for e in v])
+        return type(v)([nested_move_to(e, device=device, dtype=dtype, stream=stream) for e in v])
     else:
         return v
 
@@ -510,7 +510,7 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        qModules[name].pack(layers[name], scale, zero, g_idx)
+        qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
         if pbar:
             pbar.progress()

@@ -24,7 +24,7 @@ from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from gptqmodel.adapter.adapter import normalize_adapter
+from gptqmodel.adapter.adapter import normalize_adapter, Lora
 from packaging import version
 
 from ..utils.logger import setup_logger
@@ -183,7 +183,7 @@ class QuantizeConfig():
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
     # pending used field
-    adapter: Optional[Dict] = field(default=None)
+    adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
     eora_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = field(default=None)
 
     def __post_init__(self):

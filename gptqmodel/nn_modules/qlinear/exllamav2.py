@@ -215,6 +215,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
         self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
 
+        super().post_init()
+
     def forward(self, x, force_cuda=False):
         x_dtype = x.dtype
         if x_dtype != torch.float16:

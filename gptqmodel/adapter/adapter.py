@@ -86,15 +86,11 @@ class Lora(Adapter):
 
             adapter_load_cache = safetensors.torch.load_file(lora_path)
 
-        weight_key = weight_key.lower()
+        weight_key = weight_key.lower().removeprefix("model.")
 
-        if f"{weight_key}.lora_A.weight" in adapter_load_cache:
-            lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
-            lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
-        else:
-            weight_key = weight_key.removeprefix("model.")  # some HF AutoModel api does not append 'model.'
-            lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
-            lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
+        #print(f"loaded lora weight keys: {adapter_load_cache.keys()}")
+        lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
+        lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
 
         # since loder cache is singleton, we need to reset to None to ci loop tests can pass
         if len(adapter_load_cache) == 0:

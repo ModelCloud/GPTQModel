@@ -15,8 +15,9 @@
 # limitations under the License.
 
 import copy
+import os
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Dict
 
 import torch
 from gptqmodel.adapter.adapter import Lora
@@ -44,7 +45,7 @@ class EoraProcessor(LoopProcessor):
                          logger_board, require_fwd)
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
-        self.eigen_scaling_diag_matrix = {}
+        self.eigen_scaling_diag_matrix: Dict[str, torch.float32] = {}
 
     def log_plotly(self):
         task = self.logger_task
@@ -77,7 +78,7 @@ class EoraProcessor(LoopProcessor):
         # hack store property inside module
         module.adapter_cfg = adapter_cfg
 
-        self.eigen_scaling_diag_matrix[module.name] = 0
+        self.eigen_scaling_diag_matrix[module.name] = 0 # torch.tensor(0.0, dtype=torch.float32)
 
         return
 
@@ -96,7 +97,7 @@ class EoraProcessor(LoopProcessor):
         return tmp
 
     def process(self, module: NamedModule):
-        assert (isinstance(module.adapter_cfg, Lora))
+        assert(isinstance(module.adapter_cfg, Lora))
 
         self.pb.set_description(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
 
@@ -117,17 +118,10 @@ class EoraProcessor(LoopProcessor):
 
         del w
 
-        # wq is currently on GPU, stream to CPU if possible
-        streamCtx = torch_new_stream_ctx()
-        if streamCtx:
-            wq_copy = torch.zeros_like(wq, device=CPU, pin_memory=True)
-            with streamCtx:
-                wq_copy.copy_(wq, non_blocking=True)
-
-            module.state.update({
-                "wq": wq_copy,
-                "streaming": True,
-            })
+        module.state.update({
+            "wq": move_to(wq, device=CPU, stream=True),
+            "streaming": True,
+        })
 
         # override module weight with computed weight with B@A delta
         module.weight.data = computed_wq.to(dtype=module.weight.data.dtype)
@@ -155,23 +149,28 @@ class EoraProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {
-            "lora_A": move_to(A, device=CPU, stream=True), # A.to(dtype=torch.float16, device=CPU),
-            "lora_B": move_to(B, device=CPU, stream=True), # B.to(dtype=torch.float16, device=CPU),
-            "streaming": True,
+            "lora_A.weight": move_to(A, device=CPU, dtype=torch.float16, stream=True), # A.to(dtype=torch.float16, device=CPU),
+            "lora_B.weight": move_to(B, device=CPU, dtype=torch.float16, stream=True), # B.to(dtype=torch.float16, device=CPU),
+            # "streaming": True,
         })
 
     def post_process(self, module: NamedModule):
         pass
 
     def submodule_finalize(self, module: NamedModule):
-        if module.state.pop("streaming", False):
-            torch_sync()
+        pass
+        # if module.state.pop("streaming", False):
+        #     torch_sync()
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
         torch_sync()
 
         del self.eigen_scaling_diag_matrix
+
+        # hack: store loras into model until `save()` is called
+        model.lora_results = self.results()
+
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
@@ -185,4 +184,4 @@ class EoraProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
-        return "eora_test"
+        return "eora"

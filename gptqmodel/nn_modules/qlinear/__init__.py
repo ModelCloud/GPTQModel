@@ -339,7 +339,7 @@ class BaseQuantLinear(nn.Module):
 
 class PackableQuantLinear(BaseQuantLinear):
     def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data # no need to clone, we will generate qweight and release this
+        W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):

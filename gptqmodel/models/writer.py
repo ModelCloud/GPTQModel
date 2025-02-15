@@ -28,7 +28,7 @@ import torch
 import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
-from safetensors.torch import save_file as safe_save
+from safetensors.torch import save_file as safe_save, save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
@@ -56,8 +56,9 @@ QUANT_LOG_DAMP = "damp"
 PROCESS_LOG_TIME = "time"
 PROCESS_LOG_FWD_TIME = "fwd_time"
 
-def ModelWriter(cls):
+EORA_DEFAULT_FILE = "eora.safetensors"
 
+def ModelWriter(cls):
     def save_pretrained(
             self,
             save_dir: str,
@@ -68,12 +69,45 @@ def ModelWriter(cls):
 
     cls.save_pretrained = save_pretrained
 
+    def eora_save(self, eora_path: str):
+        # save lora tensors
+        if hasattr(self, 'lora_results'):  # hack: TODO
+            weights = {}
+
+            # convert the dict into safetensors compatible dict
+            for key, d in self.lora_results.items():
+                # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
+                key = key.lower().removeprefix("model.")
+                for lora_key, lora_weight in d.items():
+                    if isinstance(lora_weight, torch.Tensor):
+                        weights[f"{key}.{lora_key}"] = lora_weight
+                        logger.info(f"lora weight: `{key}.{lora_key}`")
+
+
+            # then lora_path from `save()` then lora.path
+            eora_path = eora_path if eora_path else self.quantize_config.adapter.path
+
+            if not eora_path:
+                raise ValueError(f"Invalid EoRA lora path: actual = `{eora_path}`")
+
+            is_file = eora_path.endswith(".safetensors")
+
+            if not is_file:
+                eora_path = f"{eora_path}/eora.safetensors"
+
+            logger.info(f"Found EoRA lora weights: saving to {eora_path}")
+
+            os.makedirs(os.path.dirname(eora_path), exist_ok=True)
+
+            save_file(tensors=weights, filename=eora_path)
+
     def save_quantized(
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
+            eora_path: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -294,6 +328,9 @@ def ModelWriter(cls):
                 with open(index_save_path, "w", encoding="utf-8") as f:
                     content = json.dumps(index, indent=2, sort_keys=True) + "\n"
                     f.write(content)
+
+        # save lora
+        eora_save(self, eora_path=eora_path)
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:

@@ -1017,6 +1017,7 @@ class BaseGPTQModel(nn.Module):
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
+            eora_path: Optional[str] = None,
             **kwargs,
     ):
         extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
@@ -1031,7 +1032,12 @@ class BaseGPTQModel(nn.Module):
             # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
             #untie_weights(self.model)
 
-            self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
+            self.save_quantized(
+                save_dir=save_dir,
+                safetensors_metadata=safetensors_metadata,
+                max_shard_size=max_shard_size,
+                meta_quantizer=meta_quantizer,
+                eora_path=eora_path)
 
             # overwrite quant_override_files
             for name, value in self.quant_override_files.items():
@@ -1042,7 +1048,7 @@ class BaseGPTQModel(nn.Module):
                     else:
                         f.write(json.dumps(value))
         else:
-            self.save_pretrained(save_dir, **kwargs)
+            self.save_pretrained(save_dir=save_dir, **kwargs)
 
     def compile(self, backend="inductor", mode="max-autotune"):
         if not self.quantized:
