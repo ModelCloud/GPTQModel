@@ -128,7 +128,7 @@ class Lora(Adapter):
             "rank": self.rank
         }
 
-ADAPTER_MAPPING = {"lora": Lora}
+ADAPTER_MAPPING = {Lora.name(): Lora}
 
 # accept both Adapter cls instance or Dict()
 def normalize_adapter(adapter:  Union[Dict, Adapter]):
