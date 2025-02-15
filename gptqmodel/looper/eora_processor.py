@@ -63,6 +63,11 @@ class EoraProcessor(LoopProcessor):
         self.num_batches = len(calibration_dataset)
 
     def preprocess(self, module: NamedModule, **kwargs):
+        # entire module is skipped
+        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+            module.adapter_cfg = None # hack
+            return
+
         adapter_cfg = copy.deepcopy(self.qcfg.adapter)
 
         # dynamic overrides
@@ -72,6 +77,10 @@ class EoraProcessor(LoopProcessor):
         # hack store property inside module
         module.adapter_cfg = adapter_cfg
         return
+
+    def is_skipped(self, module: NamedModule) -> bool:
+        # dynamic override removed eora processing for this module
+        return module.adapter_cfg in [None, {}]
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, input: Tuple[torch.Tensor, ...], output: torch.Tensor):

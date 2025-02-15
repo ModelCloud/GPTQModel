@@ -233,12 +233,6 @@ class ModuleLooper():
 
                     for name in subset:
                         layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{module_index}.{name}"
-                        if self.gptq_model.quantize_config.dynamic is not None:
-                            if self.gptq_model.quantize_config.dynamic_get(layer_name=layer_name) == False:  # noqa: E712
-                                logger.info(f"skip module: {layer_name}")
-
-                                skipped_modules.append(name)
-                                continue
 
                         # gptq task is created and stored inside processor
                         if not isinstance(subset[name], NamedModule):
@@ -247,6 +241,9 @@ class ModuleLooper():
                             subset[name] = named_module
 
                         processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                        # some modules are skipped
+                        if processor.is_skipped(subset[name]):
+                            skipped_modules.append(name)
 
                     for name in skipped_modules:
                         subset.pop(name)

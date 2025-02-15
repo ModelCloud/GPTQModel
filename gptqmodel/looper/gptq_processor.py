@@ -63,6 +63,10 @@ class GPTQProcessor(LoopProcessor):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
+        # entire module is skipped
+        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+            return
+
         qcfg_clone = copy.deepcopy(self.qcfg)
 
         # dynamic overrides
@@ -91,7 +95,14 @@ class GPTQProcessor(LoopProcessor):
             perchannel=True,
         )
         self.tasks[module.name] = tmp
-        return tmp
+
+    def is_skipped(self, module: NamedModule) -> bool:
+        # gptq has no dynamic method of full override (removal)
+        t = self.tasks.get(module.name, False)
+        if t == False:
+            return True
+        else:
+            return False
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):

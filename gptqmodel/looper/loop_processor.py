@@ -288,6 +288,10 @@ class LoopProcessor:
     def preprocess(self, module: NamedModule, **kwargs):
         pass
 
+    # after preproces, this process may be skipped due to dynamic override (lora adapter = None)
+    def is_skipped(self, module: NamedModule) -> bool:
+        pass
+
     def receive_input_cache(self, input_cache: InputCache):
         self.inputs_cache = input_cache
 

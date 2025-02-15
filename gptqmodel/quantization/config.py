@@ -120,6 +120,10 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+
+    if dynamic is None:
+        return default_value
+
     for pattern, overrides in dynamic.items():
         if pattern.startswith("-:"):
             if re.match(pattern.removeprefix("-:"), module_name):
