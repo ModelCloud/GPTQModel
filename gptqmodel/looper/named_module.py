@@ -31,6 +31,8 @@ class NamedModule(torch.nn.Module):
         self.layer_index = layer_index # layerid in a repeating layer, if in outside layer, this info may be fake
         self.state = {} # state is dict to store all temp data used in processor
 
+        # print(f"NamedModule init: name: `{name}, full-name: `{full_name}`")
+
         # store original in/out features since weight.data will changed later on
         if isinstance(module, nn.Linear):
             in_features = module.in_features
