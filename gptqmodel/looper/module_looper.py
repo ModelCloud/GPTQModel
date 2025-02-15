@@ -223,8 +223,8 @@ class ModuleLooper():
                 position_ids = processor.inputs_cache.position_ids
                 attention_masks = processor.inputs_cache.attention_masks
 
-                subset = {}
                 for index, names in enumerate(modules):
+                    subset = {}
                     for n in names:
                         assert n in full, f"module {n} has wrong type, check your config"
                         subset[n] = full[n]
@@ -321,7 +321,6 @@ class ModuleLooper():
                 is_last_module = module_index == len(quant_modules_pb) - 1
                 layer_outputs = []
                 if not is_last_module:
-                    print("xxxx", type(processor), cur_layer_device, get_device(module))
                     for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
