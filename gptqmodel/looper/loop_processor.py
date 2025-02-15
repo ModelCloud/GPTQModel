@@ -59,7 +59,6 @@ class LoopProcessor:
         self.gpu_memorys = []
         self.cpu_memorys = []
         self.durations = []
-        self.avg_losses = []
         self.module_names = []
 
         if self.logger_board == "clearml":
@@ -321,6 +320,8 @@ class LoopProcessor:
     # last step, after all loop processor is called
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.inputs_cache
+
+    def release_calibration_dataset(self):
         del self.calibration_dataset
 
     def number_batches(self) -> int:

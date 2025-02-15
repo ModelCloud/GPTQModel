@@ -25,7 +25,6 @@ from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PR
                                      PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to, pack_model
 from torch.nn import Module
@@ -41,8 +40,24 @@ class GPTQProcessor(LoopProcessor):
         super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
                          logger_board, require_fwd)
 
+        self.avg_losses = []
+
         self.quant_result = {}
         self.streaming = False
+
+    def log_plotly(self):
+        task = self.logger_task
+        if task is not None:
+            from gptqmodel.utils.plotly import create_plotly
+            x = list(range(self.layer_count))
+            gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+            cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+            loss_fig = create_plotly(x=self.module_names, y=self.avg_losses, xaxis_title="layer", yaxis_title="loss")
+            time_fig = create_plotly(x=self.module_names, y=self.durations, xaxis_title="layer", yaxis_title="time")
+            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
+            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")

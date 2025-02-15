@@ -170,7 +170,7 @@ class ModuleLooper():
 
         # release calibration_dataset
         for processor in self.processors:
-            del processor.calibration_dataset
+            processor.release_calibration_dataset()
 
         layer_modules = self.gptq_model.layer_modules
 

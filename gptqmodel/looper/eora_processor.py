@@ -26,9 +26,8 @@ from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models import BaseGPTQModel
 from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                                     PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
+                                     PROCESS_LOG_NAME, PROCESS_LOG_TIME)
 from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.torch import torch_sync, torch_new_stream_ctx
 
@@ -46,6 +45,18 @@ class EoraProcessor(LoopProcessor):
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix = {}
+
+    def log_plotly(self):
+        task = self.logger_task
+        if task is not None:
+            from gptqmodel.utils.plotly import create_plotly
+            x = list(range(self.layer_count))
+            gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
+            cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
+            time_fig = create_plotly(x=self.module_names, y=self.durations, xaxis_title="layer", yaxis_title="time")
+            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
+            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
+            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def set_calibration_dataset(self, calibration_dataset):
         self.calibration_dataset = calibration_dataset
