@@ -16,13 +16,16 @@
 
 # -- do not touch
 import os
+import tempfile
+
+from gptqmodel.utils import Perplexity
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 
 import torch  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -75,3 +78,13 @@ class TestsQ4CUDA(ModelTest):
         # This one does not.
         self.assertInference(model=model_q.model,tokenizer=self.tokenizer)
 
+
+    def test_3bit(self):
+        self.NATIVE_MODEL_ID="/monster/data/model/Llama-3.2-1B-Instruct"
+        self.NATIVE_ARC_CHALLENGE_ACC = 0.3567
+        self.NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
+        self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.40
+
+        self.QUANTIZE_CONFIG_BITS = 3
+
+        self.quant_lm_eval()
