@@ -79,10 +79,10 @@ class Qwen2VLGPTQ(BaseGPTQModel):
     }
 
     def pre_quantize_generate_hook_start(self):
-        self.model.visual = move_to(self.model.visual, self.quantize_config.device)
+        self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.model.visual = move_to(self.model.visual, CPU)
+        self.model.visual = move_to(self.model.visual, device=CPU)
 
     @staticmethod
     def process_vision_info(

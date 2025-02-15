@@ -53,28 +53,28 @@ class ModuleLooper():
             # Positional arguments.
             layer_input = []
             for inp in args:
-                layer_input.append(move_to(inp, data_device))
+                layer_input.append(move_to(inp, device=data_device))
             if len(layer_input) == 0:
                 # Some models put hidden_states in kwargs instead of args.
                 # For example, gptj ...
                 if kwargs.get("hidden_states") is not None:
-                    layer_input.append(move_to(kwargs["hidden_states"], data_device))
+                    layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
 
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
             if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(data_device))
+                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
 
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, data_device))
+                position_ids.append(move_to(pos_ids, device=data_device))
             one_kwargs = {}
             for (k, v) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to(v, data_device)
+                    one_kwargs[k] = nested_move_to(v, device=data_device)
             layer_input_kwargs.append(one_kwargs)
 
             raise ValueError
@@ -103,11 +103,11 @@ class ModuleLooper():
                         if len(v[module_index].shape) == 1:
                             v[module_index] = v[module_index].unsqueeze(0)
                         v[module_index] = move_to(v[module_index].to(torch.bfloat16) if is_ovis else v[module_index],
-                                                  data_device)
+                                                  device=data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
-                    example[k] = move_to(v, data_device)
+                    example[k] = move_to(v, device=data_device)
             try:
                 if is_ovis:
                     self.gptq_model.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
@@ -117,11 +117,11 @@ class ModuleLooper():
                 pass
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
-        move_to(layers[0], CPU)
+        move_to(layers[0], device=CPU)
         for module_name in self.gptq_model.base_modules:
             module = get_module_by_name_prefix(self.gptq_model.model, module_name)
             if module is not None:
-                move_to(module, ori_outside_layer_module_devices[module_name])
+                move_to(module, device=ori_outside_layer_module_devices[module_name])
         if auto_gc:
             torch_empty_cache()
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
@@ -267,19 +267,19 @@ class ModuleLooper():
                     for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, cur_layer_device))
+                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
 
                         mask = attention_masks[j]
-                        layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
                         additional_layer_inputs = {"attention_mask": layer_attention_mask}
                         layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], cur_layer_device)
+                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         )
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids
                         for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
 
                         with torch.no_grad():
                             # reuse_kv is a flag to reuse the kv cache, only for the hamba model
@@ -327,17 +327,17 @@ class ModuleLooper():
                     for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, cur_layer_device))
+                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
 
                         mask = attention_masks[j]
-                        layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
+                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
                         additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                        layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
+                        layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids
                         for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
+                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
 
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:
@@ -347,7 +347,7 @@ class ModuleLooper():
                             layer_output = move_to(
                                 module(*layer_input)[0] if is_lm_head_module else
                                 module(*layer_input, **additional_layer_inputs)[0],
-                                cur_layer_device if calibration_enable_gpu_cache else CPU,
+                                device=cur_layer_device if calibration_enable_gpu_cache else CPU,
                             )
                             layer_outputs.append([layer_output])
 

@@ -29,6 +29,7 @@ from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PR
                                      PROCESS_LOG_NAME, PROCESS_LOG_TIME)
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.model import move_to
 from gptqmodel.utils.torch import torch_sync, torch_new_stream_ctx
 
 from torch.nn import Module
@@ -154,9 +155,10 @@ class EoraProcessor(LoopProcessor):
         logger.info(stat)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        module.state.update({
-            "lora_A": A.to(dtype=torch.float16, device=CPU),
-            "lora_B": B.to(dtype=torch.float16, device=CPU),
+        self.result_save(module.full_name, {
+            "lora_A": move_to(A, device=CPU, stream=True), # A.to(dtype=torch.float16, device=CPU),
+            "lora_B": move_to(B, device=CPU, stream=True), # B.to(dtype=torch.float16, device=CPU),
+            "streaming": True,
         })
 
     def post_process(self, module: NamedModule):
@@ -167,6 +169,9 @@ class EoraProcessor(LoopProcessor):
             torch_sync()
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
+        # block for streams
+        torch_sync()
+
         del self.eigen_scaling_diag_matrix
         super().finalize(model=model, **kwargs)
 

@@ -45,12 +45,12 @@ class OvisGPTQ(BaseGPTQModel):
     IGNORE_ID = -100
 
     def pre_quantize_generate_hook_start(self):
-        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, self.quantize_config.device)
-        self.model.vte = move_to(self.model.vte, self.quantize_config.device)
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=self.quantize_config.device)
+        self.model.vte = move_to(self.model.vte, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, CPU)
-        self.model.vte = move_to(self.model.vte, CPU)
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=CPU)
+        self.model.vte = move_to(self.model.vte, device=CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         text_max_length = 832

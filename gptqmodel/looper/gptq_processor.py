@@ -161,30 +161,11 @@ class GPTQProcessor(LoopProcessor):
         self.log.append(stat)
         logger.info(stat)
 
-        streamCtx = torch_new_stream_ctx()
-        if streamCtx:
-            self.streaming = True
-
-            scale_copy = torch.zeros_like(scale, device=CPU, pin_memory=True)
-            zero_copy = torch.zeros_like(zero, device=CPU, pin_memory=True)
-            g_idx_copy = torch.zeros_like(g_idx, device=CPU, pin_memory=True)
-
-            with streamCtx:
-                scale_copy.copy_(scale, non_blocking=True)
-                zero_copy.copy_(zero, non_blocking=True)
-                g_idx_copy.copy_(g_idx, non_blocking=True)
-
-                self.result_save(module.full_name, {
-                    "scale": scale_copy,
-                    "zero": zero_copy,
-                    "g_idx": g_idx_copy,
-                })
-        else:
-            self.result_save(module.full_name, {
-                "scale": move_to(scale, CPU),
-                "zero": move_to(zero, CPU),
-                "g_idx": move_to(g_idx, CPU),
-            })
+        self.result_save(module.full_name, {
+            "scale": move_to(scale, device=CPU, stream=True),
+            "zero": move_to(zero, device=CPU, stream=True),
+            "g_idx": move_to(g_idx, device=CPU, stream=True),
+        })
 
         w = module.weight.data
         # TODO FIXME data can't set to None
@@ -199,19 +180,16 @@ class GPTQProcessor(LoopProcessor):
 
     def post_process(self, module: NamedModule):
         # prepare for module.forward post generate
-        module.weight.data = module.state["wq"] # module.layer.weight or module.weight?
+        module.weight.data = module.state.get("wq")
 
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
-        # TODO FIX: remove this? eora_test process need to override fwd in post_process so it can do wq + (A @ B)
-        module.weight.data = module.state.pop("wq").cpu()
+        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=True)
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
-        # possible gpu to cpu streams in progress (scales, zeros, idx)
-        if self.streaming:
-            self.streaming = False
-            torch_sync()
+        # block for streams
+        torch_sync()
 
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
@@ -230,7 +208,6 @@ class GPTQProcessor(LoopProcessor):
 
         # set quantized state
         model.quantized = True
-
 
         super().finalize(model=model, **kwargs)
 

@@ -591,34 +591,34 @@ class BaseGPTQModel(nn.Module):
             # Positional arguments.
             layer_input = []
             for inp in args:
-                layer_input.append(move_to(inp, data_device))
+                layer_input.append(move_to(inp, device=data_device))
             if len(layer_input) == 0:
                 # Some models put hidden_states in kwargs instead of args.
                 # For example, gptj ...
                 if kwargs.get("hidden_states") is not None:
-                    layer_input.append(move_to(kwargs["hidden_states"], data_device))
+                    layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
 
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
             if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(data_device))
+                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
 
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, data_device))
+                position_ids.append(move_to(pos_ids, device=data_device))
             one_kwargs = {}
             for (k, v) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to(v, data_device)
+                    one_kwargs[k] = nested_move_to(v, device=data_device)
             layer_input_kwargs.append(one_kwargs)
 
             raise ValueError
 
         # move layer to target device
-        layers[0] = layers[0].to(self.quantize_config.device)
+        layers[0] = layers[0].to(device=self.quantize_config.device)
 
         ori_outside_layer_module_devices = {}
         for module_name in self.base_modules:
@@ -1114,11 +1114,11 @@ class BaseGPTQModel(nn.Module):
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, self.quantize_config.device)
+            return move_to(module, device=self.quantize_config.device)
         return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
-        return move_to(module, CPU)
+        return move_to(module, device=CPU)
 
     def __getattr__(self, item):
         try:
