@@ -46,6 +46,13 @@ def torch_new_stream():
         return torch.xpu.Stream()
     return None
 
+def torch_new_stream_ctx():
+    if HAS_CUDA:
+        return torch.cuda.stream(torch_new_stream())
+    if HAS_XPU:
+        return torch.xpu.Stream(torch_new_stream())
+    return None
+
 def torch_sync(device: torch.device = None):
     # check all backends
     if device is None:

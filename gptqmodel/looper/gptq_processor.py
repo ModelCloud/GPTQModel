@@ -30,6 +30,8 @@ from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to, pack_model
 from torch.nn import Module
 
+from gptqmodel.utils.torch import torch_sync, torch_new_stream_ctx
+
 logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
@@ -37,6 +39,7 @@ class GPTQProcessor(LoopProcessor):
         super().__init__(calibration_dataset=calibration_dataset, qcfg=qcfg)
 
         self.quant_result = {}
+        self.streaming = False
 
         if self.logger_board == "clearml":
             try:
@@ -181,11 +184,31 @@ class GPTQProcessor(LoopProcessor):
         self.log.append(stat)
         logger.info(stat)
 
-        self.quant_result[module.full_name] = (
-            move_to(scale, CPU),
-            move_to(zero, CPU),
-            move_to(g_idx, CPU),
-        )
+        streamCtx = torch_new_stream_ctx()
+        if streamCtx:
+            self.streaming = True
+
+            scale_copy = torch.zeros_like(scale, device=CPU, pin_memory=True)
+            zero_copy = torch.zeros_like(zero, device=CPU, pin_memory=True)
+            g_idx_copy = torch.zeros_like(g_idx, device=CPU, pin_memory=True)
+
+            with streamCtx:
+                scale_copy.copy_(scale, non_blocking=True)
+                zero_copy.copy_(zero, non_blocking=True)
+                g_idx_copy.copy_(g_idx, non_blocking=True)
+
+                self.quant_result[module.full_name] = (
+                    scale_copy,
+                    zero_copy,
+                    g_idx_copy
+                )
+        else:
+            self.quant_result[module.full_name] = (
+                move_to(scale, CPU),
+                move_to(zero, CPU),
+                move_to(g_idx, CPU),
+            )
+
         w = module.weight.data
         # TODO FIXME data can't set to None
         # module.weight.data = None # Processor should fix this
@@ -205,9 +228,13 @@ class GPTQProcessor(LoopProcessor):
         # generate complete, safe to move to cpu
         # TODO FIX: remove this? eora_test process need to override fwd in post_process so it can do wq + (A @ B)
         module.weight.data = module.state.pop("wq").cpu()
-        module.state.pop("w") # no need for original weights now
+        module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
+        # possible gpu to cpu streams in progress (scales, zeros, idx)
+        if self.streaming:
+            self.streaming = False
+            torch_sync()
 
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(

@@ -30,7 +30,8 @@ from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PR
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.torch import torch_new_stream, torch_sync
+from gptqmodel.utils.torch import torch_sync, torch_new_stream_ctx
+
 from torch.nn import Module
 
 logger = setup_logger()
@@ -143,10 +144,10 @@ class EoraProcessor(LoopProcessor):
         del w
 
         # wq is currently on GPU, stream to CPU if possible
-        stream = torch_new_stream()
-        if stream:
+        streamCtx = torch_new_stream_ctx()
+        if streamCtx:
             wq_copy = torch.zeros_like(wq, device=CPU, pin_memory=True)
-            with torch.cuda.stream(stream):
+            with streamCtx:
                 wq_copy.copy_(wq, non_blocking=True)
 
             module.state.update({
