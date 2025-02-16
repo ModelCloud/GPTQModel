@@ -44,7 +44,11 @@ class Lora(Adapter):
 
     def apply(self, x: torch.Tensor, out: torch.Tensor):
         #out = out + ((x @ self.lora_A) @ self.lora_B)
-        return out.add_((x @ self.lora_A) @ self.lora_B)
+        out_orgi_shape = out.shape
+        out = out.view(-1, out.shape[-1])
+        out.add_((x @ self.lora_A) @ self.lora_B)
+        out = out.reshape(out_orgi_shape)
+        return out
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
         # we need since lora A/B weights may be merged into model tensors and not separate
