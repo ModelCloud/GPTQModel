@@ -113,7 +113,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def compile(self):
         # compile dequantize
-        self.dequantize = torch.compile(self.dequantize)
+        self.dequantize_weight = torch.compile(self.dequantize_weight)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:

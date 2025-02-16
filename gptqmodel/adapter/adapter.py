@@ -43,7 +43,7 @@ class Lora(Adapter):
         return "lora"
 
     def apply(self, x: torch.Tensor, out: torch.Tensor):
-        #out = out + ((x @ self.lora_A) @ self.lora_B)
+        # out = out + ((x @ self.lora_A) @ self.lora_B)
         out_orgi_shape = out.shape
         out = out.view(-1, out.shape[-1])
         out.add_((x @ self.lora_A) @ self.lora_B)
