@@ -119,7 +119,7 @@ class TestGroupSize(unittest.TestCase):
         )
         results = lm_eval(
             model,
-            model_name="hf",
+            backend="hf",
             output_path=tmp_dir,
             tasks=TASK_NAME,
             apply_chat_template=False,

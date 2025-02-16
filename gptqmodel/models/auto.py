@@ -39,7 +39,7 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Dict, List, Optional, Union  # noqa: E402
+from typing import Dict, List, Optional, Union, Any  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
@@ -300,55 +300,69 @@ class GPTQModel:
     @classmethod
     def eval(
             cls,
-            model_id_or_path: str,
-            framework: EVAL,
-            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
+            # model: BaseGPTQModel = None,
+            model_or_id_or_path: Union[str, BaseGPTQModel] = None,
+            framework: EVAL = EVAL.LM_EVAL,
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = EVAL.LM_EVAL.ARC_CHALLENGE,
             batch: int = 1,
             trust_remote_code: bool = False,
-            output_file: Optional[str] = None,
+            output_file: str = None,
             backend: str = 'gptqmodel',
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
-            extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
-            **args
+            model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
+            apply_chat_template: Optional[bool] = None,
+            **kwargs
     ):
+        if not model_or_id_or_path:
+            raise ValueError("Eval parameter: `model_id_or_path` is not passed.")
         if framework is None:
-            raise ValueError("eval parameter: `framework` cannot be set to None")
+            raise ValueError("Eval parameter: `framework` cannot be set to None")
 
         if not isinstance(tasks, list):
-            raise ValueError("eval parameter: `tasks` must be of List type")
+            raise ValueError("Eval parameter: `tasks` must be of List type")
 
         if backend not in ['gptqmodel', 'vllm']:
-            raise ValueError('Eval framework support backend: [gptqmodel, vllm]')
+            raise ValueError('Eval framework support `backend`: `[gptqmodel, vllm]`')
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
-                    raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
+                    raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
 
             from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
 
-            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-
             model_name = 'hf' if backend == 'gptqmodel' else backend
-            def_args = f"pretrained={model_id_or_path}"
-            if backend == "gptqmodel":
-                def_args += ",gptqmodel=True"
-            model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
+            if model_args is not None and not isinstance(model_args, Dict):
+                 raise TypeError(f"Expected `model_args` to a `Dict`: actual = {model_args.__class__} ")
 
+            if not model_args:
+                model_args = {}
+
+            if isinstance(model_or_id_or_path, str):
+                tokenizer = AutoTokenizer.from_pretrained(model_or_id_or_path, trust_remote_code=trust_remote_code)
+                # only pass in gptqmodel args if loading via path or id
+                model_args.update({"pretrained": model_or_id_or_path})
+            else:
+                tokenizer = model_or_id_or_path.tokenizer
+
+            if backend == "gptqmodel":
+                model_args.update({"gptqmodel": True})
+
+            if apply_chat_template is None:
+                apply_chat_template = True if tokenizer.chat_template is not None else False
             results = lm_eval(
-                model_name=model_name,
+                model=model_or_id_or_path if isinstance(model_or_id_or_path, BaseGPTQModel) else None,
+                model_name=model_name, # model_name is lm-eval model class name/type
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
                 trust_remote_code=trust_remote_code,
                 batch_size=batch,
-                apply_chat_template=True if tokenizer.chat_template is not None else False,
-                output_path=output_file,
-                numpy_random_seed=random_seed,
-                torch_random_seed=random_seed,
-                fewshot_random_seed=random_seed,
-                **args
+                apply_chat_template=apply_chat_template,
+                output_file=output_file,
+                random_seed=random_seed,
+                **kwargs
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -365,7 +379,7 @@ class GPTQModel:
             results = {}
             for task in tasks:
                 base_formatted, plus_formatted, result_path = evalplus(
-                    model=model_id_or_path,
+                    model=model_or_id_or_path,
                     dataset=task.value,
                     batch=batch,
                     trust_remote_code=trust_remote_code,

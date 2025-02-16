@@ -17,18 +17,18 @@
 import json
 import os
 from enum import Enum
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any, Dict
 
 
 class EVAL:
-    class LM_EVAL(Enum):
+    class LM_EVAL(str, Enum):
         ARC_CHALLENGE = "arc_challenge"
         MMLU = "mmlu"
         HELLASWAG = "hellaswag"
         GSM8K_COT = "gsm8k_cot"
         GPQA = "gpqa"
 
-    class EVALPLUS(Enum):
+    class EVALPLUS(str, Enum):
         HUMAN = "humaneval"
         MBPP = "mbpp"
 
@@ -109,10 +109,10 @@ def evalplus_make_table(results):
 
 
 def lm_eval(
-        model=None,
-        model_args: Union[str, dict] = "",
+        model=None, # BaseGPTQModel, circular import TODO
+        model_args: Dict = None,
         model_name: Optional[str] = "hf",
-        tasks: Optional[List[Union[str, dict, object]]] = None,
+        tasks: List[Union[str, dict, object]] = None,
         num_fewshot: Optional[int] = None,
         batch_size: Optional[Union[int, str]] = 32,
         max_batch_size: Optional[int] = 64,
@@ -131,18 +131,24 @@ def lm_eval(
         gen_kwargs: Optional[str] = None,
         verbosity: str = "INFO",
         predict_only: bool = False,
-        random_seed: int = 0,
-        numpy_random_seed: int = 1234,
-        torch_random_seed: int = 1234,
-        fewshot_random_seed: int = 1234,
-        output_path: Optional[str] = None,
+        random_seed: int = 1234,
+        output_file: Optional[str] = None,
         wandb_project: Optional[str] = None,
         wandb_name: Optional[str] = None,
         show_config: bool = False,
         trust_remote_code: bool = False,
         device: Optional[str] = None,
-        **args,
+        backend: Optional[str] = None,
+        **kwargs,
 ):
+     # hack TODO FIX ME
+    if not model_args:
+        model_args = {} # hack TODO FIX ME
+
+    # gptq model
+    if backend:
+        model_args.update({"backend": backend})
+
     try:
         from lm_eval import simple_evaluate
         from lm_eval.loggers import EvaluationTracker, WandbLogger
@@ -151,7 +157,7 @@ def lm_eval(
     except BaseException:
         raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
-    if model_name == "hf" and model is not None:
+    if model is not None:
         model_name = HFLM(
             pretrained=model,
             batch_size=batch_size,
@@ -159,8 +165,9 @@ def lm_eval(
             trust_remote_code=trust_remote_code,
         )
     evaluation_tracker = None
-    if output_path is not None:
-        evaluation_tracker = EvaluationTracker(output_path=output_path)
+    if output_file is not None:
+        evaluation_tracker = EvaluationTracker(output_path=output_file)
+
     results = simple_evaluate(
         model=model_name,
         model_args=model_args,
@@ -186,10 +193,10 @@ def lm_eval(
         verbosity=verbosity,
         predict_only=predict_only,
         random_seed=random_seed,
-        numpy_random_seed=numpy_random_seed,
-        torch_random_seed=torch_random_seed,
-        fewshot_random_seed=fewshot_random_seed,
-        **args,
+        numpy_random_seed=random_seed,
+        torch_random_seed=random_seed,
+        fewshot_random_seed=random_seed,
+        **kwargs,
     )
 
     if results is not None:
