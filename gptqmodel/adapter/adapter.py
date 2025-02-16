@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Union
+from typing import Dict, Union, List
 from urllib.parse import urlparse
 
 import safetensors
@@ -29,8 +29,14 @@ class Adapter():
 
     # override me
     @classmethod
-    def name(cls) -> str:
+    def name(cls) -> List[str]:
         pass
+
+    # override me
+    @classmethod
+    def parameter_keys(cls) -> [str]: # name of tensors/parameters in attribute key name
+        pass
+
 
 
 @dataclass
@@ -45,6 +51,10 @@ class Lora(Adapter):
     def name(cls) -> str:
         return "lora"
 
+    @classmethod
+    def parameter_keys(cls) -> List[str]:
+        return ["lora_A", "lora_B"]
+
     def apply(self, x: torch.Tensor, out: torch.Tensor):
         # out = out + ((x @ self.lora_A) @ self.lora_B)
         if out.shape[0] > 1:
@@ -55,7 +65,6 @@ class Lora(Adapter):
             return out
         else:
             return out.add_((x @ self.lora_A) @ self.lora_B)
-
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
         # we need since lora A/B weights may be merged into model tensors and not separate
@@ -68,15 +77,15 @@ class Lora(Adapter):
         if adapter_load_cache is None:
             if os.path.isfile(self.path):
                 lora_path = self.path
-                logger.info(f"Loading adapter `{self.path}` tensors from disk")  # {adapter_load_cache}
+                logger.info(f"Adapter: Loading `{self.path}` tensors from disk")  # {adapter_load_cache}
             elif self.path.startswith("http"):
                 from huggingface_hub import hf_hub_download
                 result = self.parse_url(self.path)
                 if len(result) == 3:
-                    logger.info(f"Downloading adapter from hf repo: `{result[0]}` revision: `{result[1]}` file: `{result[2]}`")
+                    logger.info(f"Adapter: Downloading adapter weights from hf repo: `{result[0]}` revision: `{result[1]}` file: `{result[2]}`")
                     lora_path = hf_hub_download(repo_id=result[0], revision=result[1], filename=result[2])
                 elif len(result) == 1:
-                    logger.info(f"Downloading adapter from uri = `{self.path}`")
+                    logger.info(f"Adapter: Downloading adapter weights from uri = `{self.path}`")
                     import requests
                     response = requests.get(self.path, stream=True)
                     lora_path = "lora.safetensors"
@@ -84,7 +93,7 @@ class Lora(Adapter):
                         for chunk in response.iter_content(chunk_size=8192):
                             f.write(chunk)
                 else:
-                    raise Exception(f"lora path is invalid: `{self.path}`")
+                    raise Exception(f"Adapter: Lora path is invalid: `{self.path}`")
             else:
                 from huggingface_hub import HfApi, hf_hub_download
                 files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora_test.safetensors"]]
@@ -93,7 +102,7 @@ class Lora(Adapter):
                     lora_path = hf_hub_download(repo_id=self.path, filename=files[0])
                     # print(f"Adapter tensors loaded from `{self.path}`")
                 else:
-                    raise Exception(f"There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
+                    raise Exception(f"Adapter: There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
 
             adapter_load_cache = safetensors.torch.load_file(lora_path)
 
@@ -114,7 +123,7 @@ class Lora(Adapter):
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
         if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
-            logger.warn(f"Warning: lora_A and lora_B tensors should be `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
+            logger.warn(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
 
         self.lora_A = lora_A.to(device=device, dtype=torch.float16)
         self.lora_B = lora_B.to(device=device, dtype=torch.float16)
@@ -156,19 +165,19 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
         return adapter
 
     if not isinstance(adapter, Dict):
-        raise ValueError("Invalid adapter config: `adapter`.")
+        raise ValueError("Adapter: Invalid adapter config: `adapter`.")
 
     adapter_type = adapter.pop("name", None)
     if adapter_type is None:
-        raise ValueError(f"Invalid adapter class `{adapter_type}`: expected = `{ADAPTER_MAPPING}`.")
+        raise ValueError(f"Adapter: Invalid adapter class `{adapter_type}`: expected = `{ADAPTER_MAPPING}`.")
 
     adapterCls = ADAPTER_MAPPING.get(adapter_type)
     if adapterCls is None:
-        raise ValueError(f"QuantizeConfig.extension only accept `{ADAPTER_MAPPING.keys()}`: actual `{(adapter_type)}`.")
+        raise ValueError(f"Adapter: Compatible adapters include `{ADAPTER_MAPPING.keys()}`: actual `{(adapter_type)}`.")
 
     try:
         adapterInstance = adapterCls(**adapter)
     except Exception:
-        raise ValueError(f"Invalid adapter config: `{adapter}`.")
+        raise ValueError(f"Adapter: Invalid adapter config: `{adapter}`.")
 
     return adapterInstance

@@ -154,6 +154,19 @@ class BaseGPTQModel(nn.Module):
         if self.require_monkeypatch:
             self.monkey_patch()
 
+        # hack: circular import
+        from ..adapter.adapter import Lora
+
+        # check adapter load and print info so users knows lora(s) are applied
+        if isinstance(self.quantize_config.adapter, Lora):
+            loaded_loras = 0
+            qmodules = find_modules(self.model, layers=[BaseQuantLinear])
+            for name, m in qmodules.items():
+                if all(hasattr(m.adapter, name) for name in Lora.parameter_keys()):
+                    loaded_loras += 1
+
+            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded.")
+
     def prepare_dataset(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
