@@ -140,7 +140,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            adpater=adapter,
+            adapter=adapter,
             register_buffers=False,
             **kwargs)
 

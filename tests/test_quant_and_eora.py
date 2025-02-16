@@ -47,8 +47,9 @@ class Test(ModelTest):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             quant_config = QuantizeConfig(
-                bits=2,
+                bits=4,
                 group_size=32,
+                desc_act=False,  # bitblas only supports DESC_ACT=False
                 adapter=Lora(
                     path=os.path.join(tmpdir, "lora_adapter.safetensors"),
                     rank=512,
@@ -64,16 +65,14 @@ class Test(ModelTest):
 
             model.save(tmpdir)
 
-            # test post-quant inference
-            model = GPTQModel.load(
-                model_id_or_path=tmpdir,
-                backend=BACKEND.AUTO,
-            )
-            tokens = model.generate("Capital of France is")[0]
-            result = model.tokenizer.decode(tokens)
-            print(f"Result: {result}")
-            self.assertIn("paris", result.lower())
-
-
-
-
+            for backend in [BACKEND.CUDA, BACKEND.TORCH, BACKEND.TRITON, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_V2,
+                            BACKEND.MARLIN, BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V]:
+                # test post-quant inference
+                model = GPTQModel.load(
+                    model_id_or_path=tmpdir,
+                    backend=backend,
+                )
+                tokens = model.generate("Capital of France is")[0]
+                result = model.tokenizer.decode(tokens)
+                print(f"BACKEND: {backend}, Result: {result}")
+                self.assertIn("paris", result.lower())

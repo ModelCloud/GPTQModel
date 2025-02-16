@@ -111,7 +111,8 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
                     out_features=module.out_features,
                     pack_dtype=qcfg.pack_dtype,
                     bias=module.bias is not None,
-                    enable_tuning=True
+                    enable_tuning=True,
+                    adapter=qcfg.adapter,
                 )
 
             # convert to bitblas format
