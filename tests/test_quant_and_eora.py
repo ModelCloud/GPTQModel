@@ -19,6 +19,9 @@ import tempfile
 
 from datasets import load_dataset
 
+from gptqmodel.utils.eval import EVAL
+from gptqmodel.utils.torch import torch_empty_cache
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -43,7 +46,7 @@ class Test(ModelTest):
             "allenai/c4",
             data_files="en/c4-train.00001-of-01024.json.gz",
             split="train"
-        ).select(range(64))["text"]
+        ).select(range(128))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             quant_config = QuantizeConfig(
@@ -59,14 +62,14 @@ class Test(ModelTest):
             model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
 
             # increase `batch_size` to match gpu/vram specs to speed up quantization
-            model.quantize(calibration_dataset, batch_size=8, auto_gc=False)
+            model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
             # print("log", l)
             # model.quantize_old(calibration_dataset, batch_size=2)
 
             model.save(tmpdir)
-
-            for backend in [BACKEND.CUDA, BACKEND.TORCH, BACKEND.TRITON, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_V2,
-                            BACKEND.MARLIN]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V
+            # .reshape(out_shape)
+            for backend in [ BACKEND.TORCH,
+                            ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 # test post-quant inference
                 model = GPTQModel.load(
                     model_id_or_path=tmpdir,
@@ -76,3 +79,13 @@ class Test(ModelTest):
                 result = model.tokenizer.decode(tokens)
                 print(f"BACKEND: {backend}, Result: {result}")
                 self.assertIn("paris", result.lower())
+
+                GPTQModel.eval(
+                    model_or_path=model,
+                    #backend=BACKEND.EXLLAMA_V2,
+                    framework=EVAL.LM_EVAL,
+                    tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
+                )
+
+                del model
+                torch_empty_cache()

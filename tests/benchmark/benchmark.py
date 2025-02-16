@@ -22,7 +22,7 @@ from parameterized import parameterized  # noqa: E402
 class TestInference(BenchmarkTest):
     @parameterized.expand(
         [
-            (BACKEND.TORCH, 'cuda', 205),
+            (BACKEND.TORCH, 'cuda', 210),
             # (BACKEND.TORCH, 'cpu', 5.50),
             # (BACKEND.TORCH, 'xpu', 58.20),
             # (BACKEND.TORCH, 'mps', 3.40),
