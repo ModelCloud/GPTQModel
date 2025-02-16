@@ -15,20 +15,46 @@
 
 # -- do not touch
 import os
-import tempfile
-
-from datasets import load_dataset
-
-from gptqmodel.utils.eval import EVAL
-from gptqmodel.utils.torch import torch_empty_cache
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.adapter.adapter import Lora  # noqa: E402
+import tempfile # noqa: E402
+from typing import Optional # noqa: E402
+
+from datasets import load_dataset # noqa: E402
+from lm_eval.utils import make_table # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
+from gptqmodel.utils.eval import EVAL # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel.adapter.adapter import Lora  # noqa: E402
+
+
+def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
+    # test post-quant inference
+    model = GPTQModel.load(
+        model_id_or_path=path,
+        backend=backend,
+        adapter=adapter,
+    )
+    tokens = model.generate("Capital of France is")[0]
+    result = model.tokenizer.decode(tokens)
+    print(f"BACKEND: {backend}, Result: {result}")
+    if "paris" not in result.lower():
+        raise AssertionError(" `paris` not found in `result`")
+
+    bench_result = GPTQModel.eval(
+        model_or_path=model,
+        framework=EVAL.LM_EVAL,
+        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
+    )
+
+    del model
+    torch_empty_cache()
+
+    return bench_result
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
@@ -50,6 +76,7 @@ class Test(ModelTest):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
+                # for quant, path is save path. for load, it is loading path
                 path=os.path.join(tmpdir, "lora_adapter.safetensors"),
                 rank=512,
             )
@@ -66,32 +93,27 @@ class Test(ModelTest):
             model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
 
             # EoRA adapter is saved according to Lora.path property
-            # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as qaunt model
-            # You can also pass eora_path to model.save() to override this save path
+            # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
+            # You can also pass `eora_path` to `model.save()` to override this save path
             model.save(tmpdir)
 
+            del model
+            torch_empty_cache()
 
-            # .reshape(out_shape)
             for backend in [ BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-                # test post-quant inference
-                model = GPTQModel.load(
-                    model_id_or_path=tmpdir,
-                    backend=backend,
-                    adapter=eora,
-                )
-                tokens = model.generate("Capital of France is")[0]
-                result = model.tokenizer.decode(tokens)
-                print(f"BACKEND: {backend}, Result: {result}")
-                self.assertIn("paris", result.lower())
+                base_bench = bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
+                eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
-                r = GPTQModel.eval(
-                    model_or_path=model,
-                    framework=EVAL.LM_EVAL,
-                    tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
-                )
+                print('--------Eval Base Result---------')
+                print(make_table(base_bench))
+                if "groups" in base_bench:
+                    print(make_table(base_bench, "groups"))
+                # print('--------Eval Base Result End---------')
 
-                print(f"RESULT: kernel=`{backend}`")
-                print(r)
+                print('--------Eval EoRA Result---------')
+                print(make_table(eora_bench))
+                if "groups" in eora_bench:
+                    print(make_table(eora_bench, "groups"))
+                #print('--------Eval EoRA Result End---------')
 
-                del model
-                torch_empty_cache()
+
