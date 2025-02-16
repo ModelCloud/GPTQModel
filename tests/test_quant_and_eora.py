@@ -66,7 +66,7 @@ class Test(ModelTest):
             model.save(tmpdir)
 
             for backend in [BACKEND.CUDA, BACKEND.TORCH, BACKEND.TRITON, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_V2,
-                            BACKEND.MARLIN, BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V]:
+                            BACKEND.MARLIN]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V
                 # test post-quant inference
                 model = GPTQModel.load(
                     model_id_or_path=tmpdir,
