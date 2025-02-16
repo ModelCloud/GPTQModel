@@ -56,7 +56,7 @@ class BenchmarkTest(unittest.TestCase):
         model.compile()
 
         tokenizer = model.tokenizer
-        inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(device)
+        inp = tokenizer(self.PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to(device)
 
         times = []
         pb = ProgressBar(range(self.NUM_RUNS))

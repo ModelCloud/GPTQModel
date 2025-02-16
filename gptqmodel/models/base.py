@@ -1057,7 +1057,7 @@ class BaseGPTQModel(nn.Module):
         else:
             self.save_pretrained(save_dir=save_dir, **kwargs)
 
-    def compile(self, backend="inductor", mode="max-autotune"):
+    def compile(self, backend: str = None, mode: str = None, fullgraph: bool = False):
         if not self.quantized:
             logger.warning("model is not quantized, skip compiling...")
             return self
@@ -1072,16 +1072,21 @@ class BaseGPTQModel(nn.Module):
         logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
         try:
-            self.model = torch.compile(self.model, fullgraph=True, backend=backend, mode=mode)
+            self.model = torch.compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
             self.compiled = True
         except Exception as e:
-            logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
-            try:
-                self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
-                self.compiled = True
-            except Exception as e:
+            # if fullgraph is already disabled, no need to try again
+            if not fullgraph:
                 self.compiled = False
                 logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
+            else:
+                logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
+                try:
+                    self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+                    self.compiled = True
+                except Exception as e:
+                    self.compiled = False
+                    logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
 
         # trigger kernel compilation hooks
         if self.compiled:
