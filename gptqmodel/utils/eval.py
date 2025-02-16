@@ -16,8 +16,11 @@
 
 import json
 import os
+import types
 from enum import Enum
 from typing import List, Optional, Union, Any, Dict
+
+from .evalplus import patch_evalplus
 
 
 class EVAL:
@@ -54,15 +57,16 @@ class EVAL:
                 full_names.extend(cls.get_full_name(member) for member in attr)
         return ', '.join(full_names)
 
-
 def evalplus(
-        model: str,
+        model,
         dataset: str,
         batch: int = 1,
         trust_remote_code: bool = False,
         output_file: Optional[str] = None,
         backend: str = 'gptqmodel'
 ):
+    patch_evalplus(model)
+
     try:
         from evalplus.evaluate import evaluate
     except BaseException:
