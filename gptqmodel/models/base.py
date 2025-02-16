@@ -991,6 +991,9 @@ class BaseGPTQModel(nn.Module):
 
     def generate(self, inputs=None, **kwargs):
         with torch.inference_mode():
+            # fix hf generate not applying correct pad token
+            kwargs["pad_token_id"] = kwargs.get("pad_token_id", self.tokenizer.pad_token_id)
+
             if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
                 inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.model.device)
                 return self.model.generate(**inputs, **kwargs)
