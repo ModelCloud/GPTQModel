@@ -361,6 +361,7 @@ class GPTQModel:
 
             if apply_chat_template is None:
                 apply_chat_template = True if tokenizer.chat_template is not None else False
+
             results = lm_eval(
                 model=model_or_path if isinstance(model_or_path, BaseGPTQModel) else None,
                 model_name=model_name, # model_name is lm-eval model class name/type
