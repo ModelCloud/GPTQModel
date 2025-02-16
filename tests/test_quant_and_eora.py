@@ -49,14 +49,16 @@ class Test(ModelTest):
         ).select(range(128))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            eora = Lora(
+                path=os.path.join(tmpdir, "lora_adapter.safetensors"),
+                rank=512,
+            )
+
             quant_config = QuantizeConfig(
                 bits=4,
                 group_size=32,
                 desc_act=True,  # bitblas only supports DESC_ACT=False
-                adapter=Lora(
-                    path=os.path.join(tmpdir, "lora_adapter.safetensors"),
-                    rank=512,
-                )
+                adapter=eora
             )
 
             model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
@@ -70,6 +72,7 @@ class Test(ModelTest):
                 model = GPTQModel.load(
                     model_id_or_path=tmpdir,
                     backend=backend,
+                    adapter=eora,
                 )
                 tokens = model.generate("Capital of France is")[0]
                 result = model.tokenizer.decode(tokens)

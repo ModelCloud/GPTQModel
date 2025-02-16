@@ -287,6 +287,7 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
+        # inject adapter into qcfg
         if adapter is not None:
             qcfg.adapter = adapter
 
