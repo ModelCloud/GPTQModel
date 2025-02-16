@@ -6,6 +6,9 @@ from urllib.parse import urlparse
 import safetensors
 import torch
 
+from gptqmodel.utils.logger import setup_logger
+
+logger = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
 
 # TODO FIX ME: cache of adapter tensors loaded from disk
@@ -57,7 +60,7 @@ class Lora(Adapter):
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
         # we need since lora A/B weights may be merged into model tensors and not separate
         if lora_A is not None and lora_B is not None:
-            print(f"Adapter has preloaded lora_A and lora_B")
+            # print(f"Adapter has preloaded lora_A and lora_B")
             self.lora_A, self.lora_B = lora_A, lora_B
             return
 
@@ -65,15 +68,15 @@ class Lora(Adapter):
         if adapter_load_cache is None:
             if os.path.isfile(self.path):
                 lora_path = self.path
-                print(f"loading adapter `{self.path}` tensors from disk")  # {adapter_load_cache}
+                logger.info(f"Loading adapter `{self.path}` tensors from disk")  # {adapter_load_cache}
             elif self.path.startswith("http"):
                 from huggingface_hub import hf_hub_download
                 result = self.parse_url(self.path)
                 if len(result) == 3:
-                    print(f"downloading adapter from huggingface. repo: {result[0]} revision: {result[1]} file: {result[2]}")
+                    logger.info(f"Downloading adapter from hf repo: `{result[0]}` revision: `{result[1]}` file: `{result[2]}`")
                     lora_path = hf_hub_download(repo_id=result[0], revision=result[1], filename=result[2])
                 elif len(result) == 1:
-                    print(f"downloading adapter from link `{self.path}`")
+                    logger.info(f"Downloading adapter from uri = `{self.path}`")
                     import requests
                     response = requests.get(self.path, stream=True)
                     lora_path = "lora.safetensors"
@@ -88,7 +91,7 @@ class Lora(Adapter):
 
                 if files:
                     lora_path = hf_hub_download(repo_id=self.path, filename=files[0])
-                    print(f"Adapter tensors loaded from `{self.path}`")
+                    # print(f"Adapter tensors loaded from `{self.path}`")
                 else:
                     raise Exception(f"There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
 
@@ -108,11 +111,10 @@ class Lora(Adapter):
         if len(adapter_load_cache) == 0:
             adapter_load_cache = None
 
-        print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
-        print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
+        # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
+        # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
         if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
-            print(
-                f"Warning: lora_A and lora_B tensors should be `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
+            logger.warn(f"Warning: lora_A and lora_B tensors should be `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
 
         self.lora_A = lora_A.to(device=device, dtype=torch.float16)
         self.lora_B = lora_B.to(device=device, dtype=torch.float16)

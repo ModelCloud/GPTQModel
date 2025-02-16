@@ -151,7 +151,8 @@ class BaseQuantLinear(nn.Module):
                     t.zeros((adapter.rank, out_features), dtype=t.float16),
                 )
             else:
-                print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
+                pass
+                # print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
 
             # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
             # EoRA need to preallocate buffers for Lora_A and B weights so HF can load

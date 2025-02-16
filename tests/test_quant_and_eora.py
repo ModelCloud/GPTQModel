@@ -52,7 +52,7 @@ class Test(ModelTest):
             quant_config = QuantizeConfig(
                 bits=4,
                 group_size=32,
-                desc_act=False,  # bitblas only supports DESC_ACT=False
+                desc_act=True,  # bitblas only supports DESC_ACT=False
                 adapter=Lora(
                     path=os.path.join(tmpdir, "lora_adapter.safetensors"),
                     rank=512,
@@ -61,15 +61,11 @@ class Test(ModelTest):
 
             model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
 
-            # increase `batch_size` to match gpu/vram specs to speed up quantization
             model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
-            # print("log", l)
-            # model.quantize_old(calibration_dataset, batch_size=2)
 
             model.save(tmpdir)
             # .reshape(out_shape)
-            for backend in [ BACKEND.TORCH,
-                            ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [ BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 # test post-quant inference
                 model = GPTQModel.load(
                     model_id_or_path=tmpdir,
@@ -80,12 +76,14 @@ class Test(ModelTest):
                 print(f"BACKEND: {backend}, Result: {result}")
                 self.assertIn("paris", result.lower())
 
-                GPTQModel.eval(
+                r = GPTQModel.eval(
                     model_or_path=model,
-                    #backend=BACKEND.EXLLAMA_V2,
                     framework=EVAL.LM_EVAL,
                     tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
                 )
+
+                print(f"RESULT: kernel=`{backend}`")
+                print(r)
 
                 del model
                 torch_empty_cache()

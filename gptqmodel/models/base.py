@@ -292,6 +292,9 @@ class BaseGPTQModel(nn.Module):
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
         auto_gc: bool = True,
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -326,6 +329,7 @@ class BaseGPTQModel(nn.Module):
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
+                # TODO FIX ME...this is a bug
                 self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
             else:
                 raise ValueError(
@@ -337,16 +341,34 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
         from gptqmodel.looper.gptq_processor import GPTQProcessor
+        from gptqmodel.looper.eora_processor import EoraProcessor
         from gptqmodel.looper.module_looper import ModuleLooper
-        processors = [
-            GPTQProcessor(self.tokenizer, self.quantize_config, calibration_dataset, calibration_dataset_concat_size,
-                          batch_size, logger_board)]
+        from gptqmodel.adapter.adapter import Lora
 
-        if self.quantize_config.adapter:
-            from gptqmodel.looper.eora_processor import EoraProcessor
+        # init processor with default GPTQ processor
+        processors = [
+            GPTQProcessor(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                batch_size=batch_size,
+                logger_board=logger_board,
+            )
+        ]
+
+        # Append EoRA processor for lora adapter
+        if isinstance(self.quantize_config.adapter, Lora):
             processors.append(
-                EoraProcessor(self.tokenizer, self.quantize_config, self.quantize_config.eora_calibration_dataset,
-                              calibration_dataset_concat_size, batch_size, logger_board))
+                EoraProcessor(
+                    tokenizer=self.tokenizer,
+                    qcfg=self.quantize_config,
+                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else self.quantize_config.eora_calibration_dataset,
+                    calibration_dataset_concat_size=calibration_dataset_concat_size,
+                    batch_size=batch_size,
+                    logger_board=logger_board,
+                )
+            )
 
         module_looper = ModuleLooper(self, processors=processors)
         return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,
