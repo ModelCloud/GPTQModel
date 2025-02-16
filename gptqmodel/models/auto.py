@@ -301,7 +301,7 @@ class GPTQModel:
     def eval(
             cls,
             # model: BaseGPTQModel = None,
-            model_or_id_or_path: Union[str, BaseGPTQModel] = None,
+            model_or_path: Union[str, BaseGPTQModel] = None,
             framework: EVAL = EVAL.LM_EVAL,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = EVAL.LM_EVAL.ARC_CHALLENGE,
             batch: int = 1,
@@ -313,7 +313,7 @@ class GPTQModel:
             apply_chat_template: Optional[bool] = None,
             **kwargs
     ):
-        if not model_or_id_or_path:
+        if not model_or_path:
             raise ValueError("Eval parameter: `model_id_or_path` is not passed.")
         if framework is None:
             raise ValueError("Eval parameter: `framework` cannot be set to None")
@@ -340,12 +340,12 @@ class GPTQModel:
             if not model_args:
                 model_args = {}
 
-            if isinstance(model_or_id_or_path, str):
-                tokenizer = AutoTokenizer.from_pretrained(model_or_id_or_path, trust_remote_code=trust_remote_code)
+            if isinstance(model_or_path, str):
+                tokenizer = AutoTokenizer.from_pretrained(model_or_path, trust_remote_code=trust_remote_code)
                 # only pass in gptqmodel args if loading via path or id
-                model_args.update({"pretrained": model_or_id_or_path})
+                model_args.update({"pretrained": model_or_path})
             else:
-                tokenizer = model_or_id_or_path.tokenizer
+                tokenizer = model_or_path.tokenizer
 
             if backend == "gptqmodel":
                 model_args.update({"gptqmodel": True})
@@ -353,7 +353,7 @@ class GPTQModel:
             if apply_chat_template is None:
                 apply_chat_template = True if tokenizer.chat_template is not None else False
             results = lm_eval(
-                model=model_or_id_or_path if isinstance(model_or_id_or_path, BaseGPTQModel) else None,
+                model=model_or_path if isinstance(model_or_path, BaseGPTQModel) else None,
                 model_name=model_name, # model_name is lm-eval model class name/type
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
@@ -379,7 +379,7 @@ class GPTQModel:
             results = {}
             for task in tasks:
                 base_formatted, plus_formatted, result_path = evalplus(
-                    model=model_or_id_or_path,
+                    model=model_or_path,
                     dataset=task.value,
                     batch=batch,
                     trust_remote_code=trust_remote_code,

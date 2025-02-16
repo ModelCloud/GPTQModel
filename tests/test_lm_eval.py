@@ -34,14 +34,14 @@ class TestLmEval(unittest.TestCase):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
         self.random_seed = 1234
         self.task = EVAL.LM_EVAL.ARC_CHALLENGE
-        self.acc_score = 0.3174
-        self.acc_norm_score = 0.3498
+        self.acc_score = 0.3183
+        self.acc_norm_score = 0.3515
 
-    def test_lm_eval_path(self):
+    def test_eval_direct(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
-           results = lm_eval(
-                backend='hf',
-                model_args={"pretrained": self.MODEL_ID,"gptqmodel": True, "backend": BACKEND.EXLLAMA_V2},
+           model = GPTQModel.load(self.MODEL_ID, backend=BACKEND.EXLLAMA_V2)
+           results = GPTQModel.eval(
+                model_or_path=model,
                 apply_chat_template=True,
                 output_file=tmp_dir,
                 tasks=[self.task],
@@ -57,37 +57,13 @@ class TestLmEval(unittest.TestCase):
            acc_score = results['results'].get(self.task, {}).get('acc,none')
            acc_norm_score = results['results'].get(self.task, {}).get('acc_norm,none')
 
-           self.assertGreaterEqual(acc_score, 0.28, "acc score does not match expected result")
-           self.assertGreaterEqual(acc_norm_score, 0.32, "acc_norm score does not match expected result")
-
-    def test_lm_eval_direct(self):
-       with tempfile.TemporaryDirectory() as tmp_dir:
-           model = GPTQModel.load(self.MODEL_ID, backend=BACKEND.EXLLAMA_V2)
-           results = lm_eval(
-                model=model,
-                apply_chat_template=True,
-                output_file=tmp_dir,
-                tasks=[self.task],
-                random_seed=self.random_seed
-            )
-
-           print('--------lm_eval Eval Result---------')
-           print(make_table(results))
-           if "groups" in results:
-               print(make_table(results, "groups"))
-           print('--------lm_eval Result End---------')
-
-           acc_score = results['results'].get(self.task, {}).get('acc,none')
-           acc_norm_score = results['results'].get(self.task, {}).get('acc_norm,none')
-
            self.assertGreaterEqual(acc_score, self.acc_score, "acc score does not match expected result")
            self.assertGreaterEqual(acc_norm_score, self.acc_norm_score, "acc_norm score does not match expected result")
 
-    def test_eval_direct(self):
+    def test_eval_path(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
-           model = GPTQModel.load(self.MODEL_ID, backend=BACKEND.EXLLAMA_V2)
            results = GPTQModel.eval(
-                model_or_id_or_path=model,
+                model_or_path=self.MODEL_ID,
                 apply_chat_template=True,
                 output_file=tmp_dir,
                 tasks=[self.task],
