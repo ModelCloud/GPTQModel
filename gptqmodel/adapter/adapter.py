@@ -47,7 +47,7 @@ class Lora(Adapter):
         out_orgi_shape = out.shape
         out = out.view(-1, out.shape[-1])
         out.add_((x @ self.lora_A) @ self.lora_B)
-        out = out.reshape(out_orgi_shape)
+        out = out.view(out_orgi_shape)
         return out
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
