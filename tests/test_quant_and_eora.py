@@ -65,7 +65,12 @@ class Test(ModelTest):
 
             model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
 
+            # EoRA adapter is saved according to Lora.path property
+            # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as qaunt model
+            # You can also pass eora_path to model.save() to override this save path
             model.save(tmpdir)
+
+
             # .reshape(out_shape)
             for backend in [ BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 # test post-quant inference
