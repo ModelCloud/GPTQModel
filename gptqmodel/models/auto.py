@@ -312,6 +312,7 @@ class GPTQModel:
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
             apply_chat_template: Optional[bool] = None,
+            gen_kwargs: str="temperature=0.0,top_k=50",
             **kwargs
     ):
         if not model_or_path:
@@ -370,6 +371,7 @@ class GPTQModel:
                 apply_chat_template=apply_chat_template,
                 output_file=output_file,
                 random_seed=random_seed,
+                gen_kwargs=gen_kwargs,
                 **kwargs
             )
             print('--------lm_eval Eval Result---------')
