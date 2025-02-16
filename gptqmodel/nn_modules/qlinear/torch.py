@@ -209,8 +209,8 @@ def dequantize_model(model: nn.Module):
         if isinstance(module, TorchQuantLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize().T.detach().to("cpu", torch.float16))
-            new_module.bias = module.bias
+            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
+            new_module.bias = torch.nn.Parameter(module.bias)
 
             # Replace the module in the model
             parent = model.model

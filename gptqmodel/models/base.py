@@ -50,7 +50,8 @@ from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE
                      PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, ModelWriter)
 
 # pytorch 2.6.0 fixes many compilation errors
-PYTORCH_MIN_VERFSION_WITH_COMPILE = Version("2.6.0")
+TORCH_MIN_VERSION_STR = '2.6.0'
+PYTORCH_MIN_VERSION_WITH_COMPILE = Version(TORCH_MIN_VERSION_STR)
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -1090,9 +1091,10 @@ class BaseGPTQModel(nn.Module):
             logger.warning("model is not quantized, skip compiling...")
             return self
 
-        if Version(torch.__version__) < PYTORCH_MIN_VERFSION_WITH_COMPILE:
+        if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
             self.compiled = False
-            logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
+            logger.warning(f"To use compile(), you need to have torch version >= {TORCH_MIN_VERSION_STR}, please "
+                           f"upgrade it by `pip install torch -U`")
             return self
 
         # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
