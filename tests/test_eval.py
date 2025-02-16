@@ -32,6 +32,7 @@ class TestEval(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+        self.model = GPTQModel.load(self.MODEL_ID)
 
     @parameterized.expand(
         [
@@ -50,10 +51,10 @@ class TestEval(unittest.TestCase):
                 model_args.update({"gpu_memory_utilization": 0.7})
 
             results = GPTQModel.eval(
-                model_or_path=self.MODEL_ID,
+                model_or_path=self.model,
                 framework=framework,
                 tasks=[task],
-                batch=32,
+                batch=8 if task == EVAL.LM_EVAL.GPQA else 32,
                 output_file=output_file,
                 llm_backend=llm_backend,
                 model_args=model_args,
