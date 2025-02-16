@@ -36,30 +36,31 @@ class TestEval(unittest.TestCase):
     @parameterized.expand(
         [
             (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
-            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
             (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
-    def test_eval_gptqmodel(self, eval_backend: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], backend: str):
+    def test_eval_gptqmodel(self, framework: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_file = f"{tmp_dir}/result.json"
-            if task == EVAL.LM_EVAL.GPQA:
-                model_args = {"gpu_memory_utilization": 0.7}
+            model_args = {}
+            if llm_backend == "vllm" and task == EVAL.LM_EVAL.GPQA:
+                model_args.update({"gpu_memory_utilization": 0.7})
 
             results = GPTQModel.eval(
-                model_id_or_path=self.MODEL_ID,
-                framework=eval_backend,
+                model_or_path=self.MODEL_ID,
+                framework=framework,
                 tasks=[task],
                 batch=32,
                 output_file=output_file,
-                llm_backend=backend,
+                llm_backend=llm_backend,
                 model_args=model_args,
                 task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
             )
 
-            if eval_backend == EVAL.LM_EVAL:
+            if llm_backend == EVAL.LM_EVAL:
                 if task == EVAL.LM_EVAL.GPQA:
                     gpqa_main_n_shot = results['results'].get('gpqa_main_n_shot', {}).get('acc,none')
                     gpqa_main_zeroshot = results['results'].get('gpqa_main_zeroshot', {}).get('acc,none')
@@ -72,7 +73,7 @@ class TestEval(unittest.TestCase):
 
                     self.assertGreaterEqual(acc_score, 0.28, "acc score does not match expected result")
                     self.assertGreaterEqual(acc_norm_score, 0.32, "acc_norm score does not match expected result")
-            elif eval_backend == EVAL.EVALPLUS:
+            elif llm_backend == EVAL.EVALPLUS:
                 result = results.get(task.value)
                 base_formatted, plus_formatted, _ = float(result.get("base tests")), float(
                     result.get("base + extra tests")), result.get("results_path")
