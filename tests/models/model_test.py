@@ -275,9 +275,6 @@ class ModelTest(unittest.TestCase):
                     batch_size=self.BATCH_SIZE,
                     gen_kwargs="temperature=0.0,top_k=50",
                     random_seed=RAND_SEED,
-                    numpy_random_seed=RAND_SEED,
-                    torch_random_seed=RAND_SEED,
-                    fewshot_random_seed=RAND_SEED,
                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                 )
 
