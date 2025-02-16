@@ -35,13 +35,14 @@ class TestLmEval(unittest.TestCase):
         self.random_seed = 1234
         self.task = EVAL.LM_EVAL.ARC_CHALLENGE
         self.acc_score = 0.3183
-        self.acc_norm_score = 0.3515
+        self.acc_norm_score = 0.3507
 
     def test_eval_direct(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
            model = GPTQModel.load(self.MODEL_ID, backend=BACKEND.EXLLAMA_V2)
            results = GPTQModel.eval(
                 model_or_path=model,
+                backend=BACKEND.AUTO, # not used for direct model passing
                 apply_chat_template=True,
                 output_file=tmp_dir,
                 tasks=[self.task],
@@ -64,6 +65,7 @@ class TestLmEval(unittest.TestCase):
        with tempfile.TemporaryDirectory() as tmp_dir:
            results = GPTQModel.eval(
                 model_or_path=self.MODEL_ID,
+                backend = BACKEND.EXLLAMA_V2, # for path loading, can override backend
                 apply_chat_template=True,
                 output_file=tmp_dir,
                 tasks=[self.task],

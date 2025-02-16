@@ -307,7 +307,8 @@ class GPTQModel:
             batch: int = 1,
             trust_remote_code: bool = False,
             output_file: str = None,
-            backend: str = 'gptqmodel',
+            llm_backend: str = 'gptqmodel',
+            backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
             apply_chat_template: Optional[bool] = None,
@@ -315,14 +316,21 @@ class GPTQModel:
     ):
         if not model_or_path:
             raise ValueError("Eval parameter: `model_id_or_path` is not passed.")
+
         if framework is None:
             raise ValueError("Eval parameter: `framework` cannot be set to None")
 
         if not isinstance(tasks, list):
             raise ValueError("Eval parameter: `tasks` must be of List type")
 
-        if backend not in ['gptqmodel', 'vllm']:
+        if llm_backend not in ['gptqmodel', 'vllm']:
             raise ValueError('Eval framework support `backend`: `[gptqmodel, vllm]`')
+
+        if llm_backend == "gptqmodel":
+            if isinstance(model_or_path, str):
+                model_or_path = GPTQModel.load(model_id_or_path=model_or_path, backend=backend)
+            else:
+                os.environ["GPTQMODEL_BACKEND"] = backend # hack so gptqmodel can get var from lm_eval call
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
@@ -333,7 +341,7 @@ class GPTQModel:
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
 
-            model_name = 'hf' if backend == 'gptqmodel' else backend
+            model_name = 'hf' if llm_backend == 'gptqmodel' else llm_backend
             if model_args is not None and not isinstance(model_args, Dict):
                  raise TypeError(f"Expected `model_args` to a `Dict`: actual = {model_args.__class__} ")
 
@@ -347,7 +355,7 @@ class GPTQModel:
             else:
                 tokenizer = model_or_path.tokenizer
 
-            if backend == "gptqmodel":
+            if llm_backend == "gptqmodel":
                 model_args.update({"gptqmodel": True})
 
             if apply_chat_template is None:
@@ -384,7 +392,7 @@ class GPTQModel:
                     batch=batch,
                     trust_remote_code=trust_remote_code,
                     output_file=output_file,
-                    backend=backend
+                    backend=llm_backend
                 )
                 results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted,
                                        "results_path": result_path}

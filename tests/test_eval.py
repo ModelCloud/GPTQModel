@@ -54,7 +54,7 @@ class TestEval(unittest.TestCase):
                 tasks=[task],
                 batch=32,
                 output_file=output_file,
-                backend=backend,
+                llm_backend=backend,
                 model_args=model_args,
                 task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
             )
