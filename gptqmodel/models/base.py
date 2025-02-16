@@ -363,16 +363,22 @@ class BaseGPTQModel(nn.Module):
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else self.quantize_config.eora_calibration_dataset,
+                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration_dataset,
                     calibration_dataset_concat_size=calibration_dataset_concat_size,
                     batch_size=batch_size,
                     logger_board=logger_board,
                 )
             )
 
+        # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
-        return module_looper.loop(calibration_enable_gpu_cache=calibration_enable_gpu_cache, buffered_fwd=buffered_fwd,
-                                  auto_gc=auto_gc, backend=backend)
+
+        return module_looper.loop(
+            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+            buffered_fwd=buffered_fwd,
+            auto_gc=auto_gc,
+            backend=backend,
+        )
 
     def quantize_old(
         self,

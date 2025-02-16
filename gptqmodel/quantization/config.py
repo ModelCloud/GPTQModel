@@ -184,7 +184,6 @@ class QuantizeConfig():
 
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
-    eora_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = field(default=None)
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -414,7 +413,8 @@ class QuantizeConfig():
             # torch.dtype convert to string
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
-            ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
+            # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
+            # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
 
         # simplify: clean keys where the value is None or empty [list, dict]
