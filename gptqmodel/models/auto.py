@@ -302,7 +302,7 @@ class GPTQModel:
             cls,
             # model: BaseGPTQModel = None,
             model_or_path: Union[str, BaseGPTQModel] = None,
-            framework: EVAL = EVAL.LM_EVAL,
+            framework: Type[EVAL] = EVAL.LM_EVAL,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = EVAL.LM_EVAL.ARC_CHALLENGE,
             batch: int = 1,
             trust_remote_code: bool = False,

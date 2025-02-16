@@ -120,7 +120,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         if x.shape[0] >= self.kernel_switch_threshold:
             # logger.warning_once(
             #   f"Input shape `{x.shape[0]}` >= `{self.kernel_switch_threshold}` is not optimized for cuda kernel: dynamic switching to torch kernel.")
-            return self._forward(x, x.dtype).reshape(out_shape)
+            return self._forward(x, x.dtype, out_shape)
 
         out = torch.zeros((x.shape[0], self.out_features), device=x.device, dtype=torch.float32)
         self.qmatmul(

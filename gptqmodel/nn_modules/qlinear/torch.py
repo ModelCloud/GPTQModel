@@ -128,10 +128,10 @@ class TorchQuantLinear(PackableQuantLinear):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         weights = self.dequantize_weight(num_itr=num_itr)
 
-        out = torch.matmul(x, weights).reshape(out_shape)
-
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+            out = self.adapter.apply(x=x, out=torch.matmul(x, weights).reshape(out_shape))
+        else:
+            out = torch.matmul(x, weights).reshape(out_shape)
 
         if self.bias is not None:
             out.add_(self.bias)
@@ -145,7 +145,7 @@ class TorchQuantLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-    def dequantize_weight(self, num_itr=1):
+    def dequantize_weight(self, num_itr: int=1):
         if self.bits in [2, 4, 8]:
             zeros = torch.bitwise_right_shift(
                 torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),

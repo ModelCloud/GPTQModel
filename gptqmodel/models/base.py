@@ -999,7 +999,7 @@ class BaseGPTQModel(nn.Module):
             if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
                 if self.tokenizer is None:
                     raise ValueError("You passed in an `input` to `generate()` of type `str` but model is missing `model.tokenizer`. Please set `model.tokenizer = my_tokenizer`.")
-                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.model.device)
+                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left").to(self.model.device)
                 return self.model.generate(**inputs, **kwargs)
 
             return self.model.generate(inputs=inputs, **kwargs)
