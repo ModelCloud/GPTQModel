@@ -42,8 +42,6 @@ class GPTQProcessor(LoopProcessor):
 
         self.avg_losses = []
 
-        self.streaming = False
-
     def log_plotly(self):
         task = self.logger_task
         if task is not None:
@@ -160,9 +158,9 @@ class GPTQProcessor(LoopProcessor):
         logger.info(stat)
 
         self.result_save(module.full_name, {
-            "scale": move_to(scale, device=CPU, stream=True),
-            "zero": move_to(zero, device=CPU, stream=True),
-            "g_idx": move_to(g_idx, device=CPU, stream=True),
+            "scale": move_to(scale, device=CPU, stream=self.stream),
+            "zero": move_to(zero, device=CPU, stream=self.stream),
+            "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
         })
 
         w = module.weight.data
@@ -182,15 +180,13 @@ class GPTQProcessor(LoopProcessor):
 
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=True)
+        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
-        torch_sync()
-        # stream = torch_new_stream()
-        # if stream:
-        #     stream.synchronize()
+        if self.stream:
+            torch_sync()
 
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(

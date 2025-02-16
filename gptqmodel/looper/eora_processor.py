@@ -119,8 +119,7 @@ class EoraProcessor(LoopProcessor):
         del w
 
         module.state.update({
-            "wq": move_to(wq, device=CPU, stream=True),
-            "streaming": True,
+            "wq": move_to(wq, device=CPU, stream=self.stream),
         })
 
         # override module weight with computed weight with B@A delta
@@ -149,9 +148,8 @@ class EoraProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {
-            "lora_A.weight": move_to(A.to(dtype=torch.float16), device=CPU, stream=True), # A.to(dtype=torch.float16, device=CPU),
-            "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=True), # B.to(dtype=torch.float16, device=CPU),
-            # "streaming": True,
+            "lora_A.weight": move_to(A.to(dtype=torch.float16), device=CPU, stream=self.stream), # A.to(dtype=torch.float16, device=CPU),
+            "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=self.stream), # B.to(dtype=torch.float16, device=CPU),
         })
 
     def post_process(self, module: NamedModule):
@@ -164,10 +162,8 @@ class EoraProcessor(LoopProcessor):
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
-        torch_sync()
-        # stream = torch_new_stream()
-        # if stream:
-        #     stream.synchronize()
+        if self.stream:
+            torch_sync()
 
         del self.eigen_scaling_diag_matrix
 

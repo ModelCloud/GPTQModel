@@ -40,6 +40,9 @@ class LoopProcessor:
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
 
+        # toggle to enable stream from gpu to cpu
+        self.stream = False
+
         self.tokenizer = tokenizer
         self.qcfg = qcfg
 
