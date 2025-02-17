@@ -320,7 +320,7 @@ class ModuleLooper():
                             subset[name].forward_hook = None
 
                     for name_index, name in enumerate(subset):
-                        m = module=subset[name]
+                        m = subset[name]
                         processor.process(module=m)
                         processed_subset[name] = m
 
