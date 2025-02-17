@@ -41,8 +41,8 @@ class EoraProcessor(LoopProcessor):
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True,
                  ):
-        super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
-                         logger_board, require_fwd)
+        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset, calibration_dataset_concat_size=calibration_dataset_concat_size, batch_size=batch_size,
+                         logger_board=logger_board, require_fwd=require_fwd)
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix: Dict[str, torch.float32] = {}

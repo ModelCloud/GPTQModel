@@ -20,8 +20,8 @@ import os
 
 from gptqmodel.adapter.adapter import Adapter, normalize_adapter
 
-from ..eora_test.eora_generate import eora_generate
 from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..utils.torch import torch_empty_cache
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -40,7 +40,7 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Any, Dict, List, Optional, Union  # noqa: E402
+from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
@@ -497,7 +497,6 @@ class GPTQModel:
         quantized_model = GPTQModel.load(quantized_model_id_or_path, backend=BACKEND.TORCH)
         quantize_config = quantized_model.quantize_config
         qModules: Dict[str, TorchQuantLinear] = find_modules(quantized_model.model, [TorchQuantLinear])
-        quantized_weights = {}
         # for name, module in qModules.items():
         #     quantized_weights[name] = module.dequantize_weight()
         del quantized_model

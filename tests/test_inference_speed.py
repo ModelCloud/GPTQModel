@@ -16,9 +16,6 @@
 
 # -- do not touch
 import os
-from xmlrpc.client import Fault
-
-import torch
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 from gptqmodel.utils import BACKEND  # noqa: E402

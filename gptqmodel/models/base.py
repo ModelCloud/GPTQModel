@@ -21,7 +21,7 @@ import json
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union, Set
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch._dynamo
@@ -450,12 +450,6 @@ class BaseGPTQModel(nn.Module):
         processors = [
             DequantizeProcessor(
                 quantized_modules=quantized_modules,
-                # tokenizer = self.tokenizer,
-                # qcfg = self.quantize_config,
-                # calibration_dataset = calibration_dataset
-                # calibration_dataset_concat_size = calibration_dataset_concat_size,
-                # batch_size = batch_size,
-                # logger_board = logger_board,
             ),
             EoraProcessor(
                 tokenizer=self.tokenizer,

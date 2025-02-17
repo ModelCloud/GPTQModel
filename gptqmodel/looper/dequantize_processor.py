@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import torch
 from gptqmodel import QuantizeConfig
+from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
@@ -27,22 +28,23 @@ from gptqmodel.utils.logger import setup_logger
 logger = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):
-    def __init__(self, quantized_modules: Dict[str, TorchQuantLinear], tokenizer, qcfg: QuantizeConfig, calibration_dataset,
-                 calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True,
-
-                 ):
-        super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
-                         logger_board, require_fwd)
+    def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
+        super().__init__(tokenizer=None, qcfg=None, calibration_dataset=None, calibration_dataset_concat_size=None, batch_size=1,
+                         logger_board="", require_fwd=True)
 
         self.quantized_modules = quantized_modules
 
+    def set_calibration_dataset(self, calibration_dataset):
+        self.calibration_dataset = None
+        self.num_batches = 0
+
     # de-quantize weights
     def process(self, module: NamedModule):
-        w = module.weight.data.to(device=CPU, dtype=torch.float16) # TODO: allow w to be native bf16 and upcast to fp32?
+        device = module.weight.device
+        w = module.weight.data
 
         # TODO fix num_itr param..need to calculate this before dequant
-        wq = self.quantized_modules.pop(module.full_name).dequantize_weight(num_itr=1).to(device=CPU, dtype=torch.float16)
+        wq = self.quantized_modules.pop(module.full_name).dequantize_weight(num_itr=1).T.to(device=device)
 
         module.state.update({
             "w": w,
@@ -52,6 +54,9 @@ class DequantizeProcessor(LoopProcessor):
     def submodule_finalize(self, module: NamedModule):
         module.state.pop("w", None)  # no need for these weights now
         module.state.pop("wq", None) # no need for these weights now
+
+    def verify_calibration_dataset(self, processor_index: int) -> bool:
+        return False
 
     @classmethod
     def name(cls) -> str:

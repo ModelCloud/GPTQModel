@@ -288,6 +288,9 @@ class LoopProcessor:
     def set_calibration_dataset(self, calibration_dataset):
         pass
 
+    def set_fwd_time(self, fwd_time: float):
+        self.fwd_time = fwd_time
+
     # called first
     def preprocess(self, module: NamedModule, **kwargs):
         pass

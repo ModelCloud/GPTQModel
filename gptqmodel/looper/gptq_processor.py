@@ -38,8 +38,8 @@ class GPTQProcessor(LoopProcessor):
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
 
-        super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
-                         logger_board, require_fwd)
+        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset, calibration_dataset_concat_size=calibration_dataset_concat_size, batch_size=batch_size,
+                         logger_board=logger_board, require_fwd=require_fwd)
 
         self.retain_w = retain_w
         self.avg_losses = []

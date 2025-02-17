@@ -15,13 +15,12 @@ def patch_evalplus(model):
     model.strip = types.MethodType(patch_strip, model)
     model.__str__ = types.MethodType(patch_tostring, model)
 
+    import torch
     from evalplus.provider.base import DecoderBase
     from evalplus.provider.gptqmodel import GPTQModelDecoder
-
-    import torch
-
     from evalplus.provider.utility import extra_eos_for_direct_completion
     from transformers import AutoTokenizer
+
     from .. import GPTQModel
 
     class PatchedGPTQModelDecoder(DecoderBase):

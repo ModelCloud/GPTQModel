@@ -18,7 +18,7 @@ import time
 from typing import List
 
 import torch
-
+from gptqmodel.looper.dequantize_processor import DequantizeProcessor
 from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
@@ -158,10 +158,16 @@ class ModuleLooper():
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
-                prev_processor = self.processors[p_index - 1]
-                processor.set_calibration_dataset(prev_processor.calibration_dataset)
-                # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
-                processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
+                if isinstance(processor, EoraProcessor):
+                    prev_processor = self.processors[p_index - 1]
+                    processor.set_calibration_dataset(prev_processor.calibration_dataset)
+                    # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
+                    processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
+                elif isinstance(processor, DequantizeProcessor):
+                    # DequantizeProcessor does not perform any operations on dataset.
+                    processor.set_calibration_dataset([])
+                    processor.receive_input_cache(InputCache([], [], [], []))
+
                 continue
 
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
@@ -310,7 +316,7 @@ class ModuleLooper():
                     fwd_end = time.time()
                     fwd_time = fwd_end - fwd_start
 
-                    processor.fwd_time = fwd_time
+                    processor.set_fwd_time(fwd_time)
 
                     for h in handle:
                         h.remove()
