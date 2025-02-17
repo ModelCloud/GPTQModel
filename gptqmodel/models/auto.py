@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 
 from lm_eval.utils import make_table
+from tokenicer import Tokenicer
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -42,7 +43,7 @@ from typing import Dict, List, Optional, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig, AutoTokenizer  # noqa: E402
+from transformers import AutoConfig, AutoTokenizer, PreTrainedModel  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
@@ -286,7 +287,8 @@ class GPTQModel:
     def eval(
             cls,
             model_or_id_or_path: str=None,
-            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to tifx mutable warning
+            tokenizer=None,
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
             framework: EVAL = EVAL.LM_EVAL,
             batch_size: int = 1,
             trust_remote_code: bool = False,
@@ -320,6 +322,12 @@ class GPTQModel:
             model = model_or_id_or_path
             model_id_or_path = model.config.name_or_path  #
 
+        if tokenizer is None:
+            if isinstance(model, BaseGPTQModel):
+                tokenizer = model.tokenizer
+            elif isinstance(model, PreTrainedModel):
+                tokenizer = Tokenicer.load(model_id_or_path)
+
         if framework == EVAL.LM_EVAL:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
@@ -351,7 +359,7 @@ class GPTQModel:
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
                 batch_size=batch_size,
-                apply_chat_template=args.pop("apply_chat_template", False),
+                apply_chat_template=args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False),
                 gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
                 random_seed=random_seed,
                 numpy_random_seed=random_seed,
