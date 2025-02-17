@@ -29,7 +29,6 @@ from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import Quantizer
 
-
 logger = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -38,7 +37,7 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: torch.nn.Module, name: str):
+    def __init__(self, module: torch.nn.Module):
         self.module = module
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()

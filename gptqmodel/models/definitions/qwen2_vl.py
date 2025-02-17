@@ -106,6 +106,7 @@ class Qwen2VLGPTQ(BaseGPTQModel):
     def prepare_dataset(
             self,
             calibration_dataset,
+            calibration_dataset_concat_size,
             batch_size: int = 1,
             tokenizer=None, ):
         import json

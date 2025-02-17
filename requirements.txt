@@ -7,7 +7,6 @@ transformers>=4.48.3
 threadpoolctl>=3.5.0
 packaging>=24.2
 device-smi==0.3.3
-sentencepiece>=0.2.0
 protobuf>=5.29.3
 pillow>=11.1.0
 hf_transfer>=0.1.9

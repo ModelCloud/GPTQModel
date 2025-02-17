@@ -275,8 +275,12 @@ class BaseQuantLinear(nn.Module):
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
-    # override me
+    # override me, to perform post-weight load to device init
     def post_init(self):
+        pass
+
+    # override me, to perform any torch.compile logic on the kernel pre forward
+    def compile(self):
         pass
 
 class PackableQuantLinear(BaseQuantLinear):
@@ -340,23 +344,24 @@ class PackableQuantLinear(BaseQuantLinear):
         elif self.bits == 3:
             i = 0
             col = 0
-            for j in range(i, i + 10):
-                qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
-            i += 10
-            qzeros[:, col] |= zeros[:, i] << 30
-            col += 1
-            qzeros[:, col] |= (zeros[:, i] >> 2) & 1
-            i += 1
-            for j in range(i, i + 10):
-                qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
-            i += 10
-            qzeros[:, col] |= zeros[:, i] << 31
-            col += 1
-            qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
-            i += 1
-            for j in range(i, i + 10):
-                qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
-            i += 10
-            col += 1
+            while col < qzeros.shape[1]:
+                for j in range(i, i + 10):
+                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
+                i += 10
+                qzeros[:, col] |= zeros[:, i] << 30
+                col += 1
+                qzeros[:, col] |= (zeros[:, i] >> 2) & 1
+                i += 1
+                for j in range(i, i + 10):
+                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
+                i += 10
+                qzeros[:, col] |= zeros[:, i] << 31
+                col += 1
+                qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
+                i += 1
+                for j in range(i, i + 10):
+                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
+                i += 10
+                col += 1
 
         self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))

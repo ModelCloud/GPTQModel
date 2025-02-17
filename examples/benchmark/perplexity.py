@@ -17,10 +17,8 @@
 import argparse
 import os
 
-from transformers import AutoTokenizer
-
 from gptqmodel.utils import Perplexity
-
+from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 

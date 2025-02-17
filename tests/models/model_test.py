@@ -19,13 +19,11 @@ import os
 import sys
 from typing import Dict, List
 
-
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from pathlib import Path  # noqa: E402
-
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402
@@ -36,10 +34,6 @@ import unittest  # noqa: E402
 import torch.cuda  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
-from packaging.version import Version  # noqa: E402
-from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
-
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
@@ -47,7 +41,9 @@ from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-
+from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
+from packaging.version import Version  # noqa: E402
+from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
 
@@ -62,6 +58,7 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
     LOAD_BACKEND = BACKEND.AUTO
+    QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
@@ -80,12 +77,14 @@ class ModelTest(unittest.TestCase):
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
     INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
-    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country", "the city"]
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
+
+    QUANTIZE_CONFIG_BITS = 4
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -99,7 +98,7 @@ class ModelTest(unittest.TestCase):
             if k.lower() in generated:
                 self.assertTrue(True)
                 return
-        self.assertTrue(False, f"none of keywords were found in generated: {generated}")
+        self.assertTrue(False, f"none of keywords were found in generated: `{generated}`")
 
     # note that sampling is disabled for help with deterministic generation for ci tests
     def generate(self, model, tokenizer, prompt=None):
@@ -152,7 +151,7 @@ class ModelTest(unittest.TestCase):
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = 4, **kwargs):
         quantize_config = QuantizeConfig(
-            bits=4,
+            bits=self.QUANTIZE_CONFIG_BITS,
             group_size=128,
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
@@ -193,7 +192,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, batch_size=batch_size)
+            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 

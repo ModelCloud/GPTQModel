@@ -17,16 +17,14 @@
 import os
 import time
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
 import unittest
 
-from transformers import AutoTokenizer
-
 from gptqmodel import GPTQModel
 from gptqmodel.utils.progress import ProgressBar
+from transformers import AutoTokenizer
 
 
 class InferenceSpeed(unittest.TestCase):
