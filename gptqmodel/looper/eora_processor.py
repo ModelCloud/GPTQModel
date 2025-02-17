@@ -138,6 +138,11 @@ class EoraProcessor(LoopProcessor):
         # override module weight with computed weight with B@A delta
         module.weight.data = computed_wq.to(dtype=module.weight.data.dtype)
 
+        # for assert weight
+        # module.state.update({
+        #     "wq_ab": move_to(computed_wq.to(dtype=module.weight.data.dtype), device=CPU, stream=self.stream),
+        # })
+
         # lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(dtype=torch.float16)
         # lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(dtype=torch.float16)
 

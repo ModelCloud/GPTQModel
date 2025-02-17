@@ -339,6 +339,15 @@ class ModuleLooper():
                 layer_outputs = []
                 if not is_last_module:
                     for j in range(processor.num_batches):
+                        # assert weight
+                        # if isinstance(processor, EoraProcessor):
+                        #     for names in modules:
+                        #         if n in names:
+                        #             assert torch.equal(full[n].weight.data.cpu(), processed_subset[n].state["wq_ab"])
+                        #             assert not torch.equal(full[n].weight.data.cpu(), processed_subset[n].state["wq"])
+                        #             assert not torch.equal(processed_subset[n].state["wq_ab"], processed_subset[n].state["wq"])
+                        #             full[n].weight.data.cuda()
+
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
                             layer_input.append(move_to(layer_inp, device=cur_layer_device))
