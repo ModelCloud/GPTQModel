@@ -42,7 +42,7 @@ from typing import Dict, List, Optional, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig  # noqa: E402
+from transformers import AutoConfig,AutoTokenizer  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
@@ -311,7 +311,6 @@ class GPTQModel:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
-            from transformers import AutoTokenizer
             # model_id_or_path=model_id_or_path if model_id_or_path else model.model_id_or_path
             # tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
             tokenizer = model.tokenizer if model else AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -319,8 +318,8 @@ class GPTQModel:
             model_name = 'hf' if backend == 'gptqmodel' else backend
 
             if backend == "gptqmodel":
-                model_args["gptqmodel"]=True
-            model_args["pretrained"]=model_id_or_path
+                model_args["gptqmodel"] = True
+            model_args["pretrained"] = model_id_or_path
 
             try:
                 from lm_eval import simple_evaluate
