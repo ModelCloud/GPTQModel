@@ -322,7 +322,7 @@ class GPTQModel:
             model = model_or_id_or_path
             model_id_or_path = model.config.name_or_path  #
         else:
-            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: {model_or_id_or_path}")
+            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
 
         if tokenizer is None:
             if isinstance(model, BaseGPTQModel):
@@ -331,7 +331,7 @@ class GPTQModel:
                 tokenizer = Tokenicer.load(model_id_or_path)
 
         if tokenizer is None:
-            raise ValueError("tokenizer is required for lm-eval, please check your settings.")
+            raise ValueError("cannot load tokenizer with `model_or_id_or_path`.")
 
         model_args["tokenizer"] = tokenizer
 

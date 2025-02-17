@@ -63,10 +63,16 @@ def patch_evalplus(model):
             elif isinstance(name, PreTrainedModel):
                 self.model = name
                 self.tokenizer = Tokenicer.load(name.config.name_or_path, trust_remote_code=self.trust_remote_code)
-            else:
+            elif isinstance(name, str):
                 self.tokenizer = Tokenicer.load(name, trust_remote_code=self.trust_remote_code)
                 self.model = GPTQModel.load(**kwargs)
                 self.model = self.model.to(self.device)
+            else:
+                raise ValueError(f"`name` is invalid. expected: `model instance or str` actual: `{name}`")
+
+            if self.tokenizer is None:
+                raise ValueError("cannot load tokenizer with `model_or_id_or_path`.")
+
             if self.is_direct_completion():  # no chat template
                 self.eos += extra_eos_for_direct_completion(dataset)
             else:  # with chat template
