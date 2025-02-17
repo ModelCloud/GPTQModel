@@ -29,7 +29,10 @@ class NamedModule(torch.nn.Module):
         self.name = name # module name
         self.full_name = full_name # module full name (path) within model
         self.layer_index = layer_index # layerid in a repeating layer, if in outside layer, this info may be fake
-        self.state = {} # state is dict to store all temp data used in processor
+
+        # persistent work state forLoopProcessors
+        # store all `processed()` work state/data/result here
+        self.state = {}
 
         # print(f"NamedModule init: name: `{name}, full-name: `{full_name}`")
 
@@ -61,9 +64,11 @@ class NamedModule(torch.nn.Module):
     #         STAT_GPTQ_FWD_TIME: self.state.get(STAT_GPTQ_FWD_TIME, -1),
     #     }
 
+    # getattr is only called if python cannot find attr for `self`
     def __getattr__(self, name: str):
         return getattr(self.module, name)
 
+    # setattr is always called by python even if attr exists in `self`
     def __setattr__(self, name: str, value: Any) -> None:
         if name in ["module", "name", "full_name", "layer_index", "state"]:
             self.__dict__[name] = value
