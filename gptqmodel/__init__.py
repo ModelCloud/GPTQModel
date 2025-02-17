@@ -19,3 +19,8 @@ from .quantization import BaseQuantizeConfig, QuantizeConfig
 from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
+
+import os
+if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
+    from modelscope.utils.hf_util.patcher import patch_hub
+    patch_hub()
