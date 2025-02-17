@@ -91,7 +91,7 @@ class TestBits(unittest.TestCase):
 
     def test_bits(self):
         # quantize
-        model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
+        model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         calibration_dataset = [tokenizer(example) for example in dataset]
