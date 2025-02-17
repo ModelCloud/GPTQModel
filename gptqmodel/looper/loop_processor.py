@@ -315,15 +315,13 @@ class LoopProcessor:
     def process(self, module: NamedModule):
         pass
 
-    # step after `process` and before post_process generate()
-    def post_process(self, module: NamedModule):
-        pass
-
     # last step, after all loop processor is called
+    # submodule_finalize is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
         pass
 
     # last step, after all loop processor is called
+    # finalize is called in reverse after all next sequential processes are called
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.inputs_cache
         del self._results

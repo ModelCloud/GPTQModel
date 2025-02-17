@@ -320,10 +320,9 @@ class ModuleLooper():
                             subset[name].forward_hook = None
 
                     for name_index, name in enumerate(subset):
-                        processor.process(module=subset[name])
-                        processed_subset[name] = subset[name]
-
-                        processor.post_process(module=subset[name])
+                        m = module=subset[name]
+                        processor.process(module=m)
+                        processed_subset[name] = m
 
                     if index == len(layer_modules) - 1:
                         if auto_gc:

@@ -152,9 +152,6 @@ class EoraProcessor(LoopProcessor):
             "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=self.stream), # B.to(dtype=torch.float16, device=CPU),
         })
 
-    def post_process(self, module: NamedModule):
-        pass
-
     def submodule_finalize(self, module: NamedModule):
         pass
         # if module.state.pop("streaming", False):

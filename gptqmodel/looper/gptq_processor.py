@@ -36,10 +36,12 @@ logger = setup_logger()
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True):
+                 logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
+
         super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
                          logger_board, require_fwd)
 
+        self.retain_w = retain_w
         self.avg_losses = []
 
     def log_plotly(self):
@@ -163,21 +165,24 @@ class GPTQProcessor(LoopProcessor):
             "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
         })
 
-        w = module.weight.data
-        # TODO FIXME data can't set to None
-        # module.weight.data = None # Processor should fix this
+        if self.retain_w:
+            # original weights
+            w = module.weight.data
+            module.state.update({
+                "w": w,  # bf16/fp16, non-quantized native weight
+            })
 
         gptq[module.name].free()
+
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
-            "w": w, # fp16, non-quantized weight
             "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
         })
 
-    def post_process(self, module: NamedModule):
         # prepare for module.forward post generate
-        module.weight.data = module.state.get("wq")
+        module.weight.data = wq
 
+    # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu

@@ -360,6 +360,10 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
+        # overwrite quantize_config.adapter
+        if adapter is not None:
+            self.quantize_config.adapter = adapter
+
         from gptqmodel.adapter.adapter import Lora
         from gptqmodel.looper.eora_processor import EoraProcessor
         from gptqmodel.looper.gptq_processor import GPTQProcessor
@@ -374,12 +378,9 @@ class BaseGPTQModel(nn.Module):
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
                 batch_size=batch_size,
                 logger_board=logger_board,
+                retain_w=isinstance(self.quantize_config.adapter, Lora), # eora needs original w
             )
         ]
-
-        # overwrite quantize_config.adapter
-        if adapter is not None:
-            self.quantize_config.adapter = adapter
 
         # Append EoRA processor for lora adapter
         if isinstance(self.quantize_config.adapter, Lora):
