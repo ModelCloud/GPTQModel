@@ -27,7 +27,7 @@ class Adapter():
         pass
 
     # override me
-    def compile(self):
+    def optimize(self):
         pass
 
     # override me
@@ -58,8 +58,7 @@ class Lora(Adapter):
     def parameter_keys(cls) -> List[str]:
         return ["lora_A", "lora_B"]
 
-    # since qlinear uses `g_compile`, we use it here too
-    def g_compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         print("Lora compile")
         self.apply = torch.compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 

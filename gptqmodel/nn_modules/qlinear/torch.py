@@ -112,7 +112,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
         self.wf = self.wf.to(device=self.qweight.device)
 
-    def g_compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         # compile dequantize
         self.dequantize_weight = torch.compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
 

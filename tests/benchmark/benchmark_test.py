@@ -52,7 +52,7 @@ class BenchmarkTest(unittest.TestCase):
             backend=backend,
         )
 
-        model.g_compile()
+        model.optimize()
 
         tokenizer = model.tokenizer
         inp = tokenizer(self.PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to(device)
