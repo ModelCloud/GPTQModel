@@ -496,14 +496,14 @@ class GPTQModel:
                       ):
         quantized_model = GPTQModel.load(quantized_model_id_or_path, backend=BACKEND.TORCH)
         quantize_config = quantized_model.quantize_config
-        qModules = find_modules(quantized_model.model, [TorchQuantLinear])
-        quantized_weights = {}
-        for name, module in qModules.items():
-            quantized_weights[name] = module.dequantize_weight().T.detach().to("cpu", torch.float16)
+        qModules: Dict[str, TorchQuantLinear] = find_modules(quantized_model.model, [TorchQuantLinear])
+        # quantized_weights = {}
+        # for name, module in qModules.items():
+        #     quantized_weights[name] = module.dequantize_weight().T.detach().to("cpu", torch.float16)
 
         model = GPTQModel.load(model_id_or_path, quantize_config, backend=backend)
         model.eora_generate(adapter=adapter,
-                            quantized_weights=quantized_weights,
+                            quantized_modules=qModules,
                             calibration_dataset=calibration_dataset,
                             calibration_dataset_concat_size=calibration_dataset_concat_size,
                             batch_size=batch_size,

@@ -14,21 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
-from typing import Callable, Optional, Tuple, Dict
+from typing import Optional, Dict
 
 import torch
 from gptqmodel import QuantizeConfig
-from gptqmodel.eora_test.llama import quantized_weights
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 
 logger = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):
-    def __init__(self, quantized_weights: Dict[str, torch.Tensor], tokenizer, qcfg: QuantizeConfig, calibration_dataset,
+    def __init__(self, quantized_modules: Dict[str, TorchQuantLinear], tokenizer, qcfg: QuantizeConfig, calibration_dataset,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True,
 
@@ -36,13 +35,14 @@ class DequantizeProcessor(LoopProcessor):
         super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
                          logger_board, require_fwd)
 
-        self.quantized_weights = quantized_weights
-
+        self.quantized_modules = quantized_modules
 
     # de-quantize weights
     def process(self, module: NamedModule):
         w = module.weight.data.to(device=CPU, dtype=torch.float16) # TODO: allow w to be native bf16 and upcast to fp32?
-        wq = quantized_weights.get(module.full_name).to(device=CPU, dtype=torch.float16)
+
+        # TODO fix num_itr param..need to calculate this before dequant
+        wq = self.quantized_modules.pop(module.full_name).dequantize_weight(num_itr=1).to(device=CPU, dtype=torch.float16)
 
         module.state.update({
             "w": w,

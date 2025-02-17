@@ -34,6 +34,7 @@ from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokeni
 from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -407,7 +408,7 @@ class BaseGPTQModel(nn.Module):
         self,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter,
-        quantized_weights: Dict[str, torch.Tensor],
+        quantized_modules: Dict[str, TorchQuantLinear],
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
@@ -444,7 +445,7 @@ class BaseGPTQModel(nn.Module):
         # init processor with EoRA processor
         processors = [
             DequantizeProcessor(
-                quantized_weights=quantized_weights,
+                quantized_modules=quantized_modules,
                 # tokenizer = self.tokenizer,
                 # qcfg = self.quantize_config,
                 # calibration_dataset = calibration_dataset
