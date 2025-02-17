@@ -11,12 +11,10 @@ def patch_tostring(self):
     return self.config.name_or_path
 
 def patch_evalplus(model):
-    if isinstance(model, str):
-        return
-
-    assert model.tokenizer, "model must have a tokenizer to use evalplus!"
-    model.strip = types.MethodType(patch_strip, model)
-    model.__str__ = types.MethodType(patch_tostring, model)
+    from ..models.base import BaseGPTQModel
+    if isinstance(model, BaseGPTQModel) or isinstance(model, PreTrainedModel):
+        model.strip = types.MethodType(patch_strip, model)
+        model.__str__ = types.MethodType(patch_tostring, model)
 
     import torch
     from evalplus.provider.base import DecoderBase
