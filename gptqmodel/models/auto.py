@@ -284,16 +284,17 @@ class GPTQModel:
 
     @classmethod
     def eval(
-            model,
-            model_id_or_path: str,
+            cls,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
             framework: EVAL = EVAL.LM_EVAL,
+            model=None, # model instance
+            model_id_or_path: str=None,
             batch_size: int = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
             backend: str = 'gptqmodel',
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
-            extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
+            model_args: Dict = {},  # only for framework=EVAL.LM_EVAL backend=vllm
             **args
     ):
         if framework is None:
@@ -311,14 +312,15 @@ class GPTQModel:
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
             from transformers import AutoTokenizer
-
-            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+            # model_id_or_path=model_id_or_path if model_id_or_path else model.model_id_or_path
+            # tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+            tokenizer = model.tokenizer if model else AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
             model_name = 'hf' if backend == 'gptqmodel' else backend
-            def_args = f"pretrained={model_id_or_path}"
+
             if backend == "gptqmodel":
-                def_args += ",gptqmodel=True"
-            model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
+                model_args["gptqmodel"]=True
+            model_args["pretrained"]=model_id_or_path
 
             try:
                 from lm_eval import simple_evaluate
@@ -328,12 +330,12 @@ class GPTQModel:
             except BaseException:
                 raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 
-            # if model_name == "hf" and model is not None:
-            #     model_name = HFLM(
-            #         pretrained=model,
-            #         batch_size=batch_size,
-            #         trust_remote_code=trust_remote_code,
-            #     )
+            if backend == "gptqmodel" and model is not None:
+                model_name = HFLM(
+                    pretrained=model,
+                    batch_size=batch_size,
+                    trust_remote_code=trust_remote_code,
+                )
             apply_chat_template=args.pop("apply_chat_template")
             if apply_chat_template is None:
                 apply_chat_template = True if tokenizer.chat_template is not None else False

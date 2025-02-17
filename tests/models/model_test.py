@@ -250,13 +250,21 @@ class ModelTest(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 if self.USE_VLLM:
-                    model_args = f"pretrained={model.model_local_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
+                    model_args = {
+                        "pretrained": model.model_local_path,
+                        "dtype": "auto",
+                        "gpu_memory_utilization": 0.8,
+                        "tensor_parallel_size": 1,
+                        "trust_remote_code": trust_remote_code,
+                        "max_model_len": self.MODEL_MAX_LEN
+                    }
                 else:
-                    model_args = ""
+                    model_args = {}
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
                 results = GPTQModel.eval(
-                    model,
+                    model=model,
+                    model_id_or_path=None,
                     backend="vllm" if self.USE_VLLM else "gptqmodel",
                     model_args=model_args,
                     output_path=tmp_dir,
