@@ -414,7 +414,7 @@ def ModelWriter(cls):
 
             make_quant(
                 model,
-                names=modules,
+                quant_result=modules,
                 qcfg=qcfg,
                 backend=BACKEND.AUTO,
                 lm_head_name=cls.lm_head,
