@@ -38,7 +38,7 @@ def eora_compute_lora(
         eigen_scaling_diag_matrix: torch.float32,
         rank: int) -> Tuple[Tensor, Tensor]:
 
-    assert w_wq_delta.dtype != torch.float32
+    assert w_wq_delta.dtype == torch.float32
 
     # save this later for SVD
     raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=device)

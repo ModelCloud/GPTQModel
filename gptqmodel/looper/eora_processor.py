@@ -108,7 +108,7 @@ class EoraProcessor(LoopProcessor):
         w = module.state.pop("w")
         wq: torch.Tensor = module.state["wq"]
 
-        print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
+        # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
         if w.dtype != torch.float16:
             w_wq_delta = w.to(dtype=torch.float32) - wq # wq is float16
         else:
@@ -116,7 +116,7 @@ class EoraProcessor(LoopProcessor):
 
         assert w_wq_delta.dtype == torch.float32
 
-        print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
+        # print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
         w_device = w.device # TODO FIX clear up device situation between w and wq
         del w
 
