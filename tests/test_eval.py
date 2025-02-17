@@ -15,16 +15,17 @@
 # limitations under the License.
 
 import os
-import tempfile
-import unittest
-from typing import Union
-
-from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL
-from lm_eval.tasks import TaskManager
-from parameterized import parameterized
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from typing import Union  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
+from lm_eval.tasks import TaskManager  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+
 
 class TestEval(unittest.TestCase):
     @classmethod
@@ -42,7 +43,7 @@ class TestEval(unittest.TestCase):
     )
     def test_eval_gptqmodel(self, eval_backend: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            output_file = f"{tmp_dir}/result.json"
+            output_path = f"{tmp_dir}/result.json"
             extra_model_args = ""
             if task == EVAL.LM_EVAL.GPQA:
                 extra_model_args = "gpu_memory_utilization=0.7"
@@ -50,8 +51,8 @@ class TestEval(unittest.TestCase):
             results = GPTQModel.eval(self.MODEL_ID,
                                      framework=eval_backend,
                                      tasks=[task],
-                                     batch=32,
-                                     output_file=output_file,
+                                     batch_size=32,
+                                     output_path=output_path,
                                      backend=backend,
                                      extra_model_args=extra_model_args,
                                      task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)

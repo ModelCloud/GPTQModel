@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 
+from lm_eval.utils import make_table
+
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
@@ -286,9 +288,9 @@ class GPTQModel:
             model_id_or_path: str,
             framework: EVAL,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
-            batch: int = 1,
+            batch_size: int = 1,
             trust_remote_code: bool = False,
-            output_file: Optional[str] = None,
+            output_path: Optional[str] = None,
             backend: str = 'gptqmodel',
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
@@ -309,7 +311,6 @@ class GPTQModel:
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
             from gptqmodel.utils.eval import lm_eval
-            from lm_eval.utils import make_table
             from transformers import AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -320,19 +321,55 @@ class GPTQModel:
                 def_args += ",gptqmodel=True"
             model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
 
-            results = lm_eval(
-                model_name=model_name,
+            # results = lm_eval(
+            #     model_args=model_args,
+            #     model_name=model_name,
+            #     tasks=[task.value for task in tasks],
+            #     trust_remote_code=trust_remote_code,
+            #     batch_size=batch_size,
+            #     apply_chat_template=True if tokenizer.chat_template is not None else False,
+            #     output_path=output_path,
+            #     numpy_random_seed=random_seed,
+            #     torch_random_seed=random_seed,
+            #     fewshot_random_seed=random_seed,
+            #     **args
+            # )
+
+            ############## def lm_eval start ##############
+            try:
+                from lm_eval import simple_evaluate
+                from lm_eval.loggers import EvaluationTracker, WandbLogger
+                from lm_eval.models.huggingface import HFLM
+                from lm_eval.utils import handle_non_serializable
+            except BaseException:
+                raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
+
+            # if model_name == "hf" and model is not None:
+            #     model_name = HFLM(
+            #         pretrained=model,
+            #         batch_size=batch_size,
+            #         max_batch_size=max_batch_size,
+            #         trust_remote_code=trust_remote_code,
+            #     )
+            results = simple_evaluate(
+                model=model_name,
                 model_args=model_args,
-                tasks=[task.value for task in tasks],
-                trust_remote_code=trust_remote_code,
-                batch_size=batch,
-                apply_chat_template=True if tokenizer.chat_template is not None else False,
-                output_path=output_file,
+                tasks=tasks,
+                batch_size=batch_size,
+                gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
+                random_seed=random_seed,
                 numpy_random_seed=random_seed,
                 torch_random_seed=random_seed,
                 fewshot_random_seed=random_seed,
-                **args
+                **args,
             )
+
+            if results is None:
+                raise ValueError('lm_eval run fail, check your code!!!')
+
+            ############## def lm_eval end  ##############
+
+
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
             if "groups" in results:
@@ -350,9 +387,9 @@ class GPTQModel:
                 base_formatted, plus_formatted, result_path = evalplus(
                     model=model_id_or_path,
                     dataset=task.value,
-                    batch=batch,
+                    batch=batch_size,
                     trust_remote_code=trust_remote_code,
-                    output_file=output_file,
+                    output_file=output_path,
                     backend=backend
                 )
                 results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
