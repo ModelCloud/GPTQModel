@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -30,8 +31,10 @@ from packaging.version import Version
 from tokenicer import Tokenicer
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
+from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
@@ -45,11 +48,12 @@ from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
-from .writer import (QUANT_LOG_DAMP, QUANT_LOG_FWD_TIME, QUANT_LOG_LAYER,
-                     QUANT_LOG_LOSS, QUANT_LOG_MODULE, QUANT_LOG_TIME, ModelWriter)
+from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
+                     PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, ModelWriter)
 
 # pytorch 2.6.0 fixes many compilation errors
-PYTORCH_MIN_VERFSION_WITH_COMPILE = Version("2.6.0")
+TORCH_MIN_VERSION_STR = '2.6.0'
+PYTORCH_MIN_VERSION_WITH_COMPILE = Version(TORCH_MIN_VERSION_STR)
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -151,6 +155,23 @@ class BaseGPTQModel(nn.Module):
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
             self.monkey_patch()
+
+        # hack: circular import
+        from ..adapter.adapter import Lora
+
+        # check adapter load and print info so users knows lora(s) are applied
+        if isinstance(self.quantize_config.adapter, Lora):
+            loaded_loras = 0
+            qmodules = find_modules(self.model, layers=[BaseQuantLinear])
+            for name, m in qmodules.items():
+                if all(hasattr(m.adapter, name) for name in Lora.parameter_keys()):
+                    loaded_loras += 1
+
+            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded.")
+
+        # print kernel info:
+        loaded_kernels = self.kernels()
+        logger.info(f"Kernel: loaded kernel(s) -> `{loaded_kernels}`")
 
     def prepare_dataset(
         self,
@@ -277,7 +298,6 @@ class BaseGPTQModel(nn.Module):
 
         return new_calibration_dataset_batched
 
-    @torch.no_grad()
     def quantize(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
@@ -292,7 +312,180 @@ class BaseGPTQModel(nn.Module):
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
         auto_gc: bool = True,
-    ) -> List[Dict[str, str]]:
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        if self.quantized:
+            raise EnvironmentError("quantize() is called a model that is already quantized")
+
+        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
+            raise ValueError(
+                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
+            )
+
+        if backend == BACKEND.IPEX:
+            self.quantize_config.format = FORMAT.IPEX
+
+        if self.quantize_config.format == FORMAT.MARLIN:
+            raise ValueError(
+                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
+            )
+
+        # Validate quant linear before quantization starts
+        _ = select_quant_linear(
+            bits=self.quantize_config.bits,
+            dynamic=self.quantize_config.dynamic,
+            group_size=self.quantize_config.group_size,
+            desc_act=self.quantize_config.desc_act,
+            sym=self.quantize_config.sym,
+            backend=backend,
+            device=DEVICE(self.quantize_config.device),
+            pack=True,
+            format=self.quantize_config.format,
+            pack_dtype=self.quantize_config.pack_dtype,
+        )
+
+        # Use the provided tokenizer if one is passed to quantize()
+        if tokenizer is not None:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                # TODO FIX ME...this is a bug
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+
+        if self.quantize_config.format == FORMAT.BITBLAS:
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            if BITBLAS_AVAILABLE is False:
+                raise ValueError(BITBLAS_INSTALL_HINT)
+
+        # overwrite quantize_config.adapter
+        if adapter is not None:
+            self.quantize_config.adapter = adapter
+
+        from gptqmodel.adapter.adapter import Lora
+        from gptqmodel.looper.eora_processor import EoraProcessor
+        from gptqmodel.looper.gptq_processor import GPTQProcessor
+        from gptqmodel.looper.module_looper import ModuleLooper
+
+        # has lora process
+        needs_lora = isinstance(self.quantize_config.adapter, Lora)
+
+        # init processor with default GPTQ processor
+        processors = [
+            GPTQProcessor(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                batch_size=batch_size,
+                logger_board=logger_board,
+                retain_w=needs_lora, # eora needs original w
+            )
+        ]
+
+        # Append EoRA processor for lora adapter
+        if needs_lora:
+            processors.append(
+                EoraProcessor(
+                    tokenizer=self.tokenizer,
+                    qcfg=self.quantize_config,
+                    calibration_dataset=adapter_calibration_dataset,
+                    calibration_dataset_concat_size=calibration_dataset_concat_size,
+                    batch_size=batch_size,
+                    logger_board=logger_board,
+                )
+            )
+
+        # prepare processor worker (looper)
+        module_looper = ModuleLooper(self, processors=processors)
+
+        return module_looper.loop(
+            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+            buffered_fwd=buffered_fwd,
+            auto_gc=auto_gc,
+            backend=backend,
+        )
+
+    def eora_generate(
+        self,
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter,
+        quantized_modules: Dict[str, TorchQuantLinear],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration_dataset_concat_size: Optional[int] = None,
+        batch_size: int = 1,
+        calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+        buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+        auto_gc: bool = True,
+    ):
+        if self.quantized:
+            raise EnvironmentError("eora_generate() is called a model that is already quantized")
+
+        # Use the provided tokenizer if one is passed to quantize()
+        if tokenizer is not None:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                # TODO FIX ME...this is a bug
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+
+        from gptqmodel.adapter.adapter import Lora
+        from gptqmodel.looper.dequantize_processor import DequantizeProcessor
+        from gptqmodel.looper.eora_processor import EoraProcessor
+        from gptqmodel.looper.module_looper import ModuleLooper
+
+        self.quantize_config.adapter = adapter
+
+        assert isinstance(self.quantize_config.adapter, Lora)
+
+        # init processor with EoRA processor
+        processors = [
+            DequantizeProcessor(
+                quantized_modules=quantized_modules,
+            ),
+            EoraProcessor(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                batch_size=batch_size,
+                logger_board=logger_board,
+            ),
+        ]
+
+        # prepare processor worker (looper)
+        module_looper = ModuleLooper(self, processors=processors)
+
+        return module_looper.loop(
+            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+            buffered_fwd=buffered_fwd,
+            auto_gc=auto_gc,
+            backend=backend,
+        )
+
+    def quantize_old(
+        self,
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_dataset_concat_size: Optional[int] = None,
+        batch_size: int = 1,
+        calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+        buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+        auto_gc: bool = True,
+    ) -> Tuple[List[Dict[str, str]], Dict[str, torch.Tensor]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
@@ -460,7 +653,7 @@ class BaseGPTQModel(nn.Module):
 
             self.qlinear_kernel = pack_model(
                 model=self.model,
-                quantizers=quantizers,
+                quant_result=quantizers,
                 bits=self.quantize_config.bits,
                 dynamic=self.quantize_config.dynamic,
                 group_size=self.quantize_config.group_size,
@@ -476,7 +669,7 @@ class BaseGPTQModel(nn.Module):
             return
 
         if self.quantize_config.lm_head:
-            if self.model.config.tie_word_embeddings and hasattr(self.model.model, "_tied_weights_keys"):
+            if self.model.config.tie_word_embeddings and hasattr(self.model, "_tied_weights_keys"):
                 tied_keys = self.model._tied_weights_keys
                 for item in tied_keys:
                     if self.lm_head in item:
@@ -517,34 +710,34 @@ class BaseGPTQModel(nn.Module):
             # Positional arguments.
             layer_input = []
             for inp in args:
-                layer_input.append(move_to(inp, data_device))
+                layer_input.append(move_to(inp, device=data_device))
             if len(layer_input) == 0:
                 # Some models put hidden_states in kwargs instead of args.
                 # For example, gptj ...
                 if kwargs.get("hidden_states") is not None:
-                    layer_input.append(move_to(kwargs["hidden_states"], data_device))
+                    layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
 
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
             if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(data_device))
+                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
 
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, data_device))
+                position_ids.append(move_to(pos_ids, device=data_device))
             one_kwargs = {}
             for (k, v) in kwargs.items():  # make sure other arguments also be captured
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to(v, data_device)
+                    one_kwargs[k] = nested_move_to(v, device=data_device)
             layer_input_kwargs.append(one_kwargs)
 
             raise ValueError
 
         # move layer to target device
-        layers[0] = layers[0].to(self.quantize_config.device)
+        layers[0] = layers[0].to(device=self.quantize_config.device)
 
         ori_outside_layer_module_devices = {}
         for module_name in self.base_modules:
@@ -618,6 +811,7 @@ class BaseGPTQModel(nn.Module):
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.model)
 
+        quantized_weights = {}
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
             if is_lm_head_module:
@@ -660,9 +854,7 @@ class BaseGPTQModel(nn.Module):
                 skipped_modules = []
                 gptq = {}
                 for name in subset:
-                    bits = self.quantize_config.bits
-                    sym = self.quantize_config.sym
-                    mse = self.quantize_config.mse
+                    qcfg_clone = copy.deepcopy(self.quantize_config)
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
@@ -674,11 +866,15 @@ class BaseGPTQModel(nn.Module):
                             skipped_modules.append(name)
                             continue
 
-                        bits = self.quantize_config.dynamic_get(layer_name, "bits", bits)
-                        sym = self.quantize_config.dynamic_get(layer_name, "sym", sym)
-                        mse = self.quantize_config.dynamic_get(layer_name, "mse", mse)
+                        qcfg_clone.bits = self.quantize_config.dynamic_get(layer_name, "bits", qcfg_clone.bits)
+                        qcfg_clone.sym = self.quantize_config.dynamic_get(layer_name, "sym", qcfg_clone.sym)
+                        qcfg_clone.mse = self.quantize_config.dynamic_get(layer_name, "mse", qcfg_clone.mse)
+                        qcfg_clone.group_size = self.quantize_config.dynamic_get(layer_name, "group_size", qcfg_clone.group_size)
+                        qcfg_clone.desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", qcfg_clone.desc_act)
+                        qcfg_clone.damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", qcfg_clone.damp_percent)
+                        qcfg_clone.static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", qcfg_clone.static_groups)
 
-                    tmp = GPTQ(subset[name])
+                    tmp = GPTQ(module=subset[name], qcfg=qcfg_clone)
                     gptq[name] = tmp
 
                     # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
@@ -691,10 +887,7 @@ class BaseGPTQModel(nn.Module):
                         tmp.fwd_inputs_buffered = True
 
                     tmp.quantizer.configure(
-                        bits,
                         perchannel=True,
-                        sym=sym,
-                        mse=mse,
                     )
 
                 for name in skipped_modules:
@@ -737,16 +930,17 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                    # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                    if hasattr(module, "reuse_kv"):
-                        if module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                    with torch.no_grad():
+                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(module_index) is None:
-                            shared_kv_cache_dict[module_index] = layer_output[-1]
-                    else:
-                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(module_index) is None:
+                                shared_kv_cache_dict[module_index] = layer_output[-1]
+                        else:
+                            module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -769,26 +963,16 @@ class BaseGPTQModel(nn.Module):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
                     quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
-                    group_size = self.quantize_config.group_size
-                    desc_act = self.quantize_config.desc_act
-                    damp_percent = self.quantize_config.damp_percent
-                    static_groups = self.quantize_config.static_groups
-
-                    # dynamic overrides
-                    if self.quantize_config.dynamic is not None:
-                        group_size = self.quantize_config.dynamic_get(layer_name, "group_size", group_size)
-                        desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", desc_act)
-                        damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", damp_percent)
-                        static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", static_groups)
-
-
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
-                    scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize(
-                        percdamp=damp_percent,
-                        group_size=group_size,
-                        actorder=desc_act,
-                        static_groups=static_groups,
-                    )
+                    ## Need to return the quantized_weight for offloading
+                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize()
+
+                    ## Assign the quantized weight to the weight
+                    gptq[name].module.weight.data = quantized_weight.to(device=gptq[name].device)
+                    ## Offload the quantized weight to CPU for EoRA
+                    quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
+
+
                     if task is not None:
                         task.get_logger().report_scalar(
                             title='Quantization Loss',
@@ -807,8 +991,8 @@ class BaseGPTQModel(nn.Module):
                     avg_losses.append(avg_loss)
                     module_names.append(f"layer-{module_index}-{name}")
 
-                    stat = {QUANT_LOG_LAYER: module_index, QUANT_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
-                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", QUANT_LOG_TIME: f"{duration:.3f}", QUANT_LOG_FWD_TIME: f"{fwd_time:.3f}"}
+                    stat = {PROCESS_LOG_LAYER: module_index, PROCESS_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", PROCESS_LOG_TIME: f"{duration:.3f}", PROCESS_LOG_FWD_TIME: f"{fwd_time:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
@@ -846,11 +1030,12 @@ class BaseGPTQModel(nn.Module):
                         if module.reuse_kv:
                             additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                    layer_output = move_to(
-                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
+                    with torch.no_grad():
+                        layer_output = move_to(
+                            module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
+                            cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
 
                     del layer_input
                     del additional_layer_inputs
@@ -892,7 +1077,7 @@ class BaseGPTQModel(nn.Module):
 
         self.qlinear_kernel = pack_model(
             model=self.model,
-            quantizers=quantizers,
+            quant_result=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
             backend=backend,
@@ -910,7 +1095,8 @@ class BaseGPTQModel(nn.Module):
         if auto_gc:
             torch_empty_cache()
 
-        return self.quant_log
+        ## need to return quantized_weight for EoRA
+        return self.quant_log, quantized_weights
 
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
@@ -924,8 +1110,15 @@ class BaseGPTQModel(nn.Module):
 
     def generate(self, inputs=None, **kwargs):
         with torch.inference_mode():
+            # fix hf generate not applying correct pad token
+            pad_token_id = kwargs.get("pad_token_id", None)
+            if pad_token_id is None and self.tokenizer:
+                kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+
             if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
-                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.model.device)
+                if self.tokenizer is None:
+                    raise ValueError("You passed in an `input` to `generate()` of type `str` but model is missing `model.tokenizer`. Please set `model.tokenizer = my_tokenizer`.")
+                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left").to(self.model.device)
                 return self.model.generate(**inputs, **kwargs)
 
             return self.model.generate(inputs=inputs, **kwargs)
@@ -950,6 +1143,7 @@ class BaseGPTQModel(nn.Module):
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
+            eora_path: Optional[str] = None,
             **kwargs,
     ):
         extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
@@ -964,7 +1158,12 @@ class BaseGPTQModel(nn.Module):
             # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
             #untie_weights(self.model)
 
-            self.save_quantized(save_dir, safetensors_metadata, max_shard_size, meta_quantizer)
+            self.save_quantized(
+                save_dir=save_dir,
+                safetensors_metadata=safetensors_metadata,
+                max_shard_size=max_shard_size,
+                meta_quantizer=meta_quantizer,
+                eora_path=eora_path)
 
             # overwrite quant_override_files
             for name, value in self.quant_override_files.items():
@@ -975,39 +1174,76 @@ class BaseGPTQModel(nn.Module):
                     else:
                         f.write(json.dumps(value))
         else:
-            self.save_pretrained(save_dir, **kwargs)
+            self.save_pretrained(save_dir=save_dir, **kwargs)
 
-    def compile(self, backend="inductor", mode="max-autotune"):
+
+    # returns all the loaded qlinear types, returns empty [] if non-found
+    def kernels(self) -> List[Type(BaseQuantLinear)]:
+        loaded_kernels = set()
+        modules = find_modules(self.model, layers=[BaseQuantLinear])
+        for k, v in modules.items():
+            loaded_kernels.add(v.__class__)
+
+        return list(loaded_kernels)
+
+    def compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        logger.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
+        return self.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
+
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if not self.quantized:
             logger.warning("model is not quantized, skip compiling...")
             return self
 
-        if Version(torch.__version__) < PYTORCH_MIN_VERFSION_WITH_COMPILE:
+        if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
             self.compiled = False
-            logger.warning("To use compile(), you need to have torch version >= 2.5.1, please upgrade it by `pip install torch -U`")
+            logger.warning(f"To use compile(), you need to have torch version >= {TORCH_MIN_VERSION_STR}, please "
+                           f"upgrade it by `pip install torch -U`")
             return self
 
+        # reset dynamo cache on each model load since during ci loop model inference may exhuast cache
+        torch._dynamo.reset()
+
+        # Increase the dynamo cache size limit, default of 8 is too low
+        if torch._dynamo.config.cache_size_limit < 32:
+            torch._dynamo.config.cache_size_limit = 32
+
+        logger.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
+        modules = find_modules(self.model, layers=[BaseQuantLinear])
+        for name in modules.keys():
+            modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
+
         # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
-        #torch._dynamo.config.suppress_errors = True
+        # torch._dynamo.config.suppress_errors = True
         logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
         try:
-            self.model = torch.compile(self.model, fullgraph=True, backend=backend, mode=mode)
+            self.model = torch.compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
             self.compiled = True
         except Exception as e:
-            logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
-            try:
-                self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
-                self.compiled = True
-            except Exception as e:
+            # if fullgraph is already disabled, no need to try again
+            if not fullgraph:
                 self.compiled = False
                 logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
+            else:
+                logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
+                try:
+                    self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+                    self.compiled = True
+                except Exception as e:
+                    self.compiled = False
+                    logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
 
-        # trigger kernel compilation hooks
-        if self.compiled:
-            modules = find_modules(self.model, layers=[BaseQuantLinear])
-            for name in modules.keys():
-                modules[name].compile()
+        #trigger kernel compilation hooks
+        # if self.compiled:
+        #     modules = find_modules(self.model, layers=[BaseQuantLinear])
+        #     for name in modules.keys():
+        #         modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
+
+        # logger.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
+        # modules = find_modules(self.model, layers=[BaseQuantLinear])
+        # for name in modules.keys():
+        #     modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
 
         return self
 
@@ -1047,11 +1283,11 @@ class BaseGPTQModel(nn.Module):
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, self.quantize_config.device)
+            return move_to(module, device=self.quantize_config.device)
         return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
-        return move_to(module, CPU)
+        return move_to(module, device=CPU)
 
     def __getattr__(self, item):
         try:

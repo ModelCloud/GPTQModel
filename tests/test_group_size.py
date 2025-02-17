@@ -119,7 +119,7 @@ class TestGroupSize(unittest.TestCase):
         )
         results = lm_eval(
             model,
-            model_name="hf",
+            backend="hf",
             output_path=tmp_dir,
             tasks=TASK_NAME,
             apply_chat_template=False,
@@ -127,9 +127,6 @@ class TestGroupSize(unittest.TestCase):
             batch_size=32,
             gen_kwargs="temperature=0.0,top_k=50",
             random_seed=RAND_SEED,
-            numpy_random_seed=RAND_SEED,
-            torch_random_seed=RAND_SEED,
-            fewshot_random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
         print(make_table(results))

@@ -18,6 +18,11 @@ from __future__ import annotations
 
 import os
 
+from gptqmodel.adapter.adapter import Adapter, normalize_adapter
+
+from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..utils.torch import torch_empty_cache
+
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
@@ -35,18 +40,18 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Dict, List, Optional, Union  # noqa: E402
+from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig  # noqa: E402
+from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
-from ..utils.model import check_and_get_model_type  # noqa: E402
+from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -182,6 +187,10 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        # normalize config to cfg instance
+        if isinstance(quantize_config, Dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
@@ -190,7 +199,8 @@ class GPTQModel:
             patch_vllm()
 
         is_quantized = False
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
+                   "quantization_config"):
             is_quantized = True
         else:
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
@@ -234,14 +244,16 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseGPTQModel:
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code), "quantization_config"):
+        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
+                   "quantization_config"):
             logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if quantize_config and quantize_config.dynamic:
-            logger.warning("GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
+            logger.warning(
+                "GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
@@ -258,6 +270,7 @@ class GPTQModel:
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
+            adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             # verify weight files matches predefined hash during loading
             # usage: hash_format:hash_value, example: md5:ugkdh232
@@ -265,6 +278,10 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ) -> BaseGPTQModel:
+        # normalize adapter to instance
+        adapter = normalize_adapter(adapter)
+
+        print(f"from_quantized: adapter: {adapter}")
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
 
         if isinstance(backend, str):
@@ -277,61 +294,87 @@ class GPTQModel:
             backend=backend,
             trust_remote_code=trust_remote_code,
             verify_hash=verify_hash,
+            adapter=adapter,
             **kwargs,
         )
 
     @classmethod
     def eval(
             cls,
-            model_id_or_path: str,
-            framework: EVAL,
-            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
+            # model: BaseGPTQModel = None,
+            model_or_path: Union[str, BaseGPTQModel] = None,
+            framework: Type[EVAL] = EVAL.LM_EVAL,
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = EVAL.LM_EVAL.ARC_CHALLENGE,
             batch: int = 1,
             trust_remote_code: bool = False,
-            output_file: Optional[str] = None,
-            backend: str = 'gptqmodel',
+            output_file: str = None,
+            llm_backend: str = 'gptqmodel',
+            backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
-            extra_model_args: str = "",  # only for framework=EVAL.LM_EVAL backend=vllm
-            **args
+            model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
+            apply_chat_template: Optional[bool] = None,
+            gen_kwargs: str="temperature=0.0,top_k=50",
+            **kwargs
     ):
+        if not model_or_path:
+            raise ValueError("Eval parameter: `model_id_or_path` is not passed.")
+
         if framework is None:
-            raise ValueError("eval parameter: `framework` cannot be set to None")
+            raise ValueError("Eval parameter: `framework` cannot be set to None")
 
         if not isinstance(tasks, list):
-            raise ValueError("eval parameter: `tasks` must be of List type")
+            raise ValueError("Eval parameter: `tasks` must be of List type")
 
-        if backend not in ['gptqmodel', 'vllm']:
-            raise ValueError('Eval framework support backend: [gptqmodel, vllm]')
+        if llm_backend not in ['gptqmodel', 'vllm']:
+            raise ValueError('Eval framework support `backend`: `[gptqmodel, vllm]`')
+
+        if llm_backend == "gptqmodel":
+            if isinstance(model_or_path, str):
+                model_or_path = GPTQModel.load(model_id_or_path=model_or_path, backend=backend)
+            else:
+                os.environ["GPTQMODEL_BACKEND"] = backend # hack so gptqmodel can get var from lm_eval call
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
-                    raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
+                    raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
 
             from gptqmodel.utils.eval import lm_eval
             from lm_eval.utils import make_table
             from transformers import AutoTokenizer
 
-            tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+            model_name = 'hf' if llm_backend == 'gptqmodel' else llm_backend
+            if model_args is not None and not isinstance(model_args, Dict):
+                 raise TypeError(f"Expected `model_args` to a `Dict`: actual = {model_args.__class__} ")
 
-            model_name = 'hf' if backend == 'gptqmodel' else backend
-            def_args = f"pretrained={model_id_or_path}"
-            if backend == "gptqmodel":
-                def_args += ",gptqmodel=True"
-            model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
+            if not model_args:
+                model_args = {}
+
+            if isinstance(model_or_path, str):
+                tokenizer = AutoTokenizer.from_pretrained(model_or_path, trust_remote_code=trust_remote_code)
+                # only pass in gptqmodel args if loading via path or id
+                model_args.update({"pretrained": model_or_path})
+            else:
+                tokenizer = model_or_path.tokenizer
+
+            if llm_backend == "gptqmodel":
+                model_args.update({"gptqmodel": True})
+
+            if apply_chat_template is None:
+                apply_chat_template = True if tokenizer.chat_template is not None else False
 
             results = lm_eval(
-                model_name=model_name,
+                model=model_or_path if isinstance(model_or_path, BaseGPTQModel) else None,
+                model_name=model_name, # model_name is lm-eval model class name/type
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
                 trust_remote_code=trust_remote_code,
                 batch_size=batch,
-                apply_chat_template=True if tokenizer.chat_template is not None else False,
-                output_path=output_file,
-                numpy_random_seed=random_seed,
-                torch_random_seed=random_seed,
-                fewshot_random_seed=random_seed,
-                **args
+                apply_chat_template=apply_chat_template,
+                output_file=output_file,
+                random_seed=random_seed,
+                gen_kwargs=gen_kwargs,
+                **kwargs
             )
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -348,14 +391,15 @@ class GPTQModel:
             results = {}
             for task in tasks:
                 base_formatted, plus_formatted, result_path = evalplus(
-                    model=model_id_or_path,
+                    model=model_or_path,
                     dataset=task.value,
                     batch=batch,
                     trust_remote_code=trust_remote_code,
                     output_file=output_file,
-                    backend=backend
+                    backend=llm_backend
                 )
-                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted, "results_path": result_path}
+                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted,
+                                       "results_path": result_path}
             print('--------evalplus Eval Result---------')
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
@@ -382,9 +426,11 @@ class GPTQModel:
 
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
-                raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+                raise ValueError(
+                    "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config)
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
+                                                                  gptq_model.lm_head)
 
             save_weights(target_path, mlx_weights, donate_weights=True)
 
@@ -430,3 +476,41 @@ class GPTQModel:
             repo_type=repo_type,
         )
 
+    @classmethod
+    def eora_generate(cls,
+                      model_id_or_path: str,
+                      quantized_model_id_or_path: str,
+                      # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+                      adapter: Adapter,
+                      calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+                      calibration_dataset_concat_size: Optional[int] = None,
+                      batch_size: int = 1,
+                      calibration_enable_gpu_cache: bool = True,
+                      tokenizer: Optional[PreTrainedTokenizerBase] = None,
+                      logger_board: Optional[str] = None,
+                      backend: Optional[BACKEND] = BACKEND.AUTO,
+                      # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+                      buffered_fwd: bool = False,
+                      # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+                      auto_gc: bool = True,
+                      ):
+        quantized_model = GPTQModel.load(quantized_model_id_or_path, backend=BACKEND.TORCH)
+        quantize_config = quantized_model.quantize_config
+        qModules: Dict[str, TorchQuantLinear] = find_modules(quantized_model.model, [TorchQuantLinear])
+        # for name, module in qModules.items():
+        #     quantized_weights[name] = module.dequantize_weight()
+        del quantized_model
+        torch_empty_cache()
+
+        model = GPTQModel.load(model_id_or_path, quantize_config, backend=backend)
+        model.eora_generate(adapter=adapter,
+                            quantized_modules=qModules,
+                            calibration_dataset=calibration_dataset,
+                            calibration_dataset_concat_size=calibration_dataset_concat_size,
+                            batch_size=batch_size,
+                            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+                            tokenizer=tokenizer,
+                            logger_board=logger_board,
+                            buffered_fwd=buffered_fwd,
+                            auto_gc=auto_gc)
+        return

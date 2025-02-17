@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import math
 import sys
 from typing import List, Optional, Tuple
@@ -21,6 +22,7 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
+from gptqmodel.adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -37,6 +39,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
+    SUPORTS_ADAPTERS: List[Adapter] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -49,12 +52,16 @@ class BaseQuantLinear(nn.Module):
                  out_features: int,
                  bias: bool,
                  pack_dtype: t.dtype,
+                 adapter: Adapter,
+                 name: str = None,
                  register_buffers: bool = False,
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
                  **kwargs):
         super().__init__()
-
+        if name is None:
+            name = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
+        self.name = name # full path module name in model weights
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size if group_size != -1 else in_features
@@ -63,7 +70,9 @@ class BaseQuantLinear(nn.Module):
         self.pack_dtype = pack_dtype
         self.maxq = 2 ** self.bits - 1
         self.pack_dtype = pack_dtype
-
+        # we need to clone the adapter since passed in adapter may be shared
+        # adapter tensors are lodaed inside adapter so they must be unique per module
+        self.adapter =  copy.deepcopy(adapter)
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
@@ -126,6 +135,47 @@ class BaseQuantLinear(nn.Module):
             else:
                 self.bias = None
 
+        # load adapter if any
+        if adapter is not None:
+            if adapter.path in LORA_MERGED_WEIGHT_PATHS:
+                print(f"Adapter (merged weights) lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
+
+                # pre allocate buffers so accelerate can auto-bind merged weights in same tensor file as model
+                self.register_buffer(
+                    "lora_A",
+                    t.zeros((in_features, adapter.rank), dtype=t.float16),
+                )
+
+                self.register_buffer(
+                    "lora_B",
+                    t.zeros((adapter.rank, out_features), dtype=t.float16),
+                )
+            else:
+                pass
+                # print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
+
+            # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
+            # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # self.register_buffer(
+            #     "lora_A",
+            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
+            # )
+            #
+            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
+            # self.register_buffer(
+            #     "lora_B",
+            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
+            # )
+
+    # override me, to perform post-weight load to device init
+    def post_init(self):
+        if self.adapter is not None:
+            self.adapter.post_init(
+                weight_key=self.name,
+                device=self.qweight.device,
+                lora_A=getattr(self, "lora_A", None),
+                lora_B=getattr(self, "lora_B", None))
+
     @classmethod
     # custom quant linear class can override this and add custom checks
     def validate(
@@ -139,11 +189,13 @@ class BaseQuantLinear(nn.Module):
             pack_dtype:t.dtype=None,
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
-            trainable:Optional[bool]=None) -> Tuple[
+            trainable:Optional[bool]=None,
+            adapter:Optional[Adapter]=None,
+    ) -> Tuple[
         bool, Optional[Exception]]:
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
-                                      in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                                      dynamic=dynamic, device=device, trainable=trainable)
+                             in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
+                             dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
 
     @classmethod
     # internal method and should not be overriden
@@ -175,13 +227,20 @@ class BaseQuantLinear(nn.Module):
         for name, value in child_supports_variables:
             if not name.startswith("SUPPORTS") or callable(value):
                 continue
-            if value is None or (isinstance(value, list) and not value):
-                raise ValueError(f"{cls.__name__}.{name} cannot be None or an empty list.")
+            if value is None:
+                raise ValueError(f"{cls.__name__}.{name} cannot be None.")
+
+            # if isinstance(value, list) and not value:
+            #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
+
+        if adapter is not None and adapter.__class__ not in cls.SUPORTS_ADAPTERS:
+            err = f"{cls} does not support adapter: {adapter}"
+            return False, NotImplementedError(err)
 
         if pack_dtype not in cls.SUPPORTS_PACK_DTYPES:
             err = f"{cls} does not support `pack_dtype`: {pack_dtype}"
@@ -275,12 +334,9 @@ class BaseQuantLinear(nn.Module):
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
-    # override me, to perform post-weight load to device init
-    def post_init(self):
-        pass
-
+    # use optimize so we don't override native module.compile()
     # override me, to perform any torch.compile logic on the kernel pre forward
-    def compile(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         pass
 
 class PackableQuantLinear(BaseQuantLinear):
@@ -289,47 +345,47 @@ class PackableQuantLinear(BaseQuantLinear):
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
+            W = W.T
 
         self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
 
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
+        scales = scales.T.contiguous()
+        zeros = zeros.T.contiguous()
         scale_zeros = zeros * scales
         self.scales = scales.clone().to(dtype=t.float16)
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=t.float16)
 
-        intweight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
+        int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
+        int_weight = int_weight.T.contiguous()
+        int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
-        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
+        qweight = np.zeros((int_weight.shape[0] // self.pack_dtype_bits * self.bits, int_weight.shape[1]),
                            dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for row in range(qweight.shape[0]):
                 for j in range(self.pack_factor):
-                    qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
+                    qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
             i = 0
             row = 0
             while row < qweight.shape[0]:
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i))
+                    qweight[row] |= int_weight[j] << (3 * (j - i))
                 i += 10
-                qweight[row] |= intweight[i] << 30
+                qweight[row] |= int_weight[i] << 30
                 row += 1
-                qweight[row] |= (intweight[i] >> 2) & 1
+                qweight[row] |= (int_weight[i] >> 2) & 1
                 i += 1
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 1)
+                    qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
                 i += 10
-                qweight[row] |= intweight[i] << 31
+                qweight[row] |= int_weight[i] << 31
                 row += 1
-                qweight[row] |= (intweight[i] >> 1) & 0x3
+                qweight[row] |= (int_weight[i] >> 1) & 0x3
                 i += 1
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 2)
+                    qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
 

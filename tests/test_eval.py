@@ -15,49 +15,53 @@
 # limitations under the License.
 
 import os
-import tempfile
-import unittest
-from typing import Union
-
-from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL
-from lm_eval.tasks import TaskManager
-from parameterized import parameterized
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from typing import Union  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
+from lm_eval.tasks import TaskManager  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+
 
 class TestEval(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+        self.model = GPTQModel.load(self.MODEL_ID)
 
     @parameterized.expand(
         [
             (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
-            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
+            (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
             (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
             (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
-    def test_eval_gptqmodel(self, eval_backend: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], backend: str):
+    def test_eval_gptqmodel(self, framework: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_file = f"{tmp_dir}/result.json"
-            extra_model_args = ""
-            if task == EVAL.LM_EVAL.GPQA:
-                extra_model_args = "gpu_memory_utilization=0.7"
+            model_args = {}
+            if llm_backend == "vllm" and task == EVAL.LM_EVAL.GPQA:
+                model_args.update({"gpu_memory_utilization": 0.7})
 
-            results = GPTQModel.eval(self.MODEL_ID,
-                                     framework=eval_backend,
-                                     tasks=[task],
-                                     batch=32,
-                                     output_file=output_file,
-                                     backend=backend,
-                                     extra_model_args=extra_model_args,
-                                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
-                                     )
+            results = GPTQModel.eval(
+                model_or_path=self.model,
+                framework=framework,
+                tasks=[task],
+                batch=8 if task == EVAL.LM_EVAL.GPQA else 32,
+                output_file=output_file,
+                llm_backend=llm_backend,
+                model_args=model_args,
+                task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
+            )
 
-            if eval_backend == EVAL.LM_EVAL:
+            if llm_backend == EVAL.LM_EVAL:
                 if task == EVAL.LM_EVAL.GPQA:
                     gpqa_main_n_shot = results['results'].get('gpqa_main_n_shot', {}).get('acc,none')
                     gpqa_main_zeroshot = results['results'].get('gpqa_main_zeroshot', {}).get('acc,none')
@@ -70,7 +74,7 @@ class TestEval(unittest.TestCase):
 
                     self.assertGreaterEqual(acc_score, 0.28, "acc score does not match expected result")
                     self.assertGreaterEqual(acc_norm_score, 0.32, "acc_norm score does not match expected result")
-            elif eval_backend == EVAL.EVALPLUS:
+            elif llm_backend == EVAL.EVALPLUS:
                 result = results.get(task.value)
                 base_formatted, plus_formatted, _ = float(result.get("base tests")), float(
                     result.get("base + extra tests")), result.get("results_path")

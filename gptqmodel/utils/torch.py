@@ -23,6 +23,8 @@ HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
 
+STREAM = None # cache
+
 if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
     HAS_CUDA = True
 
@@ -38,6 +40,26 @@ try:
     HAS_MLX = True
 except BaseException:
     pass
+
+def torch_new_stream():
+    global STREAM
+    if STREAM is None:
+        return STREAM
+
+    if HAS_CUDA:
+        STREAM = torch.cuda.Stream()
+        return STREAM
+    if HAS_XPU:
+        STREAM = torch.xpu.Stream()
+        return STREAM
+    return None
+
+def torch_new_stream_ctx():
+    if HAS_CUDA:
+        return torch.cuda.stream(torch_new_stream())
+    if HAS_XPU:
+        return torch.xpu.Stream(torch_new_stream())
+    return None
 
 def torch_sync(device: torch.device = None):
     # check all backends

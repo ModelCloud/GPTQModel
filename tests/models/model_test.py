@@ -245,18 +245,31 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
+                model_args = {
+                    "pretrained": self.NATIVE_MODEL_ID,
+                    "gptqmodel": True
+                }
+
                 if self.USE_VLLM:
-                    model_args = f"pretrained={model.model_local_path},dtype=auto,gpu_memory_utilization=0.8,tensor_parallel_size=1,trust_remote_code={trust_remote_code},max_model_len={self.MODEL_MAX_LEN}"
-                else:
-                    model_args = ""
+                    model_args.update({
+                        "dtype": "auto",
+                        "gpu_memory_utilization": 0.8,
+                        "tensor_parallel_size": 1,
+                        "trust_remote_code": trust_remote_code,
+                        "max_model_len": self.MODEL_MAX_LEN
+                    })
+
+                if extra_args:
+                    model_args.update(extra_args)
+
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
                 results = lm_eval(
                     model,
-                    model_name="vllm" if self.USE_VLLM else "hf",
+                    backend="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
                     output_path=tmp_dir,
                     tasks=self.TASK_NAME,
@@ -265,9 +278,6 @@ class ModelTest(unittest.TestCase):
                     batch_size=self.BATCH_SIZE,
                     gen_kwargs="temperature=0.0,top_k=50",
                     random_seed=RAND_SEED,
-                    numpy_random_seed=RAND_SEED,
-                    torch_random_seed=RAND_SEED,
-                    fewshot_random_seed=RAND_SEED,
                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                 )
 
