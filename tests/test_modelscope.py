@@ -1,14 +1,7 @@
 import os
 os.environ["GPTQMODEL_USE_MODELSCOPE"] = "True"
-import sys
-import subprocess  # noqa: E402
-import importlib.util  # noqa: E402
-
-if importlib.util.find_spec("modelscope") is None:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "modelscope", "-U"])
-
 from models.model_test import ModelTest  # noqa: E402
-from gptqmodel import GPTQModel
+from gptqmodel import GPTQModel  # noqa: E402
 
 
 class TestLoadModelscope(ModelTest):
