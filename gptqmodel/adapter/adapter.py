@@ -16,7 +16,15 @@ adapter_load_cache = None
 class Adapter():
     def __init__(self, rank: int, path: str = None):
         self.rank = rank
-        self.path = path
+        self.path = path.lower().strip() if isinstance(path, str) else path
+
+    def validate_path(self, local_only=False):
+        if not self.path or not isinstance(self.path, str):
+            raise ValueError("Adapter: `path` str is required.")
+
+        if local_only:
+            if self.path.startswith("http"):
+                raise ValueError(f"Adapter: `path` str in this context must be a local os path: actual = `{self.path}`.")
 
     # override me
     def apply(self, x: torch.Tensor, out: torch.Tensor):

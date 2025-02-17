@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import os
 
-from gptqmodel.adapter.adapter import Adapter, normalize_adapter
+from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
 
 from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..quantization.gptq import CPU
 from ..utils.torch import torch_empty_cache
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
@@ -165,6 +166,7 @@ MODEL_MAP = {
     "ovis": OvisGPTQ,
     "telechat": TeleChat2GPTQ,
 }
+
 
 
 class GPTQModel:
@@ -476,44 +478,57 @@ class GPTQModel:
             repo_type=repo_type,
         )
 
-    @classmethod
-    def eora_generate(cls,
-                      model_id_or_path: str,
-                      quantized_model_id_or_path: str,
-                      # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
-                      adapter: Adapter,
-                      calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-                      calibration_dataset_concat_size: Optional[int] = None,
-                      batch_size: int = 1,
-                      calibration_enable_gpu_cache: bool = True,
-                      tokenizer: Optional[PreTrainedTokenizerBase] = None,
-                      logger_board: Optional[str] = None,
-                      backend: Optional[BACKEND] = BACKEND.AUTO,
-                      # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
-                      buffered_fwd: bool = False,
-                      # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-                      auto_gc: bool = True,
-                      ):
-        if adapter.path is None:
-            raise ValueError("adapter path is required")
+    class adapter:
+        @classmethod
+        def generate(
+            cls,
+            # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+            adapter: Adapter,
+            model_id_or_path: str, # native model
+            quantized_model_id_or_path: str, # gptqmodel quantized model
+            calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+            calibration_dataset_concat_size: Optional[int] = None,
+            batch_size: Optional[int] = 1,
+            calibration_enable_gpu_cache: Optional[bool] = True,
+            tokenizer: Optional[PreTrainedTokenizerBase] = None,
+            logger_board: Optional[str] = None,
+            # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+            buffered_fwd: bool = False,
+            # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+            auto_gc: bool = True,
+        ):
+            if not adapter or not isinstance(adapter, Lora):
+                raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
 
-        quantized_model = GPTQModel.load(model_id_or_path=quantized_model_id_or_path, backend=BACKEND.TORCH)
-        qcfg = quantized_model.quantize_config
-        qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
-        # for name, module in qModules.items():
-        #     quantized_weights[name] = module.dequantize_weight()
-        del quantized_model
-        torch_empty_cache()
+            adapter.validate_path(local_only=True)
 
-        model = GPTQModel.load(model_id_or_path=model_id_or_path, quantize_config=qcfg, backend=backend)
-        model.eora_generate(adapter=adapter,
-                            quantized_modules=qModules,
-                            calibration_dataset=calibration_dataset,
-                            calibration_dataset_concat_size=calibration_dataset_concat_size,
-                            batch_size=batch_size,
-                            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
-                            tokenizer=tokenizer,
-                            logger_board=logger_board,
-                            buffered_fwd=buffered_fwd,
-                            auto_gc=auto_gc)
-        return
+            quantized_model = GPTQModel.load(
+                model_id_or_path=quantized_model_id_or_path,
+                backend=BACKEND.TORCH,
+                device=CPU,
+            )
+
+            qcfg = quantized_model.quantize_config
+            qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
+            # for name, module in qModules.items():
+            #     quantized_weights[name] = module.dequantize_weight()
+            del quantized_model
+            torch_empty_cache()
+
+            model = GPTQModel.load(
+                model_id_or_path=model_id_or_path,
+                quantize_config=qcfg,
+                backend=BACKEND.TORCH)
+
+            model._eora_generate(
+                adapter=adapter,
+                quantized_modules=qModules,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                batch_size=batch_size,
+                calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+                tokenizer=tokenizer,
+                logger_board=logger_board,
+                buffered_fwd=buffered_fwd,
+                auto_gc=auto_gc)
+            return

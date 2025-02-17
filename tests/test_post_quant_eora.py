@@ -21,7 +21,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
-from tabulate import tabulate  # noqa: E402
+
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
@@ -29,6 +29,7 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+from tabulate import tabulate  # noqa: E402
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
@@ -68,11 +69,11 @@ class TestEoraPostQuant(ModelTest):
     def setUpClass(cls):
         pass
 
-    def test_eora_post_quant(self):
+    def test_post_quant_eora(self):
         bits = 4
-        group_size = 32
+        group_size = 128
         desc_act = True
-        rank = 256
+        rank = 128
         batch_size = 1
         calibration_dataset_rows = 1024
         calibration_dataset_concat_size = 0  # disable
@@ -99,17 +100,20 @@ class TestEoraPostQuant(ModelTest):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
-                # for quant, path is save path. for load, it is loading path
+                # for eora generation, path is adapter save path; for load, it is loading path
                 path=os.path.join(tmpdir, adapter_file_name),
                 rank=rank,
             )
 
             quantized_model_path = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1/"
 
-            GPTQModel.eora_generate(model_id_or_path=self.NATIVE_MODEL_ID,
-                                    quantized_model_id_or_path=quantized_model_path, adapter=eora,
-                                    calibration_dataset=calibration_dataset,
-                                    calibration_dataset_concat_size=calibration_dataset_concat_size, auto_gc=auto_gc)
+            # eora generation and save in one step
+            GPTQModel.adapter.generate(
+                adapter=eora,
+                model_id_or_path=self.NATIVE_MODEL_ID,
+                quantized_model_id_or_path=quantized_model_path,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size, auto_gc=auto_gc)
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             for backend in [BACKEND.TORCH]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN

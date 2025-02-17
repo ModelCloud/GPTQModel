@@ -408,7 +408,7 @@ class BaseGPTQModel(nn.Module):
             backend=backend,
         )
 
-    def eora_generate(
+    def _eora_generate(
         self,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter,
@@ -419,7 +419,6 @@ class BaseGPTQModel(nn.Module):
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
@@ -468,7 +467,6 @@ class BaseGPTQModel(nn.Module):
             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
             buffered_fwd=buffered_fwd,
             auto_gc=auto_gc,
-            backend=backend,
         )
 
         self.eora_save(eora_path=adapter.path)
