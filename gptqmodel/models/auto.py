@@ -39,7 +39,7 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Dict, List, Optional, Union, Any  # noqa: E402
+from typing import Any, Dict, List, Optional, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
@@ -428,7 +428,8 @@ class GPTQModel:
                 raise ValueError(
                     "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config)
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
+                                                                  gptq_model.lm_head)
 
             save_weights(target_path, mlx_weights, donate_weights=True)
 

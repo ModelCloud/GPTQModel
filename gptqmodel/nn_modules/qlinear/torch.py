@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
+from transformers import PreTrainedModel
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -201,8 +202,8 @@ class TorchQuantLinear(PackableQuantLinear):
 
         return weights
 
-def dequantize_model(model: nn.Module):
-    for name, module in model.model.named_modules():
+def dequantize_model(model: PreTrainedModel):
+    for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchQuantLinear are supported for dequantization. "
@@ -216,10 +217,10 @@ def dequantize_model(model: nn.Module):
             new_module.bias = torch.nn.Parameter(module.bias)
 
             # Replace the module in the model
-            parent = model.model
+            parent = model
             if '.' in name:
                 parent_name, module_name = name.rsplit('.', 1)
-                parent = dict(model.model.named_modules())[parent_name]
+                parent = dict(model.named_modules())[parent_name]
             else:
                 module_name = name
 

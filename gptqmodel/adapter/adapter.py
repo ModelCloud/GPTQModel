@@ -1,11 +1,10 @@
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Union, List
+from typing import Dict, List, Union
 from urllib.parse import urlparse
 
 import safetensors
 import torch
-
 from gptqmodel.utils.logger import setup_logger
 
 logger = setup_logger()

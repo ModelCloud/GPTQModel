@@ -23,10 +23,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from transformers import AutoTokenizer  # noqa: E402
-
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import evalplus  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestEvalplus(unittest.TestCase):

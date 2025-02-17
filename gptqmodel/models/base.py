@@ -354,10 +354,10 @@ class BaseGPTQModel(nn.Module):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        from gptqmodel.looper.gptq_processor import GPTQProcessor
-        from gptqmodel.looper.eora_processor import EoraProcessor
-        from gptqmodel.looper.module_looper import ModuleLooper
         from gptqmodel.adapter.adapter import Lora
+        from gptqmodel.looper.eora_processor import EoraProcessor
+        from gptqmodel.looper.gptq_processor import GPTQProcessor
+        from gptqmodel.looper.module_looper import ModuleLooper
 
         # init processor with default GPTQ processor
         processors = [
@@ -592,7 +592,7 @@ class BaseGPTQModel(nn.Module):
             return
 
         if self.quantize_config.lm_head:
-            if self.model.config.tie_word_embeddings and hasattr(self.model.model, "_tied_weights_keys"):
+            if self.model.config.tie_word_embeddings and hasattr(self.model, "_tied_weights_keys"):
                 tied_keys = self.model._tied_weights_keys
                 for item in tied_keys:
                     if self.lm_head in item:
