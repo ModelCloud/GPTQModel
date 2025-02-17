@@ -369,6 +369,9 @@ class BaseGPTQModel(nn.Module):
         from gptqmodel.looper.gptq_processor import GPTQProcessor
         from gptqmodel.looper.module_looper import ModuleLooper
 
+        # has lora process
+        needs_lora = isinstance(self.quantize_config.adapter, Lora)
+
         # init processor with default GPTQ processor
         processors = [
             GPTQProcessor(
@@ -378,12 +381,12 @@ class BaseGPTQModel(nn.Module):
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
                 batch_size=batch_size,
                 logger_board=logger_board,
-                retain_w=isinstance(self.quantize_config.adapter, Lora), # eora needs original w
+                retain_w=needs_lora, # eora needs original w
             )
         ]
 
         # Append EoRA processor for lora adapter
-        if isinstance(self.quantize_config.adapter, Lora):
+        if needs_lora:
             processors.append(
                 EoraProcessor(
                     tokenizer=self.tokenizer,
