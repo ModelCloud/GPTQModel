@@ -24,7 +24,10 @@ from typing import Dict, List, Optional, Union
 import torch
 import transformers
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
-    from modelscope import snapshot_download
+    try:
+        from modelscope import snapshot_download
+    except Exception:
+        raise ModuleNotFoundError("you have set GPTQMODEL_USE_MODELSCOPE env, but doesn't have modelscope? install it with `pip install modelscope`")
 else:
     from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
