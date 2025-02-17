@@ -60,6 +60,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
 
     return bench_result
 
+
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
 
@@ -69,15 +70,13 @@ class Test(ModelTest):
 
     @classmethod
     def setUpClass(cls):
-        pass
-
-    def test_quant_and_eora(self):
-        calibration_dataset = load_dataset(
+        cls.calibration_dataset = load_dataset(
             "allenai/c4",
             data_files="en/c4-train.00001-of-01024.json.gz",
             split="train"
         ).select(range(128))["text"]
 
+    def test_quant_and_eora(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
                 # for quant, path is save path. for load, it is loading path
@@ -94,7 +93,7 @@ class Test(ModelTest):
 
             model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
 
-            model.quantize(calibration_dataset, batch_size=1, auto_gc=False)
+            model.quantize(self.calibration_dataset, batch_size=1, auto_gc=False)
 
             # EoRA adapter is saved according to Lora.path property
             # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
@@ -105,9 +104,9 @@ class Test(ModelTest):
             torch_empty_cache()
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [ BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-                base_bench = bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
-                eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
+            for backend in [BACKEND.TORCH]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+                base_bench = bench(path=tmpdir, backend=backend, adapter=None)  # inference using qweights only
+                eora_bench = bench(path=tmpdir, backend=backend, adapter=eora)  # inference using eora (lora)
 
                 print('--------Eval Base Result---------')
                 print(make_table(base_bench))
@@ -119,6 +118,37 @@ class Test(ModelTest):
                 print(make_table(eora_bench))
                 if "groups" in eora_bench:
                     print(make_table(eora_bench, "groups"))
-                #print('--------Eval EoRA Result End---------')
+                # print('--------Eval EoRA Result End---------')
 
+    def test_eora_post_quant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            eora = Lora(
+                # for quant, path is save path. for load, it is loading path
+                path=os.path.join(tmpdir, "lora_adapter.safetensors"),
+                rank=512,
+            )
 
+            quantized_model_path = "/monster/data/model/Qwen2.5-0.5B-Instruct-gptq-4bit"
+
+            GPTQModel.eora_generate(model_id_or_path=self.NATIVE_MODEL_ID,
+                                    quantized_model_id_or_path=quantized_model_path, adapter=eora,
+                                    calibration_dataset=self.calibration_dataset)
+
+            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
+            for backend in [BACKEND.TORCH]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+                base_bench = bench(path=quantized_model_path, backend=backend,
+                                   adapter=None)  # inference using qweights only
+                eora_bench = bench(path=quantized_model_path, backend=backend,
+                                   adapter=eora)  # inference using eora (lora)
+
+                print('--------Eval Base Result---------')
+                print(make_table(base_bench))
+                if "groups" in base_bench:
+                    print(make_table(base_bench, "groups"))
+                # print('--------Eval Base Result End---------')
+
+                print('--------Eval EoRA Result---------')
+                print(make_table(eora_bench))
+                if "groups" in eora_bench:
+                    print(make_table(eora_bench, "groups"))
+                # print('--------Eval EoRA Result End---------')
