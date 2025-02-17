@@ -318,9 +318,11 @@ class GPTQModel:
         if isinstance(model_or_id_or_path, str):
             model = None
             model_id_or_path = model_or_id_or_path
-        else:
+        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, PreTrainedModel):
             model = model_or_id_or_path
             model_id_or_path = model.config.name_or_path  #
+        else:
+            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: {model_or_id_or_path}")
 
         if tokenizer is None:
             if isinstance(model, BaseGPTQModel):
