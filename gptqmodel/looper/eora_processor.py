@@ -30,7 +30,7 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to
-from gptqmodel.utils.torch import torch_sync
+from gptqmodel.utils.torch import torch_sync, torch_compile
 from torch.nn import Module
 
 logger = setup_logger()
@@ -46,6 +46,17 @@ class EoraProcessor(LoopProcessor):
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix: Dict[str, torch.float32] = {}
+
+
+        # Increase the dynamo cache size limit, default of 8 is too low
+        if torch._dynamo.config.cache_size_limit < 24:
+            torch._dynamo.config.cache_size_limit = 24
+
+        # needed by eora
+        torch._dynamo.config.capture_scalar_outputs = True
+
+        self.eora_compute_lora = torch_compile(eora_compute_lora)
+        self.eora_process_input = torch_compile(eora_process_input)
 
     def log_plotly(self):
         task = self.logger_task
@@ -88,7 +99,7 @@ class EoraProcessor(LoopProcessor):
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
-            eora_process_input(
+            self.eora_process_input(
                 input=input,
                 name=name,
                 eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
@@ -120,7 +131,7 @@ class EoraProcessor(LoopProcessor):
         # print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
         del w
 
-        A, B = eora_compute_lora(
+        A, B = self.eora_compute_lora(
             device=w_device,
             w_wq_delta=w_wq_delta,
             module=module,

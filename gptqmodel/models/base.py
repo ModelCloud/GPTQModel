@@ -1206,8 +1206,11 @@ class BaseGPTQModel(nn.Module):
         torch._dynamo.reset()
 
         # Increase the dynamo cache size limit, default of 8 is too low
-        if torch._dynamo.config.cache_size_limit < 32:
-            torch._dynamo.config.cache_size_limit = 32
+        if torch._dynamo.config.cache_size_limit < 24:
+            torch._dynamo.config.cache_size_limit = 24
+
+        # needed by eora
+        torch._dynamo.config.capture_scalar_outputs = True
 
         logger.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
         modules = find_modules(self.model, layers=[BaseQuantLinear])

@@ -74,7 +74,7 @@ class TestEoraPostQuant(ModelTest):
         bits = 4
         group_size = 128
         desc_act = True
-        rank = 128
+        rank = 256
         batch_size = 1
         calibration_dataset_rows = 1024
         calibration_dataset_concat_size = 0  # disable
