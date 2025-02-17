@@ -105,7 +105,8 @@ class EoraProcessor(LoopProcessor):
 
         eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix[module.name]
 
-        w = module.state.pop("w")
+        w: torch.Tensor = module.state.pop("w")
+        w_device = w.device  # TODO clear up device situation between w and wq
         wq: torch.Tensor = module.state["wq"]
 
         # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
@@ -117,12 +118,11 @@ class EoraProcessor(LoopProcessor):
         assert w_wq_delta.dtype == torch.float32
 
         # print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
-        w_device = w.device # TODO FIX clear up device situation between w and wq
         del w
 
         A, B = eora_compute_lora(
             device=w_device,
-            w_wq_delta=w_wq_delta.to(dtype=torch.float32),
+            w_wq_delta=w_wq_delta,
             module=module,
             eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
             rank=module.adapter_cfg.rank
