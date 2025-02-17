@@ -336,9 +336,7 @@ class GPTQModel:
                     batch_size=batch_size,
                     trust_remote_code=trust_remote_code,
                 )
-            apply_chat_template=args.pop("apply_chat_template")
-            if apply_chat_template is None:
-                apply_chat_template = True if tokenizer.chat_template is not None else False
+            apply_chat_template=args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
             results = simple_evaluate(
                 model=model_name,
                 model_args=model_args,
