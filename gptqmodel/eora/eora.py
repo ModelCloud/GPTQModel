@@ -44,7 +44,7 @@ def eora_compute_lora(
     raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=device)
 
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
-    if (L < 0).any().item():
+    if (L < 0).any():
         logger.warn(f"Found negative eigenvalues in `{module.name}`. Please increase your calibration data set for EoRA.")
         minimum = torch.min(L[L > 0])
         L[L < 0] = minimum
