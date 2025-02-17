@@ -99,10 +99,10 @@ class ModuleLooper():
             for k, v in example.items():
                 data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
-                    for module_index in range(len(v)):
-                        if len(v[module_index].shape) == 1:
-                            v[module_index] = v[module_index].unsqueeze(0)
-                        v[module_index] = move_to(v[module_index].to(torch.bfloat16) if is_ovis else v[module_index],
+                    for index in range(len(v)):
+                        if len(v[index].shape) == 1:
+                            v[index] = v[index].unsqueeze(0)
+                        v[index] = move_to(v[index].to(torch.bfloat16) if is_ovis else v[index],
                                                   device=data_device)
                 else:
                     if len(v.shape) == 1:
@@ -194,16 +194,16 @@ class ModuleLooper():
         # replace linear with hooked linear
         replace_linear_with_hooked_linear(self.gptq_model.model)
 
-        for module_index in quant_modules_pb:
-            is_lm_head_module = module_index >= layer_count
+        for layer_index in quant_modules_pb:
+            is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
                 quant_modules_pb.set_description("Quantizing lm_head")
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
                 layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
-                module = layers[module_index]
+                quant_modules_pb.set_description(f"Quantizing layer {layer_index} of {layer_count - 1}")
+                module = layers[layer_index]
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -216,7 +216,7 @@ class ModuleLooper():
             modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
             for p_index, processor in enumerate(self.processors):
-                processor.collect_memory_info(module_index)
+                processor.collect_memory_info(layer_index)
 
                 layer_inputs = processor.inputs_cache.layer_inputs
                 layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
@@ -233,12 +233,12 @@ class ModuleLooper():
                     skipped_modules = []
 
                     for name in subset:
-                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{module_index}.{name}"
+                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{layer_index}.{name}"
 
                         # gptq task is created and stored inside processor
                         if not isinstance(subset[name], NamedModule):
                             named_module = NamedModule(subset[name], name=name, full_name=layer_name,
-                                                      layer_index=module_index)
+                                                      layer_index=layer_index)
                             subset[name] = named_module
                             full[name] = named_module
 
@@ -286,12 +286,12 @@ class ModuleLooper():
                             if hasattr(module, "reuse_kv"):
                                 if module.reuse_kv:
                                     additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
-                                        module_index - 1)
+                                        layer_index - 1)
 
                                 layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                                      **additional_layer_inputs)
-                                if shared_kv_cache_dict.get(module_index) is None:
-                                    shared_kv_cache_dict[module_index] = layer_output[-1]
+                                if shared_kv_cache_dict.get(layer_index) is None:
+                                    shared_kv_cache_dict[layer_index] = layer_output[-1]
                             else:
                                 module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                       **additional_layer_inputs)
@@ -321,7 +321,7 @@ class ModuleLooper():
                         if auto_gc:
                             torch_empty_cache()
 
-                is_last_module = module_index == len(quant_modules_pb) - 1
+                is_last_module = layer_index == len(quant_modules_pb) - 1
                 layer_outputs = []
                 if not is_last_module:
                     for j in range(processor.num_batches):
@@ -341,7 +341,7 @@ class ModuleLooper():
 
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
                         with torch.no_grad():
                             layer_output = move_to(
@@ -360,7 +360,7 @@ class ModuleLooper():
                 # TODO move to processor?
                 if p_index == len(self.processors) - 1:
                     if not is_lm_head_module:
-                        layers[module_index] = self.gptq_model.post_quantize(module)
+                        layers[layer_index] = self.gptq_model.post_quantize(module)
                     else:
                         self.gptq_model.post_quantize(module)
 
