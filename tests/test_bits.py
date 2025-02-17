@@ -17,12 +17,14 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import logging  # noqa: E402
 import tempfile  # noqa: E402
 import traceback  # noqa: E402
 import unittest  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
@@ -33,14 +35,13 @@ from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.utils.eval import lm_eval  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 RAND_SEED = 42
-TASK_NAME = "arc_challenge"
+TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
 
 class TestBits(unittest.TestCase):
     QLINEAR_DICT = {
@@ -101,11 +102,11 @@ class TestBits(unittest.TestCase):
             for bits in supports_bits:
                 print(f"-----------------------quant backend: {quant_backend}-- bits: {bits} ---------------------")
                 quantize_config = QuantizeConfig(bits=bits, group_size=128, sym=True, desc_act=False)
-                print(f"bits: {quantize_config.bits}, quant_backend: {quant_backend} start quant")
+                print(f"bits: {bits}, quant_backend: {quant_backend} start quant")
                 try:
                     self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
                 except Exception:
-                    error_log=f"bits:  {quantize_config.bits}, quant_backend: {quant_backend} An error occurred"
+                    error_log=f"bits:  {bits}, quant_backend: {quant_backend} An error occurred"
                     print(error_log)
                     errors.append(error_log)
 
@@ -145,11 +146,11 @@ class TestBits(unittest.TestCase):
             device_map="auto",
             backend=inference_backend,
         )
-        results = lm_eval(
-            model,
+        results = GPTQModel.eval(
+            model_or_id_or_path=model,
             model_name="hf",
             output_path=tmp_dir,
-            tasks=TASK_NAME,
+            tasks=[TASK_NAME],
             apply_chat_template=False,
             trust_remote_code=False,
             batch_size=32,
@@ -162,7 +163,7 @@ class TestBits(unittest.TestCase):
             print(make_table(results, "groups"))
         print('--------Eval Result End---------')
         task_results = {
-            metric: value for metric, value in results['results'].get(TASK_NAME, {}).items()
+            metric: value for metric, value in results['results'].get(TASK_NAME.value, {}).items()
             if metric != 'alias' and 'stderr' not in metric
         }
         print(f"bits is: {quantize_config.bits}, quant_backend: {quant_backend}, inference_backend: {inference_backend} -> task_results: {task_results}")
