@@ -296,6 +296,8 @@ class GPTQModel:
             model_args: Dict = None,  # only for framework=EVAL.LM_EVAL backend=vllm
             **args
     ):
+        if model_args is None:
+            model_args = {}
         if tasks is None:
             if framework == EVAL.LM_EVAL:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
