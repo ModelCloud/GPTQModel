@@ -285,17 +285,23 @@ class GPTQModel:
     @classmethod
     def eval(
             cls,
-            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
-            framework: EVAL = EVAL.LM_EVAL,
             model_or_id_or_path: str=None,
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to tifx mutable warning
+            framework: EVAL = EVAL.LM_EVAL,
             batch_size: int = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
             backend: str = 'gptqmodel',
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
-            model_args: Dict = {},  # only for framework=EVAL.LM_EVAL backend=vllm
+            model_args: Dict = None,  # only for framework=EVAL.LM_EVAL backend=vllm
             **args
     ):
+        if tasks is None:
+            if framework == EVAL.LM_EVAL:
+                tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
+            else:
+                tasks = [EVAL.EVALPLUS.HUMAN]
+
         if framework is None:
             raise ValueError("eval parameter: `framework` cannot be set to None")
 
