@@ -494,15 +494,18 @@ class GPTQModel:
                       # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
                       auto_gc: bool = True,
                       ):
-        quantized_model = GPTQModel.load(quantized_model_id_or_path, backend=BACKEND.TORCH)
-        quantize_config = quantized_model.quantize_config
-        qModules: Dict[str, TorchQuantLinear] = find_modules(quantized_model.model, [TorchQuantLinear])
+        if adapter.path is None:
+            raise ValueError("adapter path is required")
+
+        quantized_model = GPTQModel.load(model_id_or_path=quantized_model_id_or_path, backend=BACKEND.TORCH)
+        qcfg = quantized_model.quantize_config
+        qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
         # for name, module in qModules.items():
         #     quantized_weights[name] = module.dequantize_weight()
         del quantized_model
         torch_empty_cache()
 
-        model = GPTQModel.load(model_id_or_path, quantize_config, backend=backend)
+        model = GPTQModel.load(model_id_or_path=model_id_or_path, quantize_config=qcfg, backend=backend)
         model.eora_generate(adapter=adapter,
                             quantized_modules=qModules,
                             calibration_dataset=calibration_dataset,
@@ -513,5 +516,4 @@ class GPTQModel:
                             logger_board=logger_board,
                             buffered_fwd=buffered_fwd,
                             auto_gc=auto_gc)
-        model.eora_save(adapter.path)
         return

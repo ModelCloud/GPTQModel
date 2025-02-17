@@ -462,14 +462,17 @@ class BaseGPTQModel(nn.Module):
         ]
 
         # prepare processor worker (looper)
-        module_looper = ModuleLooper(self, processors=processors)
+        module_looper = ModuleLooper(model=self, processors=processors)
 
-        return module_looper.loop(
+        module_looper.loop(
             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
             buffered_fwd=buffered_fwd,
             auto_gc=auto_gc,
             backend=backend,
         )
+
+        self.eora_save(eora_path=adapter.path)
+        return
 
     def quantize_old(
         self,
