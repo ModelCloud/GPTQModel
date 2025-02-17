@@ -64,6 +64,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
 
 class TestEoraPostQuant(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
+    QUANTIZED_MODEL_PATH = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1/"
 
     @classmethod
     def setUpClass(cls):
@@ -105,21 +106,19 @@ class TestEoraPostQuant(ModelTest):
                 rank=rank,
             )
 
-            quantized_model_path = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1/"
-
             # eora generation and save in one step
             GPTQModel.adapter.generate(
                 adapter=eora,
                 model_id_or_path=self.NATIVE_MODEL_ID,
-                quantized_model_id_or_path=quantized_model_path,
+                quantized_model_id_or_path=self.QUANTIZED_MODEL_PATH,
                 calibration_dataset=calibration_dataset,
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
                 auto_gc=auto_gc)
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             for backend in [BACKEND.TORCH]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-                base_bench = bench(path=quantized_model_path, backend=backend, adapter=None)  # inference using qweights only
-                eora_bench = bench(path=quantized_model_path, backend=backend, adapter=eora)  # inference using eora (lora)
+                base_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=None)  # inference using qweights only
+                eora_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=eora)  # inference using eora (lora)
 
                 print('--------Quant/EoRA Config ---------')
 
