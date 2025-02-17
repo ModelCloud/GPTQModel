@@ -74,7 +74,7 @@ class Test(ModelTest):
 
     def test_quant_and_eora(self):
         bits = 4
-        group_size = 64
+        group_size = 128
         desc_act = True
         rank = 256
         batch_size = 1
