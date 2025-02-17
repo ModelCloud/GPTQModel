@@ -331,7 +331,7 @@ class GPTQModel:
                 tokenizer = Tokenicer.load(model_id_or_path)
 
         if tokenizer is None:
-            raise ValueError("cannot load tokenizer with `model_or_id_or_path`.")
+            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
         model_args["tokenizer"] = tokenizer
 
