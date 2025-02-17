@@ -20,7 +20,8 @@ class TestLoadModelscope(ModelTest):
     def test_load_modelscope(self):
         model = GPTQModel.load(self.MODEL_ID)
 
-        result = model.generate("Hello")[0]
-        assert(model.tokenizer.decode(result))
+        result = model.generate("The capital of mainland China is")[0]
+        str_output = model.tokenizer.decode(result)
+        assert "beijing" in str_output.lower() or "bei-jing" in str_output.lower()
 
         del model
