@@ -19,6 +19,8 @@ import os
 import sys
 from typing import Dict, List
 
+from gptqmodel.utils.eval import EVAL
+
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -38,7 +40,6 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
-from gptqmodel.utils.eval import lm_eval  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
@@ -49,7 +50,7 @@ RAND_SEED = 898
 
 
 class ModelTest(unittest.TestCase):
-    TASK_NAME = "arc_challenge"
+    TASK_NAME = [EVAL.LM_EVAL.ARC_CHALLENGE]
     # sub test can modify
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
@@ -254,20 +255,18 @@ class ModelTest(unittest.TestCase):
                     model_args = ""
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
-                results = lm_eval(
+                results = GPTQModel.eval(
                     model,
                     model_name="vllm" if self.USE_VLLM else "hf",
                     model_args=model_args,
                     output_path=tmp_dir,
+                    framework=EVAL.LM_EVAL,
                     tasks=self.TASK_NAME,
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
                     gen_kwargs="temperature=0.0,top_k=50",
                     random_seed=RAND_SEED,
-                    numpy_random_seed=RAND_SEED,
-                    torch_random_seed=RAND_SEED,
-                    fewshot_random_seed=RAND_SEED,
                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                 )
 

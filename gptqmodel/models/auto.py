@@ -284,10 +284,10 @@ class GPTQModel:
 
     @classmethod
     def eval(
-            cls,
+            model,
             model_id_or_path: str,
-            framework: EVAL,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
+            framework: EVAL = EVAL.LM_EVAL,
             batch_size: int = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
@@ -332,15 +332,17 @@ class GPTQModel:
             #     model_name = HFLM(
             #         pretrained=model,
             #         batch_size=batch_size,
-            #         max_batch_size=max_batch_size,
             #         trust_remote_code=trust_remote_code,
             #     )
+            apply_chat_template=args.pop("apply_chat_template")
+            if apply_chat_template is None:
+                apply_chat_template = True if tokenizer.chat_template is not None else False
             results = simple_evaluate(
                 model=model_name,
                 model_args=model_args,
-                tasks=tasks,
+                tasks=[task.value for task in tasks],
                 batch_size=batch_size,
-                apply_chat_template=True if tokenizer.chat_template is not None else False,
+                apply_chat_template=apply_chat_template,
                 gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
                 random_seed=random_seed,
                 numpy_random_seed=random_seed,
