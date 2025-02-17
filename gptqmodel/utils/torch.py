@@ -17,6 +17,7 @@
 import gc as py_gc
 
 import torch
+from packaging.version import Version
 
 HAS_CUDA = False
 HAS_XPU = False
@@ -40,6 +41,16 @@ try:
     HAS_MLX = True
 except BaseException:
     pass
+
+def torch_compile(module=torch.nn.Module, backend:str ="inductor", mode: str = None, fullgraph=False):
+    from gptqmodel.models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
+
+    if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
+        return module
+    try:
+        return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
+    except BaseException:
+        return module
 
 def torch_new_stream():
     global STREAM

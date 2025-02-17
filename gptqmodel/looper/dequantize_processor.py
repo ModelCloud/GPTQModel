@@ -14,16 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Optional
+from typing import Dict
 
-import torch
-from gptqmodel import QuantizeConfig
-from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.torch import torch_compile
 
 logger = setup_logger()
 
@@ -44,7 +41,9 @@ class DequantizeProcessor(LoopProcessor):
         w = module.weight.data
 
         # TODO fix num_itr param..need to calculate this before dequant
-        wq = self.quantized_modules.pop(module.full_name).dequantize_weight(num_itr=1).T.to(device=device)
+        m = self.quantized_modules.pop(module.full_name)
+        m.dequantize_weight = torch_compile(m.dequantize_weight)
+        wq = m.dequantize_weight().T.to(device=device)
 
         module.state.update({
             "w": w,

@@ -113,7 +113,8 @@ class TestEoraPostQuant(ModelTest):
                 model_id_or_path=self.NATIVE_MODEL_ID,
                 quantized_model_id_or_path=quantized_model_path,
                 calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size, auto_gc=auto_gc)
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                auto_gc=auto_gc)
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             for backend in [BACKEND.TORCH]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
