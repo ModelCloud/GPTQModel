@@ -19,12 +19,19 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
 
+
 logger = setup_logger()
+
+
+# shapes = set()
+#
+# shapes_size = 0
 
 class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [2, 3, 4, 8]
@@ -45,16 +52,16 @@ class TorchQuantLinear(PackableQuantLinear):
     QUANT_TYPE = "torch"
 
     def __init__(
-        self,
-        bits: int,
-        group_size: int,
-        sym: bool,
-        desc_act: bool,
-        in_features: int,
-        out_features: int,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
-        **kwargs,
+            self,
+            bits: int,
+            group_size: int,
+            sym: bool,
+            desc_act: bool,
+            in_features: int,
+            out_features: int,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int32,
+            **kwargs,
     ):
         super().__init__(
             bits=bits,
@@ -107,6 +114,10 @@ class TorchQuantLinear(PackableQuantLinear):
     def compile(self):
         # compile dequantize
         self.dequantize = torch.compile(self.dequantize)
+        if self.compile_forward:
+            self._forward = torch.compile(self._forward)
+
+    compile_forward=False
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
@@ -114,7 +125,27 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
+
+        # shapes.add(x.shape)
+        # global shapes_size
+        # if len(shapes) != shapes_size:
+        #     shapes_size = len(shapes)
+        #     print(f"eeeeeeeeee x.shape: {x.shape} size: {shapes_size}")
+
+        if self.compile_forward or x.shape[0] > 220: # for test_inference_speed, size must be greater than 220
+            # pad first dim to max tokens size
+            pad_size = (0, 0, 0, 220 - x.shape[0])
+            original_first_dim = x.shape[0]
+            x = F.pad(x, pad_size, "constant", 0)  # pad with 0
+
+        # now = time.time()
         out = self._forward(x, x.dtype)
+        # print(f"out forward time={time.time()-now}")
+
+        if self.compile_forward:
+            # restore shape
+            out = out[:original_first_dim, :]
+
         out = out.reshape(out_shape)
         return out
 
