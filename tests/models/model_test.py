@@ -263,8 +263,7 @@ class ModelTest(unittest.TestCase):
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
                 results = GPTQModel.eval(
-                    model=model,
-                    model_id_or_path=None,
+                    model_or_id_or_path=model,
                     backend="vllm" if self.USE_VLLM else "gptqmodel",
                     model_args=model_args,
                     output_path=tmp_dir,

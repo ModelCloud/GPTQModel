@@ -48,7 +48,7 @@ class TestEval(unittest.TestCase):
             if task == EVAL.LM_EVAL.GPQA:
                 model_args["gpu_memory_utilization"]=0.7
 
-            results = GPTQModel.eval(model_id_or_path=self.MODEL_ID,
+            results = GPTQModel.eval(model_or_id_or_path=self.MODEL_ID,
                                      framework=eval_backend,
                                      tasks=[task],
                                      batch_size=32,

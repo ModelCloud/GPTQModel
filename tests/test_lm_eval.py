@@ -40,7 +40,7 @@ class TestLmEval(unittest.TestCase):
     def test_lm_eval(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
            results = GPTQModel.eval(
-                model_id_or_path=self.MODEL_ID,
+                model_or_id_or_path=self.MODEL_ID,
                 apply_chat_template=True,
                 output_path=tmp_dir,
                 tasks=[self.task],

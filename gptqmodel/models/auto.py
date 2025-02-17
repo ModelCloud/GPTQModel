@@ -287,8 +287,7 @@ class GPTQModel:
             cls,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]],
             framework: EVAL = EVAL.LM_EVAL,
-            model=None, # model instance
-            model_id_or_path: str=None,
+            model_or_id_or_path: str=None,
             batch_size: int = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
@@ -305,6 +304,13 @@ class GPTQModel:
 
         if backend not in ['gptqmodel', 'vllm']:
             raise ValueError('Eval framework support backend: [gptqmodel, vllm]')
+
+        if isinstance(model_or_id_or_path, str):
+            model = None
+            model_id_or_path = model_or_id_or_path
+        else:
+            model  = model_or_id_or_path
+            model_id_or_path = model.model_local_path
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
