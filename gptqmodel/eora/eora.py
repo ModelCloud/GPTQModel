@@ -32,15 +32,16 @@ def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict
     del inp, tmp, adds, adds_sum
 
 def eora_compute_lora(
-        w: Tensor, # w: original fp16 weights,
-        wq: Tensor, # wq: is gptq (smoothed) fp16 weights, before packing
+        device: torch.device,
+        w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qeight) delta in float32
         module: NamedModule,
         eigen_scaling_diag_matrix: torch.float32,
-        rank: int) -> Tuple[Tensor, Tensor, Tensor]:
-    delta = w - wq
+        rank: int) -> Tuple[Tensor, Tensor]:
+
+    assert w_wq_delta.dtype != torch.float32
 
     # save this later for SVD
-    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=w.device)
+    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=device)
 
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
     if (L < 0).any().item():
@@ -55,13 +56,13 @@ def eora_compute_lora(
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
     except Exception:
         logger.warn("`scaling_diag_matrix` is not full rank!") # TODO: assert?
-        scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(w.device)
+        scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(device)
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
 
     scaling_diag_matrix = scaling_diag_matrix.to(dtype=torch.float32)
     scaling_matrix_inv = scaling_matrix_inv.to(dtype=torch.float32)
-    
-    delta_scale = torch.matmul(delta.to(dtype=torch.float32), scaling_diag_matrix)
+
+    delta_scale = torch.matmul(w_wq_delta, scaling_diag_matrix)
 
     U, S, V = torch.linalg.svd(delta_scale, full_matrices=False)
     lowrank_r = rank
@@ -71,13 +72,12 @@ def eora_compute_lora(
     truc_sigma = torch.diag(truc_s)
 
     sqrtS = torch.sqrt(truc_sigma)
-    B = torch.matmul(truc_u, sqrtS).to(dtype=wq.dtype)
-    A = torch.matmul(sqrtS, truc_v).to(dtype=wq.dtype)
+    B = torch.matmul(truc_u, sqrtS).to(dtype=torch.float16)
+    A = torch.matmul(sqrtS, truc_v).to(dtype=torch.float16)
 
-    computed_wq = wq + (B @ A)
 
     del L, Q, U, S, V,
-    del w, wq, delta, raw_scaling_diag_matrix, sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
+    del w_wq_delta, raw_scaling_diag_matrix, sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
     del truc_s, truc_u, truc_v, truc_sigma, sqrtS
     
-    return A, B, computed_wq
+    return A, B

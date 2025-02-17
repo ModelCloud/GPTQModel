@@ -108,15 +108,28 @@ class EoraProcessor(LoopProcessor):
         w = module.state.pop("w")
         wq: torch.Tensor = module.state["wq"]
 
-        A, B, computed_wq = eora_compute_lora(
-            w=w,
-            wq=wq,
+        print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
+        if w.dtype != torch.float16:
+            w_wq_delta = w.to(dtype=torch.float32) - wq # wq is float16
+        else:
+            w_wq_delta = w - wq
+
+        assert w_wq_delta.dtype == torch.float32
+
+        print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
+        w_device = w.device # TODO FIX clear up device situation between w and wq
+        del w
+
+        A, B = eora_compute_lora(
+            device=w_device,
+            w_wq_delta=w_wq_delta.to(dtype=torch.float32),
             module=module,
             eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
             rank=module.adapter_cfg.rank
         )
 
-        del w
+        # wq with A/B applied
+        computed_wq = wq + (B @ A)
 
         module.state.update({
             "wq": move_to(wq, device=CPU, stream=self.stream),
@@ -148,14 +161,27 @@ class EoraProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {
-            "lora_A.weight": move_to(A.to(dtype=torch.float16), device=CPU, stream=self.stream), # A.to(dtype=torch.float16, device=CPU),
-            "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=self.stream), # B.to(dtype=torch.float16, device=CPU),
+            "lora_A.weight": move_to(A.to(dtype=torch.float16), device=CPU, stream=self.stream),
+            "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=self.stream),
         })
+
+        # eora = Lora(rank=module.adapter_cfg.rank, lora_A=A, lora_B=B)
+        #
+        # module.state.update({
+        #     "adapter": eora,
+        # })
 
     def submodule_finalize(self, module: NamedModule):
         pass
-        # if module.state.pop("streaming", False):
-        #     torch_sync()
+        # adapter: Lora = module.state.pop("adapter")
+        #
+        # # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+        # self.result_save(module.full_name, {
+        #     "lora_A.weight": move_to(adapter.lora_A.to(dtype=torch.float16), device=CPU, stream=self.stream),
+        #     # A.to(dtype=torch.float16, device=CPU),
+        #     "lora_B.weight": move_to(adapter.lora_B.to(dtype=torch.float16), device=CPU, stream=self.stream),
+        #     # B.to(dtype=torch.float16, device=CPU),
+        # })
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams

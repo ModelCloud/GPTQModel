@@ -13,10 +13,10 @@ LORA_MERGED_WEIGHT_PATHS = [None, ""]
 # TODO FIX ME: cache of adapter tensors loaded from disk
 adapter_load_cache = None
 
-@dataclass
 class Adapter():
-    path: str
-    rank: int
+    def __init__(self, rank: int, path: str = None):
+        self.rank = rank
+        self.path = path
 
     # override me
     def apply(self, x: torch.Tensor, out: torch.Tensor):
@@ -41,14 +41,13 @@ class Adapter():
         pass
 
 
-
 @dataclass
 class Lora(Adapter):
-    path: str = field(default=None)
-    rank: int = field(default=256, metadata={"choices": [32, 64, 128, 256, 512]})
+    def __init__(self, rank: int, path: str = None, lora_A: torch.Tensor = None, lora_B: torch.Tensor = None):
+        super().__init__(rank, path)
 
-    lora_A: torch.Tensor = None
-    lora_B: torch.Tensor = None
+        self.lora_A = lora_A
+        self.lora_B = lora_B
 
     @classmethod
     def name(cls) -> str:
