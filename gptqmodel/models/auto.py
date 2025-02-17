@@ -513,4 +513,5 @@ class GPTQModel:
                             logger_board=logger_board,
                             buffered_fwd=buffered_fwd,
                             auto_gc=auto_gc)
+        model.eora_save(adapter.path)
         return

@@ -100,7 +100,9 @@ def ModelWriter(cls):
 
             os.makedirs(os.path.dirname(eora_path), exist_ok=True)
 
-            save_file(tensors=weights, filename=eora_path)
+            save_file(tensors=weights, filename=eora_path, metadata={"format": "pt"})
+
+    cls.eora_save = eora_save
 
     def save_quantized(
             self,
