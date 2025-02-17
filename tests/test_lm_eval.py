@@ -52,8 +52,8 @@ class TestLmEval(unittest.TestCase):
                print(make_table(results, "groups"))
            print('--------lm_eval Result End---------')
 
-           acc_score = results['results'].get(self.task, {}).get('acc,none')
-           acc_norm_score = results['results'].get(self.task, {}).get('acc_norm,none')
+           acc_score = results['results'].get(self.task.value, {}).get('acc,none')
+           acc_norm_score = results['results'].get(self.task.value, {}).get('acc_norm,none')
 
            self.assertGreaterEqual(acc_score, 0.28, "acc score does not match expected result")
            self.assertGreaterEqual(acc_norm_score, 0.32, "acc_norm score does not match expected result")

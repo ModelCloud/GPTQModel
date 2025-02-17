@@ -50,7 +50,7 @@ RAND_SEED = 898
 
 
 class ModelTest(unittest.TestCase):
-    TASK_NAME = [EVAL.LM_EVAL.ARC_CHALLENGE]
+    TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
     # sub test can modify
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
@@ -261,7 +261,7 @@ class ModelTest(unittest.TestCase):
                     model_args=model_args,
                     output_path=tmp_dir,
                     framework=EVAL.LM_EVAL,
-                    tasks=self.TASK_NAME,
+                    tasks=[self.TASK_NAME],
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
@@ -276,7 +276,7 @@ class ModelTest(unittest.TestCase):
                     print(make_table(results, "groups"))
                 print('--------Eval Result End---------')
                 task_results = {
-                    metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
+                    metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
