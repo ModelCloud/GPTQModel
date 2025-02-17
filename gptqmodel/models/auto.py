@@ -43,7 +43,7 @@ from typing import Dict, List, Optional, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig, AutoTokenizer, PreTrainedModel  # noqa: E402
+from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
@@ -287,7 +287,7 @@ class GPTQModel:
     def eval(
             cls,
             model_or_id_or_path: str=None,
-            tokenizer=None,
+            tokenizer: PreTrainedTokenizerBase=None,
             tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
             framework: EVAL = EVAL.LM_EVAL,
             batch_size: int = 1,
@@ -327,6 +327,11 @@ class GPTQModel:
                 tokenizer = model.tokenizer
             elif isinstance(model, PreTrainedModel):
                 tokenizer = Tokenicer.load(model_id_or_path)
+
+        if tokenizer is None:
+            raise ValueError("tokenizer is required for lm-eval, please check your settings.")
+
+        model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
