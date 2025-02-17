@@ -546,7 +546,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
+          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ] || [ "${{ matrix.test_script }}" == "test_q4_bitblas" ]; then
             echo "===== install auto_round bitblas==0.0.1.dev13 ====="
             uv pip install auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
