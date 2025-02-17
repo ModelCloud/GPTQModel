@@ -28,6 +28,10 @@ class Adapter():
         pass
 
     # override me
+    def compile(self):
+        pass
+
+    # override me
     @classmethod
     def name(cls) -> List[str]:
         pass
@@ -55,8 +59,16 @@ class Lora(Adapter):
     def parameter_keys(cls) -> List[str]:
         return ["lora_A", "lora_B"]
 
+    # since qlinear uses `g_compile`, we use it here too
+    def g_compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        print("Lora compile")
+        self.apply = torch.compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
+
     def apply(self, x: torch.Tensor, out: torch.Tensor):
+        # original code
         # out = out + ((x @ self.lora_A) @ self.lora_B)
+
+        # fix batch for lora
         if out.shape[0] > 1:
             out_orgi_shape = out.shape
             out = out.view(-1, out.shape[-1])

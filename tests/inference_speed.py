@@ -54,7 +54,7 @@ class InferenceSpeed(unittest.TestCase):
         )
 
         if compile:
-            model.compile()
+            model.g_compile()
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer.pad_token_id = tokenizer.eos_token_id

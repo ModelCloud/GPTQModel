@@ -1099,7 +1099,7 @@ class BaseGPTQModel(nn.Module):
         else:
             self.save_pretrained(save_dir=save_dir, **kwargs)
 
-    def compile(self, backend: str = None, mode: str = None, fullgraph: bool = False):
+    def g_compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if not self.quantized:
             logger.warning("model is not quantized, skip compiling...")
             return self
@@ -1112,30 +1112,35 @@ class BaseGPTQModel(nn.Module):
 
         # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
         #torch._dynamo.config.suppress_errors = True
-        logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
+        #logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
-        try:
-            self.model = torch.compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
-            self.compiled = True
-        except Exception as e:
-            # if fullgraph is already disabled, no need to try again
-            if not fullgraph:
-                self.compiled = False
-                logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
-            else:
-                logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
-                try:
-                    self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
-                    self.compiled = True
-                except Exception as e:
-                    self.compiled = False
-                    logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
+        # try:
+        #     self.model = torch.compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
+        #     self.compiled = True
+        # except Exception as e:
+        #     # if fullgraph is already disabled, no need to try again
+        #     if not fullgraph:
+        #         self.compiled = False
+        #         logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
+        #     else:
+        #         logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
+        #         try:
+        #             self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
+        #             self.compiled = True
+        #         except Exception as e:
+        #             self.compiled = False
+        #             logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
 
         # trigger kernel compilation hooks
-        if self.compiled:
-            modules = find_modules(self.model, layers=[BaseQuantLinear])
-            for name in modules.keys():
-                modules[name].compile()
+        # if self.compiled:
+        #     modules = find_modules(self.model, layers=[BaseQuantLinear])
+        #     for name in modules.keys():
+        #         modules[name].g_compile(fullgraph=False, backend=backend, mode=mode)
+
+        logger.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
+        modules = find_modules(self.model, layers=[BaseQuantLinear])
+        for name in modules.keys():
+            modules[name].g_compile(fullgraph=False, backend=backend, mode=mode)
 
         return self
 

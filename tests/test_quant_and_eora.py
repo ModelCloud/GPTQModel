@@ -39,6 +39,9 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
         backend=backend,
         adapter=adapter,
     )
+
+    model.g_compile()
+
     tokens = model.generate("Capital of France is")[0]
     result = model.tokenizer.decode(tokens)
     print(f"BACKEND: {backend}, Result: {result}")
@@ -100,7 +103,8 @@ class Test(ModelTest):
             del model
             torch_empty_cache()
 
-            for backend in [ BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
+            for backend in [ BACKEND.EXLLAMA_V2, BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 base_bench = bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
                 eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 

@@ -334,8 +334,9 @@ class BaseQuantLinear(nn.Module):
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
+    # hack: use g_compile so we don't override native module.compile()
     # override me, to perform any torch.compile logic on the kernel pre forward
-    def compile(self):
+    def g_compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         pass
 
 class PackableQuantLinear(BaseQuantLinear):
