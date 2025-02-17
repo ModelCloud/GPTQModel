@@ -257,7 +257,7 @@ class ModelTest(unittest.TestCase):
                 from lm_eval.utils import make_table
                 results = GPTQModel.eval(
                     model,
-                    model_name="vllm" if self.USE_VLLM else "hf",
+                    backend="vllm" if self.USE_VLLM else "gptqmodel",
                     model_args=model_args,
                     output_path=tmp_dir,
                     framework=EVAL.LM_EVAL,
