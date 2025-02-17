@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 
 from lm_eval.utils import make_table
+from tokenicer import Tokenicer
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -42,7 +43,7 @@ from typing import Dict, List, Optional, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig,AutoTokenizer  # noqa: E402
+from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
@@ -286,7 +287,8 @@ class GPTQModel:
     def eval(
             cls,
             model_or_id_or_path: str=None,
-            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to tifx mutable warning
+            tokenizer: PreTrainedTokenizerBase=None,
+            tasks: Union[List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
             framework: EVAL = EVAL.LM_EVAL,
             batch_size: int = 1,
             trust_remote_code: bool = False,
@@ -316,20 +318,29 @@ class GPTQModel:
         if isinstance(model_or_id_or_path, str):
             model = None
             model_id_or_path = model_or_id_or_path
+        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, PreTrainedModel):
+            model = model_or_id_or_path
+            model_id_or_path = model.config.name_or_path  #
         else:
-            model  = model_or_id_or_path
-            model_id_or_path = model.model_local_path
+            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
+
+        if tokenizer is None:
+            if isinstance(model, BaseGPTQModel):
+                tokenizer = model.tokenizer
+            elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
+                tokenizer = Tokenicer.load(model_id_or_path)
+
+        if tokenizer is None:
+            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
+
+        model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
-            # model_id_or_path=model_id_or_path if model_id_or_path else model.model_id_or_path
-            # tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-            tokenizer = model.tokenizer if model else AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-
-            model_name = 'hf' if backend == 'gptqmodel' else backend
+            model_name = "hf" if backend == "gptqmodel" else backend
 
             if backend == "gptqmodel":
                 model_args["gptqmodel"] = True
@@ -349,13 +360,13 @@ class GPTQModel:
                     batch_size=batch_size,
                     trust_remote_code=trust_remote_code,
                 )
-            apply_chat_template=args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
+
             results = simple_evaluate(
                 model=model_name,
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
                 batch_size=batch_size,
-                apply_chat_template=apply_chat_template,
+                apply_chat_template=args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False),
                 gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
                 random_seed=random_seed,
                 numpy_random_seed=random_seed,
