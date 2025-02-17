@@ -20,6 +20,7 @@ from typing import List
 import torch
 from gptqmodel.looper.dequantize_processor import DequantizeProcessor
 from gptqmodel.looper.eora_processor import EoraProcessor
+from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
@@ -394,7 +395,15 @@ class ModuleLooper():
         total_log = {}
 
         for reverse_p in reversed(self.processors):
-            logger.info(f"Quantization summary:\n{reverse_p.log}")
+            if isinstance(reverse_p, GPTQProcessor):
+                logger.info(f"Quantization summary:\n{reverse_p.log}")
+            elif isinstance(reverse_p, EoraProcessor):
+                logger.info(f"Eora summary:\n{reverse_p.log}")
+            elif isinstance(reverse_p, DequantizeProcessor):
+                # ignore log
+                pass
+            else:
+                logger.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
 
             processor_name = reverse_p.name()
             total_log[processor_name] = reverse_p.log
