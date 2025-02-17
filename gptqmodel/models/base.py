@@ -31,6 +31,7 @@ from packaging.version import Version
 from tokenicer import Tokenicer
 from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
 
+from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
@@ -371,18 +372,82 @@ class BaseGPTQModel(nn.Module):
             )
         ]
 
+        # overwrite quantize_config.adapter
+        if adapter is not None:
+            self.quantize_config.adapter = adapter
+
         # Append EoRA processor for lora adapter
         if isinstance(self.quantize_config.adapter, Lora):
             processors.append(
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration_dataset,
+                    calibration_dataset=adapter_calibration_dataset,
                     calibration_dataset_concat_size=calibration_dataset_concat_size,
                     batch_size=batch_size,
                     logger_board=logger_board,
                 )
             )
+
+        # prepare processor worker (looper)
+        module_looper = ModuleLooper(self, processors=processors)
+
+        return module_looper.loop(
+            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+            buffered_fwd=buffered_fwd,
+            auto_gc=auto_gc,
+            backend=backend,
+        )
+
+    def eora_generate(
+        self,
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter,
+        quantized_weights: Dict[str, torch.Tensor],
+        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration_dataset_concat_size: Optional[int] = None,
+        batch_size: int = 1,
+        calibration_enable_gpu_cache: bool = True,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        logger_board: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+        buffered_fwd: bool = False,
+        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
+        auto_gc: bool = True,
+    ):
+        if self.quantized:
+            raise EnvironmentError("eora_generate() is called a model that is already quantized")
+
+        # Use the provided tokenizer if one is passed to quantize()
+        if tokenizer is not None:
+            if isinstance(tokenizer, PreTrainedTokenizerBase):
+                # TODO FIX ME...this is a bug
+                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+            else:
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
+
+        from gptqmodel.adapter.adapter import Lora
+        from gptqmodel.looper.eora_processor import EoraProcessor
+        from gptqmodel.looper.module_looper import ModuleLooper
+
+        self.quantize_config.adapter = adapter
+
+        assert isinstance(self.quantize_config.adapter, Lora)
+
+        # init processor with default GPTQ processor
+        processors = [
+            EoraProcessor(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                batch_size=batch_size,
+                logger_board=logger_board,
+                quantized_weights=quantized_weights,
+            )
+        ]
 
         # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)

@@ -18,6 +18,8 @@ import time
 from typing import List
 
 import torch
+
+from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
@@ -239,6 +241,12 @@ class ModuleLooper():
                         if not isinstance(subset[name], NamedModule):
                             named_module = NamedModule(subset[name], name=name, full_name=layer_name,
                                                       layer_index=layer_index)
+                            if isinstance(processor, EoraProcessor):
+                                named_module.state.update({
+                                    "wq": processor.quantized_weights[layer_name],
+                                })
+                                processor.release_quantized_weights()
+
                             subset[name] = named_module
                             full[name] = named_module
 

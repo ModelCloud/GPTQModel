@@ -21,6 +21,7 @@ import os
 from gptqmodel.adapter.adapter import Adapter, normalize_adapter
 
 from ..eora_test.eora_generate import eora_generate
+from ..nn_modules.qlinear.torch import TorchQuantLinear
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -44,13 +45,13 @@ from typing import Any, Dict, List, Optional, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from transformers import AutoConfig  # noqa: E402
+from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
-from ..utils.model import check_and_get_model_type  # noqa: E402
+from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -478,23 +479,38 @@ class GPTQModel:
     @classmethod
     def eora_generate(cls,
                       model_id_or_path: str,
-                      quantize_config: QuantizeConfig,
-                      quantized_weights: Dict[str, torch.Tensor],
-                      calibration_dataset: Union[
-                          List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-                      output_path: Union[str | os.PathLike],
-                      lora_rank: int = 64,
+                      quantized_model_id_or_path: str,
+                      # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+                      adapter: Adapter,
+                      calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+                      calibration_dataset_concat_size: Optional[int] = None,
                       batch_size: int = 1,
                       calibration_enable_gpu_cache: bool = True,
+                      tokenizer: Optional[PreTrainedTokenizerBase] = None,
+                      logger_board: Optional[str] = None,
+                      backend: Optional[BACKEND] = BACKEND.AUTO,
+                      # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
+                      buffered_fwd: bool = False,
+                      # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
                       auto_gc: bool = True,
                       ):
-        model = GPTQModel.load(model_id_or_path, quantize_config)
-        eora_weight = eora_generate(model=model, calibration_dataset=calibration_dataset, batch_size=batch_size,
-                                    quantized_weights=quantized_weights, lora_rank=lora_rank,
-                                    calibration_enable_gpu_cache=calibration_enable_gpu_cache, auto_gc=auto_gc)
+        quantized_model = GPTQModel.load(quantized_model_id_or_path, backend=BACKEND.TORCH)
+        quantize_config = quantized_model.quantize_config
+        qModules = find_modules(quantized_model.model, [TorchQuantLinear])
+        quantized_weights = {}
+        for name, module in qModules.items():
+            quantized_weights[name] = module.dequantize_weight().T.detach().to("cpu", torch.float16)
 
-        assert os.path.isfile(output_path), "output_path must be a file"
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-        torch.save(eora_weight, output_path)
+        model = GPTQModel.load(model_id_or_path, quantize_config, backend=backend)
+        model.eora_generate(model=model,
+                            adapter=adapter,
+                            quantized_weights=quantized_weights,
+                            calibration_dataset=calibration_dataset,
+                            calibration_dataset_concat_size=calibration_dataset_concat_size,
+                            batch_size=batch_size,
+                            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+                            tokenizer=tokenizer,
+                            logger_board=logger_board,
+                            buffered_fwd=buffered_fwd,
+                            auto_gc=auto_gc)
         return

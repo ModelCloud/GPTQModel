@@ -40,9 +40,12 @@ logger = setup_logger()
 class EoraProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True):
+                 logger_board: str = "", require_fwd: bool = True,
+                 quantized_weights: Optional[Dict[str, torch.Tensor]] = None):
         super().__init__(tokenizer, qcfg, calibration_dataset, calibration_dataset_concat_size, batch_size,
                          logger_board, require_fwd)
+
+        self.quantized_weights = quantized_weights
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix: Dict[str, torch.float32] = {}
@@ -180,6 +183,8 @@ class EoraProcessor(LoopProcessor):
                 return False
         return True
 
+    def release_quantized_weights(self):
+        del self.quantized_weights
 
     @classmethod
     def name(cls) -> str:
