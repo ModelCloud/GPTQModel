@@ -15,7 +15,7 @@ class TestLoadModelscope(ModelTest):
 
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
+        self.MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4"
 
     def test_load_modelscope(self):
         model = GPTQModel.load(self.MODEL_ID)
