@@ -148,7 +148,6 @@ class TestBits(unittest.TestCase):
         )
         results = GPTQModel.eval(
             model_or_id_or_path=model,
-            model_name="hf",
             output_path=tmp_dir,
             tasks=[TASK_NAME],
             apply_chat_template=False,
