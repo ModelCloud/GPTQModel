@@ -502,8 +502,7 @@ class GPTQModel:
             quantized_weights[name] = module.dequantize_weight().T.detach().to("cpu", torch.float16)
 
         model = GPTQModel.load(model_id_or_path, quantize_config, backend=backend)
-        model.eora_generate(model=model,
-                            adapter=adapter,
+        model.eora_generate(adapter=adapter,
                             quantized_weights=quantized_weights,
                             calibration_dataset=calibration_dataset,
                             calibration_dataset_concat_size=calibration_dataset_concat_size,

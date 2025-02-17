@@ -245,7 +245,7 @@ class ModuleLooper():
                                 named_module.state.update({
                                     "wq": processor.quantized_weights[layer_name],
                                 })
-                                processor.release_quantized_weights()
+                                # TODO processor.release_quantized_weights()
 
                             subset[name] = named_module
                             full[name] = named_module
