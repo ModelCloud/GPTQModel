@@ -310,7 +310,6 @@ class GPTQModel:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"lm_eval support tasks: {EVAL.get_all_tasks_string()}")
 
-            from gptqmodel.utils.eval import lm_eval
             from transformers import AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -321,21 +320,6 @@ class GPTQModel:
                 def_args += ",gptqmodel=True"
             model_args = f"{def_args},{extra_model_args}" if extra_model_args else def_args
 
-            # results = lm_eval(
-            #     model_args=model_args,
-            #     model_name=model_name,
-            #     tasks=[task.value for task in tasks],
-            #     trust_remote_code=trust_remote_code,
-            #     batch_size=batch_size,
-            #     apply_chat_template=True if tokenizer.chat_template is not None else False,
-            #     output_path=output_path,
-            #     numpy_random_seed=random_seed,
-            #     torch_random_seed=random_seed,
-            #     fewshot_random_seed=random_seed,
-            #     **args
-            # )
-
-            ############## def lm_eval start ##############
             try:
                 from lm_eval import simple_evaluate
                 from lm_eval.loggers import EvaluationTracker, WandbLogger
@@ -356,6 +340,7 @@ class GPTQModel:
                 model_args=model_args,
                 tasks=tasks,
                 batch_size=batch_size,
+                apply_chat_template=True if tokenizer.chat_template is not None else False,
                 gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
                 random_seed=random_seed,
                 numpy_random_seed=random_seed,
@@ -366,9 +351,6 @@ class GPTQModel:
 
             if results is None:
                 raise ValueError('lm_eval run fail, check your code!!!')
-
-            ############## def lm_eval end  ##############
-
 
             print('--------lm_eval Eval Result---------')
             print(make_table(results))
@@ -454,7 +436,7 @@ class GPTQModel:
         repo_type = "model"
 
         api = HfApi()
-        # if repo does not exists, create it
+        # if repo does not exist, create it
         try:
             api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
         except Exception:
