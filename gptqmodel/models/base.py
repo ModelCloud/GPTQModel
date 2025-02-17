@@ -433,6 +433,7 @@ class BaseGPTQModel(nn.Module):
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
         from gptqmodel.adapter.adapter import Lora
+        from gptqmodel.looper.dequantize_processor import DequantizeProcessor
         from gptqmodel.looper.eora_processor import EoraProcessor
         from gptqmodel.looper.module_looper import ModuleLooper
 
@@ -440,8 +441,17 @@ class BaseGPTQModel(nn.Module):
 
         assert isinstance(self.quantize_config.adapter, Lora)
 
-        # init processor with default GPTQ processor
+        # init processor with EoRA processor
         processors = [
+            DequantizeProcessor(
+                quantized_weights=quantized_weights,
+                # tokenizer = self.tokenizer,
+                # qcfg = self.quantize_config,
+                # calibration_dataset = calibration_dataset
+                # calibration_dataset_concat_size = calibration_dataset_concat_size,
+                # batch_size = batch_size,
+                # logger_board = logger_board,
+            ),
             EoraProcessor(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
@@ -449,8 +459,7 @@ class BaseGPTQModel(nn.Module):
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
                 batch_size=batch_size,
                 logger_board=logger_board,
-                quantized_weights=quantized_weights,
-            )
+            ),
         ]
 
         # prepare processor worker (looper)
