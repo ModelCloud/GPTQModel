@@ -327,7 +327,7 @@ class GPTQModel:
         if tokenizer is None:
             if isinstance(model, BaseGPTQModel):
                 tokenizer = model.tokenizer
-            elif isinstance(model, PreTrainedModel):
+            elif isinstance(model, PreTrainedModel) or (isinstance(model_id_or_path, str) and model_id_or_path.strip()):
                 tokenizer = Tokenicer.load(model_id_or_path)
 
         if tokenizer is None:
