@@ -69,7 +69,7 @@ def patch_evalplus(model):
                 raise ValueError(f"`name` is invalid. expected: `model instance or str` actual: `{name}`")
 
             if self.tokenizer is None:
-                raise ValueError("cannot load tokenizer with `model_or_id_or_path`.")
+                raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
             if self.is_direct_completion():  # no chat template
                 self.eos += extra_eos_for_direct_completion(dataset)
