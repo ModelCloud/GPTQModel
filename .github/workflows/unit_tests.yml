@@ -547,8 +547,8 @@ jobs:
       - name: Install wheel
         run: |
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
-            echo "===== install auto_round ====="
-            uv pip install auto_round -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
+            echo "===== install auto_round bitblas==0.0.1.dev13 ====="
+            uv pip install auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
