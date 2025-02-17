@@ -49,14 +49,17 @@ class EoraProcessor(LoopProcessor):
 
 
         # Increase the dynamo cache size limit, default of 8 is too low
-        if torch._dynamo.config.cache_size_limit < 24:
-            torch._dynamo.config.cache_size_limit = 24
+        if torch._dynamo.config.cache_size_limit < 64:
+            torch._dynamo.config.cache_size_limit = 64
 
         # needed by eora
-        torch._dynamo.config.capture_scalar_outputs = True
+        # torch._dynamo.config.capture_scalar_outputs = True
 
         self.eora_compute_lora = torch_compile(eora_compute_lora)
         self.eora_process_input = torch_compile(eora_process_input)
+
+        # self.eora_compute_lora = eora_compute_lora
+        # self.eora_process_input = eora_process_input
 
     def log_plotly(self):
         task = self.logger_task
