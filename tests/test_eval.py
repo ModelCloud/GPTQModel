@@ -44,17 +44,17 @@ class TestEval(unittest.TestCase):
     def test_eval_gptqmodel(self, eval_backend: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = f"{tmp_dir}/result.json"
-            extra_model_args = ""
+            model_args = {}
             if task == EVAL.LM_EVAL.GPQA:
-                extra_model_args = "gpu_memory_utilization=0.7"
+                model_args["gpu_memory_utilization"]=0.7
 
-            results = GPTQModel.eval(self.MODEL_ID,
+            results = GPTQModel.eval(model_id_or_path=self.MODEL_ID,
                                      framework=eval_backend,
                                      tasks=[task],
                                      batch_size=32,
                                      output_path=output_path,
                                      backend=backend,
-                                     extra_model_args=extra_model_args,
+                                     model_args=model_args,
                                      task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
                                      )
 
