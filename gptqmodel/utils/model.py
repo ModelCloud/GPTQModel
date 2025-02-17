@@ -202,7 +202,7 @@ def make_quant(
         adapter=extension,
     )
 
-    logger.info(f"make_quant: Linear candidates: {quant_linear_candidates}")
+    logger.info(f"Kernel: candidates -> `{quant_linear_candidates}`")
 
     # loop over actual QLinear init, catch errors and use fallbacks if applicable
     for linear in quant_linear_candidates:
@@ -226,10 +226,10 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 adapter=qcfg.adapter,
             )
-            logger.info(f"make_quant: Selected linear: `{linear}`.")
+            logger.info(f"Kernel: selected -> `{linear}`.")
             return linear_instance
         except NotImplementedError as e:
-            logger.info(f"make_quant: Skipped linear: `{linear}`.")
+            logger.info(f"Kernel: skipped -> `{linear}`.")
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e

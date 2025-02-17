@@ -21,7 +21,7 @@ import json
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Set
 
 import torch
 import torch._dynamo
@@ -167,6 +167,10 @@ class BaseGPTQModel(nn.Module):
                     loaded_loras += 1
 
             logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded.")
+
+        # print kernel info:
+        loaded_kernels = self.kernels()
+        logger.info(f"Kernel: loaded kernel(s) -> `{loaded_kernels}`")
 
     def prepare_dataset(
         self,
@@ -1163,6 +1167,16 @@ class BaseGPTQModel(nn.Module):
                         f.write(json.dumps(value))
         else:
             self.save_pretrained(save_dir=save_dir, **kwargs)
+
+
+    # returns all the loaded qlinear types, returns empty [] if non-found
+    def kernels(self) -> List[Type(BaseQuantLinear)]:
+        loaded_kernels = set()
+        modules = find_modules(self.model, layers=[BaseQuantLinear])
+        for k, v in modules.items():
+            loaded_kernels.add(v.__class__)
+
+        return list(loaded_kernels)
 
     def compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         logger.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
