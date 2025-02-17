@@ -19,6 +19,7 @@ import os
 from enum import Enum
 from typing import Optional
 
+from .evalplus import patch_evalplus
 
 class EVAL:
     class LM_EVAL(Enum):
@@ -56,13 +57,15 @@ class EVAL:
 
 
 def evalplus(
-        model: str,
+        model,
         dataset: str,
         batch: int = 1,
         trust_remote_code: bool = False,
         output_file: Optional[str] = None,
         backend: str = 'gptqmodel'
 ):
+    patch_evalplus(model)
+
     try:
         from evalplus.evaluate import evaluate
     except BaseException:
