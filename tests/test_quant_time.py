@@ -27,15 +27,15 @@ from models.model_test import ModelTest  # noqa: E402
 
 class TestQuantTime(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
-    INPUTS_MAX_LENGTH = 2048
     DATASETS_MAX_COUNT = 128
-    QUANT_TIME = 136
+    QUANT_TIME = 116
     MAX_DELTA_PERCENT = 5 # %
 
     def test_quant_time(self):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=128,
+            desc_act=True,
         )
 
         model = GPTQModel.load(
@@ -44,13 +44,18 @@ class TestQuantTime(ModelTest):
         )
         tokenizer = model.tokenizer
 
-        datasets = self.load_dataset(tokenizer)
+        datasets = self.load_dataset(tokenizer, self.DATASETS_MAX_COUNT)
 
-        start_time = time.time()
-        model.quantize(datasets, batch_size=4)
+        start = time.time()
+        model.quantize(
+            calibration_dataset=datasets,
+            # calibration_dataset_concat_size=2048,
+            batch_size=4,
+            auto_gc=False,
+        )
         end_time = time.time()
 
-        quant_time = end_time - start_time
+        quant_time = end_time - start
         diff_pct = (quant_time / self.QUANT_TIME)
 
         print("**************** Quant Time Result Info****************")

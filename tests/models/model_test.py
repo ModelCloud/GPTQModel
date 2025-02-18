@@ -246,9 +246,14 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
+                model_args = {
+                    "pretrained": self.NATIVE_MODEL_ID,
+                    "gptqmodel": True
+                }
+
                 if self.USE_VLLM:
                     model_args = {
                         "pretrained": model.model_local_path,
