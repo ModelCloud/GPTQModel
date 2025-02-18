@@ -63,7 +63,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
 
 class Test(ModelTest):
     #NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
-    NATIVE_MODEL_ID = "meta-llama/Llama-3.2-1B"
+    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
