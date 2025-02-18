@@ -346,8 +346,12 @@ def ModelWriter(cls):
             logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         config.quantization_config = quantize_config.to_dict()
-        config.save_pretrained(save_dir)
 
+        # save config back to model
+        self.model.config = config
+
+        # hack to allow hf to save model without weights (configs only)
+        self.save_pretrained(save_dir, state_dict={})
         quantize_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
