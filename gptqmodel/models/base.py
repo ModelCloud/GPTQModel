@@ -21,7 +21,7 @@ import json
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Type
 
 import torch
 import torch._dynamo
@@ -1179,7 +1179,7 @@ class BaseGPTQModel(nn.Module):
 
 
     # returns all the loaded qlinear types, returns empty [] if non-found
-    def kernels(self) -> List[Type(BaseQuantLinear)]:
+    def kernels(self) -> List[Type[BaseQuantLinear]]:
         loaded_kernels = set()
         modules = find_modules(self.model, layers=[BaseQuantLinear])
         for k, v in modules.items():

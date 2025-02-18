@@ -161,6 +161,17 @@ result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
 ```
 
+To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFace Hub, set an environment variable:
+```shell
+export GPTQMODEL_USE_MODELSCOPE=True
+```
+```py
+from gptqmodel import GPTQModel
+# load Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4 from modelscope
+model = GPTQModel.load("Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4")
+result = model.generate("Uncovering deep insights begins with")[0] # tokens
+print(model.tokenizer.decode(result)) # string output
+```
 
 ### OpenAI API compatible end-point
 ```py

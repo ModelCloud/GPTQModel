@@ -45,21 +45,20 @@ class TestEval(unittest.TestCase):
     )
     def test_eval_gptqmodel(self, framework: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            output_file = f"{tmp_dir}/result.json"
+            output_path = f"{tmp_dir}/result.json"
             model_args = {}
-            if llm_backend == "vllm" and task == EVAL.LM_EVAL.GPQA:
-                model_args.update({"gpu_memory_utilization": 0.7})
+            if task == EVAL.LM_EVAL.GPQA:
+                model_args["gpu_memory_utilization"]=0.7
 
-            results = GPTQModel.eval(
-                model_or_path=self.model,
-                framework=framework,
-                tasks=[task],
-                batch=8 if task == EVAL.LM_EVAL.GPQA else 32,
-                output_file=output_file,
-                llm_backend=llm_backend,
-                model_args=model_args,
-                task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
-            )
+            results = GPTQModel.eval(model_or_id_or_path=self.MODEL_ID,
+                                     framework=framework,
+                                     tasks=[task],
+                                     batch_size=32,
+                                     output_path=output_path,
+                                     llm_backend=llm_backend,
+                                     model_args=model_args,
+                                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
+                                     )
 
             if llm_backend == EVAL.LM_EVAL:
                 if task == EVAL.LM_EVAL.GPQA:

@@ -37,12 +37,9 @@ class TestLoadVLLM(ModelTest):
 
     @classmethod
     def setUpClass(self):
-        if importlib.util.find_spec("flashinfer") is None:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i",
-                                   f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
-
-        if importlib.util.find_spec("vllm") is None:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "vllm>=0.6.2"])
+        if ((importlib.util.find_spec("flashinfer") is None and importlib.util.find_spec("flashinfer-python") is None) or
+                importlib.util.find_spec("vllm") is None):
+            raise RuntimeError("flashinfer and vllm are required by this test. you can install them by `pip install gptqmodel['vllm']`")
 
         from vllm import SamplingParams  # noqa: E402
         self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"

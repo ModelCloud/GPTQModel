@@ -157,7 +157,7 @@ SUPPORTED_MODELS = [
     "cohere",
     "cohere2",
     "minicpm",
-    "minicpm3"
+    "minicpm3",
     "qwen2_moe",
     "qwen2_vl",
     "dbrx_converted",
