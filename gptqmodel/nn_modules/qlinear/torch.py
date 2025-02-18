@@ -25,6 +25,7 @@ from gptqmodel.utils.logger import setup_logger
 from transformers import PreTrainedModel
 
 from ...models._const import DEVICE, PLATFORM
+from ...utils.torch import torch_compile
 
 logger = setup_logger()
 
@@ -114,7 +115,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         # compile dequantize
-        self.dequantize_weight = torch.compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+        self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
 
         #if self.adapter:
         #    self.adapter.g_compile(backend=backend, mode=mode, fullgraph=fullgraph)
