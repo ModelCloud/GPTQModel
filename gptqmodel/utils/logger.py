@@ -16,6 +16,7 @@
 
 import logging
 import sys
+from typing import Callable
 
 from colorlog import ColoredFormatter
 
@@ -33,12 +34,28 @@ def setup_logger():
         return logger
 
     class CustomLogger(logging.Logger):
+        def critical(self, msg, *args, **kwargs):
+            op = super().critical
+            self._process(op, msg, *args, **kwargs)
+
+        def warning(self, msg, *args, **kwargs):
+            op = super().warning
+            self._process(op, msg, *args, **kwargs)
+
+        def debug(self, msg, *args, **kwargs):
+            op = super().debug
+            self._process(op, msg, *args, **kwargs)
+
         def info(self, msg, *args, **kwargs):
+            op = super().info
+            self._process(op, msg, *args, **kwargs)
+
+        def _process(self, op: Callable, msg, *args, **kwargs):
             global last_logging_src
             if last_logging_src == 2:
                 print(" ", flush=True)
                 last_logging_src = 1
-            super().info(msg, *args, **kwargs)
+            op(msg, *args, **kwargs)
 
     logging.setLoggerClass(CustomLogger)
 

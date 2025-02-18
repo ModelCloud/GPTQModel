@@ -72,9 +72,9 @@ class ProgressBar:
     def log(self, bar, log):
         # print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
         if self.prefix:
-            print(f"{self.prefix} {self.description} |{bar}| {log}", end='', flush=True)
+            print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
         else:
-            print(f"{self.description} |{bar}| {log}", end='', flush=True)
+            print(f'\r{self.description} |{bar}| {log}', end='', flush=True)
 
         update_logging_src(src=2)  # let logger now we logged
 
