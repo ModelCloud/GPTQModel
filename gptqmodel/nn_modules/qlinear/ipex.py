@@ -99,7 +99,7 @@ class IPEXQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_ADAPTERS = [Lora] # TODO FIXME lora
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
 
@@ -138,11 +138,6 @@ class IPEXQuantLinear(PackableQuantLinear):
         return cls._validate(**args)
 
     def post_init(self):
-        if self.bias is not None and self.adapter is not None:
-            # TODO FIX ME
-            # IPEX does not support Lora since we need to inject Lora before bias is applied inside the intel IPEX kernel
-            raise NotImplementedError("Kernel: IPEX does not support `adapters` (EoRA/Lora) with `bias=True`.")
-
         self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(
             self.qweight,
             self.scales,
@@ -150,7 +145,8 @@ class IPEXQuantLinear(PackableQuantLinear):
             self.in_features,
             self.out_features,
             None,
-            self.bias,
+            # bias: if adapter, do not let ipex do apply bias, do it after adapter.apply
+            None if self.adapter else self.adapter,
             self.group_size,
             self.g_idx,
             quant_method=QuantMethod.GPTQ_GEMM,
