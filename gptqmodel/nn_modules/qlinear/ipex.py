@@ -127,7 +127,6 @@ class IPEXQuantLinear(TorchQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            register_buffers=True,
             **kwargs)
 
         # FIX ME IPEX CPU has no float16 support
