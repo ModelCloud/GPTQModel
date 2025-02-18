@@ -80,7 +80,8 @@ class ProgressBar:
         bar_length -= len(self.prefix) # +1 for space
         bar_length -= len(self.info_text)
 
-        percent = ("{0:.1f}").format(100 * (iteration / float(len(self))))
+        percent_num = iteration / float(len(self))
+        percent = ("{0:.1f}").format(100 * (percent_num))
         log = f"{self.calc_time(iteration)} [{iteration}/{len(self)}] {percent}%"
 
         bar_length -= len(log)
@@ -96,7 +97,7 @@ class ProgressBar:
 
         filled_length = int(bar_length * iteration // len(self))
         bar = self.fill * filled_length + '-' * (bar_length - filled_length)
-        self.log(bar=bar, log=log, padding=padding)
+        self.log(bar=bar, log=log, padding=padding, end='\n' if percent_num >= 1.0 else '')
 
     def calc_time(self, iteration):
         used_time = int(time.time() - self.time)
