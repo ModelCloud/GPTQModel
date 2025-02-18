@@ -92,7 +92,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
         # Note that due to tvm compilation of per layer modules shapes, the first layer loop is
         # relatively much slower if caching is not available. estimate time remaining is highly inaccurate
-        for name, module in ProgressBar(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
+        for name, module in ProgressBar(model.named_modules(), info=message, total=len(list(model.named_modules()))):
             if not isinstance(module, model_quantlinear):
                 continue
 

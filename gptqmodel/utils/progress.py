@@ -16,6 +16,7 @@
 
 import datetime
 import time
+from typing import Iterable
 from warnings import warn
 
 from gptqmodel.utils.logger import setup_logger, update_logging_src
@@ -30,7 +31,17 @@ class ProgressBarWarning(Warning):
             super().__init__(msg, *a, **k)
 
 class ProgressBar:
-    def __init__(self, iterable=None, total=None, prefix='        ', bar_length=60, fill='█', desc=""):
+    def __init__(self,
+                 iterable: Iterable=None,
+                 total=None,
+                 prefix:str ='        ', # left padding set to same as logger
+                 bar_length:int =60,
+                 fill:str = '█',
+                 info:str = ""):
+
+        # max info length over the life ot the pb
+        self.max_info_length = len(info)
+
         if total is None and iterable is not None:
             try:
                 total = len(iterable)
@@ -48,12 +59,15 @@ class ProgressBar:
         self.prefix = prefix
         self.bar_length = bar_length
         self.fill = fill
-        self.description = desc
+        self.info_text = info
         self.current = 0
         self.time = time.time()
 
-    def info(self, description):
-        self.description = description
+    def info(self, info:str):
+        if len(info) > self.max_info_length:
+            self.max_info_length = len(info)
+
+        self.info_text = info
 
     def progress(self, iteration = None):
         if not iteration:
@@ -69,12 +83,18 @@ class ProgressBar:
         remaining = str(datetime.timedelta(seconds=int((used_time / max(iteration, 1)) * len(self))))
         return f"{formatted_time} / {remaining}"
 
-    def log(self, bar, log):
-        # print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
-        if self.prefix:
-            print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
+    def log(self, bar:str, log:str):
+        # calculate padding
+        if len(self.info_text) < self.max_info_length:
+            padding = " " * (self.max_info_length - len(self.info_text))
         else:
-            print(f'\r{self.description} |{bar}| {log}', end='', flush=True)
+            padding = ""
+
+        # print(f'\r{self.prefix} {self.info_text} |{bar}| {log}', end='', flush=True)
+        if self.prefix:
+            print(f'\r{self.prefix} {self.info_text}{padding} |{bar}| {log}', end='', flush=True)
+        else:
+            print(f'\r{self.info_text}{padding} |{bar}| {log}', end='', flush=True)
 
         update_logging_src(src=2)  # let logger now we logged
 

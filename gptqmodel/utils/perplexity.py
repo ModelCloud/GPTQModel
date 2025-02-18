@@ -149,7 +149,7 @@ class Perplexity:
         curr_ppl = 0
         all_perplexity = []
 
-        with ProgressBar(range(len(tokens[0]) // n_ctx), desc="Perplexity: - ") as progress:
+        with ProgressBar(range(len(tokens[0]) // n_ctx), info="Perplexity: - ") as progress:
             for i in progress:
                 # Process each batch of tokens
                 nll, count = self._process_batch(i, n_ctx, n_batch, tokens, nll, count)
