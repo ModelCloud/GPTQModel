@@ -307,17 +307,10 @@ def ModelWriter(cls):
 
         config.quantization_config = quantize_config.to_dict()
 
-        # Save model
-        class EmptyModule(nn.Module):
-            def __init__(self):
-                super(EmptyModule, self).__init__()
-
-            def forward(self, x):
-                return x
-
         self.model.config = config
-        # Save model and config files with empty state dict
-        self.model.save_pretrained(save_dir, state_dict=EmptyModule().state_dict())
+
+        # Save config files with empty state dict
+        self.model.save_pretrained(save_dir, state_dict={})
 
         quantize_config.save_pretrained(save_dir)
 
