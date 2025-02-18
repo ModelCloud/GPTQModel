@@ -389,10 +389,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
-            bias=self.bias)
+            bias=self.bias if not self.adapter else None)
 
         if self.adapter:
-            output = self.adapter.apply(x=A, out=output)
+            if self.bias:
+                output = self.adapter.apply(x=A, out=output).add_(self.bias)
+            else:
+                output = self.adapter.apply(x=A, out=output)
 
         return output
 
