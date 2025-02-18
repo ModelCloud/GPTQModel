@@ -328,7 +328,7 @@ class GPTQModel:
             if isinstance(model, BaseGPTQModel):
                 tokenizer = model.tokenizer
             elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path)
+                tokenizer = Tokenicer.load(model_id_or_path).tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
 
         if tokenizer is None:
             raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
