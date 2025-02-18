@@ -45,7 +45,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
-from ..utils.torch import torch_empty_cache
+from ..utils.torch import torch_empty_cache, torch_compile
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
@@ -1202,13 +1202,6 @@ class BaseGPTQModel(nn.Module):
                            f"upgrade it by `pip install torch -U`")
             return self
 
-        # reset dynamo cache on each model load since during ci loop model inference may exhuast cache
-        torch._dynamo.reset()
-
-        # Increase the dynamo cache size limit, default of 8 is too low
-        if torch._dynamo.config.cache_size_limit < 64:
-            torch._dynamo.config.cache_size_limit = 64
-
         # needed by eora
         # torch._dynamo.config.capture_scalar_outputs = True
 
@@ -1221,22 +1214,7 @@ class BaseGPTQModel(nn.Module):
         # torch._dynamo.config.suppress_errors = True
         logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
-        try:
-            self.model = torch.compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
-            self.compiled = True
-        except Exception as e:
-            # if fullgraph is already disabled, no need to try again
-            if not fullgraph:
-                self.compiled = False
-                logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
-            else:
-                logger.info(f"Compiling model again with `fullgraph=False`; `full-graph=True` compile failed: {e}")
-                try:
-                    self.model = torch.compile(self.model, fullgraph=False, backend=backend, mode=mode)
-                    self.compiled = True
-                except Exception as e:
-                    self.compiled = False
-                    logger.info(f"Compiling model failed: running model in non-compiled mode. {e}")
+        self.model = torch_compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
 
         #trigger kernel compilation hooks
         # if self.compiled:

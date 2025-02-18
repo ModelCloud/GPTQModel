@@ -15,9 +15,12 @@
 # limitations under the License.
 
 import gc as py_gc
+from typing import Callable, Union
 
 import torch
 from packaging.version import Version
+
+from gptqmodel.utils.logger import setup_logger
 
 HAS_CUDA = False
 HAS_XPU = False
@@ -25,6 +28,15 @@ HAS_MPS = False
 HAS_MLX = False
 
 STREAM = None # cache
+
+logger = setup_logger()
+
+# reset dynamo cache on each model load since during ci loop model inference may exhuast cache
+torch._dynamo.reset()
+
+# Increase the dynamo cache size limit, default of 8 is too low
+if torch._dynamo.config.cache_size_limit < 64:
+    torch._dynamo.config.cache_size_limit = 64
 
 if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
     HAS_CUDA = True
@@ -42,7 +54,7 @@ try:
 except BaseException:
     pass
 
-def torch_compile(module=torch.nn.Module, backend:str ="inductor", mode: str = None, fullgraph=False):
+def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
     from gptqmodel.models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
 
     if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
@@ -50,6 +62,7 @@ def torch_compile(module=torch.nn.Module, backend:str ="inductor", mode: str = N
     try:
         return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
     except BaseException:
+        logger.warning(f"Failed to compile `{module}`")
         return module
 
 def torch_new_stream():
