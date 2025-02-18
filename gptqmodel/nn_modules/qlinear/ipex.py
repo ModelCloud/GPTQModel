@@ -22,6 +22,7 @@ from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.models._const import DEVICE, PLATFORM
 from . import PackableQuantLinear
 from ...utils.logger import setup_logger
+from ...utils.torch import torch_compile
 
 logger = setup_logger()
 
@@ -131,12 +132,17 @@ class IPEXQuantLinear(PackableQuantLinear):
         self.weight_dtype = torch.float16
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+    def validate(cls, bias: bool = False, adapter: Optional[Adapter] = None, **args) -> Tuple[bool, Optional[Exception]]:
         if not HAS_IPEX:
             return False, IPEX_ERROR_LOG
         return cls._validate(**args)
 
     def post_init(self):
+        if self.bias is not None and self.adapter is not None:
+            # TODO FIX ME
+            # IPEX does not support Lora since we need to inject Lora before bias is applied inside the intel IPEX kernel
+            raise NotImplementedError("Kernel: IPEX does not support `adapters` (EoRA/Lora) with `bias=True`.")
+
         self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(
             self.qweight,
             self.scales,
@@ -152,7 +158,12 @@ class IPEXQuantLinear(PackableQuantLinear):
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor):
-        outputs = self.ipex_linear(x)
-        return outputs
+        if self.adapter:
+            return self.adapter(x=x, out=self.ipex_linear(x))
+        else:
+            return self.ipex_linear(x)
+
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
 
 __all__ = ["IPEXQuantLinear"]
