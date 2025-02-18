@@ -249,11 +249,6 @@ class ModelTest(unittest.TestCase):
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                model_args = {
-                    "pretrained": self.NATIVE_MODEL_ID,
-                    "gptqmodel": True
-                }
-
                 if self.USE_VLLM:
                     model_args = {
                         "pretrained": model.model_local_path,
@@ -269,7 +264,7 @@ class ModelTest(unittest.TestCase):
                 from lm_eval.utils import make_table
                 results = GPTQModel.eval(
                     model_or_id_or_path=model,
-                    backend="vllm" if self.USE_VLLM else "gptqmodel",
+                    llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                     model_args=model_args,
                     output_path=tmp_dir,
                     framework=EVAL.LM_EVAL,
