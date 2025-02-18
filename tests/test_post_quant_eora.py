@@ -51,7 +51,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
         raise AssertionError(" `paris` not found in `result`")
 
     bench_result = GPTQModel.eval(
-        model_or_path=model,
+        model_or_id_or_path=model,
         framework=EVAL.LM_EVAL,
         tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
     )
