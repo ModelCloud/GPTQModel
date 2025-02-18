@@ -333,7 +333,8 @@ class GPTQModel:
         if tokenizer is None:
             raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
-        model_args["tokenizer"] = tokenizer
+        if backend=="gptqmodel": # vllm loads tokenizer
+            model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
