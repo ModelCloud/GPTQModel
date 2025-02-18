@@ -351,7 +351,7 @@ def ModelWriter(cls):
         self.model.config = config
 
         # hack to allow hf to save model without weights (configs only)
-        self.save_pretrained(save_dir, state_dict={})
+        self.model.save_pretrained(save_dir, state_dict={})
         quantize_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
