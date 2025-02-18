@@ -45,6 +45,8 @@ class Qwen2VLGPTQ(BaseGPTQModel):
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
+    require_load_processor = True
+
     quant_override_files = {
         "preprocessor_config.json": {
             "do_convert_rgb": True,
