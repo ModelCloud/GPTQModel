@@ -52,7 +52,8 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     bench_result = GPTQModel.eval(
         model_or_id_or_path=model,
         framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
+        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.GSM8K_COT],
+        batch_size=32,
     )
 
     del model
@@ -148,18 +149,18 @@ class Test(ModelTest):
                 base_bench = bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
                 eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
-                print('--------Quant/EoRA Config ---------')
+                print('--------GPTQModel + EoRA Config ---------')
 
                 # Convert the dictionary to a list of lists for tabulate
                 table_data = [[key, value] for key, value in config_dict.items()]
                 print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
-                print('--------Eval Base Result---------')
+                print('--------Eval GPTQ Result---------')
                 print(make_table(base_bench))
                 if "groups" in base_bench:
                     print(make_table(base_bench, "groups"))
 
-                print('--------Eval EoRA Result---------')
+                print('--------Eval GPTQ + EoRA Result---------')
                 print(make_table(eora_bench))
                 if "groups" in eora_bench:
                     print(make_table(eora_bench, "groups"))
