@@ -952,7 +952,7 @@ class BaseGPTQModel(nn.Module):
             meta_quantizer: Optional[str] = None,
             **kwargs,
     ):
-        extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
+        extra_json_file_names = ["preprocessor_config.json"]
         for name in extra_json_file_names:
             json_path = os.path.join(self.model_local_path, name)
             if os.path.exists(json_path):
