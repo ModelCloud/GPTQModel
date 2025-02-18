@@ -87,9 +87,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
          out_features: int,
          pack_dtype: torch.dtype,
          adapter: Adapter,
-         bias: bool,
-         register_buffers: bool = True,
-         **kwargs,
+         bias: bool, **kwargs,
     ):
         if exllama_v2v_import_exception is not None:
             raise ValueError(
@@ -117,7 +115,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            register_buffers=register_buffers,
+            register_buffers=True,
             register_buffers_in_features=in_features,  # self.original_in_features
             register_buffers_out_feature=out_features, # self.original_out_features
             **kwargs)
