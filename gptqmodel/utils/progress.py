@@ -60,7 +60,7 @@ class ProgressBar:
         self.bar_length = bar_length
         self.fill = fill
         self.info_text = info
-        self.current = 0
+        self.current_iteration = 0
         self.time = time.time()
 
     def info(self, info:str):
@@ -69,9 +69,10 @@ class ProgressBar:
 
         self.info_text = info
 
-    def progress(self, iteration = None):
+    def progress(self, iteration:int = None):
         if not iteration:
-            iteration = self.current
+            iteration = self.current_iteration
+
         percent = ("{0:.1f}").format(100 * (iteration / float(len(self))))
         filled_length = int(self.bar_length * iteration // len(self))
         bar = self.fill * filled_length + '-' * (self.bar_length - filled_length)
@@ -154,7 +155,7 @@ class ProgressBar:
         iterable = self.iterable
 
         for obj in iterable:
-            self.current+=1
+            self.current_iteration+=1
             self.progress()
             yield obj
         return
