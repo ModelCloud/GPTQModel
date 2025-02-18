@@ -22,7 +22,7 @@ from torch import Tensor
 
 logger = setup_logger()
 
-def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.float32], sample_size: int):
+def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.dtype], sample_size: int):
     inp = input[0].to(dtype=torch.float32)
     if inp.dim() == 2:
         inp = inp.unsqueeze(0)
@@ -40,7 +40,7 @@ def eora_compute_lora(
         device: torch.device,
         w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qeight) delta in float32
         module: NamedModule,
-        eigen_scaling_diag_matrix: torch.float32,
+        eigen_scaling_diag_matrix: torch.dtype,
         rank: int) -> Tuple[Tensor, Tensor]:
 
     assert w_wq_delta.dtype == torch.float32
