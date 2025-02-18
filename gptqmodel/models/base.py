@@ -1277,6 +1277,10 @@ class BaseGPTQModel(nn.Module):
         except Exception:
             return getattr(self.model, item)
 
+    def __str__(self):
+        return self.__class__.__name__
+
+
 __all__ = ["BaseGPTQModel"]
 
 BaseGPTQModel = ModelLoader(ModelWriter(BaseGPTQModel))
