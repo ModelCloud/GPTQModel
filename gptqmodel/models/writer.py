@@ -29,7 +29,7 @@ import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
-from transformers import AutoConfig, PreTrainedTokenizerFast
+from transformers import AutoConfig, PreTrainedTokenizerFast, GenerationConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -308,6 +308,10 @@ def ModelWriter(cls):
         config.save_pretrained(save_dir)
 
         quantize_config.save_pretrained(save_dir)
+
+         # check for generation_config(.json)
+        if hasattr(self, "generation_config") and isinstance(self.generation_config, GenerationConfig):
+            self.generation_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
