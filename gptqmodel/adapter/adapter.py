@@ -28,7 +28,7 @@ class Adapter():
                 raise ValueError(f"Adapter: `path` str in this context must be a local os path: actual = `{self.path}`.")
 
     # override me
-    def apply(self, x: torch.Tensor, out: torch.Tensor):
+    def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         pass
 
     # override me
@@ -67,10 +67,11 @@ class Lora(Adapter):
         return ["lora_A", "lora_B"]
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
-        print("Lora compile")
-        self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
+        pass
+        #logger.info("Adapter: optimize (compile)")
+        #self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 
-    def apply(self, x: torch.Tensor, out: torch.Tensor):
+    def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         # original code
         # out = out + ((x @ self.lora_A) @ self.lora_B)
 
