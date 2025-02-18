@@ -319,7 +319,7 @@ setup(
         'sglang': ["sglang>=0.3.2", "flashinfer-python>=0.2.1"],
         'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
-        'ipex': ["intel_extension_for_pytorch>=2.5.0"],
+        'ipex': ["intel_extension_for_pytorch>=2.6.0"],
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
