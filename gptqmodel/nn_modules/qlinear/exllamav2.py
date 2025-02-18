@@ -134,7 +134,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
 

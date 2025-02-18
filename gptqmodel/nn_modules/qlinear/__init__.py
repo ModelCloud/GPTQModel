@@ -39,7 +39,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
-    SUPORTS_ADAPTERS: List[Adapter] = None
+    SUPPORTS_ADAPTERS: List[Adapter] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -238,7 +238,7 @@ class BaseQuantLinear(nn.Module):
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if adapter is not None and adapter.__class__ not in cls.SUPORTS_ADAPTERS:
+        if adapter is not None and adapter.__class__ not in cls.SUPPORTS_ADAPTERS:
             err = f"{cls} does not support adapter: {adapter}"
             return False, NotImplementedError(err)
 

@@ -99,7 +99,7 @@ class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [] # TODO FIXME lora
+    SUPPORTS_ADAPTERS = [Lora] # TODO FIXME lora
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
 
