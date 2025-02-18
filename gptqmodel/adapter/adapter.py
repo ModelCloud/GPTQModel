@@ -76,6 +76,8 @@ class Lora(Adapter):
         # out = out + ((x @ self.lora_A) @ self.lora_B)
 
         # fix batch for lora
+        # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
+        # out.dim() > x.dim() is used to exclude these kernels without additional processing
         if out.dim() > x.dim() and out.shape[0] > 1:
             out_orgi_shape = out.shape
             out = out.view(-1, out.shape[-1])
