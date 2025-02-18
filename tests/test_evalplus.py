@@ -25,7 +25,6 @@ import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import evalplus  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestEvalplus(unittest.TestCase):
@@ -37,7 +36,7 @@ class TestEvalplus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_file = f"{tmp_dir}/result.json"
 
-            model = GPTQModel.load(self.MODEL_ID, tokenizer=AutoTokenizer.from_pretrained(self.MODEL_ID))
+            model = GPTQModel.load(self.MODEL_ID)
 
             base_formatted, plus_formatted, _ = evalplus(model=model, dataset='humaneval', output_file=output_file)
             self.assertGreaterEqual(float(base_formatted), 0.26, "Base score does not match expected result")
