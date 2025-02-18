@@ -114,6 +114,7 @@ class ProgressBar:
             else self.iterable.__length_hint__() if hasattr(self.iterable, "__length_hint__")
             else getattr(self, "total", None))
 
+    # TODO FIXME: I have no cluse why the try/catch is catching nothing here
     def __reversed__(self):
         try:
             orig = self.iterable
@@ -132,6 +133,7 @@ class ProgressBar:
     def __enter__(self):
         return self
 
+    # TODO FIXME: I don't understand the exception here. What are we catching? yield error?
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             self.close()
