@@ -18,6 +18,9 @@ import datetime
 import time
 from warnings import warn
 
+from gptqmodel.utils.logger import setup_logger
+
+logger = setup_logger()
 
 class ProgressBarWarning(Warning):
     def __init__(self, msg, fp_write=None, *a, **k):
@@ -67,7 +70,11 @@ class ProgressBar:
         return f"{formatted_time} / {remaining}"
 
     def log(self, bar, log):
-        print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
+        # print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
+        if self.prefix:
+            logger.info(f"{self.prefix} {self.description} |{bar}| {log}")
+        else:
+            logger.info(f"{self.description} |{bar}| {log}")
 
     def __bool__(self):
         if self.total is not None:
