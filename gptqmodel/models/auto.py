@@ -21,6 +21,7 @@ import os
 from lm_eval.utils import make_table
 from tokenicer import Tokenicer
 
+
 from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
 
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -317,6 +318,7 @@ class GPTQModel:
             backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
+
             **args
     ):
         if model_args is None:
@@ -326,6 +328,7 @@ class GPTQModel:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
             else:
                 tasks = [EVAL.EVALPLUS.HUMAN]
+
         elif not isinstance(tasks, List):
             tasks = [tasks]
 
@@ -357,6 +360,27 @@ class GPTQModel:
             raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
         if llm_backend=="gptqmodel": # vllm loads tokenizer
+            model_args["tokenizer"] = tokenizer
+
+        if isinstance(model_or_id_or_path, str):
+            model = None
+            model_id_or_path = model_or_id_or_path
+        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, PreTrainedModel):
+            model = model_or_id_or_path
+            model_id_or_path = model.config.name_or_path  #
+        else:
+            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
+
+        if tokenizer is None:
+            if isinstance(model, BaseGPTQModel):
+                tokenizer = model.tokenizer
+            elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
+                tokenizer = Tokenicer.load(model_id_or_path).tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
+
+        if tokenizer is None:
+            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
+
+        if backend=="gptqmodel": # vllm loads tokenizer
             model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:

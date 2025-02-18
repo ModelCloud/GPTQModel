@@ -23,7 +23,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+
 from gptqmodel import BACKEND, GPTQModel
+
 from lm_eval.utils import make_table  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
@@ -37,8 +39,10 @@ class TestLmEval(unittest.TestCase):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
         self.random_seed = 1234
         self.task = EVAL.LM_EVAL.ARC_CHALLENGE
+
         # self.acc_score = 0.3183
         self.acc_norm_score = 0.3515
+
 
     def test_eval_direct(self):
        with tempfile.TemporaryDirectory() as tmp_dir:

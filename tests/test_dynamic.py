@@ -22,7 +22,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-import json
+import json  # noqa: E402
 import tempfile  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402

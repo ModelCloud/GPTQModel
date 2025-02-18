@@ -30,8 +30,10 @@ if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
         raise ModuleNotFoundError("env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`.")
 else:
     from huggingface_hub import snapshot_download
+
 from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import snapshot_download
+
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights

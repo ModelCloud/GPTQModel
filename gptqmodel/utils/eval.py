@@ -21,7 +21,6 @@ from typing import Optional
 
 from .evalplus import patch_evalplus
 
-
 class EVAL:
     class LM_EVAL(str, Enum):
         ARC_CHALLENGE = "arc_challenge"

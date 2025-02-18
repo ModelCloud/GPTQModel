@@ -27,6 +27,15 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from typing import Union  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
+from lm_eval.tasks import TaskManager  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+
 
 class TestEval(unittest.TestCase):
     @classmethod
