@@ -84,8 +84,13 @@ class Test(ModelTest):
         calibration_dataset_concat_size = 0 # disable
         auto_gc = False
         adapter_file_name = "eora.safetensors"
+        dataset_id = "allenai/c4"
+        dataset_files = "en/c4-train.00001-of-01024.json.gz"
 
         config_dict = {
+            "model_id": self.NATIVE_MODEL_ID,
+            "dataset_id": dataset_id,
+            "dataset_files": dataset_files,
             "bits": bits,
             "group_size": group_size,
             "desc_act": desc_act,
@@ -98,8 +103,8 @@ class Test(ModelTest):
         }
 
         calibration_dataset = load_dataset(
-            "allenai/c4",
-            data_files="en/c4-train.00001-of-01024.json.gz",
+            dataset_id,
+            data_files=dataset_files,
             split="train"
         ).select(range(calibration_dataset_rows))["text"]
 
