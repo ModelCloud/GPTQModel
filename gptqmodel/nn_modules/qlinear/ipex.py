@@ -17,12 +17,11 @@
 from typing import Optional, Tuple
 
 import torch
+
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.models._const import DEVICE, PLATFORM
-from . import BaseQuantLinear
-
+from . import PackableQuantLinear
 from ...utils.logger import setup_logger
-from ...utils.torch import HAS_XPU
 
 logger = setup_logger()
 
@@ -85,7 +84,7 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(BaseQuantLinear):
+class IPEXQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -126,6 +125,7 @@ class IPEXQuantLinear(BaseQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
+            register_buffers=True,
             **kwargs)
 
         self.weight_dtype = torch.float16
