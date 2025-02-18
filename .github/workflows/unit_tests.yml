@@ -554,8 +554,12 @@ jobs:
             echo "===== install transformers from git ====="
             uv pip install -U git+https://github.com/huggingface/transformers.git -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
-          if [[ "${{ matrix.test_script }}" == *xpu* || "${{ matrix.test_script }}" == *ipex* ]]; then
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
+          fi
+
+          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
+            uv pip install -U intel_extension_for_pytorch -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
 
           if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
@@ -605,7 +609,7 @@ jobs:
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
-          if [[ "${{ matrix.test_script }}" == *xpu* || "${{ matrix.test_script }}" == *ipex* ]]; then
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
             pip uninstall vllm -y
