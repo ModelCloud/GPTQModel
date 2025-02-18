@@ -15,6 +15,8 @@
 # limitations under the License.
 
 import datetime
+import os
+import sys
 import time
 from typing import Iterable
 from warnings import warn
@@ -73,9 +75,7 @@ class ProgressBar:
         if not iteration:
             iteration = self.current_iteration
 
-        import shutil
-
-        columns, _ = shutil.get_terminal_size()
+        columns, _ = terminal_size()
         bar_length = columns
         bar_length -= len(self.prefix) # +1 for space
         bar_length -= len(self.info_text)
@@ -84,7 +84,7 @@ class ProgressBar:
         log = f"{self.calc_time(iteration)} [{iteration}/{len(self)}] {percent}%"
 
         bar_length -= len(log)
-        bar_length -= 4 # space + | chars
+        bar_length -= 5 # space + | chars
 
         # calculate padding
         if len(self.info_text) < self.max_info_length:
@@ -182,4 +182,49 @@ class ProgressBar:
         pass
         #self.log(f"{self.fill * self.bar_length}", "100.0%", end="\n")
 
+# copied from github.com/onsim/shutils
+def terminal_size(fallback=(80, 24)):
+    """Get the size of the terminal window.
+
+    For each of the two dimensions, the environment variable, COLUMNS
+    and LINES respectively, is checked. If the variable is defined and
+    the value is a positive integer, it is used.
+
+    When COLUMNS or LINES is not defined, which is the common case,
+    the terminal connected to sys.__stdout__ is queried
+    by invoking os.get_terminal_size.
+
+    If the terminal size cannot be successfully queried, either because
+    the system doesn't support querying, or because we are not
+    connected to a terminal, the value given in fallback parameter
+    is used. Fallback defaults to (80, 24) which is the default
+    size used by many terminal emulators.
+
+    The value returned is a named tuple of type os.terminal_size.
+    """
+    # columns, lines are the working values
+    try:
+        columns = int(os.environ['COLUMNS'])
+    except (KeyError, ValueError):
+        columns = 0
+
+    try:
+        lines = int(os.environ['LINES'])
+    except (KeyError, ValueError):
+        lines = 0
+
+    # only query if necessary
+    if columns <= 0 or lines <= 0:
+        try:
+            size = os.get_terminal_size(sys.__stdout__.fileno())
+        except (AttributeError, ValueError, OSError):
+            # stdout is None, closed, detached, or not a terminal, or
+            # os.get_terminal_size() is unsupported
+            size = os.terminal_size(fallback)
+        if columns <= 0:
+            columns = size.columns or fallback[0]
+        if lines <= 0:
+            lines = size.lines or fallback[1]
+
+    return (columns, lines)
 
