@@ -340,8 +340,8 @@ class BaseQuantLinear(nn.Module):
         pass
 
 class PackableQuantLinear(BaseQuantLinear):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def post_init(self, **kwargs):
+        super().post_init(**kwargs)
 
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
