@@ -76,7 +76,7 @@ class Lora(Adapter):
         # out = out + ((x @ self.lora_A) @ self.lora_B)
 
         # fix batch for lora
-        if out.shape[0] > 1:
+        if out.dim() > x.dim() and out.shape[0] > 1:
             out_orgi_shape = out.shape
             out = out.view(-1, out.shape[-1])
             out.add_((x @ self.lora_A) @ self.lora_B)
