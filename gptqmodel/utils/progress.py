@@ -84,7 +84,7 @@ class ProgressBar:
         remaining = str(datetime.timedelta(seconds=int((used_time / max(iteration, 1)) * len(self))))
         return f"{formatted_time} / {remaining}"
 
-    def log(self, bar:str, log:str):
+    def log(self, bar:str, log:str, end: str = ""):
         # calculate padding
         if len(self.info_text) < self.max_info_length:
             padding = " " * (self.max_info_length - len(self.info_text))
@@ -93,9 +93,9 @@ class ProgressBar:
 
         # print(f'\r{self.prefix} {self.info_text} |{bar}| {log}', end='', flush=True)
         if self.prefix:
-            print(f'\r{self.prefix} {self.info_text}{padding} |{bar}| {log}', end='', flush=True)
+            print(f'\r{self.prefix} {self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
         else:
-            print(f'\r{self.info_text}{padding} |{bar}| {log}', end='', flush=True)
+            print(f'\r{self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
 
         update_logging_src(src=2)  # let logger now we logged
 
@@ -161,6 +161,6 @@ class ProgressBar:
         return
 
     def close(self):
-        self.log(f"{'-' * self.bar_length}", "100.0%")
+        self.log(f"{self.fill * self.bar_length}", "100.0%", end="\r")
 
 
