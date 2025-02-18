@@ -19,10 +19,13 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from gptqmodel.utils.logger import setup_logger
+from transformers import PreTrainedModel
 
 from ...models._const import DEVICE, PLATFORM
+from ...utils.torch import torch_compile
 
 logger = setup_logger()
 
@@ -40,7 +43,7 @@ class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
-
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
 
@@ -54,6 +57,7 @@ class TorchQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs,
     ):
         super().__init__(
@@ -65,6 +69,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -86,27 +91,14 @@ class TorchQuantLinear(PackableQuantLinear):
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
-        if self.bits in [2, 4, 8]:
-            self.register_buffer(
-                "wf",
-                torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0).to(device=self.g_idx.device),
-            )
-        elif self.bits == 3:
-            self.register_buffer(
-                "wf",
-                torch.tensor(
-                    [
-                        [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
-                        [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
-                        [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
-                    ],
-                    dtype=torch.int32,
-                ).reshape(1, 3, 12).to(device=self.g_idx.device)
-            )
+        super().post_init()
 
-    def compile(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         # compile dequantize
-        self.dequantize = torch.compile(self.dequantize)
+        self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+
+        if self.adapter:
+            self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
@@ -114,18 +106,22 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        out = self._forward(x, x.dtype)
-        out = out.reshape(out_shape)
+        out = self._forward(x, x.dtype, out_shape)
         return out
 
-    def _forward(self, x, x_dtype):
+    def _forward(self, x, x_dtype, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self.dequantize(num_itr=num_itr)
+        weights = self.dequantize_weight(num_itr=num_itr)
 
-        out = torch.matmul(x, weights).to(x_dtype)
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=torch.matmul(x, weights).reshape(out_shape))
+        else:
+            out = torch.matmul(x, weights).reshape(out_shape)
+
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+
+        return out.to(x_dtype)
 
     # clear gptq only weights: useful in de-quantization
     def _empty_gptq_only_weights(self):
@@ -134,61 +130,8 @@ class TorchQuantLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-    def dequantize(self, num_itr=1):
-        if self.bits in [4, 8, 2]:
-            zeros = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-                self.wf.unsqueeze(0),
-            ).to(self.dequant_dtype)
-            zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
-
-            weight = torch.bitwise_and(
-                torch.bitwise_right_shift(
-                    torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                    self.wf.unsqueeze(-1),
-                ).to(self.dequant_dtype),
-                self.maxq
-            )
-        elif self.bits == 3:
-            zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
-                -1, -1, -1, 12
-            )
-            zeros = zeros >> self.wf.unsqueeze(0)
-            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
-            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
-            zeros = zeros & 0x7
-            zeros = torch.cat(
-                [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
-                dim=2,
-            ).reshape(self.scales.shape)
-
-            weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
-                -1, -1, 12, -1
-            )
-            weight = (weight >> self.wf.unsqueeze(-1)) & 0x7
-            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
-            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
-            weight = weight & 0x7
-            weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-
-        if num_itr == 1:
-            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
-        else:
-            num_dim = self.g_idx.shape[0] // num_itr
-            weights = []
-            for i in range(num_itr):
-                scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
-                weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
-                zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim].long()
-                weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
-            weights = torch.cat(weights, dim=1)
-
-        return weights
-
-def dequantize_model(model: nn.Module):
-    for name, module in model.model.named_modules():
+def dequantize_model(model: PreTrainedModel):
+    for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchQuantLinear are supported for dequantization. "
@@ -198,14 +141,14 @@ def dequantize_model(model: nn.Module):
         if isinstance(module, TorchQuantLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize().T.detach().to("cpu", torch.float16))
-            new_module.bias = module.bias
+            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
+            new_module.bias = torch.nn.Parameter(module.bias)
 
             # Replace the module in the model
-            parent = model.model
+            parent = model
             if '.' in name:
                 parent_name, module_name = name.rsplit('.', 1)
-                parent = dict(model.model.named_modules())[parent_name]
+                parent = dict(model.named_modules())[parent_name]
             else:
                 module_name = name
 

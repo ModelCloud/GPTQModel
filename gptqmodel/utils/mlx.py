@@ -20,7 +20,7 @@ except ImportError:
 
 logger = setup_logger()
 
-def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseGPTQModel], gptq_config: QuantizeConfig):
+def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseGPTQModel], gptq_config: QuantizeConfig, lm_head_name: str):
     if not MLX_AVAILABLE:
         raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
@@ -65,8 +65,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
 
             n += 1
 
-        elif hasattr(module, "weight") and (
-                name != "lm_head" if config.get("tie_word_embeddings", False) else True):
+        elif hasattr(module, "weight") and (config.tie_word_embeddings or name != lm_head_name):
             weights[f"{name}.weight"] = mx.array(
                 module.weight.detach().to("cpu", torch.float16).numpy()
             )
