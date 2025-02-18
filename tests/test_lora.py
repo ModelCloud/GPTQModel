@@ -82,7 +82,7 @@ class Test(ModelTest):
 
     def test_lm_eval_from_path(self):
         adapter = Lora(path=self.lora_path, rank=128)
-        task_results = self.lm_eval(None, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
+        task_results = self.lm_eval(self.NATIVE_MODEL_ID, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
         self.check_results(task_results)
 
     def test_lm_eval_from_model(self):
