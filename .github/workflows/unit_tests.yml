@@ -558,10 +558,6 @@ jobs:
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
-#          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
-#            uv pip install -U intel_extension_for_pytorch -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
-#          fi
-
           if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
             uv pip install mlx_lm --no-build-isolation -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
