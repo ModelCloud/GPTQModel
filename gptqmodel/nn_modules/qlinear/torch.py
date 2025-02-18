@@ -25,7 +25,6 @@ from gptqmodel.utils.logger import setup_logger
 from transformers import PreTrainedModel
 
 from ...models._const import DEVICE, PLATFORM
-from ...utils.torch import torch_compile
 
 logger = setup_logger()
 
@@ -113,13 +112,6 @@ class TorchQuantLinear(PackableQuantLinear):
 
         self.wf = self.wf.to(device=self.qweight.device)
 
-    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
-        # compile dequantize
-        self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
-
-        #if self.adapter:
-        #    self.adapter.g_compile(backend=backend, mode=mode, fullgraph=fullgraph)
-
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
             x = F.pad(x, (0, self.padded_infeatures - self.in_features))
@@ -149,59 +141,6 @@ class TorchQuantLinear(PackableQuantLinear):
         self.qweight = None
         self.g_idx = None
         self.scales = None
-
-    def dequantize_weight(self, num_itr: int=1):
-        if self.bits in [2, 4, 8]:
-            zeros = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-                self.wf.unsqueeze(0),
-            ).to(self.dequant_dtype)
-            zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
-
-            weight = torch.bitwise_and(
-                torch.bitwise_right_shift(
-                    torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                    self.wf.unsqueeze(-1),
-                ).to(self.dequant_dtype),
-                self.maxq
-            )
-        elif self.bits == 3:
-            zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
-                -1, -1, -1, 12
-            )
-            zeros = zeros >> self.wf.unsqueeze(0)
-            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
-            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
-            zeros = zeros & 0x7
-            zeros = torch.cat(
-                [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
-                dim=2,
-            ).reshape(self.scales.shape)
-
-            weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
-                -1, -1, 12, -1
-            )
-            weight = (weight >> self.wf.unsqueeze(-1)) & 0x7
-            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
-            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
-            weight = weight & 0x7
-            weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-
-        if num_itr == 1:
-            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
-        else:
-            num_dim = self.g_idx.shape[0] // num_itr
-            weights = []
-            for i in range(num_itr):
-                scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
-                weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
-                zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim].long()
-                weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
-            weights = torch.cat(weights, dim=1)
-
-        return weights
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
