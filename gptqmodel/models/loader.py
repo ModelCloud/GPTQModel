@@ -412,8 +412,17 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            if config.architectures:
+                model_class = getattr(transformers, config.architectures[0], None)
+                if model_class is not None and hasattr(model_class, "_supports_flash_attn_2"):
+                    supports_flash_attn = model_class._supports_flash_attn_2
+                else:
+                    supports_flash_attn = None
+            else:
+                supports_flash_attn = None
+
             args = {}
-            if device in [DEVICE.CUDA, DEVICE.ROCM]:
+            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if ATTN_IMPLEMENTATION in kwargs:
                     args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
                 if USE_FLASH_ATTENTION_2 in kwargs:
