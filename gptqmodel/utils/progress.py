@@ -34,7 +34,7 @@ class ProgressBar:
     def __init__(self,
                  iterable: Iterable=None,
                  total=None,
-                 prefix:str ='        ', # left padding set to same as logger
+                 prefix:str = '',
                  bar_length:int =60,
                  fill:str = '█',
                  info:str = ""):
@@ -73,10 +73,30 @@ class ProgressBar:
         if not iteration:
             iteration = self.current_iteration
 
+        import shutil
+
+        columns, _ = shutil.get_terminal_size()
+        bar_length = columns
+        bar_length -= len(self.prefix) # +1 for space
+        bar_length -= len(self.info_text)
+
         percent = ("{0:.1f}").format(100 * (iteration / float(len(self))))
-        filled_length = int(self.bar_length * iteration // len(self))
-        bar = self.fill * filled_length + '-' * (self.bar_length - filled_length)
-        self.log(bar, f"{self.calc_time(iteration)} [{iteration}/{len(self)}] {percent}%")
+        log = f"{self.calc_time(iteration)} [{iteration}/{len(self)}] {percent}%"
+
+        bar_length -= len(log)
+        bar_length -= 4 # space + | chars
+
+        # calculate padding
+        if len(self.info_text) < self.max_info_length:
+            padding = " " * (self.max_info_length - len(self.info_text))
+        else:
+            padding = ""
+
+        bar_length -= len(padding)
+
+        filled_length = int(bar_length * iteration // len(self))
+        bar = self.fill * filled_length + '-' * (bar_length - filled_length)
+        self.log(bar=bar, log=log, padding=padding)
 
     def calc_time(self, iteration):
         used_time = int(time.time() - self.time)
@@ -84,13 +104,7 @@ class ProgressBar:
         remaining = str(datetime.timedelta(seconds=int((used_time / max(iteration, 1)) * len(self))))
         return f"{formatted_time} / {remaining}"
 
-    def log(self, bar:str, log:str, end: str = ""):
-        # calculate padding
-        if len(self.info_text) < self.max_info_length:
-            padding = " " * (self.max_info_length - len(self.info_text))
-        else:
-            padding = ""
-
+    def log(self, bar:str, log:str, padding:str = "", end: str = ""):
         # print(f'\r{self.prefix} {self.info_text} |{bar}| {log}', end='', flush=True)
         if self.prefix:
             print(f'\r{self.prefix} {self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
@@ -160,9 +174,12 @@ class ProgressBar:
             self.current_iteration+=1
             self.progress()
             yield obj
+
+        self.progress()
         return
 
     def close(self):
-        self.log(f"{self.fill * self.bar_length}", "100.0%", end="\r")
+        pass
+        #self.log(f"{self.fill * self.bar_length}", "100.0%", end="\n")
 
 
