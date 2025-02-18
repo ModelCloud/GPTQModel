@@ -99,7 +99,7 @@ class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPORTS_ADAPTERS = [] # TODO FIXME lora
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
 
@@ -129,7 +129,6 @@ class IPEXQuantLinear(BaseQuantLinear):
             **kwargs)
 
         self.weight_dtype = torch.float16
-        self.ipex_linear = None  # None means not init, False means no ipex, else is good
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -138,35 +137,22 @@ class IPEXQuantLinear(BaseQuantLinear):
         return cls._validate(**args)
 
     def post_init(self):
-        pass
+        self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(
+            self.qweight,
+            self.scales,
+            self.qzeros,
+            self.in_features,
+            self.out_features,
+            None,
+            self.bias,
+            self.group_size,
+            self.g_idx,
+            quant_method=QuantMethod.GPTQ_GEMM,
+            dtype=QuantDtype.INT4)
 
-    def init_ipex_linear(self, x: torch.Tensor):
-        if not self.training and HAS_IPEX and not x.requires_grad:
-            self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(
-                self.qweight,
-                self.scales,
-                self.qzeros,
-                self.in_features,
-                self.out_features,
-                None,
-                self.bias,
-                self.group_size,
-                self.g_idx,
-                quant_method=QuantMethod.GPTQ_GEMM,
-                dtype=QuantDtype.INT4)
-            assert self.ipex_linear is not None
-        else:
-            self.ipex_linear = False
-
+    @torch.no_grad()
     def forward(self, x: torch.Tensor):
-        if self.ipex_linear is None: # None is special value meaning ipex_linear init is not called yet
-            self.init_ipex_linear(x)
-
-        if self.ipex_linear:
-            with torch.no_grad():
-                outputs = self.ipex_linear(x)
-            return outputs
-
-        return super().forward(x)
+        outputs = self.ipex_linear(x)
+        return outputs
 
 __all__ = ["IPEXQuantLinear"]
