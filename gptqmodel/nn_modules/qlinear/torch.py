@@ -97,8 +97,8 @@ class TorchQuantLinear(PackableQuantLinear):
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
 
-        #if self.adapter:
-        #    self.adapter.g_compile(backend=backend, mode=mode, fullgraph=fullgraph)
+        if self.adapter:
+            self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:
