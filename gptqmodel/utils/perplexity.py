@@ -157,7 +157,7 @@ class Perplexity:
                 # Calculate and display the current perplexity
                 curr_ppl = np.exp(nll / count)
                 all_perplexity.append(curr_ppl)
-                progress.set_description(f"Perplexity: {curr_ppl:.4f}")
+                progress.info(f"Perplexity: {curr_ppl:.4f}")
 
         return all_perplexity
 

@@ -115,7 +115,7 @@ class EoraProcessor(LoopProcessor):
     def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)
 
-        self.pb.set_description(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
+        self.pb.info(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
 
         start = time.time()
 

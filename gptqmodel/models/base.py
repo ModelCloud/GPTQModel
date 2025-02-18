@@ -819,11 +819,11 @@ class BaseGPTQModel(nn.Module):
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
             if is_lm_head_module:
-                quant_modules_pb.set_description("Quantizing lm_head")
+                quant_modules_pb.info("Quantizing lm_head")
                 module = get_module(self.model, key=self.lm_head)
                 layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
+                quant_modules_pb.info(f"Quantizing layer {module_index} of {layer_count - 1}")
                 module = layers[module_index]
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
@@ -965,7 +965,7 @@ class BaseGPTQModel(nn.Module):
 
                 for name_index, name in enumerate(subset):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
-                    quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
+                    quant_modules_pb.info(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     ## Need to return the quantized_weight for offloading

@@ -502,7 +502,7 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         if pbar:
-            pbar.set_description(f"Packing {name}")
+            pbar.info(f"Packing {name}")
         r = quant_result[name]
         scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device

@@ -412,7 +412,7 @@ class PackableQuantLinear(BaseQuantLinear):
 
         return weights
 
-    def pack(self, linear, scales, zeros, g_idx=None):
+    def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)

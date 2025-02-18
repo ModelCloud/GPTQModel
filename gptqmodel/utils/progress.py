@@ -52,7 +52,7 @@ class ProgressBar:
         self.current = 0
         self.time = time.time()
 
-    def set_description(self, description):
+    def info(self, description):
         self.description = description
 
     def progress(self, iteration = None):
