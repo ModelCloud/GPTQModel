@@ -131,8 +131,7 @@ class IPEXQuantLinear(PackableQuantLinear):
             register_buffers=True,
             **kwargs)
 
-        # FIX ME IPEX CPU has no float16 support
-        self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
+        self.weight_dtype = torch.float16
         self.init_ipex = False
 
         self.kernel_switch_threshold = kernel_switch_threshold
