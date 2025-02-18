@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import safetensors
 import torch
 from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.torch import torch_compile
 
 logger = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
@@ -67,7 +68,7 @@ class Lora(Adapter):
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         print("Lora compile")
-        self.apply = torch.compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
+        self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 
     def apply(self, x: torch.Tensor, out: torch.Tensor):
         # original code
@@ -84,6 +85,9 @@ class Lora(Adapter):
             return out.add_((x @ self.lora_A) @ self.lora_B)
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
+        # self.register_buffer("lora_A", lora_A)
+        # self.register_buffer("lora_B", lora_B)
+
         # we need since lora A/B weights may be merged into model tensors and not separate
         if lora_A is not None and lora_B is not None:
             # print(f"Adapter has preloaded lora_A and lora_B")
