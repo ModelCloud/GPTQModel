@@ -167,7 +167,7 @@ class BaseGPTQModel(nn.Module):
                 if all(hasattr(m.adapter, name) for name in Lora.parameter_keys()):
                     loaded_loras += 1
 
-            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded.")
+            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded for `{len(qmodules)}` modules.")
 
         # print kernel info:
         loaded_kernels = self.kernels()
