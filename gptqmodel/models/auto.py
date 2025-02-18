@@ -310,15 +310,14 @@ class GPTQModel:
             model_or_id_or_path: str=None,
             tokenizer: PreTrainedTokenizerBase=None,
             tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
-            framework: EVAL = EVAL.LM_EVAL,
-            batch_size: int = 1,
+            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]] = EVAL.LM_EVAL,
+            batch_size: Union[int, str] = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
             llm_backend: str = 'gptqmodel',
             backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
-
             **args
     ):
         if model_args is None:
