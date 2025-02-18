@@ -29,6 +29,7 @@ import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
+from torch import nn
 from transformers import AutoConfig, PreTrainedTokenizerFast, GenerationConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
@@ -305,13 +306,13 @@ def ModelWriter(cls):
             logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         config.quantization_config = quantize_config.to_dict()
-        config.save_pretrained(save_dir)
+
+        self.model.config = config
+
+        # Save config files with empty state dict
+        self.model.save_pretrained(save_dir, state_dict={})
 
         quantize_config.save_pretrained(save_dir)
-
-         # check for generation_config(.json)
-        if hasattr(self, "generation_config") and isinstance(self.generation_config, GenerationConfig):
-            self.generation_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
