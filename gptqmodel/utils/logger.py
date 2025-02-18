@@ -15,18 +15,34 @@
 # limitations under the License.
 
 import logging
+import sys
+
 from colorlog import ColoredFormatter
 
 # global static/shared logger instance
 logger = None
+last_logging_src = 1 # one for logger, 2 for progressbar
+
+def update_logging_src(src: int):
+    global last_logging_src
+    last_logging_src = src
 
 def setup_logger():
     global logger
     if logger is not None:
         return logger
 
-    logger = logging.getLogger(__name__)
+    class CustomLogger(logging.Logger):
+        def info(self, msg, *args, **kwargs):
+            global last_logging_src
+            if last_logging_src == 2:
+                print(" ", flush=True)
+                last_logging_src = 1
+            super().info(msg, *args, **kwargs)
 
+    logging.setLoggerClass(CustomLogger)
+
+    logger = logging.getLogger(__name__)
     logger.propagate = False
     logger.setLevel(logging.DEBUG)
 
@@ -46,8 +62,9 @@ def setup_logger():
         style='%'
     )
 
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
+    handler.flush = sys.stdout.flush
     logger.addHandler(handler)
 
     return logger

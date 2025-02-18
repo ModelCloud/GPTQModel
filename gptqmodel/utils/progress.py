@@ -18,7 +18,7 @@ import datetime
 import time
 from warnings import warn
 
-from gptqmodel.utils.logger import setup_logger
+from gptqmodel.utils.logger import setup_logger, update_logging_src
 
 logger = setup_logger()
 
@@ -30,7 +30,7 @@ class ProgressBarWarning(Warning):
             super().__init__(msg, *a, **k)
 
 class ProgressBar:
-    def __init__(self, iterable=None, total=None, prefix='', bar_length=40, fill='█', desc=""):
+    def __init__(self, iterable=None, total=None, prefix='        ', bar_length=60, fill='█', desc=""):
         if total is None and iterable is not None:
             try:
                 total = len(iterable)
@@ -72,9 +72,11 @@ class ProgressBar:
     def log(self, bar, log):
         # print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
         if self.prefix:
-            logger.info(f"{self.prefix} {self.description} |{bar}| {log}")
+            print(f"{self.prefix} {self.description} |{bar}| {log}", end='', flush=True)
         else:
-            logger.info(f"{self.description} |{bar}| {log}")
+            print(f"{self.description} |{bar}| {log}", end='', flush=True)
+
+        update_logging_src(src=2)  # let logger now we logged
 
     def __bool__(self):
         if self.total is not None:
