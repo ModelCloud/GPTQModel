@@ -308,7 +308,7 @@ class GPTQModel:
     def eval(
             cls,
             model_or_id_or_path: str=None,
-            tokenizer: PreTrainedTokenizerBase=None,
+            tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
             tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
             framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]] = EVAL.LM_EVAL,
             batch_size: Union[int, str] = 1,
@@ -351,33 +351,15 @@ class GPTQModel:
 
         if tokenizer is None:
             if isinstance(model, BaseGPTQModel):
-                tokenizer = model.tokenizer
+                tokenizer = model
             elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path).tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
+                tokenizer = Tokenicer.load(model_id_or_path)
 
         if tokenizer is None:
             raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
-        if llm_backend=="gptqmodel": # vllm loads tokenizer
-            model_args["tokenizer"] = tokenizer
-
-        if isinstance(model_or_id_or_path, str):
-            model = None
-            model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, PreTrainedModel):
-            model = model_or_id_or_path
-            model_id_or_path = model.config.name_or_path  #
-        else:
-            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
-
-        if tokenizer is None:
-            if isinstance(model, BaseGPTQModel):
-                tokenizer = model.tokenizer
-            elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path).tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
-
-        if tokenizer is None:
-            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
+        if isinstance(tokenizer, Tokenicer):
+            tokenizer = tokenizer.tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
 
         if backend=="gptqmodel": # vllm loads tokenizer
             model_args["tokenizer"] = tokenizer
