@@ -45,17 +45,23 @@ class BenchmarkTest(unittest.TestCase):
     MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
-    def benchmark(self, backend, device, tokens_per_second):
-        model = GPTQModel.from_quantized(
+    def benchmark(self, backend, device, tokens_per_second: int, warmup_iter: int = 1):
+        model = GPTQModel.load(
             self.MODEL_id,
             device=device,
             backend=backend,
+            use_cache=False,
         )
 
         model.optimize()
 
         tokenizer = model.tokenizer
         inp = tokenizer(self.PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to(device)
+
+        print(f"Warming up: warmup_iter = `{warmup_iter}`")
+        for i in range(warmup_iter):
+            _ = model.generate(**inp, min_new_tokens=self.MIN_NEW_TOKENS,
+                               max_new_tokens=self.MAX_NEW_TOKENS)
 
         times = []
         pb = ProgressBar(range(self.NUM_RUNS))

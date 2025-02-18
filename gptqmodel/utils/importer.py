@@ -201,17 +201,18 @@ def select_quant_linear(
                 if pack:
                     check_pack_func = issubclass(cls, PackableQuantLinear)
                     if check_pack_func:
-                        if not message_logged:
-                            logger.info(f"Auto pick kernel based on compatibility: {cls}")
-                            message_logged = True
+                        #if not message_logged:
+                        #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
+                        #    message_logged = True
+                        logger.info(f"Kernel: Auto-selection: adding candidate `{cls}`")
                         validated_qlinears.append(cls)
                         if not multi_select:
                             return cls
                 else:
-                    if not message_logged:
-                        logger.info(f"Auto pick kernel based on compatibility: {cls}")
-                        message_logged = True
-
+                    #if not message_logged:
+                    #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
+                    #    message_logged = True
+                    logger.info(f"Kernel: Auto-selection: adding candidate `{cls}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
                         return cls

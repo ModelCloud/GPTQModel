@@ -91,27 +91,7 @@ class TorchQuantLinear(PackableQuantLinear):
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
 
-        if self.bits in [2, 4, 8]:
-            self.register_buffer(
-                "wf",
-                torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0).to(device=self.g_idx.device),
-            )
-        elif self.bits == 3:
-            self.register_buffer(
-                "wf",
-                torch.tensor(
-                    [
-                        [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
-                        [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
-                        [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
-                    ],
-                    dtype=torch.int32,
-                ).reshape(1, 3, 12).to(device=self.g_idx.device)
-            )
-
         super().post_init()
-
-        self.wf = self.wf.to(device=self.qweight.device)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         # compile dequantize
@@ -149,59 +129,6 @@ class TorchQuantLinear(PackableQuantLinear):
         self.qweight = None
         self.g_idx = None
         self.scales = None
-
-    def dequantize_weight(self, num_itr: int=1):
-        if self.bits in [2, 4, 8]:
-            zeros = torch.bitwise_right_shift(
-                torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-                self.wf.unsqueeze(0),
-            ).to(self.dequant_dtype)
-            zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
-
-            weight = torch.bitwise_and(
-                torch.bitwise_right_shift(
-                    torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                    self.wf.unsqueeze(-1),
-                ).to(self.dequant_dtype),
-                self.maxq
-            )
-        elif self.bits == 3:
-            zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
-                -1, -1, -1, 12
-            )
-            zeros = zeros >> self.wf.unsqueeze(0)
-            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
-            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
-            zeros = zeros & 0x7
-            zeros = torch.cat(
-                [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
-                dim=2,
-            ).reshape(self.scales.shape)
-
-            weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
-                -1, -1, 12, -1
-            )
-            weight = (weight >> self.wf.unsqueeze(-1)) & 0x7
-            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
-            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
-            weight = weight & 0x7
-            weight = torch.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-
-        if num_itr == 1:
-            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
-        else:
-            num_dim = self.g_idx.shape[0] // num_itr
-            weights = []
-            for i in range(num_itr):
-                scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
-                weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
-                zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim].long()
-                weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
-            weights = torch.cat(weights, dim=1)
-
-        return weights
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():

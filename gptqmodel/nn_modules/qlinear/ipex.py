@@ -16,13 +16,10 @@
 
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
-import transformers
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.models._const import DEVICE, PLATFORM
-from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+from .torch import TorchQuantLinear
 
 from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
@@ -88,7 +85,7 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(PackableQuantLinear):
+class IPEXQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -117,7 +114,6 @@ class IPEXQuantLinear(PackableQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
-        kernel_switch_threshold=128,
         training=False,
         **kwargs,
     ):
@@ -134,15 +130,10 @@ class IPEXQuantLinear(PackableQuantLinear):
             register_buffers=True,
             **kwargs)
 
-        self.weight_dtype = torch.float16
-        self.init_ipex = False
-
-        self.kernel_switch_threshold = kernel_switch_threshold
-
+        # FIX ME IPEX CPU has no float16 support
+        self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
         self.training = training
-
-        # for training forward
-        self.wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
+        self.ipex_linear = None  # None means not init, False means no ipex, else is good
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -156,130 +147,88 @@ class IPEXQuantLinear(PackableQuantLinear):
     def init_ipex_linear(self, x: torch.Tensor):
         if not self.training and HAS_IPEX and not x.requires_grad:
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
-                                                                         self.in_features, self.out_features, None, self.bias,
+                                                                     self.in_features, self.out_features, None, self.bias,
                                                                          self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
+            assert self.ipex_linear is not None
+        else:
+            self.ipex_linear = False
 
     def forward(self, x: torch.Tensor):
-        if not self.init_ipex:
+        if self.ipex_linear is None: # None is special value meaning ipex_linear init is not called yet
             self.init_ipex_linear(x)
-            self.init_ipex = True
 
-        if hasattr(self, "ipex_linear"):
+        if self.ipex_linear:
             with torch.no_grad():
                 outputs = self.ipex_linear(x)
             return outputs
 
-        if self.wf.device != x.device:
-            self.wf = self.wf.to(x.device)
-        out_shape = x.shape[:-1] + (self.out_features,)
-        x = x.reshape(-1, x.shape[-1])
-        x_dtype = x.dtype
-        zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, 32 // self.bits),
-            self.wf.unsqueeze(0),
-        ).to(torch.int16)
-        zeros = torch.bitwise_and(zeros, (2**self.bits) - 1)
-
-        zeros = zeros + 1
-        zeros = zeros.reshape(self.scales.shape)
-
-        weight = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qweight, 1).expand(-1, 32 // self.bits, -1),
-            self.wf.unsqueeze(-1),
-        ).to(torch.int16)
-        weight = torch.bitwise_and(weight, (2**self.bits) - 1)
-
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
-        if num_itr == 1:
-            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
-        else:
-            num_dim = self.g_idx.shape[0] // num_itr
-            weights = []
-            for i in range(num_itr):
-                scale_i = self.scales[:, i * num_dim : (i + 1) * num_dim]
-                weight_i = weight[:, i * num_dim : (i + 1) * num_dim]
-                zeros_i = zeros[:, i * num_dim : (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim : (i + 1) * num_dim]
-                weights.append(scale_i[g_idx_i.long()] * (weight_i - zeros_i[g_idx_i.long()]))
-            weights = torch.cat(weights, dim=1)
-        out = torch.matmul(x, weights.to(x.dtype))
-        out = out.to(x_dtype)
-        out = out.reshape(out_shape)
-
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
-
-        if self.bias is not None:
-            out.add_(self.bias)
-
-        return out
+        return super().forward(x)
 
 
-@torch.no_grad()
-def unpack_to_8bit_signed(qweight, qzeros, bits, g_idx=None):
-    wf = torch.tensor(list(range(0, 32, bits)), dtype=torch.int32).unsqueeze(0)
-    zeros = None
-    if not torch.all(torch.eq(qzeros, 2004318071 if bits == 4 else 0b01111111011111110111111101111111)):
-        zp_shape = list(qzeros.shape)
-        zp_shape[1] = zp_shape[1] * (32 // bits)
+# @torch.no_grad()
+# def unpack_to_8bit_signed(qweight, qzeros, bits, g_idx=None):
+#     wf = torch.tensor(list(range(0, 32, bits)), dtype=torch.int32).unsqueeze(0)
+#     zeros = None
+#     if not torch.all(torch.eq(qzeros, 2004318071 if bits == 4 else 0b01111111011111110111111101111111)):
+#         zp_shape = list(qzeros.shape)
+#         zp_shape[1] = zp_shape[1] * (32 // bits)
+#
+#         zeros = torch.bitwise_right_shift(
+#             torch.unsqueeze(qzeros, 2).expand(-1, -1, 32 // bits), wf.unsqueeze(0)
+#         ).to(torch.int16 if bits == 8 else torch.int8)
+#         torch.bitwise_and(zeros, (2**bits) - 1, out=zeros)
+#         if bits == 8:
+#             zeros = zeros.to(torch.uint8)
+#         zeros = zeros + 1
+#         try:
+#             zeros = zeros.reshape(zp_shape)
+#         except Exception:
+#             # zeros and scales have different iteam numbers.
+#             # remove 1 (due to 0 + 1 in line 252)
+#             zeros = zeros[zeros != 1]
+#             zeros = zeros.reshape(zp_shape)
+#
+#     try:
+#         r = torch.unsqueeze(qweight, 1).expand(-1, 32 // bits, -1)
+#     except BaseException as e:
+#         print(e)
+#     weight = torch.bitwise_right_shift(
+#         r, wf.unsqueeze(-1)
+#     ).to(torch.int16 if bits == 8 else torch.int8)
+#     weight.bitwise_and_((2**bits) - 1)
+#     weight = weight.view(-1, weight.shape[-1])
+#
+#     if g_idx is not None:
+#         group_size = weight.shape[0] // qzeros.shape[0]
+#         weight2 = weight.clone()
+#         group_dict = {}
+#         for i in range(len(g_idx)):
+#             group_idx = g_idx[i].item()
+#             if group_idx not in group_dict:
+#                 target_idx = group_idx * group_size
+#                 group_dict[group_idx] = 0
+#             else:
+#                 group_dict[group_idx] = group_dict[group_idx] + 1
+#                 target_idx = group_idx * group_size + group_dict[group_idx]
+#             weight2[target_idx] = weight[i]
+#         weight = weight2
+#
+#     return weight, zeros
+#
+#
+# # Copied from marlin.py
+# @torch.no_grad()
+# def dequantize_weight(qweight, qzeros, scales, bits):
+#     unpacked_qweight, unpacked_qzeros = unpack_to_8bit_signed(qweight, qzeros, bits)
+#     group_size = unpacked_qweight.shape[0] // scales.shape[0]
+#     scales = scales.repeat_interleave(group_size, dim=0)
+#     if unpacked_qzeros is not None:
+#         unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
+#     else:
+#         unpacked_qzeros = torch.full_like(scales, 8 if bits == 4 else 128, dtype=torch.int32)
+#     unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
+#
+#     return unpacked_qweight, unpacked_qzeros
 
-        zeros = torch.bitwise_right_shift(
-            torch.unsqueeze(qzeros, 2).expand(-1, -1, 32 // bits), wf.unsqueeze(0)
-        ).to(torch.int16 if bits == 8 else torch.int8)
-        torch.bitwise_and(zeros, (2**bits) - 1, out=zeros)
-        if bits == 8:
-            zeros = zeros.to(torch.uint8)
-        zeros = zeros + 1
-        try:
-            zeros = zeros.reshape(zp_shape)
-        except Exception:
-            # zeros and scales have different iteam numbers.
-            # remove 1 (due to 0 + 1 in line 252)
-            zeros = zeros[zeros != 1]
-            zeros = zeros.reshape(zp_shape)
 
-    try:
-        r = torch.unsqueeze(qweight, 1).expand(-1, 32 // bits, -1)
-    except BaseException as e:
-        print(e)
-    weight = torch.bitwise_right_shift(
-        r, wf.unsqueeze(-1)
-    ).to(torch.int16 if bits == 8 else torch.int8)
-    weight.bitwise_and_((2**bits) - 1)
-    weight = weight.view(-1, weight.shape[-1])
-
-    if g_idx is not None:
-        group_size = weight.shape[0] // qzeros.shape[0]
-        weight2 = weight.clone()
-        group_dict = {}
-        for i in range(len(g_idx)):
-            group_idx = g_idx[i].item()
-            if group_idx not in group_dict:
-                target_idx = group_idx * group_size
-                group_dict[group_idx] = 0
-            else:
-                group_dict[group_idx] = group_dict[group_idx] + 1
-                target_idx = group_idx * group_size + group_dict[group_idx]
-            weight2[target_idx] = weight[i]
-        weight = weight2
-
-    return weight, zeros
-
-
-# Copied from marlin.py
-@torch.no_grad()
-def dequantize_weight(qweight, qzeros, scales, bits):
-    unpacked_qweight, unpacked_qzeros = unpack_to_8bit_signed(qweight, qzeros, bits)
-    group_size = unpacked_qweight.shape[0] // scales.shape[0]
-    scales = scales.repeat_interleave(group_size, dim=0)
-    if unpacked_qzeros is not None:
-        unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
-    else:
-        unpacked_qzeros = torch.full_like(scales, 8 if bits == 4 else 128, dtype=torch.int32)
-    unpacked_qweight = (unpacked_qweight - unpacked_qzeros) * scales
-
-    return unpacked_qweight, unpacked_qzeros
-
-
-__all__ = ["IPEXQuantLinear", "dequantize_weight"]
+__all__ = ["IPEXQuantLinear"]

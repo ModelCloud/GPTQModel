@@ -47,8 +47,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     tokens = model.generate("Capital of France is")[0]
     result = model.tokenizer.decode(tokens)
     print(f"BACKEND: {backend}, Result: {result}")
-    if "paris" not in result.lower():
-        raise AssertionError(" `paris` not found in `result`")
+    assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
     bench_result = GPTQModel.eval(
         model_or_path=model,
@@ -62,8 +61,10 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     return bench_result
 
 class Test(ModelTest):
-    #NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
+    # NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
+    #NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
+
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
@@ -113,14 +114,21 @@ class Test(ModelTest):
                 bits=bits,
                 group_size=group_size,
                 desc_act=desc_act,  # bitblas only supports DESC_ACT=False
-                adapter=eora
+                adapter=eora,
             )
 
             model = GPTQModel.load(
                 model_id_or_path=self.NATIVE_MODEL_ID,
-                quantize_config=quant_config)
+                quantize_config=quant_config,
+            )
 
-            model.quantize(calibration_dataset, batch_size=batch_size, auto_gc=auto_gc, calibration_dataset_concat_size=calibration_dataset_concat_size) #
+            model.quantize(
+                calibration_dataset=calibration_dataset,
+                batch_size=batch_size,
+                auto_gc=auto_gc,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                backend=BACKEND.TORCH,
+            ) #
 
             # EoRA adapter is saved according to Lora.path property
             # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
