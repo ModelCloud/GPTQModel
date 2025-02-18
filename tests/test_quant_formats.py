@@ -99,6 +99,8 @@ class TestQuantization(ModelTest):
                 backend=backend,
             )
 
+            self.assertInference(model)
+
             logging.info(f"Loaded config: {model.quantize_config}")
 
             versionable = model.quantize_config.meta_get_versionable(META_FIELD_QUANTIZER)

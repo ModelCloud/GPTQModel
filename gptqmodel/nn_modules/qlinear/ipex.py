@@ -134,8 +134,7 @@ class IPEXQuantLinear(PackableQuantLinear):
             register_buffers=True,
             **kwargs)
 
-        # FIX ME IPEX CPU has no float16 support
-        self.weight_dtype = torch.float16 if HAS_XPU else torch.bfloat16
+        self.weight_dtype = torch.float16
         self.init_ipex = False
 
         self.kernel_switch_threshold = kernel_switch_threshold
@@ -159,46 +158,6 @@ class IPEXQuantLinear(PackableQuantLinear):
             self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
                                                                          self.in_features, self.out_features, None, self.bias,
                                                                          self.group_size, self.g_idx, quant_method=QuantMethod.GPTQ_GEMM, dtype=QuantDtype.INT4)
-
-    def pack(self, linear, scales, zeros, g_idx=None):
-        W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
-
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
-        self.scales = scales.clone().to(dtype=linear.weight.dtype)
-        if linear.bias is not None:
-            self.bias = linear.bias.clone().to(dtype=linear.weight.dtype)
-
-        intweight = torch.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(torch.int)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
-
-        qweight = np.zeros((intweight.shape[0] // 32 * self.bits, intweight.shape[1]), dtype=np.uint32)
-        for row in range(qweight.shape[0]):
-            i = row * (32 // self.bits)
-            for j in range(32 // self.bits):
-                qweight[row] |= intweight[i + j] << (self.bits * j)
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight)
-
-        zeros -= 1
-        zeros = zeros.numpy().astype(np.uint32)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // 32 * self.bits), dtype=np.uint32)
-        for col in range(qzeros.shape[1]):
-            i = col * (32 // self.bits)
-            for j in range(32 // self.bits):
-                qzeros[:, col] |= zeros[:, i + j] << (self.bits * j)
-
-        qzeros = qzeros.astype(np.int32)
-        self.qzeros = torch.from_numpy(qzeros)
 
     def forward(self, x: torch.Tensor):
         if not self.init_ipex:
