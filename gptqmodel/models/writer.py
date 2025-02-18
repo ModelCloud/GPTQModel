@@ -306,9 +306,6 @@ def ModelWriter(cls):
             logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         config.quantization_config = quantize_config.to_dict()
-        config.save_pretrained(save_dir)
-
-        quantize_config.save_pretrained(save_dir)
 
         # Save model
         class EmptyModule(nn.Module):
@@ -321,7 +318,8 @@ def ModelWriter(cls):
         self.model.config = config
         # Save model and config files with empty state dict
         self.model.save_pretrained(save_dir, state_dict=EmptyModule().state_dict())
-        print("EmptyModule().state_dict()",EmptyModule().state_dict())
+
+        quantize_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
