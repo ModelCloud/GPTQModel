@@ -309,6 +309,10 @@ def ModelWriter(cls):
 
         quantize_config.save_pretrained(save_dir)
 
+         # check for generation_config(.json)
+        if hasattr(self, "generation_config") and isinstance(self.generation_config, GenerationConfig):
+            self.generation_config.save_pretrained(save_dir)
+
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_local_path)
