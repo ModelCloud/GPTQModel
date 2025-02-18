@@ -185,6 +185,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
+        register_buffers: bool = False,
         **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
@@ -209,7 +210,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            register_buffers=False,
+            register_buffers=register_buffers,
             **kwargs)
 
         # Determine sharding

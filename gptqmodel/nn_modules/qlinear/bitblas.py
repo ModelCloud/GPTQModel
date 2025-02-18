@@ -129,6 +129,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
         propagate_b: bool = BITBLAS_PROPAGATE_WEIGHTS,
         opt_features: Union[int, List[int]] = OPT_FEATURES,
         layout: str = "nt",
+        register_buffers: bool=False,
         **kwargs,
     ):
         super().__init__(
@@ -141,7 +142,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            register_buffers=False,
+            register_buffers=register_buffers,
             **kwargs)
 
         import_bitblas()

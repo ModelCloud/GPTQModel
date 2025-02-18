@@ -242,7 +242,7 @@ def select_quant_linear(
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
-            raise ValueError("IPEX is not available.")
+            raise ValueError("IPEX is not available. please install it with `pip install gptqmodel['ipex']`")
 
         from device_smi import Device
 

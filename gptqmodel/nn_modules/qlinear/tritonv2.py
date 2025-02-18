@@ -84,6 +84,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
+        register_buffers: bool = True,
         **kwargs,
     ):
         if not TRITON_AVAILABLE:
@@ -98,7 +99,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            register_buffers=True,
+            register_buffers=register_buffers,
             **kwargs)
 
         if self.group_size != self.in_features:
