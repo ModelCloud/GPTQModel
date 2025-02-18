@@ -12,4 +12,5 @@ pillow>=11.1.0
 hf_transfer>=0.1.9
 huggingface_hub>=0.28.1
 lm-eval==0.4.7
+colorlog>=6.9.0
 tokenicer>=0.0.2

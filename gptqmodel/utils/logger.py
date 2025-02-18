@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+from colorlog import ColoredFormatter
 
 # global static/shared logger instance
 logger = None
@@ -25,11 +26,30 @@ def setup_logger():
         return logger
 
     logger = logging.getLogger(__name__)
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(levelname)s - %(message)s")
-    handler.setFormatter(formatter)
+
     logger.propagate = False
-    logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
 
+    # Create a colored formatter
+    formatter = ColoredFormatter(
+        "%(log_color)s%(levelname)-8s%(reset)s %(message)s",
+        datefmt=None,
+        reset=True,
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'green',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'red,bg_white',
+        },
+        secondary_log_colors={},
+        style='%'
+    )
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
     return logger
+
+
