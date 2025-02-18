@@ -314,6 +314,10 @@ def ModelWriter(cls):
 
         quantize_config.save_pretrained(save_dir)
 
+        # Save processor related config files. For example: preprocessor_config.json, chat_template.json
+        if self.processor is not None:
+            self.processor.save_pretrained(save_dir)
+
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_local_path)
