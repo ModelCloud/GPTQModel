@@ -21,15 +21,16 @@ from typing import Optional
 
 from .evalplus import patch_evalplus
 
+
 class EVAL:
-    class LM_EVAL(Enum):
+    class LM_EVAL(str, Enum):
         ARC_CHALLENGE = "arc_challenge"
         MMLU = "mmlu"
         HELLASWAG = "hellaswag"
         GSM8K_COT = "gsm8k_cot"
         GPQA = "gpqa"
 
-    class EVALPLUS(Enum):
+    class EVALPLUS(str, Enum):
         HUMAN = "humaneval"
         MBPP = "mbpp"
 
@@ -54,7 +55,6 @@ class EVAL:
             if isinstance(attr, type) and issubclass(attr, Enum):
                 full_names.extend(cls.get_full_name(member) for member in attr)
         return ', '.join(full_names)
-
 
 def evalplus(
         model,

@@ -15,9 +15,15 @@
 # limitations under the License.
 
 import datetime
+import os
+import sys
 import time
+from typing import Iterable
 from warnings import warn
 
+from gptqmodel.utils.logger import setup_logger, update_logging_src
+
+logger = setup_logger()
 
 class ProgressBarWarning(Warning):
     def __init__(self, msg, fp_write=None, *a, **k):
@@ -27,7 +33,17 @@ class ProgressBarWarning(Warning):
             super().__init__(msg, *a, **k)
 
 class ProgressBar:
-    def __init__(self, iterable=None, total=None, prefix='', bar_length=40, fill='█', desc=""):
+    def __init__(self,
+                 iterable: Iterable=None,
+                 total=None,
+                 prefix:str = '',
+                 bar_length:int =60,
+                 fill:str = '█',
+                 info:str = ""):
+
+        # max info length over the life ot the pb
+        self.max_info_length = len(info)
+
         if total is None and iterable is not None:
             try:
                 total = len(iterable)
@@ -45,20 +61,43 @@ class ProgressBar:
         self.prefix = prefix
         self.bar_length = bar_length
         self.fill = fill
-        self.description = desc
-        self.current = 0
+        self.info_text = info
+        self.current_iteration = 0
         self.time = time.time()
 
-    def set_description(self, description):
-        self.description = description
+    def info(self, info:str):
+        if len(info) > self.max_info_length:
+            self.max_info_length = len(info)
 
-    def progress(self, iteration = None):
+        self.info_text = info
+
+    def progress(self, iteration:int = None):
         if not iteration:
-            iteration = self.current
-        percent = ("{0:.1f}").format(100 * (iteration / float(len(self))))
-        filled_length = int(self.bar_length * iteration // len(self))
-        bar = self.fill * filled_length + '-' * (self.bar_length - filled_length)
-        self.log(bar, f"{self.calc_time(iteration)} [{iteration}/{len(self)}] {percent}%")
+            iteration = self.current_iteration
+
+        columns, _ = terminal_size()
+        bar_length = columns
+        bar_length -= len(self.prefix) # +1 for space
+        bar_length -= len(self.info_text)
+
+        percent_num = iteration / float(len(self))
+        percent = ("{0:.1f}").format(100 * (percent_num))
+        log = f"{self.calc_time(iteration)} [{iteration}/{len(self)}] {percent}%"
+
+        bar_length -= len(log)
+        bar_length -= 5 # space + | chars
+
+        # calculate padding
+        if len(self.info_text) < self.max_info_length:
+            padding = " " * (self.max_info_length - len(self.info_text))
+        else:
+            padding = ""
+
+        bar_length -= len(padding)
+
+        filled_length = int(bar_length * iteration // len(self))
+        bar = self.fill * filled_length + '-' * (bar_length - filled_length)
+        self.log(bar=bar, log=log, padding=padding, end='\n' if percent_num >= 1.0 else '')
 
     def calc_time(self, iteration):
         used_time = int(time.time() - self.time)
@@ -66,8 +105,14 @@ class ProgressBar:
         remaining = str(datetime.timedelta(seconds=int((used_time / max(iteration, 1)) * len(self))))
         return f"{formatted_time} / {remaining}"
 
-    def log(self, bar, log):
-        print(f'\r{self.prefix} {self.description} |{bar}| {log}', end='', flush=True)
+    def log(self, bar:str, log:str, padding:str = "", end: str = ""):
+        # print(f'\r{self.prefix} {self.info_text} |{bar}| {log}', end='', flush=True)
+        if self.prefix:
+            print(f'\r{self.prefix} {self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
+        else:
+            print(f'\r{self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
+
+        update_logging_src(src=2)  # let logger now we logged
 
     def __bool__(self):
         if self.total is not None:
@@ -84,6 +129,7 @@ class ProgressBar:
             else self.iterable.__length_hint__() if hasattr(self.iterable, "__length_hint__")
             else getattr(self, "total", None))
 
+    # TODO FIXME: I have no cluse why the try/catch is catching nothing here
     def __reversed__(self):
         try:
             orig = self.iterable
@@ -102,6 +148,7 @@ class ProgressBar:
     def __enter__(self):
         return self
 
+    # TODO FIXME: I don't understand the exception here. What are we catching? yield error?
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             self.close()
@@ -125,12 +172,60 @@ class ProgressBar:
         iterable = self.iterable
 
         for obj in iterable:
-            self.current+=1
+            self.current_iteration+=1
             self.progress()
             yield obj
+
+        self.progress()
         return
 
     def close(self):
-        self.log(f"{'-' * self.bar_length}", "100.0%")
+        pass
+        #self.log(f"{self.fill * self.bar_length}", "100.0%", end="\n")
 
+# copied from github.com/onsim/shutils
+def terminal_size(fallback=(80, 24)):
+    """Get the size of the terminal window.
+
+    For each of the two dimensions, the environment variable, COLUMNS
+    and LINES respectively, is checked. If the variable is defined and
+    the value is a positive integer, it is used.
+
+    When COLUMNS or LINES is not defined, which is the common case,
+    the terminal connected to sys.__stdout__ is queried
+    by invoking os.get_terminal_size.
+
+    If the terminal size cannot be successfully queried, either because
+    the system doesn't support querying, or because we are not
+    connected to a terminal, the value given in fallback parameter
+    is used. Fallback defaults to (80, 24) which is the default
+    size used by many terminal emulators.
+
+    The value returned is a named tuple of type os.terminal_size.
+    """
+    # columns, lines are the working values
+    try:
+        columns = int(os.environ['COLUMNS'])
+    except (KeyError, ValueError):
+        columns = 0
+
+    try:
+        lines = int(os.environ['LINES'])
+    except (KeyError, ValueError):
+        lines = 0
+
+    # only query if necessary
+    if columns <= 0 or lines <= 0:
+        try:
+            size = os.get_terminal_size(sys.__stdout__.fileno())
+        except (AttributeError, ValueError, OSError):
+            # stdout is None, closed, detached, or not a terminal, or
+            # os.get_terminal_size() is unsupported
+            size = os.terminal_size(fallback)
+        if columns <= 0:
+            columns = size.columns or fallback[0]
+        if lines <= 0:
+            lines = size.lines or fallback[1]
+
+    return (columns, lines)
 

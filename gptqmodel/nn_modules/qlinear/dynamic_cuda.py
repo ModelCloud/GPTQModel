@@ -17,6 +17,7 @@
 from typing import Optional, Tuple
 
 import torch
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.logger import setup_logger
 
@@ -47,6 +48,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "cuda"
@@ -61,6 +63,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             out_features: int,
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int32,
+            adapter: Adapter = None,
             kernel_switch_threshold=128,
             **kwargs,
     ):
@@ -77,6 +80,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             **kwargs)
 
         # assert in_features % 64 == 0 and out_features % 64 == 0
@@ -116,7 +120,7 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
         if x.shape[0] >= self.kernel_switch_threshold:
             # logger.warning_once(
             #   f"Input shape `{x.shape[0]}` >= `{self.kernel_switch_threshold}` is not optimized for cuda kernel: dynamic switching to torch kernel.")
-            return self._forward(x, x.dtype).reshape(out_shape)
+            return self._forward(x, x.dtype, out_shape)
 
         out = torch.zeros((x.shape[0], self.out_features), device=x.device, dtype=torch.float32)
         self.qmatmul(
@@ -128,10 +132,15 @@ class DynamicCudaQuantLinear(TorchQuantLinear):
             self.g_idx,
         )
 
-        out = out.to(x.dtype).reshape(out_shape)
+        out = out.reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+
+        return out.to(x.dtype)
 
 
 __all__ = ["DynamicCudaQuantLinear"]

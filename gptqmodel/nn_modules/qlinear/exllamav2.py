@@ -21,6 +21,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
@@ -133,7 +134,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
 
@@ -149,6 +150,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs, ):
 
         if exllama_v2_import_exception is not None:
@@ -176,6 +178,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             register_buffers_in_features=self.original_in_features,
             register_buffers_out_feature=self.original_out_features,
@@ -212,8 +215,11 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
         self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
 
+        super().post_init()
+
     def forward(self, x, force_cuda=False):
-        if x.dtype != torch.float16:
+        x_dtype = x.dtype
+        if x_dtype != torch.float16:
             logger.warning_once(
                 f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
@@ -225,12 +231,18 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         if x.size(-1) != self.in_features:
             x = F.pad(x, self.in_features_padding_shape)
 
-        output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+        if self.adapter:
+            if self.bias:
+                output = self.adapter.apply(x=x, out=ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)).add_(self.bias)
+            else:
+                output = self.adapter.apply(x=x, out=ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda))
+        else:
+            if self.bias:
+                output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda).add_(self.bias)
+            else:
+                output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
 
-        if self.bias is not None:
-            output.add_(self.bias)
-
-        return output
+        return output.to(dtype=x_dtype)
 
     def temp_dq_size(self):
         return self.in_features * self.out_features * 2 + 128

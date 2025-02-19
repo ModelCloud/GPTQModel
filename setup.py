@@ -153,7 +153,7 @@ if RELEASE_MODE == "1":
 
 additional_setup_kwargs = {}
 
-include_dirs = ["gptqmodel_cuda"]
+include_dirs = []
 
 extensions = []
 
@@ -211,24 +211,20 @@ if BUILD_CUDA_EXT:
         ]
 
     extensions = [
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_64",
-            [
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_256",
-            [
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
+        # cpp_ext.CUDAExtension(
+        #     'gptqmodel_exllama_eora',
+        #     [
+        #         "gptqmodel_ext/exllama_eora/q_gemm.cu",
+        #         "gptqmodel_ext/exllama_eora/pybind.cu",
+        #     ],
+        #     extra_link_args=extra_link_args,
+        #     extra_compile_args=extra_compile_args,
+        #     #include_dirs=[os.path.abspath("."), os.path.abspath("eora_test")],
+        #     # extra_compile_args={
+        #     #     'cxx': ['-std=c++20'],
+        #     #     'nvcc': ['-std=c++20'],
+        #     # }
+        # ),
     ]
 
     if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
@@ -314,12 +310,12 @@ setup(
     install_requires=requirements,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
-        "quality": ["ruff==0.4.9", "isort==5.13.2"],
-        'vllm': ["vllm>=0.6.4", "flashinfer-python>=0.2.1"],
-        'sglang': ["sglang>=0.3.2", "flashinfer-python>=0.2.1"],
+        "quality": ["ruff==0.9.6", "isort==6.0.0"],
+        'vllm': ["vllm>=0.6.4",  "flashinfer-python>=0.2.1"],
+        'sglang': ["sglang>=0.3.2",  "flashinfer-python>=0.2.1"],
         'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
-        'ipex': ["intel_extension_for_pytorch>=2.5.0"],
+        'ipex': ["intel_extension_for_pytorch>=2.6.0"],
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],

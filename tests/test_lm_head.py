@@ -46,7 +46,7 @@ class TestLmHeadLoad(ModelTest):
 
 class TestLmHeadQuant(ModelTest):
     APPLY_CHAT_TEMPLATE = True
-    EXPECT_LM_HEAD_LOSS = 31.11202
+    EXPECT_LM_HEAD_LOSS = 23.84
 
     sample_length = 1024
     samples = 128

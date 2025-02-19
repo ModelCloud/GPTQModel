@@ -19,6 +19,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
@@ -60,7 +61,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
-
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
 
@@ -82,6 +83,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         out_features,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs,
     ):
         if not TRITON_AVAILABLE:
@@ -95,6 +97,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
@@ -125,6 +128,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
                                       device=self.g_idx.device)
+        super().post_init()
 
     def forward(self, x):
         # if in_features is padded, we need to pad the input as well
@@ -142,11 +146,14 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.bits,
             self.pack_dtype_bits,
             self.maxq,
-        )
-        out = out.to(dtype=x.dtype).reshape(out_shape)
+        ).reshape(out_shape)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+        return out.to(dtype=x.dtype)
 
 
 __all__ = ["TritonV2QuantLinear"]
