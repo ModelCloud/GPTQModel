@@ -205,7 +205,7 @@ class BaseQuantLinear(nn.Module):
         if bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)
-        if group_size not in cls.SUPPORTS_GROUP_SIZE:
+        if group_size not in cls.SUPPORTS_GROUP_SIZE and group_size != in_features:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
         if sym not in cls.SUPPORTS_SYM:
@@ -365,3 +365,5 @@ class PackableQuantLinear(BaseQuantLinear):
                 col += 1
 
         self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+
+        print("self qw", self.qweight, self.scales, self.qzeros)
