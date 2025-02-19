@@ -26,7 +26,7 @@ import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type, Any
 
 import accelerate
 import threadpoolctl as tctl
@@ -175,6 +175,8 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
+) -> Type[BaseQuantLinear]:
+
     bits = qcfg.bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
@@ -183,7 +185,6 @@ def make_quant(
     sym = qcfg.sym
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
-) -> Type[BaseQuantLinear]:
 
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
@@ -225,10 +226,10 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 adapter=qcfg.adapter,
             )
-            logger.info(f"Kernel: selected -> `{linear}`.")
-            return linear_instance
+            logger.info(f"Kernel: selected -> `{linear_cls}`.")
+            return linear_cls
         except NotImplementedError as e:
-            logger.info(f"Kernel: skipped -> `{linear}`.")
+            logger.info(f"Kernel: skipped -> `{linear_cls}`.")
 
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
@@ -250,10 +251,9 @@ def create_quant_layer(
         lm_head_name: str,
         pack_dtype: torch.dtype,
         adapter: Optional[Adapter] = None,
-
-                       ) -> BaseQuantLinear:
-    if isinstance(module, linear):
-        return linear
+) -> Type[BaseQuantLinear]:
+    if isinstance(module, linear_cls):
+        return linear_cls
     for name, submodule in module.named_modules():
         # skip non-quantized modules
         if name not in quant_result:
@@ -306,7 +306,7 @@ def create_quant_layer(
 
         # when loading a quantized model, device is target device passed in GPTQModel.load()
         # check in_features and out_features validate
-        _, err = linear.validate(
+        _, err = linear_cls.validate(
             bits=tmp_bits,
             group_size=tmp_group_size,
             desc_act=tmp_desc_act,
@@ -320,7 +320,7 @@ def create_quant_layer(
         if err is not None:
             raise err
 
-        new_layer = linear(
+        new_layer = linear_cls(
             bits=tmp_bits,
             group_size=tmp_group_size,
             desc_act=tmp_desc_act,
@@ -336,7 +336,7 @@ def create_quant_layer(
         )
         new_layer.device = ori_layer_device
         recurse_setattr(module, name, new_layer.to(ori_layer_device))
-    return linear
+    return linear_cls
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
@@ -533,7 +533,6 @@ def pack_model(
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
-
     qcfg = QuantizeConfig(
         bits=bits,
         group_size=group_size,
@@ -550,7 +549,7 @@ def pack_model(
 
     modules = find_modules(model)
 
-    modules = {n: modules[n] for n in quantizers}
+    modules = {n: modules[n] for n in quant_result}
     quant_linear_cls = make_quant(
         model,
         quant_result=quant_result,
