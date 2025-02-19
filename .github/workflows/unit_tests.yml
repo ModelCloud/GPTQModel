@@ -631,7 +631,9 @@ jobs:
   
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
+        run: |
+          rm ~/.cache/evalplus/*pkl || true
+          pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
