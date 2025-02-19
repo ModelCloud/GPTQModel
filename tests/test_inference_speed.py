@@ -43,7 +43,6 @@ class TestInferenceSpeed(InferenceSpeed):
     @parameterized.expand(
         [
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 161.72, True, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 227.96, True, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),

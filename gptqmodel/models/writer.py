@@ -185,23 +185,6 @@ def ModelWriter(cls):
             model = self.model
             # # internal is always gptq v2 but allow users to pass gptq (v1) via config
             if quantize_config.format == FORMAT.GPTQ:
-                # fix ModelCloud/GPTQModel/issues/47
-                # fix gptqmodel_cuda cannot be serialized
-                # no need to set it back, no calculation below
-                if quantize_config.bits != 4:
-                    cuda_name_modules = {}
-                    from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
-                    for name, module in model.named_modules():
-                        if isinstance(module, DynamicCudaQuantLinear):
-                            cuda_name_modules[name] = module.gptqmodel_cuda
-                            module.gptqmodel_cuda = None
-
-                    for name, module in model.named_modules():
-                        if isinstance(module, DynamicCudaQuantLinear) and name in cuda_name_modules:
-                            module.gptqmodel_cuda = cuda_name_modules[name]
-
-                    del cuda_name_modules
-
                 # Model qzeros may be edited in place.
                 model = convert_gptq_v2_to_v1_format(
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel

@@ -153,7 +153,7 @@ if RELEASE_MODE == "1":
 
 additional_setup_kwargs = {}
 
-include_dirs = ["gptqmodel_cuda"]
+include_dirs = []
 
 extensions = []
 
@@ -225,24 +225,6 @@ if BUILD_CUDA_EXT:
         #     #     'nvcc': ['-std=c++20'],
         #     # }
         # ),
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_64",
-            [
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_256",
-            [
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
     ]
 
     if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply

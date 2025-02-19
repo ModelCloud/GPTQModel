@@ -20,7 +20,6 @@ from enum import Enum
 class BACKEND(str, Enum):
     AUTO = "auto"  # choose the optimal local kernel based on quant_config compatibility
     AUTO_TRAINABLE = "auto_trainable" # choose the optimal trainable local kernel for post-quant training
-    CUDA = "cuda"
     TORCH = "torch"
     EORA_TORCH = "eora_torch"
     TRITON = "triton"
