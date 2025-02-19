@@ -264,7 +264,8 @@ class BaseQuantLinear(nn.Module):
         if bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)
-        if group_size not in cls.SUPPORTS_GROUP_SIZE:
+        # valid group size is set of cls.SUPPORTS_GROUP_SIZE + in_features; group_size = -1 is alias for group_size == in_features
+        if group_size not in cls.SUPPORTS_GROUP_SIZE and group_size != in_features:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
         if sym not in cls.SUPPORTS_SYM:

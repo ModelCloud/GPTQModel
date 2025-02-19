@@ -212,7 +212,6 @@ def ModelWriter(cls):
                 model_id_or_path=self.model_local_path,
             )
 
-
         # --- start config save block ---
         # Save quantized config
         config.quantization_config = quantize_config.to_dict()

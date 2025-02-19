@@ -19,7 +19,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shutil
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union, Type
 
@@ -29,7 +28,8 @@ import torch.nn as nn
 from packaging import version
 from packaging.version import Version
 from tokenicer import Tokenicer
-from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
+from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils, ProcessorMixin, \
+    AutoProcessor
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -91,6 +91,9 @@ class BaseGPTQModel(nn.Module):
     require_dtype: Optional[str|torch.dtype] = None
     require_fast_init: bool = True
 
+    # some models require Processor? For example, Qwen2VLImageProcessor.
+    require_load_processor = False
+
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
     # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)
@@ -151,6 +154,10 @@ class BaseGPTQModel(nn.Module):
         self.model_local_path = model_local_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
+
+        self.processor: ProcessorMixin = None
+        if self.require_load_processor:
+            self.processor = AutoProcessor.from_pretrained(model_local_path)
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
@@ -1150,14 +1157,6 @@ class BaseGPTQModel(nn.Module):
             eora_path: Optional[str] = None,
             **kwargs,
     ):
-        extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
-        for name in extra_json_file_names:
-            json_path = os.path.join(self.model_local_path, name)
-            if os.path.exists(json_path):
-                os.makedirs(save_dir, exist_ok=True)
-
-                shutil.copyfile(json_path, os.path.join(save_dir, name))
-
         if self.quantized:
             # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
             #untie_weights(self.model)

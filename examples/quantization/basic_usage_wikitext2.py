@@ -68,9 +68,6 @@ def main():
     # with value under torch.LongTensor type.
     model.quantize(traindataset)
 
-    # save quantized model
-    model.save(quantized_model_id)
-
     # save quantized model using safetensors
     model.save(quantized_model_id)
 

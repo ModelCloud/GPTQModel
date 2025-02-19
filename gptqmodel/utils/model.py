@@ -175,8 +175,6 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
-) -> BaseQuantLinear:
-
     bits = qcfg.bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
@@ -185,6 +183,7 @@ def make_quant(
     sym = qcfg.sym
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
+) -> Type[BaseQuantLinear]:
 
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
@@ -205,15 +204,15 @@ def make_quant(
     logger.info(f"Kernel: candidates -> `{quant_linear_candidates}`")
 
     # loop over actual QLinear init, catch errors and use fallbacks if applicable
-    for linear in quant_linear_candidates:
+    for cls in quant_linear_candidates:
         try:
             # if linear is not selectedQLinear:
             #     logger.info(f"make_quant: Faild linear: `{selectedQLinear}` failed, trying to use fallback: `{linear}`")
             # else:
             #     logger.info("make_quant: Testing linear: {linear}")
 
-            linear_instance = create_quant_layer(
-                linear=linear,
+            linear_cls = create_quant_layer(
+                linear_cls=cls,
                 bits=bits,
                 desc_act=desc_act,
                 dynamic=dynamic,
@@ -230,6 +229,7 @@ def make_quant(
             return linear_instance
         except NotImplementedError as e:
             logger.info(f"Kernel: skipped -> `{linear}`.")
+
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
@@ -238,7 +238,7 @@ def make_quant(
 
 
 def create_quant_layer(
-        linear: nn.Module,
+        linear_cls: Type[BaseQuantLinear],
         bits: int,
         desc_act: bool,
         dynamic,
@@ -533,6 +533,7 @@ def pack_model(
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
+
     qcfg = QuantizeConfig(
         bits=bits,
         group_size=group_size,
@@ -542,25 +543,15 @@ def pack_model(
         dynamic=dynamic,
         pack_dtype=pack_dtype,
     )
-    quantLinear = select_quant_linear(
-        bits=bits,
-        dynamic=dynamic,
-        group_size=group_size,
-        desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=True,
-        pack_dtype=pack_dtype,
-    )
-
+   
     model.to(CPU)
 
     logger.info("Packing model...")
 
     modules = find_modules(model)
-    modules = {n: modules[n] for n in quant_result}
-    make_quant(
+
+    modules = {n: modules[n] for n in quantizers}
+    quant_linear_cls = make_quant(
         model,
         quant_result=quant_result,
         qcfg=qcfg,
@@ -568,7 +559,11 @@ def pack_model(
         lm_head_name=lm_head_name,
         pack=True,
     )
-    qModules = find_modules(model, [quantLinear])
+    
+    qModules = find_modules(model, [quant_linear_cls])
+
+    assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
+
     names = list(qModules.keys())
 
     if parallel_packing:
@@ -585,7 +580,7 @@ def pack_model(
                 pass
 
     logger.info("Model packed.")
-    return quantLinear
+    return quant_linear_cls
 
 
 def verify_model_hash(file_path: str, verify_hash: str):
