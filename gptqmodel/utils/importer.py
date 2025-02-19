@@ -40,15 +40,15 @@ from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 message_logged = False
 logger = setup_logger()
 
-BACKEND_DICT = OrderedDict({
+AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
-    BACKEND.TRITON: TritonV2QuantLinear,
-    BACKEND.CUDA: DynamicCudaQuantLinear,
-    BACKEND.BITBLAS: BitBLASQuantLinear, # super slow JIT compile but fastest for bs=1
-    BACKEND.IPEX: IPEXQuantLinear,
-    BACKEND.TORCH: TorchQuantLinear,
+    BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
+    # BACKEND.CUDA: DynamicCudaQuantLinear,
+    BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
+    BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
+    BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
 })
 
 FORMAT_DICT = {
@@ -178,7 +178,7 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = [(k, v) for k,v in BACKEND_DICT.items() if k in FORMAT_DICT[format]]
+        allow_quant_linears = [(k, v) for k,v in AUTO_SELECT_BACKEND_ORDER.items() if k in FORMAT_DICT[format]]
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.

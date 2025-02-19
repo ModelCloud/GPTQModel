@@ -15,7 +15,7 @@
 # limitations under the License.
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.importer import BACKEND_DICT
+from gptqmodel.utils.importer import AUTO_SELECT_BACKEND_ORDER
 from model_test import ModelTest
 
 
@@ -24,8 +24,8 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.1894
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
 
-    KERNEL_QUANT = {BACKEND_DICT[BACKEND.EXLLAMA_V1]}
-    KERNEL_INFERENCE = {BACKEND_DICT[BACKEND.MARLIN]}
+    KERNEL_QUANT = {AUTO_SELECT_BACKEND_ORDER[BACKEND.EXLLAMA_V1]}
+    KERNEL_INFERENCE = {AUTO_SELECT_BACKEND_ORDER[BACKEND.MARLIN]}
 
     def test_opt(self):
         self.quant_lm_eval()
