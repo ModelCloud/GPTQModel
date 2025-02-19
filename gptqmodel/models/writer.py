@@ -29,8 +29,7 @@ import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
-from torch import nn
-from transformers import AutoConfig, PreTrainedTokenizerFast, GenerationConfig
+from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -175,6 +174,21 @@ def ModelWriter(cls):
                 model_id_or_path=self.model_local_path,
             )
 
+        # --- start config save block ---
+        # Save quantized config
+        config.quantization_config = quantize_config.to_dict()
+        self.model.config = config
+
+        # Save model config, including generation_config
+        # use empty state_dict hack to bypass saving weights
+        self.model.save_pretrained(save_dir, state_dict={})
+        quantize_config.save_pretrained(save_dir)
+
+        # Save processor related config files. For example: preprocessor_config.json, chat_template.json
+        if hasattr(self,"processor") and isinstance(self.processor, ProcessorMixin):
+            self.processor.save_pretrained(save_dir)
+        # --- end config save block ---
+
         model.to(CPU)
         state_dict = get_state_dict_for_save(model)
 
@@ -305,18 +319,6 @@ def ModelWriter(cls):
             logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
             logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
-        config.quantization_config = quantize_config.to_dict()
-
-        self.model.config = config
-
-        # Save config files with empty state dict
-        self.model.save_pretrained(save_dir, state_dict={})
-
-        quantize_config.save_pretrained(save_dir)
-
-        # Save processor related config files. For example: preprocessor_config.json, chat_template.json
-        if self.processor is not None:
-            self.processor.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
