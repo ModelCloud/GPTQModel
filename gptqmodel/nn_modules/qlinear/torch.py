@@ -75,10 +75,10 @@ class TorchQuantLinear(PackableQuantLinear):
 
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
 
-        if self.group_size != self.in_features:
-            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
-        else:
-            self.padded_infeatures = self.in_features
+        # if self.group_size != self.in_features:
+        #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
+        # else:
+        #     self.padded_infeatures = self.in_features
 
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
