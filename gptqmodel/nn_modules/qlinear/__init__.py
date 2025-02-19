@@ -367,4 +367,4 @@ class PackableQuantLinear(BaseQuantLinear):
 
         self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
 
-        print("self qw", self.qweight, self.scales, self.qzeros)
+        # print("self qw", self.qweight, self.scales, self.qzeros)
