@@ -405,9 +405,11 @@ class ModuleLooper():
 
         for reverse_p in reversed(self.processors):
             if isinstance(reverse_p, GPTQProcessor):
-                logger.info(f"Quantization summary:\n{reverse_p.log}")
+                pass
+                #logger.info(f"Quantization summary:\n{reverse_p.log}")
             elif isinstance(reverse_p, EoraProcessor):
-                logger.info(f"Eora summary:\n{reverse_p.log}")
+                pass
+                #logger.info(f"Eora summary:\n{reverse_p.log}")
             elif isinstance(reverse_p, DequantizeProcessor):
                 # ignore log
                 pass
