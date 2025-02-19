@@ -24,6 +24,7 @@ from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+from gptqmodel.adapter.adapter import Lora, normalize_adapter
 from packaging import version
 
 from ..utils.logger import setup_logger
@@ -57,6 +58,7 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
 
+ADAPTER_FIELD = "adapter"
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -104,7 +106,6 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     FORMAT_FIELD_JSON: FORMAT_FIELD_CODE,
 }
 
-
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
     Checks whether the passed dictionary and its nested dicts have a *scale_dtype* key and if it's not None,
@@ -119,6 +120,10 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+
+    if dynamic is None:
+        return default_value
+
     for pattern, overrides in dynamic.items():
         if pattern.startswith("-:"):
             if re.match(pattern.removeprefix("-:"), module_name):
@@ -176,6 +181,9 @@ class QuantizeConfig():
     # allowing using different dtypes used for packing quantized weights
     # affects [`qweights`, `qzeros`]
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
+
+    # pending used field
+    adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -239,6 +247,20 @@ class QuantizeConfig():
                     raise ValueError("Keys in the meta dictionary must be strings")
         else:
             self.meta = {}
+
+        # adapter normalize
+        self.adapter = normalize_adapter(self.adapter)
+
+        print(f"adapter: {self.adapter}")
+
+    def extension_set(self, key: str, value: Any):
+        if self.adapter is None:
+            self.adapter = {}
+
+        self.adapter[key.lower()] = value
+
+    def extension_get(self, key: str) -> Any:
+            return self.adapter.get(key.lower()) if self.adapter else None
 
     def meta_set(self, key: str, value: Any):
         self.meta[key] = value
@@ -388,12 +410,15 @@ class QuantizeConfig():
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_JSON: self.format,
+            # torch.dtype convert to string
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
+            # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
+            # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
 
-        # simplify: clean keys where the value is None
-        out = {k: v for k, v in out.items() if v is not None}
+        # simplify: clean keys where the value is None or empty [list, dict]
+        out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
 
         dict_scale_dtype_to_str(out)
         return out
@@ -412,7 +437,12 @@ class QuantizeConfig():
             # FIX ME: g_idx is I32, one per infeature
             per_group_bits += 4  # ESTIMATE for g_idx int32: one per features/group_size item
             bpw = per_group_bits / self.group_size
+
+            # normally g_idx (int32 allocated one per in_feature) is allocated in device memory
+            # but each module may have different infeatures we don't have enouch ctx here, use estimated `0.1` for now
+            bpw += 0.1
         else:
+            # there is only one scale int32 + one qzero int32 per entire module so overall it contributes to close to 0 bpw
             bpw = self.bits
         logger.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
