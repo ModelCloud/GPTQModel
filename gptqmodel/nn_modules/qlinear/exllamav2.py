@@ -238,9 +238,9 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             out.add_(self.bias)
 
         if self.adapter:
-            output = self.adapter.apply(x=x, out=out)
+            out = self.adapter.apply(x=x, out=out)
 
-        return output.to(dtype=x_dtype)
+        return out.to(dtype=x_dtype)
 
     def temp_dq_size(self):
         return self.in_features * self.out_features * 2 + 128
