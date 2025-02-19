@@ -22,9 +22,11 @@ class BACKEND(str, Enum):
     AUTO_TRAINABLE = "auto_trainable" # choose the optimal trainable local kernel for post-quant training
     CUDA = "cuda"
     TORCH = "torch"
+    EORA_TORCH = "eora_torch"
     TRITON = "triton"
     EXLLAMA_V1 = "exllama_v1"
     EXLLAMA_V2 = "exllama_v2"
+    # EXLLAMA_EORA = "exllama_eora"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     IPEX = "ipex"

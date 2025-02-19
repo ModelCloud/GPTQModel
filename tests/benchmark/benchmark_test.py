@@ -23,13 +23,13 @@ import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.progress import ProgressBar  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class BenchmarkTest(unittest.TestCase):
     MODEL_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
-    MIN_NEW_TOEKNS = 10
-    NUM_RUNS = 10
+    MIN_NEW_TOKENS = 10
+    MAX_NEW_TOKENS = 20
+    NUM_RUNS = 50
     PROMPTS = [
         "I am in Paris and I",
         "The capital of the United Kingdom is",
@@ -45,31 +45,38 @@ class BenchmarkTest(unittest.TestCase):
     MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
-    def benchmark(self, backend, device, tokens_per_second):
-        model = GPTQModel.from_quantized(
+    def benchmark(self, backend, device, tokens_per_second: int, warmup_iter: int = 1):
+        model = GPTQModel.load(
             self.MODEL_id,
             device=device,
             backend=backend,
+            use_cache=False,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_id)
-        tokenizer.pad_token = tokenizer.eos_token
-        inp = tokenizer(self.PROMPTS, padding=True, truncation=True, return_tensors="pt", padding_side='left').to(device)
+        model.optimize()
+
+        tokenizer = model.tokenizer
+        inp = tokenizer(self.PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to(device)
+
+        print(f"Warming up: warmup_iter = `{warmup_iter}`")
+        for i in range(warmup_iter):
+            _ = model.generate(**inp, min_new_tokens=self.MIN_NEW_TOKENS,
+                               max_new_tokens=self.MAX_NEW_TOKENS)
 
         times = []
         pb = ProgressBar(range(self.NUM_RUNS))
         for i in pb:
-            pb.set_description(f"run index {i} of {self.NUM_RUNS -1}")
+            pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
             start_time = time.time()
-            _ = model.generate(**inp, num_beams=1, min_new_tokens=self.MIN_NEW_TOEKNS,
-                                 max_new_tokens=self.MIN_NEW_TOEKNS)
+            _ = model.generate(**inp,min_new_tokens=self.MIN_NEW_TOKENS,
+                                 max_new_tokens=self.MAX_NEW_TOKENS)
             end_time = time.time()
 
             elapsed_time = end_time - start_time
             times.append(elapsed_time)
 
         sum_time = sum(times)
-        sum_tokens = len(self.PROMPTS) * self.MIN_NEW_TOEKNS * self.NUM_RUNS
+        sum_tokens = len(self.PROMPTS) * self.MIN_NEW_TOKENS * self.NUM_RUNS
         avg_tokens_per_second = sum_tokens / sum_time
 
         print("**************** Benchmark Result Info****************")

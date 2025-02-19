@@ -19,6 +19,7 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
 import torch
+from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
@@ -51,8 +52,8 @@ BACKEND_DICT = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH],
-    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH], # BACKEND.EXLLAMA_EORA
+    FORMAT.GPTQ_V2: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH], # , BACKEND.EXLLAMA_EORA
     FORMAT.MARLIN: [BACKEND.MARLIN],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -140,6 +141,7 @@ def hf_select_quant_linear(
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
         pack_dtype=torch.int32,
+        adapter=None,
     )
 
 
@@ -157,6 +159,7 @@ def select_quant_linear(
         dynamic=None,
         pack_dtype: torch.dtype = None,
         multi_select: bool = False, # return all valid kernels
+        adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if device is None:
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
@@ -180,24 +183,35 @@ def select_quant_linear(
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
         for k, cls in allow_quant_linears:
-            validate, err = cls.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
+            validate, err = cls.validate(
+                bits=bits,
+                group_size=group_size,
+                desc_act=desc_act,
+                sym=sym,
+                pack_dtype=pack_dtype,
+                dynamic=dynamic,
+                device=device,
+                trainable=trainable,
+                adapter=adapter,
+            )
             if os.environ.get("DEBUG") and not validate:
                 logger.info(f"skip {k} for {str(err)}")
             if validate:
                 if pack:
                     check_pack_func = issubclass(cls, PackableQuantLinear)
                     if check_pack_func:
-                        if not message_logged:
-                            logger.info(f"Auto pick kernel based on compatibility: {cls}")
-                            message_logged = True
+                        #if not message_logged:
+                        #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
+                        #    message_logged = True
+                        logger.info(f"Kernel: Auto-selection: adding candidate `{cls}`")
                         validated_qlinears.append(cls)
                         if not multi_select:
                             return cls
                 else:
-                    if not message_logged:
-                        logger.info(f"Auto pick kernel based on compatibility: {cls}")
-                        message_logged = True
-
+                    #if not message_logged:
+                    #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
+                    #    message_logged = True
+                    logger.info(f"Kernel: Auto-selection: adding candidate `{cls}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
                         return cls
@@ -216,6 +230,8 @@ def select_quant_linear(
         qlinear = BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
         qlinear = MarlinQuantLinear
+    # elif backend == BACKEND.EXLLAMA_EORA:
+    #     qlinear = ExllamaEoraQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
@@ -225,7 +241,7 @@ def select_quant_linear(
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
-            raise ValueError("IPEX is not available.")
+            raise ValueError("IPEX is not available. Please install it by `pip install gptqmodel['ipex']`")
 
         from device_smi import Device
 

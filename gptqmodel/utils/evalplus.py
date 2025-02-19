@@ -15,6 +15,7 @@ def patch_evalplus(model):
     if isinstance(model, BaseGPTQModel) or isinstance(model, PreTrainedModel):
         model.strip = types.MethodType(patch_strip, model)
         model.__str__ = types.MethodType(patch_tostring, model)
+        model.__repr__ = types.MethodType(patch_tostring, model)
 
     import torch
     from evalplus.provider.base import DecoderBase

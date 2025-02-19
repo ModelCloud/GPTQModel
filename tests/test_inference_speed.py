@@ -17,8 +17,6 @@
 # -- do not touch
 import os
 
-import torch
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 from gptqmodel.utils import BACKEND  # noqa: E402
 # -- end do not touch
@@ -44,21 +42,19 @@ class TestInferenceSpeed(InferenceSpeed):
 
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 161.72),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 227.96),
-            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38), # Second time running bitblas, there is cache
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 161.72, True, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 227.96, True, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),
+            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38, False, False), # Second time running bitblas, there is cache
         ]
     )
-    def test_inference_speed(self, model_path, backend, tokens_per_second):
-        # Start a fresh compile for each parameter of the test case
-        torch._dynamo.reset()
-
+    def test_inference_speed(self, model_path, backend, tokens_per_second, optimize, fullgraph):
         # There are differences between the results of the first and second runs of bitblas
         # (there is a cache when running bitblas for the second time),
         # so only the results of the second run of bitblas are asserted.
         # The first run of bitblas only prints relevant information
-        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, compile=True, warmup_runs=1)
+        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, optimize=optimize, fullgraph=fullgraph, warmup_runs=1)

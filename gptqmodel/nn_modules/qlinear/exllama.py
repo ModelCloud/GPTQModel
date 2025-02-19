@@ -22,6 +22,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
@@ -69,6 +70,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
@@ -85,6 +87,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs,
     ):
         if exllama_import_exception is not None:
@@ -111,6 +114,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             register_buffers_in_features=self.original_in_features,
             register_buffers_out_feature=self.original_out_features,
@@ -147,9 +151,12 @@ class ExllamaQuantLinear(PackableQuantLinear):
             self.qweight.device.index,
         )
 
+        super().post_init()
+
 
     def forward(self, x):
-        if x.dtype != torch.float16:
+        x_dtype = x.dtype
+        if x_dtype != torch.float16:
             logger.warning_once(
                 f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
@@ -161,9 +168,15 @@ class ExllamaQuantLinear(PackableQuantLinear):
         if x.size(-1) != self.in_features:
             x = F.pad(x, self.in_features_padding_shape)
 
-        out = ext_q4_matmul(x, self.q4, self.width)
+        if self.adapter:
+            if self.bias:
+                out = self.adapter.apply(x=x, out=ext_q4_matmul(x, self.q4, self.width)).add_(self.bias)
+            else:
+                out = self.adapter.apply(x=x, out=ext_q4_matmul(x, self.q4, self.width))
+        else:
+            if self.bias:
+                out = ext_q4_matmul(x, self.q4, self.width).add_(self.bias)
+            else:
+                out = ext_q4_matmul(x, self.q4, self.width)
 
-        if self.bias is not None:
-            out.add_(self.bias)
-
-        return out
+        return out.to(x_dtype)

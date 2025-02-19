@@ -28,8 +28,9 @@ import torch
 import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
+from safetensors.torch import save_file
 from safetensors.torch import save_file as safe_save
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers import AutoConfig, GenerationConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -48,15 +49,17 @@ from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
 
 logger = setup_logger()
 
-QUANT_LOG_LAYER = "layer"
-QUANT_LOG_MODULE = "module"
+PROCESS_LOG_NAME = "process"
+PROCESS_LOG_LAYER = "layer"
+PROCESS_LOG_MODULE = "module"
 QUANT_LOG_LOSS = "loss"
 QUANT_LOG_DAMP = "damp"
-QUANT_LOG_TIME = "time"
-QUANT_LOG_FWD_TIME = "fwd_time"
+PROCESS_LOG_TIME = "time"
+PROCESS_LOG_FWD_TIME = "fwd_time"
+
+EORA_DEFAULT_FILE = "eora.safetensors"
 
 def ModelWriter(cls):
-
     def save_pretrained(
             self,
             save_dir: str,
@@ -67,12 +70,47 @@ def ModelWriter(cls):
 
     cls.save_pretrained = save_pretrained
 
+    def eora_save(self, eora_path: str):
+        # save lora tensors
+        if hasattr(self, 'lora_results'):  # hack: TODO
+            weights = {}
+
+            # convert the dict into safetensors compatible dict
+            for key, d in self.lora_results.items():
+                # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
+                key = key.lower().removeprefix("model.")
+                for lora_key, lora_weight in d.items():
+                    if isinstance(lora_weight, torch.Tensor):
+                        weights[f"{key}.{lora_key}"] = lora_weight
+                        logger.info(f"lora weight: `{key}.{lora_key}`")
+
+
+            # then lora_path from `save()` then lora.path
+            eora_path = eora_path if eora_path else self.quantize_config.adapter.path
+
+            if not eora_path:
+                raise ValueError(f"Invalid EoRA lora path: actual = `{eora_path}`")
+
+            is_file = eora_path.endswith(".safetensors")
+
+            if not is_file:
+                eora_path = f"{eora_path}/eora.safetensors"
+
+            logger.info(f"Found EoRA lora weights: saving to {eora_path}")
+
+            os.makedirs(os.path.dirname(eora_path), exist_ok=True)
+
+            save_file(tensors=weights, filename=eora_path, metadata={"format": "pt"})
+
+    cls.eora_save = eora_save
+
     def save_quantized(
             self,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
+            eora_path: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -80,9 +118,9 @@ def ModelWriter(cls):
         if self.quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
-                w.writerow([QUANT_LOG_LAYER, QUANT_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, QUANT_LOG_TIME])
-                w.writerows([[entry.get(QUANT_LOG_LAYER), entry.get(QUANT_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
-                              entry.get(QUANT_LOG_DAMP), entry.get(QUANT_LOG_TIME)] for entry in self.quant_log])
+                w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
+                w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
+                              entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
@@ -179,9 +217,29 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
+        # Hack validator so it skips validation on save
+        original_validator = None
+        if hasattr(self, "generation_config") and isinstance(self.generation_config, GenerationConfig):
+            try:
+                self.generation_config.validate()
+            except Exception as e:
+                logger.warning(f"Model `generation_config` validation failed. We will allow model save to continue but please fix discrepancies: {e}")
+
+                original_validator = self.generation_config.validate
+                def dummy_validate(**kwargs):
+                    pass
+
+                self.generation_config.validate = dummy_validate
+
         # Save model config, including generation_config
-        # use empty state_dict hack to bypass saving weights
+        # Use empty state_dict hack to bypass saving weights
         self.model.save_pretrained(save_dir, state_dict={})
+
+        # Restore validator
+        if original_validator is not None:
+            self.generation_config.validate = original_validator
+
+        # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
 
         # Save processor related config files. For example: preprocessor_config.json, chat_template.json
@@ -309,6 +367,9 @@ def ModelWriter(cls):
                     content = json.dumps(index, indent=2, sort_keys=True) + "\n"
                     f.write(content)
 
+        # save lora
+        eora_save(self, eora_path=eora_path)
+
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
             total_size_gb = total_size_mb / 1024
@@ -318,7 +379,6 @@ def ModelWriter(cls):
             logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
             logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
             logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
-
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
@@ -384,15 +444,11 @@ def ModelWriter(cls):
 
             make_quant(
                 model,
-                modules,
-                qcfg.bits,
-                qcfg.group_size,
+                quant_result=modules,
+                qcfg=qcfg,
                 backend=BACKEND.AUTO,
-                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=qcfg.desc_act,
                 pack=True,
-                pack_dtype=qcfg.pack_dtype,
             )
 
         load_checkpoint_in_model_then_tie_weights(

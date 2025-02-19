@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
@@ -170,7 +171,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
@@ -183,6 +184,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
@@ -206,6 +208,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -368,11 +371,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             group_size=self.group_size)
         replace_tensor(self, "scales", marlin_scales)
 
+        super().post_init()
+
     def forward(self, A: torch.Tensor):
         if A.dtype != torch.float16:
             A = A.to(torch.float16)
 
-        return apply_gptq_marlin_linear(
+        output = apply_gptq_marlin_linear(
             input=A.contiguous() if self.is_lm_head else A,
             weight=self.qweight,
             weight_scale=self.scales,
@@ -384,7 +389,15 @@ class MarlinQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
-            bias=self.bias)
+            bias=self.bias if not self.adapter else None)
+
+        if self.adapter:
+            if self.bias:
+                output = self.adapter.apply(x=A, out=output).add_(self.bias)
+            else:
+                output = self.adapter.apply(x=A, out=output)
+
+        return output
 
 # Precompute permutations for Marlin weight and scale shuffling
 def _get_perms():
