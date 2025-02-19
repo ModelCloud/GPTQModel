@@ -508,6 +508,9 @@ def pack_model(
         pack_dtype=pack_dtype,
     )
     qModules = find_modules(model, [quant_linear_cls])
+
+    assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
+
     names = list(qModules.keys())
 
     if parallel_packing:
