@@ -134,7 +134,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
 
@@ -231,13 +231,16 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         if x.size(-1) != self.in_features:
             x = F.pad(x, self.in_features_padding_shape)
 
-        output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
-
         if self.adapter:
-            output = self.adapter.apply(x=x, out=output)
-
-        if self.bias is not None:
-            output.add_(self.bias)
+            if self.bias:
+                output = self.adapter.apply(x=x, out=ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)).add_(self.bias)
+            else:
+                output = self.adapter.apply(x=x, out=ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda))
+        else:
+            if self.bias:
+                output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda).add_(self.bias)
+            else:
+                output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
 
         return output.to(dtype=x_dtype)
 

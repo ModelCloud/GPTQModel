@@ -33,7 +33,7 @@ logger = setup_logger()
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset,
+    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True):
 
@@ -95,7 +95,7 @@ class LoopProcessor:
                 logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                                f"Current: {len(calibration_dataset)}.")
 
-            calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
+            calibration_dataset = prepare_dataset_func(calibration_dataset=calibration_dataset,
                                                             calibration_dataset_concat_size=calibration_dataset_concat_size,
                                                             batch_size=batch_size)
 
@@ -136,131 +136,6 @@ class LoopProcessor:
 
     def results(self):
         return self._results
-
-    def prepare_dataset(
-            self,
-            calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
-            # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
-            calibration_dataset_concat_size: Optional[int] = None,
-            batch_size: int = 1,
-    ):
-        if isinstance(calibration_dataset[0], (str, list)) or (
-                isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
-            if self.tokenizer is None:
-                raise ValueError(
-                    f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
-
-            # Convert strings/ints to tokenized format
-            new_calibration_dataset = []
-            for data in calibration_dataset:
-                # convert to tensor directly if already in token ids format (ints)
-                if isinstance(data, list) and all(isinstance(x, int) for x in data):
-                    input_ids = torch.tensor([data], dtype=torch.long)
-                    attention_mask = torch.ones_like(input_ids)
-                    new_calibration_dataset.append({
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask
-                    })
-                # call tokenizer if dataset still string format (str)
-                else:
-                    tokenized = self.tokenizer(data, return_tensors="pt")
-                    new_calibration_dataset.append({
-                        "input_ids": tokenized["input_ids"],
-                        "attention_mask": tokenized["attention_mask"]
-                    })
-            calibration_dataset = new_calibration_dataset
-
-        def _convert_tensor_to_list(tensor):
-            if isinstance(tensor, torch.Tensor):
-                if len(tensor.shape) == 1:
-                    tensor = tensor.unsqueeze(0)
-                tensor = tensor.long()
-                return tensor.cpu().numpy().tolist()
-            return [tensor]
-
-        new_calibration_dataset = []
-        for example in calibration_dataset:
-            input_ids = _convert_tensor_to_list(example["input_ids"])
-            attention_mask = _convert_tensor_to_list(example["attention_mask"])
-
-            new_calibration_dataset.append(
-                {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                }
-            )
-
-        if calibration_dataset_concat_size:
-            concatenated_data = []
-            input_ids_buff = []
-            attention_mask_buff = []
-            current_length = 0
-
-            new_line = self.tokenizer(CALIBRATION_DATASET_CONCAT_CHAR, return_tensors="pt")
-            new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
-            new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
-            new_line_input_ids_len = len(new_line_input_ids)
-
-            for example in new_calibration_dataset:
-                input_ids = example["input_ids"][0]
-                attention_mask = example["attention_mask"][0]
-
-                if current_length + len(input_ids) + new_line_input_ids_len >= calibration_dataset_concat_size:
-                    if len(input_ids_buff) > 0:
-                        remaining_space = calibration_dataset_concat_size - current_length
-                        # if there is remaining space, add the remaining input to the current block
-                        if remaining_space > 0:
-                            input_ids_buff.extend(new_line_input_ids)
-                            input_ids_buff.extend(input_ids[:remaining_space - new_line_input_ids_len])
-                            attention_mask_buff.extend(new_line_attention_mask)
-                            attention_mask_buff.extend(attention_mask[:remaining_space - new_line_input_ids_len])
-
-                            concatenated_data.append({
-                                "input_ids": [input_ids_buff],
-                                "attention_mask": [attention_mask_buff]
-                            })
-                        else:
-                            # if there is no remaining space, add the current block to the concatenated data
-                            concatenated_data.append({
-                                "input_ids": [input_ids_buff],
-                                "attention_mask": [attention_mask_buff]
-                            })
-
-                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
-                        current_length = len(input_ids_buff)
-                    else:
-                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
-                        current_length = len(input_ids_buff)
-                else:
-                    if len(input_ids_buff) > 0:
-                        input_ids_buff.extend(new_line_input_ids)
-                        attention_mask_buff.extend(new_line_attention_mask)
-                        current_length += new_line_input_ids_len
-
-                    input_ids_buff.extend(input_ids)
-                    attention_mask_buff.extend(attention_mask)
-                    current_length += len(input_ids)
-
-            if input_ids_buff:
-                padding_length = calibration_dataset_concat_size - len(input_ids_buff)
-                if padding_length > 0:
-                    input_ids_buff.extend([self.tokenizer.pad_token_id] * padding_length)
-                    attention_mask_buff.extend([0] * padding_length)
-                concatenated_data.append({
-                    "input_ids": [input_ids_buff],
-                    "attention_mask": [attention_mask_buff]
-                })
-
-            new_calibration_dataset = concatenated_data
-
-        new_calibration_dataset_batched = [
-            collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-            for start in range(0, len(new_calibration_dataset), batch_size)
-        ]
-
-        return new_calibration_dataset_batched
 
     def collect_memory_info(self, layer_index: int):
         if self.logger_task is not None:

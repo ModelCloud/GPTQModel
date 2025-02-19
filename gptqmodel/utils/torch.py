@@ -18,9 +18,8 @@ import gc as py_gc
 from typing import Callable, Union
 
 import torch
-from packaging.version import Version
-
 from gptqmodel.utils.logger import setup_logger
+from packaging.version import Version
 
 HAS_CUDA = False
 HAS_XPU = False

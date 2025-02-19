@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import os
 
+from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
 from lm_eval.utils import make_table
 from tokenicer import Tokenicer
-
-
-from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
 
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization.gptq import CPU
@@ -308,17 +306,16 @@ class GPTQModel:
     def eval(
             cls,
             model_or_id_or_path: str=None,
-            tokenizer: PreTrainedTokenizerBase=None,
+            tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
             tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
-            framework: EVAL = EVAL.LM_EVAL,
-            batch_size: int = 1,
+            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]] = EVAL.LM_EVAL,
+            batch_size: Union[int, str] = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
             llm_backend: str = 'gptqmodel',
             backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
-
             **args
     ):
         if model_args is None:
@@ -354,34 +351,17 @@ class GPTQModel:
             if isinstance(model, BaseGPTQModel):
                 tokenizer = model.tokenizer
             elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path).tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
+                tokenizer = Tokenicer.load(model_id_or_path)
 
         if tokenizer is None:
             raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
-        if llm_backend=="gptqmodel": # vllm loads tokenizer
-            model_args["tokenizer"] = tokenizer
-
-        if isinstance(model_or_id_or_path, str):
-            model = None
-            model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, PreTrainedModel):
-            model = model_or_id_or_path
-            model_id_or_path = model.config.name_or_path  #
-        else:
-            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
-
-        if tokenizer is None:
-            if isinstance(model, BaseGPTQModel):
-                tokenizer = model.tokenizer
-            elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path).tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
-
-        if tokenizer is None:
-            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
 
         if backend=="gptqmodel": # vllm loads tokenizer
-            model_args["tokenizer"] = tokenizer
+            if isinstance(tokenizer, Tokenicer):
+                model_args["tokenizer"] = tokenizer.tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
+            else:
+                model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
             for task in tasks:
@@ -396,9 +376,7 @@ class GPTQModel:
 
             try:
                 from lm_eval import simple_evaluate
-                from lm_eval.loggers import EvaluationTracker, WandbLogger
                 from lm_eval.models.huggingface import HFLM
-                from lm_eval.utils import handle_non_serializable
             except BaseException:
                 raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 

@@ -171,7 +171,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
 
@@ -389,10 +389,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
-            bias=self.bias)
+            bias=self.bias if not self.adapter else None)
 
         if self.adapter:
-            output = self.adapter.apply(x=A, out=output)
+            if self.bias:
+                output = self.adapter.apply(x=A, out=output).add_(self.bias)
+            else:
+                output = self.adapter.apply(x=A, out=output)
 
         return output
 

@@ -110,7 +110,7 @@ def convert_to_marlin(
         # TODO: load directly Marlin QuantLinear.
         message = "Overriding QuantLinear layers to use Marlin's QuantLinear"
 
-    for name, module in ProgressBar(model.named_modules(), desc=message, total=len(list(model.named_modules()))):
+    for name, module in ProgressBar(model.named_modules(), info=message, total=len(list(model.named_modules()))):
         if not isinstance(module, model_quantlinear):
             continue
 

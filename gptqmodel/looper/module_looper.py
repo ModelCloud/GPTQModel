@@ -207,11 +207,11 @@ class ModuleLooper():
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
-                quant_modules_pb.set_description("Quantizing lm_head")
+                quant_modules_pb.info("Quantizing lm_head")
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
                 layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.set_description(f"Quantizing layer {layer_index} of {layer_count - 1}")
+                quant_modules_pb.info(f"Quantizing layer {layer_index} of {layer_count - 1}")
                 module = layers[layer_index]
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():

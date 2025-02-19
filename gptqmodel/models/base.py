@@ -19,9 +19,8 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shutil
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch._dynamo
@@ -29,7 +28,8 @@ import torch.nn as nn
 from packaging import version
 from packaging.version import Version
 from tokenicer import Tokenicer
-from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils
+from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
+                          PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -45,7 +45,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
-from ..utils.torch import torch_empty_cache, torch_compile
+from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
@@ -90,6 +90,9 @@ class BaseGPTQModel(nn.Module):
     # some models require a specific dtype, such as float16
     require_dtype: Optional[str|torch.dtype] = None
     require_fast_init: bool = True
+
+    # some models require Processor? For example, Qwen2VLImageProcessor.
+    require_load_processor = False
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
@@ -152,6 +155,10 @@ class BaseGPTQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
+        self.processor: ProcessorMixin = None
+        if self.require_load_processor:
+            self.processor = AutoProcessor.from_pretrained(model_local_path)
+
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
             self.monkey_patch()
@@ -167,7 +174,7 @@ class BaseGPTQModel(nn.Module):
                 if all(hasattr(m.adapter, name) for name in Lora.parameter_keys()):
                     loaded_loras += 1
 
-            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded.")
+            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded for `{len(qmodules)}` modules.")
 
         # print kernel info:
         loaded_kernels = self.kernels()
@@ -378,6 +385,7 @@ class BaseGPTQModel(nn.Module):
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
                 calibration_dataset=calibration_dataset,
+                prepare_dataset_func=self.prepare_dataset,
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
                 batch_size=batch_size,
                 logger_board=logger_board,
@@ -392,6 +400,7 @@ class BaseGPTQModel(nn.Module):
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
                     calibration_dataset=adapter_calibration_dataset,
+                    prepare_dataset_func=self.prepare_dataset,
                     calibration_dataset_concat_size=calibration_dataset_concat_size,
                     batch_size=batch_size,
                     logger_board=logger_board,
@@ -454,6 +463,7 @@ class BaseGPTQModel(nn.Module):
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
                 calibration_dataset=calibration_dataset,
+                prepare_dataset_func=self.prepare_dataset,
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
                 batch_size=batch_size,
                 logger_board=logger_board,
@@ -816,11 +826,11 @@ class BaseGPTQModel(nn.Module):
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
             if is_lm_head_module:
-                quant_modules_pb.set_description("Quantizing lm_head")
+                quant_modules_pb.info("Quantizing lm_head")
                 module = get_module(self.model, key=self.lm_head)
                 layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.set_description(f"Quantizing layer {module_index} of {layer_count - 1}")
+                quant_modules_pb.info(f"Quantizing layer {module_index} of {layer_count - 1}")
                 module = layers[module_index]
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
@@ -962,7 +972,7 @@ class BaseGPTQModel(nn.Module):
 
                 for name_index, name in enumerate(subset):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
-                    quant_modules_pb.set_description(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
+                    quant_modules_pb.info(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     ## Need to return the quantized_weight for offloading
@@ -1147,14 +1157,6 @@ class BaseGPTQModel(nn.Module):
             eora_path: Optional[str] = None,
             **kwargs,
     ):
-        extra_json_file_names = ["preprocessor_config.json", "chat_template.json"]
-        for name in extra_json_file_names:
-            json_path = os.path.join(self.model_local_path, name)
-            if os.path.exists(json_path):
-                os.makedirs(save_dir, exist_ok=True)
-
-                shutil.copyfile(json_path, os.path.join(save_dir, name))
-
         if self.quantized:
             # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
             #untie_weights(self.model)

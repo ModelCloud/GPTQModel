@@ -20,15 +20,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
-from typing import Union  # noqa: E402
-
-from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
-from lm_eval.tasks import TaskManager  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-
-import tempfile  # noqa: E402
-import unittest  # noqa: E402
+from typing import Type  # noqa: E402
 from typing import Union  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
@@ -52,7 +44,7 @@ class TestEval(unittest.TestCase):
             (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
-    def test_eval_gptqmodel(self, framework: EVAL, task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
+    def test_eval_gptqmodel(self, framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]], task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = f"{tmp_dir}/result.json"
             model_args = {}

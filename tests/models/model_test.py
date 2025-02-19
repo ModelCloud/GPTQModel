@@ -19,8 +19,6 @@ import os
 import sys
 from typing import Dict, List
 
-from gptqmodel.utils.eval import EVAL
-
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -40,6 +38,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
@@ -260,6 +259,8 @@ class ModelTest(unittest.TestCase):
                     }
                 else:
                     model_args = {}
+                if extra_args:
+                    model_args.update(extra_args)
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
                 results = GPTQModel.eval(

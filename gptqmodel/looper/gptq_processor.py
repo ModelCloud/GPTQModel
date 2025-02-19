@@ -34,11 +34,13 @@ from torch.nn import Module
 logger = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset,
+    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
 
-        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset, calibration_dataset_concat_size=calibration_dataset_concat_size, batch_size=batch_size,
+        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
+                         calibration_dataset_concat_size=calibration_dataset_concat_size,
+                         prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          logger_board=logger_board, require_fwd=require_fwd)
 
         self.retain_w = retain_w
@@ -111,7 +113,7 @@ class GPTQProcessor(LoopProcessor):
         return tmp
 
     def process(self, module: NamedModule):
-        self.pb.set_description(f"Quantizing {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
+        self.pb.info(f"Quantizing {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
         gptq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")

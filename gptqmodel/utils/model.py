@@ -26,7 +26,7 @@ import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
@@ -175,7 +175,7 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
-) -> BaseQuantLinear:
+) -> Type[BaseQuantLinear]:
 
     bits = qcfg.bits
     group_size =qcfg.group_size
@@ -205,15 +205,15 @@ def make_quant(
     logger.info(f"Kernel: candidates -> `{quant_linear_candidates}`")
 
     # loop over actual QLinear init, catch errors and use fallbacks if applicable
-    for linear in quant_linear_candidates:
+    for cls in quant_linear_candidates:
         try:
             # if linear is not selectedQLinear:
             #     logger.info(f"make_quant: Faild linear: `{selectedQLinear}` failed, trying to use fallback: `{linear}`")
             # else:
             #     logger.info("make_quant: Testing linear: {linear}")
 
-            linear_instance = create_quant_layer(
-                linear=linear,
+            linear_cls = create_quant_layer(
+                linear_cls=cls,
                 bits=bits,
                 desc_act=desc_act,
                 dynamic=dynamic,
@@ -226,10 +226,11 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 adapter=qcfg.adapter,
             )
-            logger.info(f"Kernel: selected -> `{linear}`.")
-            return linear_instance
+            logger.info(f"Kernel: selected -> `{linear_cls}`.")
+            return linear_cls
         except NotImplementedError as e:
-            logger.info(f"Kernel: skipped -> `{linear}`.")
+            logger.info(f"Kernel: skipped -> `{linear_cls}`.")
+
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
                 raise e
@@ -238,7 +239,7 @@ def make_quant(
 
 
 def create_quant_layer(
-        linear: nn.Module,
+        linear_cls: Type[BaseQuantLinear],
         bits: int,
         desc_act: bool,
         dynamic,
@@ -250,10 +251,9 @@ def create_quant_layer(
         lm_head_name: str,
         pack_dtype: torch.dtype,
         adapter: Optional[Adapter] = None,
-
-                       ) -> BaseQuantLinear:
-    if isinstance(module, linear):
-        return linear
+) -> Type[BaseQuantLinear]:
+    if isinstance(module, linear_cls):
+        return linear_cls
     for name, submodule in module.named_modules():
         # skip non-quantized modules
         if name not in quant_result:
@@ -306,7 +306,7 @@ def create_quant_layer(
 
         # when loading a quantized model, device is target device passed in GPTQModel.load()
         # check in_features and out_features validate
-        _, err = linear.validate(
+        _, err = linear_cls.validate(
             bits=tmp_bits,
             group_size=tmp_group_size,
             desc_act=tmp_desc_act,
@@ -320,7 +320,7 @@ def create_quant_layer(
         if err is not None:
             raise err
 
-        new_layer = linear(
+        new_layer = linear_cls(
             bits=tmp_bits,
             group_size=tmp_group_size,
             desc_act=tmp_desc_act,
@@ -336,7 +336,7 @@ def create_quant_layer(
         )
         new_layer.device = ori_layer_device
         recurse_setattr(module, name, new_layer.to(ori_layer_device))
-    return linear
+    return linear_cls
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
@@ -502,7 +502,7 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         if pbar:
-            pbar.set_description(f"Packing {name}")
+            pbar.info(f"Packing {name}")
         r = quant_result[name]
         scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device
@@ -542,25 +542,15 @@ def pack_model(
         dynamic=dynamic,
         pack_dtype=pack_dtype,
     )
-    quantLinear = select_quant_linear(
-        bits=bits,
-        dynamic=dynamic,
-        group_size=group_size,
-        desc_act=desc_act,
-        sym=sym,
-        backend=backend,
-        format=format,
-        pack=True,
-        pack_dtype=pack_dtype,
-    )
 
     model.to(CPU)
 
     logger.info("Packing model...")
 
     modules = find_modules(model)
+
     modules = {n: modules[n] for n in quant_result}
-    make_quant(
+    quant_linear_cls = make_quant(
         model,
         quant_result=quant_result,
         qcfg=qcfg,
@@ -568,7 +558,11 @@ def pack_model(
         lm_head_name=lm_head_name,
         pack=True,
     )
-    qModules = find_modules(model, [quantLinear])
+
+    qModules = find_modules(model, [quant_linear_cls])
+
+    assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
+
     names = list(qModules.keys())
 
     if parallel_packing:
@@ -585,7 +579,7 @@ def pack_model(
                 pass
 
     logger.info("Model packed.")
-    return quantLinear
+    return quant_linear_cls
 
 
 def verify_model_hash(file_path: str, verify_hash: str):

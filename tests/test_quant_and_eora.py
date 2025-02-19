@@ -50,9 +50,10 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
     bench_result = GPTQModel.eval(
-        model_or_path=model,
+        model_or_id_or_path=model,
         framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE]
+        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.GSM8K_COT],
+        batch_size=32,
     )
 
     del model
@@ -84,8 +85,13 @@ class Test(ModelTest):
         calibration_dataset_concat_size = 0 # disable
         auto_gc = False
         adapter_file_name = "eora.safetensors"
+        dataset_id = "allenai/c4"
+        dataset_files = "en/c4-train.00001-of-01024.json.gz"
 
         config_dict = {
+            "model_id": self.NATIVE_MODEL_ID,
+            "dataset_id": dataset_id,
+            "dataset_files": dataset_files,
             "bits": bits,
             "group_size": group_size,
             "desc_act": desc_act,
@@ -98,8 +104,8 @@ class Test(ModelTest):
         }
 
         calibration_dataset = load_dataset(
-            "allenai/c4",
-            data_files="en/c4-train.00001-of-01024.json.gz",
+            dataset_id,
+            data_files=dataset_files,
             split="train"
         ).select(range(calibration_dataset_rows))["text"]
 
@@ -143,18 +149,18 @@ class Test(ModelTest):
                 base_bench = bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
                 eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
-                print('--------Quant/EoRA Config ---------')
+                print('--------GPTQModel + EoRA Config ---------')
 
                 # Convert the dictionary to a list of lists for tabulate
                 table_data = [[key, value] for key, value in config_dict.items()]
                 print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
-                print('--------Eval Base Result---------')
+                print('--------Eval GPTQ Result---------')
                 print(make_table(base_bench))
                 if "groups" in base_bench:
                     print(make_table(base_bench, "groups"))
 
-                print('--------Eval EoRA Result---------')
+                print('--------Eval GPTQ + EoRA Result---------')
                 print(make_table(eora_bench))
                 if "groups" in eora_bench:
                     print(make_table(eora_bench, "groups"))

@@ -70,7 +70,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
@@ -168,12 +168,15 @@ class ExllamaQuantLinear(PackableQuantLinear):
         if x.size(-1) != self.in_features:
             x = F.pad(x, self.in_features_padding_shape)
 
-        out = ext_q4_matmul(x, self.q4, self.width)
-
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+            if self.bias:
+                out = self.adapter.apply(x=x, out=ext_q4_matmul(x, self.q4, self.width)).add_(self.bias)
+            else:
+                out = self.adapter.apply(x=x, out=ext_q4_matmul(x, self.q4, self.width))
+        else:
+            if self.bias:
+                out = ext_q4_matmul(x, self.q4, self.width).add_(self.bias)
+            else:
+                out = ext_q4_matmul(x, self.q4, self.width)
 
         return out.to(x_dtype)

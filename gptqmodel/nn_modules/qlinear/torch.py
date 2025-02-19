@@ -43,7 +43,7 @@ class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "torch"
 
@@ -97,8 +97,8 @@ class TorchQuantLinear(PackableQuantLinear):
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
 
-        #if self.adapter:
-        #    self.adapter.g_compile(backend=backend, mode=mode, fullgraph=fullgraph)
+        if self.adapter:
+            self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def forward(self, x: torch.Tensor):
         if x.size(-1) != self.padded_infeatures:

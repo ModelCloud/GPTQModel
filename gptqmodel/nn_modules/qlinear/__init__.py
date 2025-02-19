@@ -39,7 +39,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
-    SUPORTS_ADAPTERS: List[Adapter] = None
+    SUPPORTS_ADAPTERS: List[Adapter] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -238,7 +238,7 @@ class BaseQuantLinear(nn.Module):
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if adapter is not None and adapter.__class__ not in cls.SUPORTS_ADAPTERS:
+        if adapter is not None and adapter.__class__ not in cls.SUPPORTS_ADAPTERS:
             err = f"{cls} does not support adapter: {adapter}"
             return False, NotImplementedError(err)
 
@@ -264,7 +264,8 @@ class BaseQuantLinear(nn.Module):
         if bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)
-        if group_size not in cls.SUPPORTS_GROUP_SIZE:
+        # valid group size is set of cls.SUPPORTS_GROUP_SIZE + in_features; group_size = -1 is alias for group_size == in_features
+        if group_size not in cls.SUPPORTS_GROUP_SIZE and group_size != in_features:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
         if sym not in cls.SUPPORTS_SYM:
@@ -340,8 +341,8 @@ class BaseQuantLinear(nn.Module):
         pass
 
 class PackableQuantLinear(BaseQuantLinear):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def post_init(self, **kwargs):
+        super().post_init(**kwargs)
 
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
@@ -412,7 +413,7 @@ class PackableQuantLinear(BaseQuantLinear):
 
         return weights
 
-    def pack(self, linear, scales, zeros, g_idx=None):
+    def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
