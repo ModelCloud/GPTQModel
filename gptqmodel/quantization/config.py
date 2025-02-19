@@ -195,26 +195,26 @@ class QuantizeConfig():
             if isinstance(self.pack_dtype, str):
                 self.pack_dtype = self.pack_dtype.lower()
                 if self.pack_dtype not in ["int64", "int32", "int16", "int8"]:
-                    raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
+                    raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {self.pack_dtype}")
                 self.pack_dtype = getattr(torch, self.pack_dtype)
             elif isinstance(self.pack_dtype, torch.dtype):
                 if self.pack_dtype not in [torch.int64, torch.int32, torch.int16, torch.int8]:
-                    raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
+                    raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {self.pack_dtype}")
             else:
-                raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
+                raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {self.pack_dtype}")
 
         # validate quant method and format is matched
         valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
         if valid_formats is None:
-            raise ValueError(f"Unsupported quantization method: {self.quant_method}")
+            raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
 
         if self.format not in valid_formats:
             raise ValueError(
-                f"The checkpoint format used is {self.format}, and the quantization method is {self.quant_method}. "
+                f"QuantizeConfig: checkpoint `format` used is {self.format}, and the quantization method is {self.quant_method}. "
             )
 
         if self.bits not in fields_info[0].metadata["choices"]:
-            raise ValueError(f"only support quantize to {fields_info[0].metadata['choices']} bits.")
+            raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
 
         if self.dynamic is not None:
             self.dynamic = {
@@ -225,33 +225,33 @@ class QuantizeConfig():
             for layer, layer_dict in self.dynamic.items():
                 for key, value in layer_dict.items():
                     if key == "bits" and value not in fields_info[0].metadata["choices"]:
-                        raise ValueError(f"Layer {layer}: only support quantize to {fields_info[0].metadata['choices']} bits.")
+                        raise ValueError(f"QuantizeConfig: Layer `{layer}` only support quantization of  `{fields_info[0].metadata['choices']}` bits.")
                     elif key == "group_size" and value != -1 and value <= 0:
-                        raise ValueError("unless equal to -1, group_size must greater then 0.")
+                        raise ValueError("QuantizeConfig: `group_size` must in the value set of `[-1, 16, 32, 64, 128]`.")
 
         if self.group_size != -1 and self.group_size <= 0:
-            raise ValueError("unless equal to -1, group_size must greater than 0.")
+            raise ValueError("QuantizeConfig: `group_size` must in the value set of `[-1, 16, 32, 64, 128]`.")
 
         if not (0 < self.damp_percent < 1):
-            raise ValueError("damp_percent must between 0 and 1.")
+            raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
 
         if self.damp_auto_increment < 0:
-            raise ValueError("damp_auto_increment must greater than 0.")
+            raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
 
         # validate meta
         if self.meta is not None:
             if not isinstance(self.meta, dict):
-                raise ValueError("meta must be a dictionary")
+                raise ValueError("QuantizeConfig: `meta` must be a dictionary")
             for key, value in self.meta.items():
                 if not isinstance(key, str):
-                    raise ValueError("Keys in the meta dictionary must be strings")
+                    raise ValueError("QuantizeConfig: `meta` keys must be strings")
         else:
             self.meta = {}
 
         # adapter normalize
         self.adapter = normalize_adapter(self.adapter)
 
-        print(f"adapter: {self.adapter}")
+        #print(f"adapter: {self.adapter}")
 
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:
@@ -313,9 +313,9 @@ class QuantizeConfig():
         # compat: format can be passed in via from_quantized() if field missing from json
         if format:
             if format not in valid_formats:
-                raise ValueError(f"Unknown quantization checkpoint format: {format}.")
+                raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
             if quantize_cfg.get(FORMAT_FIELD_JSON):
-                raise ValueError("Conflict: quantization format is passed in and also exists in model config.")
+                raise ValueError("QuantizeConfig: Conflicting quantization format passed in manually and also exists in model config.")
         # compat: warn if checkpoint_format is missing
         elif quantize_cfg.get(FORMAT_FIELD_JSON) is None:
             format_auto_inferred = True
@@ -340,7 +340,7 @@ class QuantizeConfig():
                 if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}:
                     normalized[key] = val
                 else:
-                    raise ValueError(f"Unknown quantization format: {val}.")
+                    raise ValueError(f"QuantizeConfig: Unknown quantization format: `{val}`.")
             elif key == QUANT_METHOD_FIELD:
                 val = val.lower()
                 # compat: some hf models use quant_method=marlin or bitblas
@@ -349,7 +349,7 @@ class QuantizeConfig():
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
                 elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND}:
-                    raise ValueError(f"Unknown quantization method: {val}.")
+                    raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
             elif key == FORMAT_FIELD_COMPAT_MARLIN and val:
@@ -357,10 +357,10 @@ class QuantizeConfig():
             elif key in field_names:
                 normalized[key] = val
             else:
-                logger.info(f"Ignoring unknown parameter in the quantization configuration: {key}.")
+                logger.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
 
         if format_auto_inferred:
-            logger.info(f"`{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
+            logger.info(f"QuantizeConfig: `{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
 
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
             # AWQ and Marlin do not reorder the rows.
@@ -368,8 +368,7 @@ class QuantizeConfig():
 
         if "sym" not in normalized:
             logger.warning(
-                "The quantization configuration does not contain an entry `sym` (symmetric quantization). "
-                "This may result in silent errors. Defaulting to `sym=True`."
+                "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
 
         return cls(**normalized)
@@ -389,7 +388,7 @@ class QuantizeConfig():
 
         if resolved_config_file is None:
             raise ValueError(
-                "No quantize_config.json, quant_config.json or config.json file was found in the model repository."
+                "QuantizeConfig: No quantize_config.json, quant_config.json or config.json file was found in the model repository."
             )
 
         with open(resolved_config_file, "r", encoding="utf-8") as f:
@@ -510,4 +509,4 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
 class BaseQuantizeConfig(QuantizeConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        logger.warning("BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
+        logger.warning("QuantizeConfig: BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
