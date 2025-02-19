@@ -115,7 +115,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out = torch.matmul(x, weights).reshape(out_shape)
 
-        if self.bias:
+        if self.bias is not None:
             out.add_(self.bias)
 
         if self.adapter:

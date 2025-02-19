@@ -203,7 +203,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             )
             self.scales.resize_(math.ceil(self.in_features / self.group_size), self.out_features)
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
-            if self.bias:
+            if self.bias is not None:
                 self.bias.resize_(self.out_features)
 
         self.q_tensors = {
@@ -234,7 +234,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
         out = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
 
-        if self.bias:
+        if self.bias is not None:
             out.add_(self.bias)
 
         if self.adapter:

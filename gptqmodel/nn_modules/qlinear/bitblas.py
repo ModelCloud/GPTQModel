@@ -271,7 +271,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
         )
         nn.init.normal_(self.scales)
         nn.init.zeros_(self.zeros)
-        if self.bias:
+        if self.bias is not None:
             nn.init.zeros_(self.bias)
         self.q_params = None
 
@@ -350,7 +350,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
                 f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
             )
 
-        if self.bias:
+        if self.bias is not None:
             self.bias = self.bias.data.to(torch.float16).contiguous()
 
     def repack_from_gptq(self, gptq_module):
@@ -383,7 +383,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
             raise ValueError(
                 f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
             )
-        if self.bias:
+        if self.bias is not None:
             self.bias = gptq_module.bias.data.to(torch.float16).contiguous()
 
     def forward(self, A):
