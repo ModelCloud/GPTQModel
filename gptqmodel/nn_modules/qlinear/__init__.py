@@ -504,3 +504,5 @@ class PackableQuantLinear(BaseQuantLinear):
         # print(f"------ WQ Dequantized -----")
         # print(wq_dequantized)
         # assert t.equal(wq, wq_dequantized)
+
+        # print("self qw", self.qweight, self.scales, self.qzeros)
