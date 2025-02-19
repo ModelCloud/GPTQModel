@@ -148,11 +148,12 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.maxq,
         ).reshape(out_shape)
 
+        if self.bias:
+            out.add_(self.bias)
+
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
-        if self.bias is not None:
-            out.add_(self.bias)
         return out.to(dtype=x.dtype)
 
 

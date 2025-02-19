@@ -145,8 +145,7 @@ class IPEXQuantLinear(PackableQuantLinear):
             self.in_features,
             self.out_features,
             None,
-            # bias: if adapter, do not let ipex do apply bias, do it after adapter.apply
-            self.bias if not self.adapter else None,
+            self.bias,
             self.group_size,
             self.g_idx,
             quant_method=QuantMethod.GPTQ_GEMM,
@@ -155,10 +154,7 @@ class IPEXQuantLinear(PackableQuantLinear):
     @torch.no_grad()
     def forward(self, x: torch.Tensor):
         if self.adapter:
-            if self.bias:
-                return self.adapter(x=x, out=self.ipex_linear(x)).add_(self.bias)
-            else:
-                return self.adapter(x=x, out=self.ipex_linear(x))
+            return self.adapter(x=x, out=self.ipex_linear(x))
         else:
             return self.ipex_linear(x)
 

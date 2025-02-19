@@ -203,7 +203,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             )
             self.scales.resize_(math.ceil(self.in_features / self.group_size), self.out_features)
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
-            if self.bias is not None:
+            if self.bias:
                 self.bias.resize_(self.out_features)
 
         self.q_tensors = {
@@ -231,16 +231,14 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         if x.size(-1) != self.in_features:
             x = F.pad(x, self.in_features_padding_shape)
 
+
+        out = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+
+        if self.bias:
+            out.add_(self.bias)
+
         if self.adapter:
-            if self.bias:
-                output = self.adapter.apply(x=x, out=ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)).add_(self.bias)
-            else:
-                output = self.adapter.apply(x=x, out=ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda))
-        else:
-            if self.bias:
-                output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda).add_(self.bias)
-            else:
-                output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+            output = self.adapter.apply(x=x, out=out)
 
         return output.to(dtype=x_dtype)
 

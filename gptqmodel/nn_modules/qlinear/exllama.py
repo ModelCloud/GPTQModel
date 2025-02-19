@@ -136,7 +136,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
             )
             self.scales.resize_((math.ceil(self.in_features / self.group_size), self.out_features), )
             self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
-            if self.bias is not None:
+            if self.bias:
                 self.bias.resize_(self.out_features)
 
 
@@ -168,15 +168,12 @@ class ExllamaQuantLinear(PackableQuantLinear):
         if x.size(-1) != self.in_features:
             x = F.pad(x, self.in_features_padding_shape)
 
+        out = ext_q4_matmul(x, self.q4, self.width)
+
+        if self.bias:
+            out.add_(self.bias)
+
         if self.adapter:
-            if self.bias:
-                out = self.adapter.apply(x=x, out=ext_q4_matmul(x, self.q4, self.width)).add_(self.bias)
-            else:
-                out = self.adapter.apply(x=x, out=ext_q4_matmul(x, self.q4, self.width))
-        else:
-            if self.bias:
-                out = ext_q4_matmul(x, self.q4, self.width).add_(self.bias)
-            else:
-                out = ext_q4_matmul(x, self.q4, self.width)
+            out = self.adapter.apply(x=x, out=out)
 
         return out.to(x_dtype)

@@ -377,7 +377,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         if A.dtype != torch.float16:
             A = A.to(torch.float16)
 
-        output = apply_gptq_marlin_linear(
+        out = apply_gptq_marlin_linear(
             input=A.contiguous() if self.is_lm_head else A,
             weight=self.qweight,
             weight_scale=self.scales,
@@ -389,15 +389,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
-            bias=self.bias if not self.adapter else None)
+            bias=self.bias,
+        )
 
         if self.adapter:
-            if self.bias:
-                output = self.adapter.apply(x=A, out=output).add_(self.bias)
-            else:
-                output = self.adapter.apply(x=A, out=output)
+            out = self.adapter.apply(x=A, out=out)
 
-        return output
+        return out
 
 # Precompute permutations for Marlin weight and scale shuffling
 def _get_perms():
