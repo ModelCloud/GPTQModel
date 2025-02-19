@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -33,7 +34,6 @@ else:
 
 from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import snapshot_download
-
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights

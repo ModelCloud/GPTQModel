@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import os
 
+from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
 from lm_eval.utils import make_table
 from tokenicer import Tokenicer
-
-
-from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
 
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization.gptq import CPU
@@ -378,9 +376,7 @@ class GPTQModel:
 
             try:
                 from lm_eval import simple_evaluate
-                from lm_eval.loggers import EvaluationTracker, WandbLogger
                 from lm_eval.models.huggingface import HFLM
-                from lm_eval.utils import handle_non_serializable
             except BaseException:
                 raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
 

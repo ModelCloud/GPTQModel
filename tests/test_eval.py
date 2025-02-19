@@ -18,10 +18,9 @@ import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-from typing import Type  # noqa: E402
-
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
+from typing import Type  # noqa: E402
 from typing import Union  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402

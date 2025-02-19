@@ -20,7 +20,7 @@ import copy
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch._dynamo
@@ -28,8 +28,8 @@ import torch.nn as nn
 from packaging import version
 from packaging.version import Version
 from tokenicer import Tokenicer
-from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase, modeling_utils, ProcessorMixin, \
-    AutoProcessor
+from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
+                          PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -45,7 +45,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
-from ..utils.torch import torch_empty_cache, torch_compile
+from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,

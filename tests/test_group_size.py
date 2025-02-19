@@ -17,7 +17,6 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import logging  # noqa: E402
@@ -25,9 +24,7 @@ import tempfile  # noqa: E402
 import traceback  # noqa: E402
 import unittest  # noqa: E402
 
-from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.utils.eval import EVAL # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
@@ -36,7 +33,9 @@ from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

@@ -30,7 +30,7 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import CPU
 from gptqmodel.utils.logger import setup_logger
 from gptqmodel.utils.model import move_to
-from gptqmodel.utils.torch import torch_sync, torch_compile
+from gptqmodel.utils.torch import torch_compile, torch_sync
 from torch.nn import Module
 
 logger = setup_logger()

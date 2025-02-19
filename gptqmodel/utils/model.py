@@ -26,7 +26,7 @@ import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Type, Any
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import accelerate
 import threadpoolctl as tctl
@@ -542,7 +542,7 @@ def pack_model(
         dynamic=dynamic,
         pack_dtype=pack_dtype,
     )
-   
+
     model.to(CPU)
 
     logger.info("Packing model...")
@@ -558,7 +558,7 @@ def pack_model(
         lm_head_name=lm_head_name,
         pack=True,
     )
-    
+
     qModules = find_modules(model, [quant_linear_cls])
 
     assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
