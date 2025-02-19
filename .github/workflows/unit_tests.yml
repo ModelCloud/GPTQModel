@@ -388,6 +388,7 @@ jobs:
 
       - name: Install wheel
         run: |
+          uv pip install colorlog
           uv pip install git+https://github.com/ModelCloud/Tokenicer -U
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
@@ -546,6 +547,7 @@ jobs:
 
       - name: Install wheel
         run: |
+          uv pip install colorlog
           echo "===== updateing latest transformers ====="
           uv pip install -U transformers
 
