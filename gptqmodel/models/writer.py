@@ -30,7 +30,7 @@ from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file
 from safetensors.torch import save_file as safe_save
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin, GenerationConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -218,9 +218,29 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
+        # Hack validator so it skips validation on save
+        original_validator = None
+        if hasattr(self, "generation_config") and isinstance(self.generation_config, GenerationConfig):
+            try:
+                self.generation_config.validate()
+            except Exception as e:
+                logger.warning(f"Model `generation_config` validation failed. We will allow model save to continue but please fix discrepancies: {e}")
+
+                original_validator = self.generation_config.validate
+                def dummy_validate(**kwargs):
+                    pass
+
+                self.generation_config.validate = dummy_validate
+
         # Save model config, including generation_config
-        # use empty state_dict hack to bypass saving weights
+        # Use empty state_dict hack to bypass saving weights
         self.model.save_pretrained(save_dir, state_dict={})
+
+        # Restore validator
+        if original_validator is not None:
+            self.generation_config.validate = original_validator
+
+        # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
 
         # Save processor related config files. For example: preprocessor_config.json, chat_template.json
