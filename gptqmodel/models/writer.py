@@ -29,8 +29,7 @@ import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file as safe_save
-from torch import nn
-from transformers import AutoConfig, PreTrainedTokenizerFast, GenerationConfig
+from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -180,12 +179,13 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
-        # Save config files with empty state dict
+        # Save model config, including generation_config
+        # use empty state_dict hack to bypass saving weights
         self.model.save_pretrained(save_dir, state_dict={})
         quantize_config.save_pretrained(save_dir)
 
         # Save processor related config files. For example: preprocessor_config.json, chat_template.json
-        if self.processor is not None:
+        if hasattr(self,"processor") and isinstance(self.processor, ProcessorMixin):
             self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
