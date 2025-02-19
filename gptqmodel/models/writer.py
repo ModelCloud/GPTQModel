@@ -176,6 +176,10 @@ def ModelWriter(cls):
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
+        # hack to allow hf to save model without weights (configs only)
+        # it will delete all sharded models, must do it at first
+        self.model.save_pretrained(save_dir, state_dict={})
+
         if quantize_config.format == FORMAT.GPTQ_V2:
             logger.warning(
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
@@ -350,8 +354,6 @@ def ModelWriter(cls):
         # save config back to model
         self.model.config = config
 
-        # hack to allow hf to save model without weights (configs only)
-        self.model.save_pretrained(save_dir, state_dict={})
         quantize_config.save_pretrained(save_dir)
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
