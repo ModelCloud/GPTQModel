@@ -26,7 +26,7 @@ class BACKEND(str, Enum):
     TRITON = "triton"
     EXLLAMA_V1 = "exllama_v1"
     EXLLAMA_V2 = "exllama_v2"
-    EXLLAMA_EORA = "exllama_eora"
+    # EXLLAMA_EORA = "exllama_eora"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     IPEX = "ipex"

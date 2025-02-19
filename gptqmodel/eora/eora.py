@@ -38,7 +38,7 @@ def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict
 
 def eora_compute_lora(
         device: torch.device,
-        w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qeight) delta in float32
+        w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
         module: NamedModule,
         eigen_scaling_diag_matrix: torch.dtype,
         rank: int) -> Tuple[Tensor, Tensor]:
