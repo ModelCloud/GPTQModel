@@ -229,7 +229,7 @@ def make_quant(
             logger.info(f"Kernel: selected -> `{linear_cls}`.")
             return linear_cls
         except NotImplementedError as e:
-            logger.info(f"Kernel: skipped -> `{linear_cls}`.")
+            logger.info(f"Kernel: skipped -> `{cls}`.")
 
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
