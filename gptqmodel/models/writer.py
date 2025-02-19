@@ -175,6 +175,13 @@ def ModelWriter(cls):
                 model_id_or_path=self.model_local_path,
             )
 
+        # save config files
+        config.quantization_config = quantize_config.to_dict()
+        self.model.config = config
+        # Save config files with empty state dict
+        self.model.save_pretrained(save_dir, state_dict={})
+        quantize_config.save_pretrained(save_dir)
+
         model.to(CPU)
         state_dict = get_state_dict_for_save(model)
 
@@ -305,14 +312,7 @@ def ModelWriter(cls):
             logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
             logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
-        config.quantization_config = quantize_config.to_dict()
 
-        self.model.config = config
-
-        # Save config files with empty state dict
-        self.model.save_pretrained(save_dir, state_dict={})
-
-        quantize_config.save_pretrained(save_dir)
 
         # Save processor related config files. For example: preprocessor_config.json, chat_template.json
         if self.processor is not None:
