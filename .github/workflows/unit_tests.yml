@@ -563,6 +563,10 @@ jobs:
             uv pip install colorlog
           fi
 
+          if [[ "${{ matrix.test_script }}" == "test_sglang.py" ]]; then
+            uv pip install transformers==4.48.3
+          fi
+
           if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
             uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
             uv pip install torchvision torch
