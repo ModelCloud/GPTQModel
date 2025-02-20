@@ -193,7 +193,7 @@ def ModelLoader(cls):
                     model.seqlen = model_config[key]
                     break
         else:
-            logger.warning("can't get model's sequence length from model config, will set to 4096.")
+            logger.warning("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
         model.eval()
 
@@ -493,7 +493,7 @@ def ModelLoader(cls):
                 )
 
             t = time.time()
-            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 cfg=qcfg,

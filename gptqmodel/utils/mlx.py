@@ -49,7 +49,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
     # Convert weights
     weights = {}
     n = 1
-    pb = ProgressBar(model.named_modules(), prefix="Converting to mlx:", total=len(list(model.named_modules())))
+    pb = ProgressBar(model.named_modules(), prefix="Format: Converting to mlx ->", total=len(list(model.named_modules())))
     for name, module in pb:
         pb.info(f"{name}")
         if isinstance(module, TorchQuantLinear):

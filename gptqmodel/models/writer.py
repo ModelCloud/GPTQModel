@@ -84,7 +84,6 @@ def ModelWriter(cls):
                         weights[f"{key}.{lora_key}"] = lora_weight
                         logger.info(f"lora weight: `{key}.{lora_key}`")
 
-
             # then lora_path from `save()` then lora.path
             eora_path = eora_path if eora_path else self.quantize_config.adapter.path
 
@@ -168,7 +167,6 @@ def ModelWriter(cls):
             value=self.quantize_config.mse
         )
 
-
         # The config, quantize_config and model may be edited in place in save_quantized.
         config = copy.deepcopy(self.model.config)
         quantize_config = copy.deepcopy(self.quantize_config)
@@ -217,30 +215,32 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
-        # Hack validator so it skips validation on save
-        original_validator = None
-        if hasattr(self, "generation_config") and isinstance(self.generation_config, GenerationConfig):
-            try:
-                self.generation_config.validate()
-            except Exception as e:
-                logger.warning(f"Model `generation_config` validation failed. We will allow model save to continue but please fix discrepancies: {e}")
-
-                original_validator = self.generation_config.validate
-                def dummy_validate(**kwargs):
-                    pass
-
-                self.generation_config.validate = dummy_validate
-
         # Save model config, including generation_config
         # Use empty state_dict hack to bypass saving weights
-        self.model.save_pretrained(save_dir, state_dict={})
-
-        # Restore validator
-        if original_validator is not None:
-            self.generation_config.validate = original_validator
+        self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
 
         # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
+
+        def debug_saved_config(path):
+            # List all files in the directory
+            files = os.listdir(path)
+            print("Files in directory:")
+            for file in files:
+                print(file)
+
+            config_file_paths = ["generation_config.json", "config.json"]
+            for file_name in config_file_paths:
+                full_path = os.path.join(path, file_name)
+                if os.path.isfile(full_path):
+                    print(f"Content of saved `{file_name}`:")
+                    with open(full_path, 'r') as config_file:
+                        config_data = json.load(config_file)
+                        print(json.dumps(config_data, indent=4))
+                else:
+                    print(f"`{file_name}` does not exist in the directory.")
+
+        debug_saved_config(save_dir)
 
         # Save processor related config files. For example: preprocessor_config.json, chat_template.json
         if hasattr(self,"processor") and isinstance(self.processor, ProcessorMixin):

@@ -46,6 +46,7 @@ from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_devic
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_compile, torch_empty_cache
+from ..utils.hf import autofix_hf_model_config, autofix_hf_model_loading_generation_config
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
@@ -132,6 +133,12 @@ class BaseGPTQModel(nn.Module):
         super().__init__()
 
         self.model = model
+
+        # auto-fix model mismatched generation_config
+        autofix_hf_model_loading_generation_config(self.model, path=model_local_path)
+        # auto-fix model config erors
+        autofix_hf_model_config(self.model)
+
         self.compiled = False # set to True while compile() is triggered successfully
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
@@ -146,7 +153,6 @@ class BaseGPTQModel(nn.Module):
             self.tokenizer = tokenizer
             self.model.tokenizer = tokenizer # helpful for CI tests
         self.quantize_config = quantize_config
-        self.config = self.model.config if hasattr(self.model, "config") else None
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel

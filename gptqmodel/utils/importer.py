@@ -203,7 +203,7 @@ def select_quant_linear(
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         #    message_logged = True
-                        logger.info(f"Kernel: Auto-selection: adding candidate `{cls}`")
+                        logger.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                         validated_qlinears.append(cls)
                         if not multi_select:
                             return cls
@@ -211,7 +211,7 @@ def select_quant_linear(
                     #if not message_logged:
                     #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                     #    message_logged = True
-                    logger.info(f"Kernel: Auto-selection: adding candidate `{cls}`")
+                    logger.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
                         return cls
@@ -241,13 +241,13 @@ def select_quant_linear(
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
-            raise ValueError("IPEX is not available. Please install it by `pip install gptqmodel['ipex']`")
+            raise ValueError("Kernel: IPEX is not installed. Please install it via `pip install gptqmodel['ipex']`")
 
         from device_smi import Device
 
         cpu_vendor = Device("cpu").vendor
         if cpu_vendor != "intel":
-            logger.warning(f"Intel/IPEX cpu kernel is only validated and optimized for Intel cpu. Current cpu vendor: `{cpu_vendor}`.")
+            logger.warning(f"Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
 
         qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
