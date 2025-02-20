@@ -7,7 +7,8 @@ logger = setup_logger()
 # TODO FIXME! Pre-quantized use AutoModelForCausalLM.from_pretrained() but post-quantized use AutoModelForCausalLM.from_config()
 # and the `from_config` api does not auto-load the config from `generation_config.json`
 def autofix_hf_model_loading_generation_config(model: PreTrainedModel, path:str):
-    if model.can_generate():
+    # vllm is not a PreTrainedModel here
+    if isinstance(model, PreTrainedModel) and model.can_generate():
         logger.info(f"Model: Loaded `generation_config`: {model.generation_config}")
         try:
             cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
