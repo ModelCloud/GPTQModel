@@ -61,7 +61,7 @@ env:
   PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
   MAX_JOBS: 8
   RUNNER: 10.0.13.31
-  legacy_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
+  LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
@@ -138,7 +138,7 @@ jobs:
           import os
           import re
 
-          legacy_TESTS = '${legacy_TESTS}'
+          LEGACY_TESTS = '${LEGACY_TESTS}'
           IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
 
           TEST_NAMES='${{ github.event.inputs.test_names }}'
@@ -146,7 +146,7 @@ jobs:
 
           input_test_files_list = [f.strip().removesuffix('.py') for f in TEST_NAMES.split(',') if f.strip()]
 
-          transformers_test_files = [f.strip().removesuffix('.py') for f in f'{legacy_TESTS}'.split(',') if f.strip()]
+          transformers_test_files = [f.strip().removesuffix('.py') for f in f'{LEGACY_TESTS}'.split(',') if f.strip()]
           transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
 
           all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
@@ -546,7 +546,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install colorlog
+          uv pip install -U transformers colorlog
           if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ] || [ "${{ matrix.test_script }}" == "test_q4_bitblas" ]; then
             echo "===== install auto_round bitblas==0.0.1.dev13 ====="
             uv pip install auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
@@ -560,7 +560,7 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-              uv pip install colorlog
+            uv pip install colorlog
           fi
 
           if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
@@ -572,7 +572,9 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
             uv pip install mlx_lm --no-build-isolation -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
+
           if [[ "${{ matrix.test_script }}" == "test_modelscope" ]]; then
+            echo "===== installing modelscope ====="
             uv pip install modelscope --no-build-isolation -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           fi
 
@@ -644,7 +646,9 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
+        run: |
+          rm ~/.cache/evalplus/*pkl || true
+          pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
