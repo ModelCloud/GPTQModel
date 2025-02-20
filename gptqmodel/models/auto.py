@@ -32,14 +32,6 @@ import sys  # noqa: E402
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
-from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter # noqa: E402
-from lm_eval.utils import make_table # noqa: E402
-from tokenicer import Tokenicer # noqa: E402
-
-from ..nn_modules.qlinear.torch import TorchQuantLinear # noqa: E402
-from ..quantization.gptq import CPU # noqa: E402
-from ..utils.torch import torch_empty_cache # noqa: E402
-
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
@@ -47,14 +39,20 @@ from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
+from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
+from lm_eval.utils import make_table  # noqa: E402
+from tokenicer import Tokenicer  # noqa: E402
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
+from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
+from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
+from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402

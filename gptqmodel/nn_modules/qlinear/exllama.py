@@ -16,14 +16,12 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllama
 
-import math
 from logging import getLogger
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import PackableQuantLinear, BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 

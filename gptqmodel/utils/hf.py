@@ -1,6 +1,5 @@
-from transformers import GenerationConfig, PreTrainedModel
-
 from gptqmodel.utils.logger import setup_logger
+from transformers import GenerationConfig, PreTrainedModel
 
 logger = setup_logger()
 
@@ -15,12 +14,12 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
                 if cfg != model.generation_config:
                     model.generation_config = cfg
                     logger.info(
-                        f"Model: Auto-fixed `generation_config` mismatch between model and `generation_config.json`.")
+                        "Model: Auto-fixed `generation_config` mismatch between model and `generation_config.json`.")
                     logger.info(f"Model: Updated `generation_config`: {model.generation_config}")
                 else:
                     pass
                     # logger.info(f"Model: loaded `generation_config` matching `generation_config.json`.")
-            except Exception as e:
+            except Exception:
                 logger.info("Model: `generation_config.json` not found. Skipped checking.")
 
         # print(f"Before autofix_hf_model_config: {model.generation_config}")

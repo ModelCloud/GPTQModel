@@ -17,7 +17,6 @@
 # -- do not touch
 import os
 
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

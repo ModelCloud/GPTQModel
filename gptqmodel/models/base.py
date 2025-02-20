@@ -40,13 +40,13 @@ from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantize
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
+from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.progress import ProgressBar
 from ..utils.torch import torch_compile, torch_empty_cache
-from ..utils.hf import autofix_hf_model_config
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,

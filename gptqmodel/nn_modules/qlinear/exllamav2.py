@@ -16,11 +16,9 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
-import math
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
