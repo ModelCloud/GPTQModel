@@ -77,4 +77,16 @@ def patch_evalplus(model):
             else:  # with chat template
                 self.eos += ["\n```\n"]
 
+        def __str__(self):
+            if isinstance(self.model, str):
+                return self.model
+            elif isinstance(self.model, PreTrainedModel):
+                return self.model.config.name_or_path
+            elif isinstance(self.model, BaseGPTQModel):
+                return self.model.model_local_path
+            else:
+                return self.model.__class__.__name__
+
+
     GPTQModelDecoder.__init__ = PatchedGPTQModelDecoder.__init__
+    GPTQModelDecoder.__str__ = PatchedGPTQModelDecoder.__str__
