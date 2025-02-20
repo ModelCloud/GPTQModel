@@ -129,7 +129,7 @@ def nested_move_to(v, device, dtype: torch.dtype = None, stream: bool = False):
         return v
 
 
-def find_modules(module, layers=None, name="") -> Dict[str, nn.Module]:
+def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.Module]:
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
