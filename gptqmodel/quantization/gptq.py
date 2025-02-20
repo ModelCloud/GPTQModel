@@ -229,14 +229,14 @@ class GPTQ:
                 break
             except torch._C._LinAlgError as e:
                 if  self.qcfg.damp_auto_increment != 0:
-                    logger.warning(f"Current damp={damp_percent:.5f} is too low, increased by { self.qcfg.damp_auto_increment:.5f}")
+                    logger.warning(f"Quantization: Current `damp_percent = {damp_percent:.5f}` is too low, auto-incrementing by `{ self.qcfg.damp_auto_increment:.5f}`")
                     damp_percent +=  self.qcfg.damp_auto_increment
                 else:
-                    logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
+                    logger.warning("Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
                     raise e
 
         if not (0 < damp_percent < 1):
-            raise ValueError(f"damp_percent must between 0 and 1. current is {damp_percent}")
+            raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp_percent}")
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -294,7 +294,7 @@ class GPTQ:
 
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
-            raise ValueError("Quantization failed due to NaN loss")
+            raise ValueError("Quantization: Failed due to `NaN` loss")
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
