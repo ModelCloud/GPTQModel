@@ -22,32 +22,33 @@ def autofix_hf_model_loading_generation_config(model: PreTrainedModel, path:str)
 
 def autofix_hf_model_config(model: PreTrainedModel):
     if model.can_generate():
-        print(f"Before autofix_hf_model_config: {model.generation_config}")
+        # print(f"Before autofix_hf_model_config: {model.generation_config}")
         autofix_hf_generation_config(model.generation_config)
-        print(f"After autofix_hf_model_config: {model.generation_config}")
+        # print(f"After autofix_hf_model_config: {model.generation_config}")
 
 def autofix_hf_generation_config(cfg: GenerationConfig):
     # HF has recently started to perform very strict validation model save which results in warnings on load()
     # to become exceptions on save().
     if cfg.do_sample is False:
         errors = 0
-        if cfg.temperature is not None and cfg.temperature != 1.0:
+        if hasattr(cfg, "temperature") and cfg.temperature is not None and cfg.temperature != 1.0:
             errors += 1
-        if cfg.top_p is not None and cfg.top_p != 1.0:
+        if hasattr(cfg, "top_p") and cfg.top_p is not None and cfg.top_p != 1.0:
             errors += 1
-        if cfg.min_p is not None:
+        if hasattr(cfg, "min_p") and cfg.min_p is not None:
             errors += 1
-        if cfg.typical_p is not None and cfg.typical_p != 1.0:
+        if hasattr(cfg, "typical_p") and cfg.typical_p is not None and cfg.typical_p != 1.0:
             errors += 1
         # contrastive search uses top_k
-        if cfg.top_k is not None and cfg.top_k != 50 and cfg.penalty_alpha is None:
+        if (hasattr(cfg, "top_k") and cfg.top_k is not None and cfg.top_k != 50) and (hasattr(cfg, "penalty_alpha") and cfg.penalty_alpha is None):
             errors += 1
-        if cfg.epsilon_cutoff is not None and cfg.epsilon_cutoff != 0.0:
+        if hasattr(cfg, "epsilon_cutoff") and cfg.epsilon_cutoff is not None and cfg.epsilon_cutoff != 0.0:
             errors += 1
-        if cfg.eta_cutoff is not None and cfg.eta_cutoff != 0.0:
+        if hasattr(cfg, "eta_cutoff") and cfg.eta_cutoff is not None and cfg.eta_cutoff != 0.0:
             errors += 1
 
         # fix wrong do_sample
         if errors > 0:
             cfg.do_sample = True
+            logger.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
