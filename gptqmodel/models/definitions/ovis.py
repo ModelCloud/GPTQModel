@@ -28,6 +28,8 @@ from ..base import BaseGPTQModel
 
 
 class OvisGPTQ(BaseGPTQModel):
+    require_pkgs_version = ["transformers<=4.48.3"]
+
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
     pre_lm_head_norm_module = "llm.model.norm"
 
