@@ -202,7 +202,7 @@ def make_quant(
         adapter=extension,
     )
 
-    logger.info(f"Kernel: candidates -> `{quant_linear_candidates}`")
+    logger.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
 
     # loop over actual QLinear init, catch errors and use fallbacks if applicable
     for cls in quant_linear_candidates:
@@ -226,7 +226,7 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 adapter=qcfg.adapter,
             )
-            logger.info(f"Kernel: selected -> `{linear_cls}`.")
+            logger.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
         except NotImplementedError as e:
             logger.info(f"Kernel: skipped -> `{cls}`.")

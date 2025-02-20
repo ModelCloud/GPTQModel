@@ -183,8 +183,7 @@ class BaseGPTQModel(nn.Module):
             logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded for `{len(qmodules)}` modules.")
 
         # print kernel info:
-        loaded_kernels = self.kernels()
-        logger.info(f"Kernel: loaded kernel(s) -> `{loaded_kernels}`")
+        logger.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
 
     def prepare_dataset(
         self,
