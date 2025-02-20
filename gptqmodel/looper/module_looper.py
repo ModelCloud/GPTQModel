@@ -237,7 +237,9 @@ class ModuleLooper():
                     subset = {}
                     for n in names:
                         if n in full:
-                            subset[n] = full[n]
+                            # deepseek has repeating layer defs due to difference in deepseek v2 and v2-lite
+                            if n not in processed_subset:
+                                subset[n] = full[n]
                         # some modules have layer_modules that are dynamic based on config
                         # ref: deepseek v2/v3/r1
                         elif self.gptq_model.layer_modules_strict:
