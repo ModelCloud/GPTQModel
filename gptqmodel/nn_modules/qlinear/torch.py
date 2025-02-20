@@ -93,12 +93,20 @@ class TorchQuantLinear(PackableQuantLinear):
 
         super().post_init()
 
+        # torch benefits the most from torch.compile, enable it by default
+        self.optimize()
+
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        if self.optimized:
+            return
+
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
 
         if self.adapter:
             self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
+
+        super().optimize()
 
     def forward(self, x: torch.Tensor):
         # if x.size(-1) != self.padded_infeatures:

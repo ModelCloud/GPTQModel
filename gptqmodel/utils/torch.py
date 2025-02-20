@@ -34,8 +34,8 @@ logger = setup_logger()
 torch._dynamo.reset()
 
 # Increase the dynamo cache size limit, default of 8 is too low
-if torch._dynamo.config.cache_size_limit < 64:
-    torch._dynamo.config.cache_size_limit = 64
+if torch._dynamo.config.cache_size_limit < 128:
+    torch._dynamo.config.cache_size_limit = 128
 
 if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
     HAS_CUDA = True
