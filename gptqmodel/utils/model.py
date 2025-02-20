@@ -130,8 +130,6 @@ def nested_move_to(v, device, dtype: torch.dtype = None, stream: bool = False):
 
 
 def find_modules(module, layers=None, name="") -> Dict[str, nn.Module]:
-    if not isinstance(module, nn.Module):
-        return {}
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
