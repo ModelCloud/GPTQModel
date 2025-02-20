@@ -34,6 +34,9 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
     layers_node = "model.layers"
     layer_type = "DeepseekV3DecoderLayer"
 
+    # DeepSeek V3 uses dynamic modules based on lora(rank):
+    layer_modules_strict = False
+
     layer_modules = [
         ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
 

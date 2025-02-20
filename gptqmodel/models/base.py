@@ -82,6 +82,10 @@ class BaseGPTQModel(nn.Module):
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
 
+    # Strict=True -> all layer_modules must exists in model
+    # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
+    layer_modules_strict = True
+
     pre_lm_head_norm_module: str = None
 
     # some models require trust_remove_code = True (dbrx_converted)

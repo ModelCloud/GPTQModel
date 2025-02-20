@@ -236,8 +236,13 @@ class ModuleLooper():
                 for index, names in enumerate(modules):
                     subset = {}
                     for n in names:
-                        assert n in full, f"module {n} has wrong type, check your config"
-                        subset[n] = full[n]
+                        if n in full:
+                            subset[n] = full[n]
+                        # some modules have layer_modules that are dynamic based on config
+                        # ref: deepseek v2/v3/r1
+                        elif self.gptq_model.layer_modules_strict:
+                            raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+
 
                     skipped_modules = []
 
