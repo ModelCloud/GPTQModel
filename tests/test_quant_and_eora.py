@@ -40,10 +40,6 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
         adapter=adapter,
     )
 
-    # torch can benefit from optimization
-    if backend == BACKEND.TORCH:
-        model.optimize()
-
     tokens = model.generate("Capital of France is")[0]
     result = model.tokenizer.decode(tokens)
     print(f"BACKEND: {backend}, Result: {result}")
@@ -52,7 +48,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     bench_result = GPTQModel.eval(
         model_or_id_or_path=model,
         framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.GSM8K_COT],
+        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU],
         batch_size=32,
     )
 
@@ -62,10 +58,9 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     return bench_result
 
 class Test(ModelTest):
-    # NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
     #NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
-    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
-
+    #NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
@@ -81,7 +76,7 @@ class Test(ModelTest):
         desc_act = True
         rank = 128
         batch_size = 1
-        calibration_dataset_rows = 1024
+        calibration_dataset_rows = 512
         calibration_dataset_concat_size = 0 # disable
         auto_gc = False
         adapter_file_name = "eora.safetensors"
@@ -133,7 +128,6 @@ class Test(ModelTest):
                 batch_size=batch_size,
                 auto_gc=auto_gc,
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
-                backend=BACKEND.TORCH,
             ) #
 
             # EoRA adapter is saved according to Lora.path property
