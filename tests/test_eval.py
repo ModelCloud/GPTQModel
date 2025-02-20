@@ -54,7 +54,7 @@ class TestEval(unittest.TestCase):
             results = GPTQModel.eval(model_or_id_or_path=self.MODEL_ID,
                                      framework=framework,
                                      tasks=[task],
-                                     batch_size=32,
+                                     batch_size=16,
                                      output_path=output_path,
                                      llm_backend=llm_backend,
                                      model_args=model_args,
