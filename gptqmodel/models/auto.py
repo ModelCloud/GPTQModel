@@ -27,6 +27,11 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
     print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
 import sys  # noqa: E402
+
+# TODO: waiting for pytorch implementgation of aten ops for MPS
+if sys.platform == "darwin":
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter # noqa: E402
 from lm_eval.utils import make_table # noqa: E402
 from tokenicer import Tokenicer # noqa: E402
@@ -34,10 +39,6 @@ from tokenicer import Tokenicer # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear # noqa: E402
 from ..quantization.gptq import CPU # noqa: E402
 from ..utils.torch import torch_empty_cache # noqa: E402
-
-# TODO: waiting for pytorch implementgation of aten ops for MPS
-if sys.platform == "darwin":
-    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import os.path  # noqa: E402
 import random  # noqa: E402
@@ -197,9 +198,9 @@ class GPTQModel:
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
-        if backend == BACKEND.VLLM:
-            from ..integration.integration_vllm import patch_vllm
-            patch_vllm()
+        # if backend == BACKEND.VLLM:
+        #     from ..integration.integration_vllm import patch_vllm
+        #     patch_vllm()
 
         is_quantized = False
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
