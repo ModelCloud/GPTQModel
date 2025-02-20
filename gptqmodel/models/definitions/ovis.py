@@ -47,10 +47,10 @@ class OvisGPTQ(BaseGPTQModel):
     IGNORE_ID = -100
 
     def monkey_patch(self):
-        # From config.json, we know that visual_tokenizer.dtype is float32 and llm.dtpe is bfloat16.
+        # From config.json, we know that visual_tokenizer.dtype is float32 and text model.confi.dtype is bfloat16.
         # But before transformers<4.49.0, the dtype returned by AutoModel.from_config(config.visual_tokenizer_config)
         # is bfloat16. This should be a bug, but OVIS generate() unexpectedly works properly.
-        # This bug was fixed in transformers 4.49.0. So visual_tokenizer needs to be converted to config.llm.dtype
+        # This bug was fixed in transformers 4.49.0. So visual_tokenizer needs to be converted to model.config.dtype
         self.model.visual_tokenizer = self.model.visual_tokenizer.to(dtype=self.model.llm.dtype)
         self.model.vte = self.model.vte.to(dtype=self.model.llm.dtype)
 
