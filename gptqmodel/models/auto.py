@@ -18,23 +18,22 @@ from __future__ import annotations
 
 import os
 
-from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter
-from lm_eval.utils import make_table
-from tokenicer import Tokenicer
-
-from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..quantization.gptq import CPU
-from ..utils.torch import torch_empty_cache
-
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
-    print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for compatibililty.")
+    print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
 import sys  # noqa: E402
+from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter # noqa: E402
+from lm_eval.utils import make_table # noqa: E402
+from tokenicer import Tokenicer # noqa: E402
+
+from ..nn_modules.qlinear.torch import TorchQuantLinear # noqa: E402
+from ..quantization.gptq import CPU # noqa: E402
+from ..utils.torch import torch_empty_cache # noqa: E402
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
