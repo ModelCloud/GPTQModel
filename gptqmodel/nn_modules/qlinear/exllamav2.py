@@ -180,8 +180,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             pack_dtype=pack_dtype,
             adapter=adapter,
             register_buffers=True,
-            register_buffers_in_features=self.in_features,
-            register_buffers_out_feature=self.out_features,
+            register_buffers_in_features=in_features,
+            register_buffers_out_feature=out_features,
             **kwargs)
 
         self.q_handle = None
