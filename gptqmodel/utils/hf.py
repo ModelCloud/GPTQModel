@@ -5,24 +5,24 @@ from gptqmodel.utils.logger import setup_logger
 logger = setup_logger()
 
 # TODO FIXME! Pre-quantized use AutoModelForCausalLM.from_pretrained() but post-quantized use AutoModelForCausalLM.from_config()
-# and the `from_config` api does not auto-load the config from `generation_config.json`
-def autofix_hf_model_loading_generation_config(model: PreTrainedModel, path:str):
-    # vllm is not a PreTrainedModel here
-    if isinstance(model, PreTrainedModel) and model.can_generate():
-        logger.info(f"Model: Loaded `generation_config`: {model.generation_config}")
-        try:
-            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
-            if cfg != model.generation_config:
-                model.generation_config = cfg
-                logger.info(f"Model: Auto-fixed `generation_config` mismatch between model and `generation_config.json`.")
-            else:
-                pass
-                #logger.info(f"Model: loaded `generation_config` matching `generation_config.json`.")
-        except Exception as e:
-            logger.info("Model: `generation_config.json` not found. Skipped checking.")
-
-def autofix_hf_model_config(model: PreTrainedModel):
+def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
     if model.can_generate():
+        # sync config first
+        if path:
+            logger.info(f"Model: Loaded `generation_config`: {model.generation_config}")
+            try:
+                cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
+                if cfg != model.generation_config:
+                    model.generation_config = cfg
+                    logger.info(
+                        f"Model: Auto-fixed `generation_config` mismatch between model and `generation_config.json`.")
+                    logger.info(f"Model: Updated `generation_config`: {model.generation_config}")
+                else:
+                    pass
+                    # logger.info(f"Model: loaded `generation_config` matching `generation_config.json`.")
+            except Exception as e:
+                logger.info("Model: `generation_config.json` not found. Skipped checking.")
+
         # print(f"Before autofix_hf_model_config: {model.generation_config}")
         autofix_hf_generation_config(model.generation_config)
         # print(f"After autofix_hf_model_config: {model.generation_config}")
