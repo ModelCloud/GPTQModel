@@ -457,7 +457,7 @@ def ModelLoader(cls):
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
                         not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd modules only
+                    # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del modules[name]
@@ -489,7 +489,7 @@ def ModelLoader(cls):
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
             if not qcfg.sym and not qcfg.is_quantized_by_v2():
                 raise ValueError(
-                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
+                    f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
             t = time.time()
@@ -499,7 +499,7 @@ def ModelLoader(cls):
                 cfg=qcfg,
                 qlinear_kernel=preload_qlinear_kernel,
             )
-            logger.info(f"Conversion complete: {time.time() - t}s")
+            logger.info(f"Format: Conversion complete: {time.time() - t}s")
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
@@ -508,11 +508,11 @@ def ModelLoader(cls):
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
-                    "The loading of sharded checkpoints with Marlin is currently not supported."
+                    "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
+                    f'Kernel: Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
                 )
 
             # Validate the model can run in Marlin.
