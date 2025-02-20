@@ -1190,7 +1190,7 @@ class BaseGPTQModel(nn.Module):
 
     # returns all the loaded qlinear types, returns empty [] if non-found
     def kernels(self) -> List[Type[BaseQuantLinear]]:
-        if isinstance(self.model, nn.Module):
+        if not isinstance(self.model, nn.Module):
             return []
         loaded_kernels = set()
         modules = find_modules(self.model, layers=[BaseQuantLinear])
