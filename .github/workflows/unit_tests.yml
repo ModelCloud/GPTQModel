@@ -563,7 +563,7 @@ jobs:
             uv pip install colorlog
           fi
 
-          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
+          if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
             uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
             uv pip install torchvision torch
             uv pip install -U intel_extension_for_pytorch -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
