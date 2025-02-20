@@ -32,20 +32,20 @@ class TestExtensionConfig(unittest.TestCase):
         pass
 
     def test_extension_parse(self):
-        ext = normalize_adapter(adapter={lora: {"rank": 128}})
+        ext = normalize_adapter(adapter={"name": lora, "rank": 128})
 
         assert isinstance(ext, Lora)
         assert ext.rank == 128
         print(f"{ext}")
 
-        ext = normalize_adapter(adapter={lora: Lora(rank=128)})
+        ext = normalize_adapter(adapter=Lora(rank=128))
 
         assert isinstance(ext, Lora)
         assert ext.rank == 128
         print(f"{ext}")
 
         try:
-            normalize_adapter(adapter={lora: {"rank": 128, "crash": 1}})
+            normalize_adapter(adapter={"name": lora, "rank": 128, "crash": 1})
             raise RuntimeError("Non supported extension.property should crash on decode")
         except Exception:
             pass
@@ -66,7 +66,7 @@ class TestExtensionConfig(unittest.TestCase):
         print(f"{lora} config: {kv}")
 
         assert lora_config.rank == rank
-        assert len(kv) == 1
+        assert len(kv) == 3
         assert rank_field in kv.keys()
         assert kv[rank_field] == rank
 
@@ -78,18 +78,14 @@ class TestExtensionConfig(unittest.TestCase):
 
         qconfig = QuantizeConfig(
             bits=bits,
-            adapter={lora: eora_config},
+            adapter=eora_config,
         )
 
         print(f"qconfig: {qconfig}")
-        get_eroa_config = qconfig.extension_get(lora)
 
-        print(f"qconfig extract: {get_eroa_config}")
         assert qconfig.bits == bits
-        assert len(qconfig.adapter) == 1
-        assert qconfig.adapter.get(lora) == eora_config
-        assert qconfig.adapter.get(lora).rank == rank
-        assert get_eroa_config.rank == rank
+        assert qconfig.adapter == eora_config
+        assert qconfig.adapter.rank == rank
 
 
 
