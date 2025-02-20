@@ -130,6 +130,7 @@ class ModuleLooper():
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
+    @torch.no_grad()
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -301,20 +302,19 @@ class ModuleLooper():
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
 
-                        with torch.no_grad():
-                            # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                            if hasattr(module, "reuse_kv"):
-                                if module.reuse_kv:
-                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
-                                        layer_index - 1)
+                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                        if hasattr(module, "reuse_kv"):
+                            if module.reuse_kv:
+                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
+                                    layer_index - 1)
 
-                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                                     **additional_layer_inputs)
-                                if shared_kv_cache_dict.get(layer_index) is None:
-                                    shared_kv_cache_dict[layer_index] = layer_output[-1]
-                            else:
-                                module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                      **additional_layer_inputs)
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                                 **additional_layer_inputs)
+                            if shared_kv_cache_dict.get(layer_index) is None:
+                                shared_kv_cache_dict[layer_index] = layer_output[-1]
+                        else:
+                            module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                  **additional_layer_inputs)
 
                         del layer_input
                         del additional_layer_inputs
@@ -371,13 +371,12 @@ class ModuleLooper():
                             if module.reuse_kv:
                                 additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
-                        with torch.no_grad():
-                            layer_output = move_to(
-                                module(*layer_input)[0] if is_lm_head_module else
-                                module(*layer_input, **additional_layer_inputs)[0],
-                                device=cur_layer_device if calibration_enable_gpu_cache else CPU,
-                            )
-                            layer_outputs.append([layer_output])
+                        layer_output = move_to(
+                            module(*layer_input)[0] if is_lm_head_module else
+                            module(*layer_input, **additional_layer_inputs)[0],
+                            device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                        )
+                        layer_outputs.append([layer_output])
 
                         del layer_input
                         del additional_layer_inputs

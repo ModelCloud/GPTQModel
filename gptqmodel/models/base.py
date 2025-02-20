@@ -491,6 +491,7 @@ class BaseGPTQModel(nn.Module):
         self.eora_save(eora_path=adapter.path)
         return
 
+    @torch.no_grad()
     def quantize_old(
         self,
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
@@ -950,17 +951,16 @@ class BaseGPTQModel(nn.Module):
                     for k, v in layer_input_kwargs[j].items():
                         additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
 
-                    with torch.no_grad():
-                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                        if hasattr(module, "reuse_kv"):
-                            if module.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
+                    # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                    if hasattr(module, "reuse_kv"):
+                        if module.reuse_kv:
+                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                            if shared_kv_cache_dict.get(module_index) is None:
-                                shared_kv_cache_dict[module_index] = layer_output[-1]
-                        else:
-                            module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                        if shared_kv_cache_dict.get(module_index) is None:
+                            shared_kv_cache_dict[module_index] = layer_output[-1]
+                    else:
+                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
 
                     del layer_input
                     del additional_layer_inputs
@@ -1050,12 +1050,11 @@ class BaseGPTQModel(nn.Module):
                         if module.reuse_kv:
                             additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
 
-                    with torch.no_grad():
-                        layer_output = move_to(
-                            module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
-                            cur_layer_device if calibration_enable_gpu_cache else CPU,
-                        )
-                        layer_outputs.append([layer_output])
+                    layer_output = move_to(
+                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
+                        cur_layer_device if calibration_enable_gpu_cache else CPU,
+                    )
+                    layer_outputs.append([layer_output])
 
                     del layer_input
                     del additional_layer_inputs
