@@ -42,10 +42,13 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
         # DeepSeek-V2 and DeepSeek-V2-Lite use same model_type, but different self_attn
         # so we provide different layer_modules usage.
         # DeepSeek-V2-Lite usage
-        ["self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        #["self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
 
         # DeepSeek-V2 usage, included in layer 0-59
-        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        #["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+
+        # merged v2-lite and v2
+        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
 
         ["self_attn.o_proj"],
 
