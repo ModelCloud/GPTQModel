@@ -74,6 +74,8 @@ class BaseQuantLinear(nn.Module):
         # adapter tensors are lodaed inside adapter so they must be unique per module
         self.adapter =  copy.deepcopy(adapter)
 
+        self.optimized = False
+
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
             self.pack_np_dtype = np.int8 # qweight saved dtype
@@ -338,6 +340,7 @@ class BaseQuantLinear(nn.Module):
     # use optimize so we don't override native module.compile()
     # override me, to perform any torch.compile logic on the kernel pre forward
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        self.optimized = True
         pass
 
 class PackableQuantLinear(BaseQuantLinear):
@@ -357,8 +360,11 @@ class PackableQuantLinear(BaseQuantLinear):
                 dtype=t.int32,
             ).reshape(1, 3, 12).to(device=self.g_idx.device)
 
-        self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device))
-        self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device))
+        # self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device))
+        # self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device))
+        #
+        self.wf_unsqueeze_zero = wf.unsqueeze(0).to(device=self.g_idx.device)
+        self.wf_unsqueeze_neg_one = wf.unsqueeze(-1).to(device=self.g_idx.device)
 
     def dequantize_weight(self, num_itr: int = 1):
         if self.bits in [2, 4, 8]:
