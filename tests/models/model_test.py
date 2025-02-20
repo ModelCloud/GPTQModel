@@ -62,6 +62,7 @@ class ModelTest(unittest.TestCase):
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
+    DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
 
     KERNEL_QUANT = {}  # kernel sets
@@ -130,7 +131,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer, rows: int = 128):
+    def load_dataset(self, tokenizer, rows: int = DATASET_SIZE):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
