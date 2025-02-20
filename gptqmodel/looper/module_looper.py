@@ -105,7 +105,7 @@ class ModuleLooper():
                     for index in range(len(v)):
                         if len(v[index].shape) == 1:
                             v[index] = v[index].unsqueeze(0)
-                        v[index] = move_to(v[index].to(torch.bfloat16) if is_ovis else v[index],
+                        v[index] = move_to(v[index].to(self.gptq_model.model.visual_tokenizer.dtype) if is_ovis else v[index],
                                                   device=data_device)
                 else:
                     if len(v.shape) == 1:

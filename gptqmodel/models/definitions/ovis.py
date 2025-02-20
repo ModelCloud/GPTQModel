@@ -28,8 +28,6 @@ from ..base import BaseGPTQModel
 
 
 class OvisGPTQ(BaseGPTQModel):
-    require_pkgs_version = ["transformers<=4.48.3"]
-
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
     pre_lm_head_norm_module = "llm.model.norm"
 
@@ -42,9 +40,19 @@ class OvisGPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
     ]
 
+    require_monkeypatch = True
+
     modality = [MODALITY.IMAGE_TO_TEXT]
 
     IGNORE_ID = -100
+
+    def monkey_patch(self):
+        # From config.json, we know that visual_tokenizer.dtype is float32 and llm.dtpe is bfloat16.
+        # But before transformers<4.49.0, the dtype returned by AutoModel.from_config(config.visual_tokenizer_config)
+        # is bfloat16. This should be a bug, but OVIS generate() unexpectedly works properly.
+        # This bug was fixed in transformers 4.49.0. So visual_tokenizer needs to be converted to config.llm.dtype
+        self.model.visual_tokenizer = self.model.visual_tokenizer.to(dtype=self.model.llm.dtype)
+        self.model.vte = self.model.vte.to(dtype=self.model.llm.dtype)
 
     def pre_quantize_generate_hook_start(self):
         self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=self.quantize_config.device)

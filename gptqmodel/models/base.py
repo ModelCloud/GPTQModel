@@ -782,7 +782,7 @@ class BaseGPTQModel(nn.Module):
                     for module_index in range(len(v)):
                         if len(v[module_index].shape) == 1:
                             v[module_index] = v[module_index].unsqueeze(0)
-                        v[module_index] = move_to(v[module_index].to(torch.bfloat16) if is_ovis else v[module_index], data_device)
+                        v[module_index] = move_to(v[module_index].to(self.model.visual_tokenizer.dtype) if is_ovis else v[module_index], data_device)
                 else:
                     if len(v.shape) == 1:
                         v = v.unsqueeze(0)
