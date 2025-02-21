@@ -37,7 +37,6 @@ except ImportError as e:
     marlin_import_exception = e
 
 logger = setup_logger()
-fp32_warning_logged = False
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -224,10 +223,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
         self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
 
-        global fp32_warning_logged
-        if not fp32_warning_logged:
-            fp32_warning_logged = True
-            logger.warn("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
+        logger.warn.once("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,

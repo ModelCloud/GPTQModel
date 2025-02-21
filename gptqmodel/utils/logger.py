@@ -16,6 +16,7 @@
 
 import logging
 import sys
+from enum import Enum
 from typing import Callable
 
 from colorlog import ColoredFormatter
@@ -28,34 +29,119 @@ def update_logging_src(src: int):
     global last_logging_src
     last_logging_src = src
 
+class LEVEL(str, Enum):
+    CRITICAL = "CRITICAL"
+    DEBUG = "DEBUG"
+    WARN = "WARNING"
+    INFO = "INFO"
+    ERROR = "ERROR"
+
 def setup_logger():
     global logger
     if logger is not None:
         return logger
 
     class CustomLogger(logging.Logger):
-        def critical(self, msg, *args, **kwargs):
-            op = super().critical
-            self._process(op, msg, *args, **kwargs)
+        history = set()
+        history_limit = 1000
 
-        def warning(self, msg, *args, **kwargs):
-            op = super().warning
-            self._process(op, msg, *args, **kwargs)
+        def history_add(self, msg) -> bool:
+            h = hash(msg) # TODO only msg is checked not level + msg
+            if h in self.history:
+                return False # add failed since it already exists
 
-        def debug(self, msg, *args, **kwargs):
-            op = super().debug
-            self._process(op, msg, *args, **kwargs)
+            if len(self.history) > self.history_limit:
+                self.history.clear()
 
-        def info(self, msg, *args, **kwargs):
-            op = super().info
-            self._process(op, msg, *args, **kwargs)
+            self.history.add(h)
 
-        def _process(self, op: Callable, msg, *args, **kwargs):
+            return True
+
+        class critical_cls:
+            def __init__(self, logger):
+                self.logger = logger
+
+            def once(self, msg, *args, **kwargs):
+                if self.logger.history_add(msg):
+                    self(msg, *args, **kwargs)
+
+            def __call__(self, msg, *args, **kwargs):
+                self.logger._process(LEVEL.CRITICAL, msg, *args, **kwargs)
+
+        class warn_cls:
+            def __init__(self, logger):
+                self.logger = logger
+
+            def once(self, msg, *args, **kwargs):
+                if self.logger.history_add(msg):
+                    self(msg, *args, **kwargs)
+
+            def __call__(self, msg, *args, **kwargs):
+                self.logger._process(LEVEL.WARN, msg, *args, **kwargs)
+
+        class debug_cls:
+            def __init__(self, logger):
+                self.logger = logger
+
+            def once(self, msg, *args, **kwargs):
+                if self.logger.history_add(msg):
+                    self(msg, *args, **kwargs)
+
+            def __call__(self, msg, *args, **kwargs):
+                self.logger._process(LEVEL.DEBUG, msg, *args, **kwargs)
+
+        class info_cls:
+            def __init__(self, logger):
+                self.logger = logger
+
+            def once(self, msg, *args, **kwargs):
+                if self.logger.history_add(msg):
+                    self(msg, *args, **kwargs)
+
+            def __call__(self, msg, *args, **kwargs):
+                self.logger._process(LEVEL.INFO, msg, *args, **kwargs)
+
+        class error_cls:
+            def __init__(self, logger):
+                self.logger = logger
+
+            def once(self, msg, *args, **kwargs):
+                if self.logger.history_add(msg):
+                    self(msg, *args, **kwargs)
+
+            def __call__(self, msg, *args, **kwargs):
+                self.logger._process(LEVEL.ERROR, msg, *args, **kwargs)
+
+        def __init__(self, name):
+            super().__init__(name)
+            self._critical = self.critical
+            self._warning = self.warning
+            self._debug = self.debug
+            self._info = self.info
+            self._error = self.error
+
+            self.critical = self.critical_cls(logger=self)
+            self.warn = self.warn_cls(logger=self)
+            self.debug = self.debug_cls(logger=self)
+            self.info = self.info_cls(logger=self)
+            self.error = self.error_cls(logger=self)
+
+        def _process(self, level: LEVEL, msg, *args, **kwargs):
             global last_logging_src
             if last_logging_src == 2:
                 print(" ", flush=True)
                 last_logging_src = 1
-            op(msg, *args, **kwargs)
+
+            if level == LEVEL.INFO:
+                self._info(msg, *args, **kwargs)
+            elif level == LEVEL.WARN:
+                self._warning(msg, *args, **kwargs)
+            elif level == LEVEL.ERROR:
+                self._error(msg, *args, **kwargs)
+            elif level == LEVEL.DEBUG:
+                self._debug(msg, *args, **kwargs)
+            elif level == LEVEL.CRITICAL:
+                self._critical(msg, *args, **kwargs)
 
     logging.setLoggerClass(CustomLogger)
 
@@ -83,10 +169,6 @@ def setup_logger():
     handler.setFormatter(formatter)
     handler.flush = sys.stdout.flush
     logger.addHandler(handler)
-
-    # fix warnings about warn() deprecated
-    if hasattr(logger, "warning"):
-        logger.warn = logger.warning
 
     return logger
 
