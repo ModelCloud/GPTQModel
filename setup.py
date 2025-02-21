@@ -212,6 +212,20 @@ if BUILD_CUDA_EXT:
 
     extensions = [
         cpp_ext.CUDAExtension(
+            'gptqmodel_exllama_eora',
+            [
+                "gptqmodel_ext/exllama2-vllm/eora/q_gemm.cu",
+                "gptqmodel_ext/exllama2-vllm/eora/pybind.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+            # include_dirs=[os.path.abspath("."), os.path.abspath("eora")],
+            # extra_compile_args={
+            #     'cxx': ['-std=c++20'],
+            #     'nvcc': ['-std=c++20'],
+            # }
+        ),
+        cpp_ext.CUDAExtension(
             "gptqmodel_cuda_64",
             [
                 "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",

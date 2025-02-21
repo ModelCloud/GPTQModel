@@ -26,6 +26,7 @@ from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
@@ -230,8 +231,8 @@ def select_quant_linear(
         qlinear = BitBLASQuantLinear
     elif backend == BACKEND.MARLIN:
         qlinear = MarlinQuantLinear
-    # elif backend == BACKEND.EXLLAMA_EORA:
-    #     qlinear = ExllamaEoraQuantLinear
+    elif backend == BACKEND.EXLLAMA_EORA:
+        qlinear = ExllamaEoraQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
