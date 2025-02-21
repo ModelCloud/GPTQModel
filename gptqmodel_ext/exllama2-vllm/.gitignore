@@ -1,0 +1,5 @@
+cmake-build-debug
+build
+.idea
+eora.egg-info/
+**__pycache__

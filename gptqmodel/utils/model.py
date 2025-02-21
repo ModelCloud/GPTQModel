@@ -360,6 +360,7 @@ def convert_gptq_v1_to_v2_format(
     cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
+
     # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
     if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
         return model
