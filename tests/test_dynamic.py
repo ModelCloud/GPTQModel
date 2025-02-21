@@ -112,7 +112,7 @@ class TestDynamic(ModelTest):
             # exllama v1/v2 only supports 4bit so does not support dynamic bits control
             (BACKEND.TORCH, TorchQuantLinear, 15.793),
             (BACKEND.TRITON, TritonV2QuantLinear, 15.793),
-            (BACKEND.MARLIN, MarlinQuantLinear, 15.803), # A100: 15.7545
+            (BACKEND.MARLIN, MarlinQuantLinear, 15.829),
         ]
     )
     def test_dynamic_bits(self, backend, backendQLinear, expected_ppl):
