@@ -226,6 +226,7 @@ def make_quant(
                 device=device,
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
+                backend=backend,
                 adapter=qcfg.adapter,
             )
             logger.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
@@ -252,6 +253,7 @@ def create_quant_layer(
         device: DEVICE,
         lm_head_name: str,
         pack_dtype: torch.dtype,
+        backend: BACKEND,
         adapter: Optional[Adapter] = None,
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -334,6 +336,7 @@ def create_quant_layer(
             #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             name=name,
             lm_head_name=lm_head_name,
+            backend=backend,
             adapter=adapter,
         )
         new_layer.device = ori_layer_device
