@@ -98,3 +98,25 @@ class TestRepacking(unittest.TestCase):
         qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
 
         return qlinear
+
+    def test_compare_exllama_triton_torch(self):
+        triton_linear = self.pack(TritonV2QuantLinear)
+
+        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_linear)
+        dequantized_weight = dequantized_weight.to(torch.float16)
+
+        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
+        self.assertTrue(torch.all(dequantized_qzeros == 8))
+
+        # validate torch packer
+        torch_linear = self.pack(TorchQuantLinear)
+
+        dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(torch_linear)
+        dequantized_weight = dequantized_weight.to(torch.float16)
+
+        self.assertTrue(torch.equal(dequantized_weight, self.linear.weight))
+        self.assertTrue(torch.all(dequantized_qzeros == 8))
+
+        self.assertTrue(torch.allclose(triton_linear.qweight, torch_linear.qweight))
+        self.assertTrue(torch.allclose(triton_linear.scales, torch_linear.scales))
+        self.assertTrue(torch.allclose(triton_linear.qzeros, torch_linear.qzeros))
