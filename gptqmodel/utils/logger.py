@@ -55,7 +55,7 @@ def setup_logger():
 
             self.history.add(h)
 
-            return False
+            return True
 
         class critical_cls:
             def __init__(self, logger):
