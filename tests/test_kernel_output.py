@@ -1,13 +1,17 @@
 import unittest
 
 import torch
+from parameterized import parameterized
 from safetensors import safe_open
+from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
 
 
@@ -16,8 +20,8 @@ class TestKernelOutput(unittest.TestCase):
     target_qliner_map = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
-        # BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        # BACKEND.TRITON: TritonV2QuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
+        BACKEND.TRITON: TritonV2QuantLinear,
         # BACKEND.CUDA: DynamicCudaQuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
@@ -43,11 +47,13 @@ class TestKernelOutput(unittest.TestCase):
         r = 128
 
         bit = 4
-        use_exllama = True
 
         cls.x = torch.rand((m, k), device='cuda', dtype=torch.float16)
         cls.eora_a = eora_tensors[f'{cls.target}.lora_A.weight'].to('cuda:0').T
         cls.eora_b = eora_tensors[f'{cls.target}.lora_B.weight'].to('cuda:0').T
+
+        # TORCH as reference output
+        cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH)
 
     def forward(self, backend):
         model = GPTQModel.load(self.model_path, backend=backend)
@@ -69,22 +75,23 @@ class TestKernelOutput(unittest.TestCase):
 
         return result
 
-    def test_kernel_output(self):
-        torch_kernel_out = self.forward(BACKEND.TORCH)
-        exllama_kernel_out = self.forward(BACKEND.EXLLAMA_V1)
-        marlin_kernel_out = self.forward(BACKEND.MARLIN)
-        exllama_v2v_out = self.forward(BACKEND.EXLLAMA_EORA)
+    def assert_on_mismatch(self, a: Tensor, b: Tensor, rtol=0.05, atol=0.5):
+        torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
-        # print("gptq exllama kernel out: ")
-        # print(exllama_out[0][:10])
-        print("torch_kernel_out: ")
-        print(torch_kernel_out[0][:10])
+    @parameterized.expand ([
+        (BACKEND.TORCH),
+        (BACKEND.TRITON),
+        (BACKEND.EXLLAMA_V1),
+        (BACKEND.EXLLAMA_V2),
+        (BACKEND.MARLIN),
+        (BACKEND.EXLLAMA_EORA)
+    ])
+    def test_kernel_output(self, backend: BACKEND):
+        out = self.forward(backend=backend)
 
-        print("exllama_kernel_out: ")
-        print(exllama_kernel_out[0][:10])
+        print(f"backend: {backend} ")
+        print(out[0][:10])
 
-        print("marlin_kernel_out: ")
-        print(marlin_kernel_out[0][:10])
+        # torch vs exllama v1
+        self.assert_on_mismatch(self.torch_kernel_out, out) # use torch as reference
 
-        print("exllama_v2v_out: ")
-        print(exllama_v2v_out[0][:10])

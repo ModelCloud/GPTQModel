@@ -191,8 +191,8 @@ class MarlinQuantLinear(BaseQuantLinear):
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
             )
 
-        self.original_in_features = in_features
-        self.original_out_features = out_features
+        # self.original_in_features = in_features
+        # self.original_out_features = out_features
 
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
