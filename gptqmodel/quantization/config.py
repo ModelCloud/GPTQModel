@@ -33,6 +33,7 @@ logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_JSON = "checkpoint_format"
+FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
@@ -183,6 +184,8 @@ class QuantizeConfig():
 
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
+
+    is_marlin_format: bool = False
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -351,6 +354,8 @@ class QuantizeConfig():
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
+            elif key == FORMAT_FIELD_COMPAT_MARLIN and val:
+                normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
             elif key in field_names:
                 normalized[key] = val
             else:
