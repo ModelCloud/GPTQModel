@@ -563,7 +563,7 @@ jobs:
             uv pip install colorlog
           fi
 
-          if [[ "${{ matrix.test_script }}" == "test_sglang.py" ]]; then
+          if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
             uv pip install transformers==4.48.3
           fi
 
