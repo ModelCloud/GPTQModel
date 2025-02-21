@@ -351,8 +351,6 @@ class QuantizeConfig():
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
-            elif key == FORMAT_FIELD_COMPAT_MARLIN and val:
-                normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
             elif key in field_names:
                 normalized[key] = val
             else:
