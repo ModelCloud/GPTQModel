@@ -338,14 +338,14 @@ def ModelLoader(cls):
 
         if qcfg.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            if backend != BACKEND.MARLIN and backend != BACKEND.AUTO:
+            if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
             backend = BACKEND.MARLIN
 
         marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
 
         # check for marlin compat for cuda device onnly
-        if backend != BACKEND.MARLIN and device == DEVICE.CUDA:
+        if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and device == DEVICE.CUDA:
             unsupported = _validate_marlin_compatibility(qcfg)
             if unsupported is None and marlin_compatible:
                 logger.info(
@@ -503,7 +503,7 @@ def ModelLoader(cls):
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN and (
+        if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
@@ -540,7 +540,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,

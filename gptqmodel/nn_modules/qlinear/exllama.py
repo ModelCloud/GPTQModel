@@ -43,15 +43,6 @@ def ext_make_q4(qweight, qzeros, scales, g_idx, device):
     return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NON_TENSOR, device)
 
 
-def ext_q4_matmul(x, q4, q4_width):
-    """Matrix multiplication, returns x @ q4"""
-    outshape = x.shape[:-1] + (q4_width,)
-    x = x.view(-1, x.shape[-1])
-    output = torch.empty((x.shape[0], q4_width), dtype=torch.float16, device=x.device)
-
-    q4_matmul(x, q4, output)
-
-    return output.view(outshape)
 
 
 class ExllamaQuantLinear(BaseQuantLinear):
@@ -151,6 +142,22 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         super().post_init()
 
+    def ext_q4_matmul(self, x, q4, q4_width):
+        """Matrix multiplication, returns x @ q4"""
+        outshape = x.shape[:-1] + (q4_width,)
+        x = x.view(-1, x.shape[-1])
+
+        output = torch.empty((x.shape[0], q4_width), dtype=torch.float16, device=x.device)
+        q4_matmul(x, q4, output)
+
+        if self.bias is not None:
+            output.add_(self.bias)
+
+        if self.adapter:
+            output = self.adapter.apply(x=x, out=output)
+
+        return output.view(outshape)
+
 
     def forward(self, x):
         x_dtype = x.dtype
@@ -166,12 +173,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
         # if x.size(-1) != self.in_features:
         #     x = F.pad(x, self.in_features_padding_shape)
 
-        out = ext_q4_matmul(x, self.q4, self.width)
-
-        if self.bias is not None:
-            out.add_(self.bias)
-
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+        out = self.ext_q4_matmul(x, self.q4, self.width)
 
         return out.to(x_dtype)

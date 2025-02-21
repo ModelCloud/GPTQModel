@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.utils.backend import BACKEND
 from torch.nn.parameter import Parameter
 
 from ...models._const import DEVICE, PLATFORM
@@ -133,7 +134,10 @@ def apply_gptq_marlin_linear(
         output_size_per_partition: int,
         input_size_per_partition: int,
         is_k_full: bool,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        bias: torch.Tensor,
+        fp32: bool,
+) -> torch.Tensor:
+
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
@@ -151,7 +155,7 @@ def apply_gptq_marlin_linear(
         input_size_per_partition,
         is_k_full,
         False,
-        False, # <- True: enable fp32 reduce for higher accuracy, False: fp16
+        fp32, # <- True: enable fp32 reduce for higher accuracy, False: fp16
     )
 
     if bias is not None:
@@ -194,8 +198,8 @@ class MarlinQuantLinear(BaseQuantLinear):
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
             )
 
-        self.original_in_features = in_features
-        self.original_out_features = out_features
+        # self.original_in_features = in_features
+        # self.original_out_features = out_features
 
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
@@ -214,6 +218,9 @@ class MarlinQuantLinear(BaseQuantLinear):
             adapter=adapter,
             register_buffers=False,
             **kwargs)
+
+        # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
+        self.fp32 = True if self.backend is BACKEND.MARLIN else False
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -393,6 +400,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
             bias=self.bias,
+            fp32=self.fp32,
         )
 
         if self.adapter:

@@ -23,6 +23,7 @@ import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
 from gptqmodel.adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
+from gptqmodel.utils.backend import BACKEND
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -52,6 +53,7 @@ class BaseQuantLinear(nn.Module):
                  out_features: int,
                  bias: bool,
                  pack_dtype: t.dtype,
+                 backend: BACKEND,
                  adapter: Adapter,
                  name: str = None,
                  register_buffers: bool = False,
@@ -68,6 +70,7 @@ class BaseQuantLinear(nn.Module):
         self.bits = bits
         self.desc_act = desc_act
         self.pack_dtype = pack_dtype
+        self.backend = backend
         self.maxq = 2 ** self.bits - 1
         self.pack_dtype = pack_dtype
         # we need to clone the adapter since passed in adapter may be shared
