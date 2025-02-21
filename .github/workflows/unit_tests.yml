@@ -631,6 +631,9 @@ jobs:
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
+          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
+            export CUDA_VISIBLE_DEVICES=""
+          fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
