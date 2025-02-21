@@ -417,6 +417,7 @@ jobs:
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
+              curl http://${{ needs.check-vm.outputs.ip }}/gpu/status2
               sleep 5
             else
               echo "Allocated GPU ID: $gpu_id"
@@ -428,6 +429,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
+          curl http://${{ needs.check-vm.outputs.ip }}/gpu/status2
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
@@ -616,6 +618,7 @@ jobs:
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
+              curl http://${{ needs.check-vm.outputs.ip }}/gpu/status2
               sleep 5
             else
               echo "Allocated GPU ID: $gpu_id"
@@ -627,6 +630,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
+          curl http://${{ needs.check-vm.outputs.ip }}/gpu/status2
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
