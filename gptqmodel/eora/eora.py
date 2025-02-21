@@ -1,5 +1,6 @@
 # Copyright 2024-2025 NVIDIA CORPORATION
 # EoRA arXiv: https://arxiv.org/abs/2410.21271
+# EoRA Official Repo: https://github.com/NVlabs/EoRA
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
