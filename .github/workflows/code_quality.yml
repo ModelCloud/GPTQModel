@@ -9,8 +9,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.11]
-        os: [ubuntu-22.04]
+        python-version: [3.13]
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
   
     steps:
@@ -18,7 +18,8 @@ jobs:
       with:
         repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
         ref: ${{ github.event.pull_request.head.ref || github.ref }}
-    - uses: actions/setup-python@v5 
+
+    - uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
