@@ -49,9 +49,9 @@ class TestQuantization(ModelTest):
 
     @parameterized.expand(
         [
-            # (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
+            (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
             (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, True, FORMAT.GPTQ_V2, 4),
-            # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
@@ -115,12 +115,13 @@ class TestQuantization(ModelTest):
             if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
                 return
 
-            # test compat: 1) with simple dict type
+            # test compat: 1) with simple dict type 2) is_marlin_format
             compat_quantize_config = {
                 "bits": bits,
                 "group_size": 128,
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,
+                "is_marlin_format": backend == BACKEND.MARLIN,
             }
 
             model = GPTQModel.load(
