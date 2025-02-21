@@ -84,6 +84,10 @@ def setup_logger():
     handler.flush = sys.stdout.flush
     logger.addHandler(handler)
 
+    # fix warnings about warn() deprecated
+    if hasattr(logger, "warning"):
+        logger.warn = logger.warning
+
     return logger
 
 
