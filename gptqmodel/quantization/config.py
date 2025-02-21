@@ -33,7 +33,6 @@ logger = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_JSON = "checkpoint_format"
-FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"

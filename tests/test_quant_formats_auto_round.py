@@ -111,13 +111,12 @@ class TestQuantization(ModelTest):
             if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
                 return
 
-            # test compat: 1) with simple dict type 2) is_marlin_format
+            # test compat: 1) with simple dict type
             compat_quantize_config = {
                 "bits": bits,
                 "group_size": 128,
                 "sym": sym,
                 "desc_act": False if format == FORMAT.MARLIN else True,
-                "is_marlin_format": backend == BACKEND.MARLIN,
             }
 
             model = GPTQModel.load(
