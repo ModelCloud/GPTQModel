@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 class MiniCPMGPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens",]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "MiniCPMDecoderLayer"
@@ -28,5 +29,4 @@ class MiniCPMGPTQ(BaseGPTQModel):
         ["self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["mlp.gate_proj", "mlp.up_proj","mlp.down_proj"],
-        ["mlp.c_proj"],
     ]

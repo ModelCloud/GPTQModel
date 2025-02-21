@@ -20,6 +20,7 @@ from ..base import BaseGPTQModel
 class Cohere2GPTQ(BaseGPTQModel):
     require_pkgs_version = ["transformers>4.47.99"]
     base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "Cohere2DecoderLayer"

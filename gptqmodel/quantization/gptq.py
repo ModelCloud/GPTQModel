@@ -20,14 +20,17 @@ import math
 import os
 import sys
 import time
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.quantization import QuantizeConfig
 
+from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
-from .quantizer import Quantizer
+from .quantizer import HF_OPTIMUM, Quantizer
 
 logger = setup_logger()
 
@@ -37,34 +40,54 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, layer):
-        self.layer = layer
-        self.device = self.layer.weight.device
-        self.layer_copy = self._clone_layer()
+    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+        if isinstance(module, NamedModule):
+            self.module = module.module
+            name = module.name
+        else:
+            name = HF_OPTIMUM
+            self.module = module
 
-        self.rows, self.columns = self.layer_copy.shape[0], self.layer_copy.shape[1]
+        self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
+        self.device = self.module.weight.device
+        self.module_copy = self._clone_module()
+
+        self.rows, self.columns = self.module_copy.shape[0], self.module_copy.shape[1]
         # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
-        self.quantizer = Quantizer()
+
+        self.quantizer = Quantizer(qcfg=self.qcfg, name=name)
+
+        # fwd input buffer
+        self.fwd_inputs_buffered = False
+        self.fwd_inputs_buffered_data = []
+
 
     def shape(self):
-        if hasattr(self, "layer"):
-            return self.layer.weight.shape
+        if hasattr(self, "module"):
+            return self.module.weight.shape
         else:
             return (0, 0)
 
-    def _clone_layer(self):
-        clone = self.layer.weight.data.clone()
+    def _clone_module(self):
+        clone = self.module.weight.data.clone()
 
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.module, nn.Conv2d):
             clone = clone.flatten(1)
 
-        if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
+        if isinstance(self.module, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
         return clone.float()
 
     def add_batch(self, inp, out):
+        if self.fwd_inputs_buffered:
+            self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
+        else:
+            self.process_batch(inp)
+
+    def process_batch(self, inp):
+        inp = inp.to(device=self.device)
         # if os.environ.get("DEBUG"):
         #     self.inp1 = inp
         #     self.out1 = out
@@ -73,17 +96,17 @@ class GPTQ:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
 
-        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
+        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
 
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.module, nn.Conv2d):
             unfold = nn.Unfold(
-                self.layer.kernel_size,
-                dilation=self.layer.dilation,
-                padding=self.layer.padding,
-                stride=self.layer.stride,
+                self.module.kernel_size,
+                dilation=self.module.dilation,
+                padding=self.module.padding,
+                stride=self.module.stride,
             )
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
@@ -100,8 +123,7 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
-    # wrapper for backward compat with optimum
-    # TODO: mark for deprecation
+    # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
         self,
         blocksize=128,
@@ -123,34 +145,43 @@ class GPTQ:
         actorder=False,
         static_groups=False,
     ):
-        return self.quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
+        self.qcfg.group_size = group_size
+        self.qcfg.damp_percent = percdamp
+        self.qcfg.damp_auto_increment = damp_auto_increment
+        self.qcfg.desc_act = actorder
+        self.qcfg.static_groups = static_groups
+        (Q, scale, zero, g_idx, duration, avg_loss, damp_percent) = self.quantize(blocksize=blocksize)
+        self.module.weight.data = Q
+        return scale, zero, g_idx, duration, avg_loss, damp_percent
 
     @torch.inference_mode()
     def quantize(
         self,
         blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
     ):
         start = time.time()
-        if self.device.type not in ["mps", "cpu"]:
-            self.layer.weight.data = self.layer.weight.data.cpu()
+
+        # process buffered inputs
+        for inp in self.fwd_inputs_buffered_data:
+            self.process_batch(inp)
+
+        # release buffer
+        del self.fwd_inputs_buffered_data
+
+        # if self.device.type not in ["mps", "cpu"]:
+        #     self.module.weight.data = self.module.weight.data.cpu()
 
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
-        if self.layer_copy is None:
-            W = self._clone_layer()
+        if self.module_copy is None:
+            W = self._clone_module()
         else:
-            W = self.layer_copy
-            self.layer_copy = None
+            W = self.module_copy
+            self.module_copy = None
 
-        if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
+        self.quantizer.find_params(W, weight=True)
 
         H = self.H
         del self.H
@@ -163,19 +194,19 @@ class GPTQ:
         zero = []
         now_idx = 1
 
-        if static_groups:
+        if self.qcfg.static_groups:
             import copy
 
             groups = []
-            for i in range(0, self.columns, group_size):
+            for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i : (i + group_size)], weight=True)
+                quantizer.find_params(W[:, i : (i + self.qcfg.group_size)], weight=True)
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
                 groups.append(quantizer)
 
-        if actorder:
+        if self.qcfg.desc_act:
             perm = torch.argsort(torch.diag(H), descending=True)
             W = W[:, perm]
             H = H[perm][:, perm]
@@ -184,9 +215,10 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        while 1 > percdamp > 0:
+        damp_percent = self.qcfg.damp_percent
+        while 1 > damp_percent > 0:
             try:
-                damp = percdamp * torch.mean(torch.diag(H))
+                damp = damp_percent * torch.mean(torch.diag(H))
                 diag = torch.arange(self.columns, device=self.device)
                 H[diag, diag] += damp
 
@@ -196,15 +228,15 @@ class GPTQ:
                 Hinv = H
                 break
             except torch._C._LinAlgError as e:
-                if damp_auto_increment != 0:
-                    logger.warning(f"Current damp={percdamp:.5f} is too low, increased by {damp_auto_increment:.5f}")
-                    percdamp += damp_auto_increment
+                if  self.qcfg.damp_auto_increment != 0:
+                    logger.warning(f"Quantization: Current `damp_percent = {damp_percent:.5f}` is too low, auto-incrementing by `{ self.qcfg.damp_auto_increment:.5f}`")
+                    damp_percent +=  self.qcfg.damp_auto_increment
                 else:
-                    logger.warning("Please increase damp or nsamples for calibration data to avoid the following quant error. ")
+                    logger.warning("Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
                     raise e
 
-        if not (0 < percdamp < 1):
-            raise ValueError(f"damp_percent must between 0 and 1. current is {percdamp}")
+        if not (0 < damp_percent < 1):
+            raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp_percent}")
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -220,21 +252,21 @@ class GPTQ:
                 w = W1[:, i]
                 d = Hinv1[i, i]
 
-                if group_size != -1:
-                    if not static_groups:
-                        if (i1 + i) % group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + group_size)], weight=True)
+                if self.qcfg.group_size != -1:
+                    if not self.qcfg.static_groups:
+                        if (i1 + i) % self.qcfg.group_size == 0:
+                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
 
-                        if ((i1 + i) // group_size) - now_idx == -1:
+                        if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                             scale.append(self.quantizer.scale)
                             zero.append(self.quantizer.zero)
                             now_idx += 1
                     else:
                         idx = i1 + i
-                        if actorder:
+                        if self.qcfg.desc_act:
                             idx = perm[idx]
 
-                        self.quantizer = groups[idx // group_size]
+                        self.quantizer = groups[idx // self.qcfg.group_size]
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
@@ -262,37 +294,38 @@ class GPTQ:
 
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
-            raise ValueError("Quantization failed due to NaN loss")
+            raise ValueError("Quantization: Failed due to `NaN` loss")
 
-        group_size = group_size if group_size != -1 else self.columns
+        group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
-        if static_groups and actorder:
+        if self.qcfg.static_groups and self.qcfg.desc_act:
             g_idx = [perm[i] // group_size for i in range(self.columns)]
         else:
             g_idx = [i // group_size for i in range(self.columns)]
 
         g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
 
-        if actorder:
+        if self.qcfg.desc_act:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        if isinstance(self.layer, transformers.Conv1D):
+        if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
-        ##
-        # if Q.shape != self.layer.weight.shape:
-        #     self.layer.weight.data = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+        # if Q.shape != self.module.weight.shape:
+        #     self.module.weight.data = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
         # else:
-        #     self.layer.weight.data = Q.type_as(self.layer.weight.data)
+        #     self.module.weight.data = Q.type_as(self.module.weight.data)
+        #
+        # # move back to self.dev
+        # self.module.weight.data = self.module.weight.data.to(device=self.device)
 
-        if Q.shape != self.layer.weight.shape:
-            Q = Q.reshape(self.layer.weight.shape).type_as(self.layer.weight.data)
+        if Q.shape != self.module.weight.shape:
+            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
         else:
-            Q = Q.type_as(self.layer.weight.data)
+            Q = Q.type_as(self.module.weight.data)
 
-        # move back to self.dev
-        # self.layer.weight.data = self.layer.weight.data.to(device=self.device)
+        Q = Q.to(device=self.device)
 
         # if os.environ.get("DEBUG"):
         #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
@@ -305,7 +338,8 @@ class GPTQ:
         zero = torch.cat(zero, dim=1)
 
         duration = time.time() - start
-        return scale, zero, g_idx, duration, avg_loss, percdamp, Q
+
+        return Q, scale, zero, g_idx, duration, avg_loss, damp_percent
 
     def free(self):
         # if os.environ.get("DEBUG"):
@@ -317,8 +351,8 @@ class GPTQ:
         if hasattr(self, "H"):
             del self.H
         del self.quantizer
-        del self.layer_copy
-        del self.layer
+        del self.module_copy
+        del self.module
 
         # torch_empty_cache(self.device)
 

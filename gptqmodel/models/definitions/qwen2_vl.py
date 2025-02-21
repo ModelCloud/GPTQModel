@@ -24,14 +24,15 @@ from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
-from ..base import BaseGPTQModel
 from .._const import CPU
+from ..base import BaseGPTQModel
 
 
 class Qwen2VLGPTQ(BaseGPTQModel):
     loader = AutoModelForVision2Seq
 
     base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
     layer_type = "Qwen2VLDecoderLayer"
@@ -43,6 +44,8 @@ class Qwen2VLGPTQ(BaseGPTQModel):
     ]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
+
+    require_load_processor = True
 
     quant_override_files = {
         "preprocessor_config.json": {
@@ -78,10 +81,10 @@ class Qwen2VLGPTQ(BaseGPTQModel):
     }
 
     def pre_quantize_generate_hook_start(self):
-        self.model.visual = move_to(self.model.visual, self.quantize_config.device)
+        self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.model.visual = move_to(self.model.visual, CPU)
+        self.model.visual = move_to(self.model.visual, device=CPU)
 
     @staticmethod
     def process_vision_info(
@@ -105,6 +108,7 @@ class Qwen2VLGPTQ(BaseGPTQModel):
     def prepare_dataset(
             self,
             calibration_dataset,
+            calibration_dataset_concat_size,
             batch_size: int = 1,
             tokenizer=None, ):
         import json

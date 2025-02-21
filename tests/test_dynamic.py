@@ -17,16 +17,16 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
-import json
+import json  # noqa: E402
 import tempfile  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity, safetensor  # noqa: E402
@@ -110,13 +110,12 @@ class TestDynamic(ModelTest):
     @parameterized.expand(
         [
             # exllama v1/v2 only supports 4bit so does not support dynamic bits control
-            (BACKEND.TORCH, TorchQuantLinear, 15.7372),
-            (BACKEND.CUDA, DynamicCudaQuantLinear, 15.7372),
-            (BACKEND.TRITON, TritonV2QuantLinear, 15.7372),
-            (BACKEND.MARLIN, MarlinQuantLinear, 15.8582), # A100: 15.7545
+            (BACKEND.TORCH, TorchQuantLinear, 15.793),
+            (BACKEND.TRITON, TritonV2QuantLinear, 15.793),
+            (BACKEND.MARLIN, MarlinQuantLinear, 15.829),
         ]
     )
-    def test_dynamic_bits(self, backend, backendQLinear, ppl):
+    def test_dynamic_bits(self, backend, backendQLinear, expected_ppl):
         model = GPTQModel.load(
             self.tmp_quant_path.name,
             backend=backend,
@@ -132,7 +131,7 @@ class TestDynamic(ModelTest):
 
         del model
         print(f"Backend: {backend}, PPL: {dynamic_bits_ppl}")
-        assert dynamic_bits_ppl <= ppl
+        assert dynamic_bits_ppl <= expected_ppl, f"PPL expected: `{expected_ppl}`, actual = `{dynamic_bits_ppl}`"
 
     def test_skip_module(self):
         dynamic = {

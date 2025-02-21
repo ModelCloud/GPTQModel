@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
@@ -83,7 +83,7 @@ def unpack_qzeros(qzeros, bits):
     return unpacked_zeros
 
 
-class BitBLASQuantLinear(BaseQuantLinear):
+class BitBLASQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [1, 2, 4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]
@@ -97,7 +97,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -140,7 +140,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            adpater=adapter,
+            adapter=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -291,7 +291,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales
         self.scales = scales.clone().half()
-        if linear.bias is not None:
+        if linear.bias:
             self.bias = linear.bias.clone().half()
 
         intweight = torch.round((W + scale_zeros[g_idx].T) / scales[g_idx].T).to(torch.int)

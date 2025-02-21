@@ -46,6 +46,7 @@ class TestLmHeadLoad(ModelTest):
 
 class TestLmHeadQuant(ModelTest):
     APPLY_CHAT_TEMPLATE = True
+    EXPECT_LM_HEAD_LOSS = 23.84
 
     sample_length = 1024
     samples = 128
@@ -68,32 +69,7 @@ class TestLmHeadQuant(ModelTest):
 
         model.quantize(self.calibration_dataset, batch_size=8)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            model.tokenizer.save_pretrained(tmp_dir)
-            model.save(tmp_dir)
-
-            del model.tokenizer
-            del model
-
-            model = GPTQModel.load(
-                tmp_dir,
-                device_map="auto",
-            )
-
-            task_results = self.lm_eval(model=model,
-                                        apply_chat_template=self.APPLY_CHAT_TEMPLATE,
-                                        trust_remote_code=self.TRUST_REMOTE_CODE,
-                                        delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
-            self.check_results(task_results)
-
-    def test_quant_lm_head_low_gpu(self):
-        self.NATIVE_ARC_CHALLENGE_ACC = 0.3199658703071672
-        self.NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3225255972696246
-        quant_config = QuantizeConfig(bits=4, group_size=32, lm_head=True, lm_head_low_gpu_mem_usage=True)
-
-        model = GPTQModel.load(self.model_id, quant_config)
-
-        model.quantize(self.calibration_dataset, batch_size=8)
+        self.check_lm_head_loss(model.quant_log)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.tokenizer.save_pretrained(tmp_dir)

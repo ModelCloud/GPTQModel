@@ -23,6 +23,15 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
+
+if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
+    try:
+        from modelscope import snapshot_download
+    except Exception:
+        raise ModuleNotFoundError("env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`.")
+else:
+    from huggingface_hub import snapshot_download
+
 from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
@@ -41,9 +50,8 @@ from ..utils.logger import setup_logger
 from ..utils.marlin import (_validate_marlin_compatibility,
                             _validate_marlin_device_support, prepare_model_for_marlin_load)
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init,
-                           load_checkpoint_in_model_then_tie_weights, make_quant, normalize_tokenizer,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
+                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
 logger = setup_logger()
@@ -103,14 +111,6 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
         # hf_transfer does not accept max_memory arg
         kwargs.pop('max_memory', None)
         return snapshot_download(pretrained_model_id_or_path, **kwargs)
-
-def get_tokenizer(model_id_or_path, config, trust_remote_code: bool = False):
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        return normalize_tokenizer(config, tokenizer)
-    except Exception as e:
-        logger.warning(f"Failed to auto-load tokenizer from pretrained_model_id_or_path: {e}. Please pass a tokenizer to `quantize()` or set model.tokenizer after `load()`.")
-        return None
 
 
 def ModelLoader(cls):
@@ -193,11 +193,11 @@ def ModelLoader(cls):
                     model.seqlen = model_config[key]
                     break
         else:
-            logger.warning("can't get model's sequence length from model config, will set to 4096.")
+            logger.warning("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
         model.eval()
 
-        tokenizer = get_tokenizer(pretrained_model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
@@ -296,6 +296,7 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
+        # inject adapter into qcfg
         if adapter is not None:
             qcfg.adapter = adapter
 
@@ -411,8 +412,17 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            if config.architectures:
+                model_class = getattr(transformers, config.architectures[0], None)
+                if model_class is not None and hasattr(model_class, "_supports_flash_attn_2"):
+                    supports_flash_attn = model_class._supports_flash_attn_2
+                else:
+                    supports_flash_attn = None
+            else:
+                supports_flash_attn = None
+
             args = {}
-            if device in [DEVICE.CUDA, DEVICE.ROCM]:
+            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if ATTN_IMPLEMENTATION in kwargs:
                     args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
                 if USE_FLASH_ATTENTION_2 in kwargs:
@@ -447,14 +457,14 @@ def ModelLoader(cls):
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
                         not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd modules only
+                    # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
             preload_qlinear_kernel = make_quant(
                 model,
-                names=modules,
+                quant_result=modules,
                 qcfg=qcfg,
                 backend=backend,
                 lm_head_name=cls.lm_head,
@@ -467,7 +477,6 @@ def ModelLoader(cls):
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if qcfg.format == FORMAT.GPTQ and backend not in [BACKEND.IPEX]:
-            print("sean1")
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
@@ -480,17 +489,17 @@ def ModelLoader(cls):
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
             if not qcfg.sym and not qcfg.is_quantized_by_v2():
                 raise ValueError(
-                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
+                    f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
             t = time.time()
-            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 cfg=qcfg,
                 qlinear_kernel=preload_qlinear_kernel,
             )
-            logger.info(f"Conversion complete: {time.time() - t}s")
+            logger.info(f"Format: Conversion complete: {time.time() - t}s")
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
@@ -499,11 +508,11 @@ def ModelLoader(cls):
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
-                    "The loading of sharded checkpoints with Marlin is currently not supported."
+                    "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
+                    f'Kernel: Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
                 )
 
             # Validate the model can run in Marlin.
@@ -588,7 +597,7 @@ def ModelLoader(cls):
 
         model.eval()
 
-        tokenizer = get_tokenizer(model_id_or_path, config=config, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if backend == BACKEND.MLX:
             import tempfile
@@ -604,7 +613,7 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict())
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
 
                 save_weights(temp_dir, mlx_weights, donate_weights=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")

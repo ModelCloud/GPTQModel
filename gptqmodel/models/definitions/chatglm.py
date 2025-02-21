@@ -13,6 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import List
+
+import torch
 
 from ..base import BaseGPTQModel
 
@@ -22,6 +25,7 @@ class ChatGLM(BaseGPTQModel):
     require_monkeypatch = True
 
     base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
+    pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
 
     layers_node = "transformer.encoder.layers"
     layer_type = "GLMBlock"
@@ -31,6 +35,13 @@ class ChatGLM(BaseGPTQModel):
         ["mlp.dense_h_to_4h"],
         ["mlp.dense_4h_to_h"],
     ]
+
+    def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
+        if not self.config.post_layer_norm:
+            return inputs
+
+        return super().lm_head_pre_quantize_generate_hook(inputs)
+
 
     # fix: chatglm-3 and glm-4 have broken transformer (latest) compat due to missing/wrong type-hints
     def monkey_patch(self):

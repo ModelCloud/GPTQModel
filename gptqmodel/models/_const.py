@@ -157,7 +157,7 @@ SUPPORTED_MODELS = [
     "cohere",
     "cohere2",
     "minicpm",
-    "minicpm3"
+    "minicpm3",
     "qwen2_moe",
     "qwen2_vl",
     "dbrx_converted",
@@ -177,3 +177,5 @@ SUPPORTED_MODELS = [
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
 
 EXPERT_INDEX_PLACEHOLDER = "{expert_index}"
+
+CALIBRATION_DATASET_CONCAT_CHAR = " "

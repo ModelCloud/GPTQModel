@@ -74,4 +74,3 @@ class TestsQ4CUDA(ModelTest):
         self.assertInference(model=model_q,tokenizer=self.tokenizer)
         # This one does not.
         self.assertInference(model=model_q.model,tokenizer=self.tokenizer)
-

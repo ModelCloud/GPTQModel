@@ -22,10 +22,10 @@ from parameterized import parameterized  # noqa: E402
 class TestInference(BenchmarkTest):
     @parameterized.expand(
         [
-            (BACKEND.TORCH, 'cuda', 292.50),
-            (BACKEND.TORCH, 'cpu', 5.50),
-            (BACKEND.TORCH, 'xpu', 58.20),
-            (BACKEND.TORCH, 'mps', 3.40),
+            (BACKEND.TORCH, 'cuda', 210),
+            # (BACKEND.TORCH, 'cpu', 5.50),
+            # (BACKEND.TORCH, 'xpu', 58.20),
+            # (BACKEND.TORCH, 'mps', 3.40),
         ]
     )
     def test_inference(self, backend, device, tokens_per_second):

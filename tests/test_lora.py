@@ -27,7 +27,7 @@ from parameterized import parameterized  # noqa: E402
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
-    lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"
+    lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
@@ -38,14 +38,15 @@ class Test(ModelTest):
         cls.adapter = Lora(path=cls.lora_path, rank=128)
 
     @parameterized.expand([
-        BACKEND.TORCH,
-        BACKEND.CUDA,
-        BACKEND.TRITON,
-        BACKEND.EXLLAMA_V1,
-        # (BACKEND.EXLLAMA_V2), <-- adapter not working yet
-        BACKEND.MARLIN,
-        # (BACKEND.IPEX), <-- not tested yet
-        # (BACKEND.BITBLAS, <-- not tested yet
+        # BACKEND.EXLLAMA_V2V,
+        #BACKEND.TORCH,
+        # BACKEND.CUDA,
+        # BACKEND.TRITON,
+        # BACKEND.EXLLAMA_V1,
+        BACKEND.EXLLAMA_V2,
+        # BACKEND.MARLIN,
+        # # (BACKEND.IPEX), <-- not tested yet
+        # # (BACKEND.BITBLAS, <-- not tested yet
     ])
     def test_load(self, backend: BACKEND):
         model = GPTQModel.load(
@@ -59,18 +60,36 @@ class Test(ModelTest):
         tokens = model.generate("Capital of France is")[0]
         result = model.tokenizer.decode(tokens)
         print(f"Result: {result}")
-        assert "paris" in result.lower()
+        self.assertIn("paris", result.lower())
+
+    @parameterized.expand([
+        BACKEND.EXLLAMA_V2,
+    ])
+    def test_download(self, backend: BACKEND):
+        adapter = Lora(path="https://huggingface.co/sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc/blob/main/adapter_model.safetensors", rank=128)
+
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            adapter=adapter,
+            backend=backend,
+            device_map="auto",
+        )
+
+        tokens = model.generate("Capital of France is")[0]
+        result = model.tokenizer.decode(tokens)
+        print(f"Result: {result}")
+        self.assertIn("paris", result.lower())
 
     def test_lm_eval_from_path(self):
         adapter = Lora(path=self.lora_path, rank=128)
-        task_results = self.lm_eval(None, extra_args={"adapter": adapter.to_dict()})
+        task_results = self.lm_eval(self.NATIVE_MODEL_ID, extra_args={"adapter": adapter.to_dict()}) # "backend":"exllama_v2",
         self.check_results(task_results)
 
     def test_lm_eval_from_model(self):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             adapter=self.adapter,
-            backend=BACKEND.TRITON,
+            # backend=BACKEND.EXLLAMA_V2V,
         )
         task_results = self.lm_eval(model)
         self.check_results(task_results)

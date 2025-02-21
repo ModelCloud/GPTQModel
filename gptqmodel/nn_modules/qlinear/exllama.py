@@ -16,14 +16,12 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllama
 
-import math
 from logging import getLogger
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -56,21 +54,21 @@ def ext_q4_matmul(x, q4, q4_width):
     return output.view(outshape)
 
 
-class ExllamaQuantLinear(PackableQuantLinear):
+class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
@@ -96,15 +94,15 @@ class ExllamaQuantLinear(PackableQuantLinear):
             )
 
         # backup original values
-        self.original_out_features = out_features
-        self.original_in_features = in_features
-
-        # auto pad
-        group_size = group_size if group_size != -1 else in_features
-        out_features = out_features + (-out_features % 32)
-        in_features = in_features + (-in_features % group_size)
-        self.in_features_padding_size = in_features - self.original_in_features
-        self.in_features_padding_shape = (0, self.in_features_padding_size)
+        # self.original_out_features = out_features
+        # self.original_in_features = in_features
+        #
+        # # auto pad
+        # group_size = group_size if group_size != -1 else in_features
+        # out_features = out_features + (-out_features % 32)
+        # in_features = in_features + (-in_features % group_size)
+        # self.in_features_padding_size = in_features - self.original_in_features
+        # self.in_features_padding_shape = (0, self.in_features_padding_size)
 
         super().__init__(
             bits=bits,
@@ -116,8 +114,8 @@ class ExllamaQuantLinear(PackableQuantLinear):
             pack_dtype=pack_dtype,
             adapter=adapter,
             register_buffers=True,
-            register_buffers_in_features=self.original_in_features,
-            register_buffers_out_feature=self.original_out_features,
+            register_buffers_in_features=in_features,
+            register_buffers_out_feature=out_features,
             **kwargs)
 
     @classmethod
@@ -128,16 +126,16 @@ class ExllamaQuantLinear(PackableQuantLinear):
 
     def post_init(self):
         # resize due to padding after model weights have been loaded
-        if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
-            self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
-            self.qzeros.resize_(
-                math.ceil(self.in_features / self.group_size),
-                self.out_features // self.pack_dtype_bits * self.bits
-            )
-            self.scales.resize_((math.ceil(self.in_features / self.group_size), self.out_features), )
-            self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
-            if self.bias is not None:
-                self.bias.resize_(self.out_features)
+        # if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
+        #     self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
+        #     self.qzeros.resize_(
+        #         math.ceil(self.in_features / self.group_size),
+        #         self.out_features // self.pack_dtype_bits * self.bits
+        #     )
+        #     self.scales.resize_((math.ceil(self.in_features / self.group_size), self.out_features), )
+        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
+        #     if self.bias is not None:
+        #         self.bias.resize_(self.out_features)
 
 
         self.width = self.qweight.shape[1]
@@ -165,15 +163,15 @@ class ExllamaQuantLinear(PackableQuantLinear):
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
-        if x.size(-1) != self.in_features:
-            x = F.pad(x, self.in_features_padding_shape)
+        # if x.size(-1) != self.in_features:
+        #     x = F.pad(x, self.in_features_padding_shape)
 
         out = ext_q4_matmul(x, self.q4, self.width)
 
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
-
         if self.bias is not None:
             out.add_(self.bias)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         return out.to(x_dtype)

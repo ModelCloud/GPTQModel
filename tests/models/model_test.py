@@ -17,6 +17,7 @@
 # -- do not touch
 import os
 import sys
+from typing import Dict, List
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -37,7 +38,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
-from gptqmodel.utils.eval import lm_eval  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
@@ -48,7 +49,7 @@ RAND_SEED = 898
 
 
 class ModelTest(unittest.TestCase):
-    TASK_NAME = "arc_challenge"
+    TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
     # sub test can modify
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
@@ -57,9 +58,11 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
     BATCH_SIZE = "auto"
     LOAD_BACKEND = BACKEND.AUTO
+    QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
+    DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
 
     KERNEL_QUANT = {}  # kernel sets
@@ -75,9 +78,14 @@ class ModelTest(unittest.TestCase):
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
     INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
-    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country", "the city"]
+    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
     GENERATE_EVAL_SIZE_MIN = 20
     GENERATE_EVAL_SIZE_MAX = 50
+
+    LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
+    EXPECT_LM_HEAD_LOSS = None
+
+    QUANTIZE_CONFIG_BITS = 4
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -91,7 +99,7 @@ class ModelTest(unittest.TestCase):
             if k.lower() in generated:
                 self.assertTrue(True)
                 return
-        self.assertTrue(False, f"none of keywords were found in generated: {generated}")
+        self.assertTrue(False, f"none of keywords were found in generated: `{generated}`")
 
     # note that sampling is disabled for help with deterministic generation for ci tests
     def generate(self, model, tokenizer, prompt=None):
@@ -123,7 +131,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer, rows: int = 128):
+    def load_dataset(self, tokenizer, rows: int = DATASET_SIZE):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
@@ -144,7 +152,7 @@ class ModelTest(unittest.TestCase):
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = 4, **kwargs):
         quantize_config = QuantizeConfig(
-            bits=4,
+            bits=self.QUANTIZE_CONFIG_BITS,
             group_size=128,
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
@@ -185,7 +193,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, batch_size=batch_size)
+            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
@@ -241,39 +249,33 @@ class ModelTest(unittest.TestCase):
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                model_args = {
-                    "pretrained": self.NATIVE_MODEL_ID,
-                    "gptqmodel": True
-                }
-
                 if self.USE_VLLM:
-                    model_args.update({
+                    model_args = {
+                        "pretrained": model.model_local_path,
                         "dtype": "auto",
                         "gpu_memory_utilization": 0.8,
                         "tensor_parallel_size": 1,
                         "trust_remote_code": trust_remote_code,
                         "max_model_len": self.MODEL_MAX_LEN
-                    })
-
+                    }
+                else:
+                    model_args = {}
                 if extra_args:
                     model_args.update(extra_args)
-
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
-                results = lm_eval(
-                    model,
-                    model_name="vllm" if self.USE_VLLM else "hf",
+                results = GPTQModel.eval(
+                    model_or_id_or_path=model,
+                    llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                     model_args=model_args,
                     output_path=tmp_dir,
-                    tasks=self.TASK_NAME,
+                    framework=EVAL.LM_EVAL,
+                    tasks=[self.TASK_NAME],
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.BATCH_SIZE,
                     gen_kwargs="temperature=0.0,top_k=50",
                     random_seed=RAND_SEED,
-                    numpy_random_seed=RAND_SEED,
-                    torch_random_seed=RAND_SEED,
-                    fewshot_random_seed=RAND_SEED,
                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                 )
 
@@ -283,7 +285,7 @@ class ModelTest(unittest.TestCase):
                     print(make_table(results, "groups"))
                 print('--------Eval Result End---------')
                 task_results = {
-                    metric: value for metric, value in results['results'].get(self.TASK_NAME, {}).items()
+                    metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
                     if metric != 'alias' and 'stderr' not in metric
                 }
                 print(task_results)
@@ -346,6 +348,19 @@ class ModelTest(unittest.TestCase):
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+    def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
+        final_log = quant_log[-1]
+        if final_log["module"] == "lm_head":
+            loss_value = float(final_log["loss"])
+            diff_pct = (loss_value / self.EXPECT_LM_HEAD_LOSS) * 100
+            print(f"lm_head loss: {loss_value} diff {diff_pct:.2f}%")
+            negative_pct = 100 * (1 - self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+            positive_pct = 100 * (1 + self.LM_HEAD_LOSS_MAX_DELTA_PERCENT)
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct,
+                            f"lm_head loss: {loss_value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+        else:
+            raise ValueError("No quantization for lm_head module")
 
     def clear_directory(self, directory_path):
         for item in os.listdir(directory_path):

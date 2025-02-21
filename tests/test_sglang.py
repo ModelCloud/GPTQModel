@@ -20,10 +20,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import importlib.util  # noqa: E402
-import subprocess  # noqa: E402
-import sys  # noqa: E402
 
-import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
@@ -33,10 +30,8 @@ class TestLoadSglang(ModelTest):
     @classmethod
     def setUpClass(self):
         # sglang set disable_flashinfer=True still import flashinfer
-        if importlib.util.find_spec("flashinfer") is None:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "flashinfer", "-i", f"https://flashinfer.ai/whl/cu{torch.version.cuda.replace('.', '')}/torch{'.'.join(torch.__version__.split('.')[:2])}"])
-        if importlib.util.find_spec("sglang") is None:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "sglang[srt]>=0.3.2"])
+        if importlib.util.find_spec("flashinfer") is None or importlib.util.find_spec("sglang") is None:
+            raise RuntimeError("flashinfer and sglang are required by this test. you can install them by `pip install gptqmodel['sglang']`")
 
         self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 

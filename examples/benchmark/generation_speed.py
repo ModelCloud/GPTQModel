@@ -195,8 +195,8 @@ def load_model_tokenizer(
 def benchmark_generation_speed(model, tokenizer, examples, generation_config):
     generation_time_list = []
     num_generated_tokens_list = []
-    progress_bar = ProgressBar(examples)
-    for example in progress_bar:
+    pb = ProgressBar(examples)
+    for example in pb:
         input_ids = example["input_ids"].to(model.device)
 
         start = time.time()
@@ -217,7 +217,7 @@ def benchmark_generation_speed(model, tokenizer, examples, generation_config):
             )
         num_generated_tokens_list.append(num_generated_tokens)
 
-        progress_bar.set_postfix(
+        pb.set_postfix(
             num_tokens=num_generated_tokens_list[-1],
             time=generation_time_list[-1],
             speed=f"{num_generated_tokens_list[-1] / generation_time_list[-1]:.3f} tokens/s",

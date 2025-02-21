@@ -22,7 +22,7 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
-from gptqmodel.adapter.adapter import Adapter
+from gptqmodel.adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 
 from ...models._const import DEVICE, PLATFORM
 
@@ -39,7 +39,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
 
     SUPPORTS_PACK_DTYPES: List[t.dtype] = None
-    SUPORTS_ADAPTERS: List[Adapter] = None
+    SUPPORTS_ADAPTERS: List[Adapter] = None
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
@@ -73,6 +73,8 @@ class BaseQuantLinear(nn.Module):
         # we need to clone the adapter since passed in adapter may be shared
         # adapter tensors are lodaed inside adapter so they must be unique per module
         self.adapter =  copy.deepcopy(adapter)
+
+        self.optimized = False
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
@@ -137,36 +139,44 @@ class BaseQuantLinear(nn.Module):
 
         # load adapter if any
         if adapter is not None:
-            # self.register_buffer(
-            #     "lora_A",
-            #     t.zeros((in_features, 128), dtype=t.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-            # )
-            #
-            # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
-            # self.register_buffer(
-            #     "lora_B",
-            #     t.zeros((128, out_features), dtype=t.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
-            # )
+            if adapter.path in LORA_MERGED_WEIGHT_PATHS:
+                print(f"Adapter (merged weights) lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
 
-            print(f"Adapter lazy init: {self.adapter.name}: {self.adapter}, module: {self.name}")
+                # pre allocate buffers so accelerate can auto-bind merged weights in same tensor file as model
+                self.register_buffer(
+                    "lora_A",
+                    t.zeros((in_features, adapter.rank), dtype=t.float16),
+                )
+
+                self.register_buffer(
+                    "lora_B",
+                    t.zeros((adapter.rank, out_features), dtype=t.float16),
+                )
+            else:
+                pass
+                # print(f"Adapter lazy init: {self.adapter.name()}: {self.adapter}, module: {self.name}")
 
             # TDOO: allow merged lora weights exist in gptq model safetensor file for direct loading
             # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
             # self.register_buffer(
             #     "lora_A",
-            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            #     torch.zeros((in_features, 128), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
             #
             # # EoRA need to preallocate buffers for Lora_A and B weights so HF can load
             # self.register_buffer(
             #     "lora_B",
-            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora math
+            #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
-    # all kernels should override this method
+    # override me, to perform post-weight load to device init
     def post_init(self):
         if self.adapter is not None:
-            self.adapter.post_init(weight_key=self.name, device=self.qweight.device)
+            self.adapter.post_init(
+                weight_key=self.name,
+                device=self.qweight.device,
+                lora_A=getattr(self, "lora_A", None),
+                lora_B=getattr(self, "lora_B", None))
 
     @classmethod
     # custom quant linear class can override this and add custom checks
@@ -230,7 +240,7 @@ class BaseQuantLinear(nn.Module):
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
-        if adapter is not None and adapter.__class__ not in cls.SUPORTS_ADAPTERS:
+        if adapter is not None and adapter.__class__ not in cls.SUPPORTS_ADAPTERS:
             err = f"{cls} does not support adapter: {adapter}"
             return False, NotImplementedError(err)
 
@@ -256,7 +266,8 @@ class BaseQuantLinear(nn.Module):
         if bits not in cls.SUPPORTS_BITS:
             err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
             return False, NotImplementedError(err)
-        if group_size not in cls.SUPPORTS_GROUP_SIZE:
+        # valid group size is set of cls.SUPPORTS_GROUP_SIZE + in_features; group_size = -1 is alias for group_size == in_features
+        if group_size not in cls.SUPPORTS_GROUP_SIZE and group_size != in_features:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
         if sym not in cls.SUPPORTS_SYM:
@@ -326,54 +337,134 @@ class BaseQuantLinear(nn.Module):
         if device not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
+    # use optimize so we don't override native module.compile()
+    # override me, to perform any torch.compile logic on the kernel pre forward
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        self.optimized = True
+        pass
 
 class PackableQuantLinear(BaseQuantLinear):
-    def pack(self, linear, scales, zeros, g_idx=None):
+    def post_init(self, **kwargs):
+        super().post_init(**kwargs)
+
+        if self.bits in [2, 4, 8]:
+            wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
+                device=self.g_idx.device)
+        elif self.bits == 3:
+            wf = t.tensor(
+                [
+                    [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
+                    [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
+                    [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
+                ],
+                dtype=t.int32,
+            ).reshape(1, 3, 12).to(device=self.g_idx.device)
+
+        # self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device))
+        # self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device))
+        #
+        self.wf_unsqueeze_zero = wf.unsqueeze(0).to(device=self.g_idx.device)
+        self.wf_unsqueeze_neg_one = wf.unsqueeze(-1).to(device=self.g_idx.device)
+
+    def dequantize_weight(self, num_itr: int = 1):
+        if self.bits in [2, 4, 8]:
+            zeros = t.bitwise_right_shift(
+                t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+                self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
+            ).to(self.dequant_dtype)
+            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+
+            weight = t.bitwise_and(
+                t.bitwise_right_shift(
+                    t.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
+                    self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
+                ).to(self.dequant_dtype),
+                self.maxq
+            )
+        elif self.bits == 3:
+            zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
+                -1, -1, -1, 12
+            )
+            zeros = zeros >> self.wf_unsqueeze_zero  # self.wf.unsqueeze(0)
+            zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
+            zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
+            zeros = zeros & 0x7
+            zeros = t.cat(
+                [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
+                dim=2,
+            ).reshape(self.scales.shape)
+
+            weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
+                -1, -1, 12, -1
+            )
+            weight = (weight >> self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
+            weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
+            weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
+            weight = weight & 0x7
+            weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+
+        if num_itr == 1:
+            weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
+        else:
+            num_dim = self.g_idx.shape[0] // num_itr
+            weights = []
+            for i in range(num_itr):
+                scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
+                weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
+                zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
+                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim].long()
+                weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
+            weights = t.cat(weights, dim=1)
+
+        return weights
+
+    def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.t()
+            W = W.T
 
         self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
 
-        scales = scales.t().contiguous()
-        zeros = zeros.t().contiguous()
+        scales = scales.T.contiguous()
+        zeros = zeros.T.contiguous()
         scale_zeros = zeros * scales
         self.scales = scales.clone().to(dtype=t.float16)
         if linear.bias is not None:
             self.bias = linear.bias.clone().to(dtype=t.float16)
 
-        intweight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(self.pack_np_math_dtype)
+        int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
+        int_weight = int_weight.T.contiguous()
+        int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
-        qweight = np.zeros((intweight.shape[0] // self.pack_dtype_bits * self.bits, intweight.shape[1]),
+        qweight = np.zeros((int_weight.shape[0] // self.pack_dtype_bits * self.bits, int_weight.shape[1]),
                            dtype=self.pack_np_math_dtype)
         if self.bits in [2, 4, 8]:
             for row in range(qweight.shape[0]):
                 for j in range(self.pack_factor):
-                    qweight[row] |= intweight[row * self.pack_factor + j] << (self.bits * j)
+                    qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
         elif self.bits == 3:
             i = 0
             row = 0
             while row < qweight.shape[0]:
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i))
+                    qweight[row] |= int_weight[j] << (3 * (j - i))
                 i += 10
-                qweight[row] |= intweight[i] << 30
+                qweight[row] |= int_weight[i] << 30
                 row += 1
-                qweight[row] |= (intweight[i] >> 2) & 1
+                qweight[row] |= (int_weight[i] >> 2) & 1
                 i += 1
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 1)
+                    qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
                 i += 10
-                qweight[row] |= intweight[i] << 31
+                qweight[row] |= int_weight[i] << 31
                 row += 1
-                qweight[row] |= (intweight[i] >> 1) & 0x3
+                qweight[row] |= (int_weight[i] >> 1) & 0x3
                 i += 1
                 for j in range(i, i + 10):
-                    qweight[row] |= intweight[j] << (3 * (j - i) + 2)
+                    qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
                 i += 10
                 row += 1
 
@@ -388,23 +479,36 @@ class PackableQuantLinear(BaseQuantLinear):
         elif self.bits == 3:
             i = 0
             col = 0
-            for j in range(i, i + 10):
-                qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
-            i += 10
-            qzeros[:, col] |= zeros[:, i] << 30
-            col += 1
-            qzeros[:, col] |= (zeros[:, i] >> 2) & 1
-            i += 1
-            for j in range(i, i + 10):
-                qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
-            i += 10
-            qzeros[:, col] |= zeros[:, i] << 31
-            col += 1
-            qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
-            i += 1
-            for j in range(i, i + 10):
-                qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
-            i += 10
-            col += 1
+            while col < qzeros.shape[1]:
+                for j in range(i, i + 10):
+                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
+                i += 10
+                qzeros[:, col] |= zeros[:, i] << 30
+                col += 1
+                qzeros[:, col] |= (zeros[:, i] >> 2) & 1
+                i += 1
+                for j in range(i, i + 10):
+                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
+                i += 10
+                qzeros[:, col] |= zeros[:, i] << 31
+                col += 1
+                qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
+                i += 1
+                for j in range(i, i + 10):
+                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
+                i += 10
+                col += 1
 
         self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+
+        # assert
+        # assert isinstance(self, TorchQuantLinear), f"type: {self.__class_}"
+        # wq = linear.weight.data
+        # wq_dequantized = self.dequantize_weight().T
+        # print(f"------ WQ -----")
+        # print(wq)
+        # print(f"------ WQ Dequantized -----")
+        # print(wq_dequantized)
+        # assert t.equal(wq, wq_dequantized)
+
+        # print("self qw", self.qweight, self.scales, self.qzeros)

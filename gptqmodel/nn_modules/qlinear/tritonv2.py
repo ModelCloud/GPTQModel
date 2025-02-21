@@ -14,11 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from gptqmodel.adapter.adapter import Adapter, Lora
 from packaging import version
 
@@ -61,7 +59,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
-    SUPORTS_ADAPTERS = [Lora]
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
 
@@ -101,10 +99,10 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             register_buffers=True,
             **kwargs)
 
-        if self.group_size != self.in_features:
-            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
-        else:
-            self.padded_infeatures = self.in_features
+        # if self.group_size != self.in_features:
+        #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
+        # else:
+        #     self.padded_infeatures = self.in_features
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -119,21 +117,21 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         return cls._validate(**args)
 
     def post_init(self):
-        if self.padded_infeatures != self.in_features:
-            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.out_features)
-            self.qzeros.resize_(
-                math.ceil(self.padded_infeatures / self.group_size),
-                self.out_features // self.pack_factor
-            )
-            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
-            self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
-                                      device=self.g_idx.device)
+        # if self.padded_infeatures != self.in_features:
+        #     self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.out_features)
+        #     self.qzeros.resize_(
+        #         math.ceil(self.padded_infeatures / self.group_size),
+        #         self.out_features // self.pack_factor
+        #     )
+        #     self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
+        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
+        #                               device=self.g_idx.device)
         super().post_init()
 
     def forward(self, x):
         # if in_features is padded, we need to pad the input as well
-        if x.size(-1) != self.padded_infeatures:
-            x = F.pad(x, (0, self.padded_infeatures - self.in_features))
+        # if x.size(-1) != self.padded_infeatures:
+        #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
 
         out_shape = x.shape[:-1] + (self.out_features,)
 
@@ -148,11 +146,12 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.maxq,
         ).reshape(out_shape)
 
+        if self.bias is not None:
+            out.add_(self.bias)
+
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
-        if self.bias is not None:
-            out.add_(self.bias)
         return out.to(dtype=x.dtype)
 
 
