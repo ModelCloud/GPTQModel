@@ -31,6 +31,7 @@ def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict
     adds = torch.matmul(inp.transpose(1, 2), inp)
     adds_sum = torch.sum(adds, dim=0)
 
+    ## Adding tmp to denominator is only for mathmatical stability
     eigen_scaling_diag_matrix[name] *= sample_size / (sample_size + tmp)
     eigen_scaling_diag_matrix[name] += adds_sum / sample_size
 
@@ -50,6 +51,7 @@ def eora_compute_lora(
 
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
     if (L < 0).any():
+        ## When expanding the calibration data size for EoRA, I suggest maintaining the balance by allocating 50% to general input (C4) and the remaining 50% to downstream task data.
         logger.warn(f"Found negative eigenvalues in `{module.name}`. Please increase your calibration data set for EoRA.")
         minimum = torch.min(L[L > 0])
         L[L < 0] = minimum
