@@ -204,7 +204,7 @@ class TestPerplexity(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmp_dir,
-                backend=BACKEND.EORA_TORCH,
+                backend=BACKEND.TORCH,
                 device_map="auto",
             )
 
