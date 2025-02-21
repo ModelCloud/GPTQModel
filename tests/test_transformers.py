@@ -15,6 +15,7 @@
 # limitations under the License.
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
@@ -22,6 +23,7 @@ import unittest  # noqa: E402
 import transformers  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache # noqa: E402
 
 
 class TestTransformersIntegration(unittest.TestCase):
@@ -40,6 +42,9 @@ class TestTransformersIntegration(unittest.TestCase):
 
         self.assertInference(model=model, tokenizer=tokenizer)
 
+        del model
+        torch_empty_cache()
+
     def _test_load_quantized_model_gptq_v2(self, device_map):
         model_id_or_path = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
         model = AutoModelForCausalLM.from_pretrained(model_id_or_path, device_map=device_map)
@@ -47,6 +52,9 @@ class TestTransformersIntegration(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path)
 
         self.assertInference(model=model, tokenizer=tokenizer)
+
+        del model
+        torch_empty_cache()
 
     def _test_quantize(self, device_map):
         model_id = "/monster/data/model/opt-125m"
@@ -65,6 +73,9 @@ class TestTransformersIntegration(unittest.TestCase):
             generate_str = tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
 
             self.assertIn("is a good", generate_str.lower())
+
+            del model
+            torch_empty_cache()
 
     def test_load_quantized_model_gptq_v1_ipex(self):
         self._test_load_quantized_model_gptq_v1(device_map="cpu")
