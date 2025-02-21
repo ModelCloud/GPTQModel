@@ -45,8 +45,10 @@ from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import dynamic_get
 from .backend import BACKEND
@@ -358,8 +360,8 @@ def convert_gptq_v1_to_v2_format(
     cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
-    # skip v1 to v2 conversion for ipex
-    if qlinear_kernel == IPEXQuantLinear:
+    # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
