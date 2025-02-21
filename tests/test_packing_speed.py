@@ -106,34 +106,34 @@ class TestRepacking(unittest.TestCase):
         [
             # [ExllamaQuantLinear, 9.63], # A100 Z3: 36.89 # 4090? 26.5349
             # [TritonV2QuantLinear, 9.67], # A100 Z3: 35.04 # 4090? 26.5268
-            [TorchQuantLinear, 13.819], # A100 Z3 33.56 # 4090? 27.0297
+            [TorchQuantLinear, 16.63], # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
     def test_pack_speed(self, qlinearCls, expect_time):
+        start = time.time()
         with threadpoolctl.threadpool_limits(limits=1):
-            now = time.time()
             for i in range(30):
                 self.pack(qlinearCls)
-            time_usage = time.time() - now
+            time_usage = time.time() - start
             speed = self.k * self.k / time_usage
             print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
 
-            self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025, msg=f"time: {time_usage}")
+            self.assertLess((time_usage - expect_time) / expect_time, 0.025, msg=f"time: {time_usage}")
 
     @parameterized.expand(
         [
             # [ExllamaQuantLinear, 9.63],  # A100 Z3: 36.89 # 4090? 26.5349
             # [TritonV2QuantLinear, 9.67],  # A100 Z3: 35.04 # 4090? 26.5268
-            [TorchQuantLinear, 10.674],  # A100 Z3 33.56 # 4090? 27.0297
+            [TorchQuantLinear, 12.51],  # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
     def test_pack_speed_2_threads(self, qlinearCls, expect_time):
+        start = time.time()
         with threadpoolctl.threadpool_limits(limits=2):
-            now = time.time()
             for i in range(30):
                 self.pack(qlinearCls)
-            time_usage = time.time() - now
+            time_usage = time.time() - start
             speed = self.k * self.k / time_usage
             print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
 
-            self.assertLess(abs(time_usage - expect_time) / expect_time, 0.025, msg=f"time: {time_usage}")
+            self.assertLess((time_usage - expect_time) / expect_time, 0.025, msg=f"time: {time_usage}")

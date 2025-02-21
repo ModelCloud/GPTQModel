@@ -19,8 +19,6 @@ import os
 import sys
 from typing import Dict, List
 
-from gptqmodel.utils.eval import EVAL
-
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -40,6 +38,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
@@ -63,6 +62,7 @@ class ModelTest(unittest.TestCase):
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
+    DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
 
     KERNEL_QUANT = {}  # kernel sets
@@ -131,7 +131,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer, rows: int = 128):
+    def load_dataset(self, tokenizer, rows: int = DATASET_SIZE):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
 
         datas = []
@@ -246,7 +246,7 @@ class ModelTest(unittest.TestCase):
 
         return model, tokenizer
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False):
+    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 if self.USE_VLLM:
@@ -260,11 +260,13 @@ class ModelTest(unittest.TestCase):
                     }
                 else:
                     model_args = {}
+                if extra_args:
+                    model_args.update(extra_args)
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
                 results = GPTQModel.eval(
                     model_or_id_or_path=model,
-                    backend="vllm" if self.USE_VLLM else "gptqmodel",
+                    llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                     model_args=model_args,
                     output_path=tmp_dir,
                     framework=EVAL.LM_EVAL,

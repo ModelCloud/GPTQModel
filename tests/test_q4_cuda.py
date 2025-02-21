@@ -16,16 +16,13 @@
 
 # -- do not touch
 import os
-import tempfile
-
-from gptqmodel.utils import Perplexity
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 
 import torch  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402

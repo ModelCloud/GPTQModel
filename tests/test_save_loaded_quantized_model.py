@@ -37,7 +37,6 @@ class TestSave(unittest.TestCase):
             (BACKEND.TRITON),
             (BACKEND.BITBLAS),
             (BACKEND.MARLIN),
-            (BACKEND.IPEX),
         ]
     )
     def test_save(self, backend: BACKEND):

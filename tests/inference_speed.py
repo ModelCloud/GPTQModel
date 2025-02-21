@@ -17,6 +17,8 @@
 import os
 import time
 
+from gptqmodel.utils.torch import torch_empty_cache
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
@@ -47,14 +49,14 @@ class InferenceSpeed(unittest.TestCase):
     MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.25
 
-    def inference(self, model_path, backend, tokens_per_second, assert_result=True, compile=False, warmup_runs=0):
+    def inference(self, model_path, backend, tokens_per_second, assert_result=True, optimize=False, fullgraph=False, warmup_runs=0):
         model = GPTQModel.from_quantized(
             model_path,
             backend=backend,
         )
 
-        if compile:
-            model.compile()
+        if optimize:
+            model.optimize(fullgraph=fullgraph)
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -68,7 +70,7 @@ class InferenceSpeed(unittest.TestCase):
         if warmup_runs > 0:
             pb = ProgressBar(range(warmup_runs))
             for i in pb:
-                pb.set_description(f"warmup run index {i} of {self.NUM_RUNS - 1}")
+                pb.info(f"warmup run index {i} of {self.NUM_RUNS - 1}")
                 start_time = time.time()
                 result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
@@ -87,7 +89,7 @@ class InferenceSpeed(unittest.TestCase):
 
             print(f"\n**************** {backend} Warm-up Result Info****************")
             print(f"Times: {times}")
-            print(f"New Tokens: {tokens}")
+            print(f"New Tokens (Size Per Batch Request): {tokens}")
             print(f"Sum Times: {sum_time}")
             print(f"Sum New Tokens: {sum_tokens}")
             print(f"New Token Per Second: {avg_tokens_per_second} token/s")
@@ -95,7 +97,7 @@ class InferenceSpeed(unittest.TestCase):
 
         pb = ProgressBar(range(self.NUM_RUNS))
         for i in pb:
-            pb.set_description(f"run index {i} of {self.NUM_RUNS - 1}")
+            pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
             start_time = time.time()
             result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
             end_time = time.time()
@@ -129,3 +131,6 @@ class InferenceSpeed(unittest.TestCase):
 
         self.assertTrue(negative_pct <= diff_pct <= positive_pct,
                         f"Tokens Per Second: {avg_tokens_per_second} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+        del model
+        torch_empty_cache()

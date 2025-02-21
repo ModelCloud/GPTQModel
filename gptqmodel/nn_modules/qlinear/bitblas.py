@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
@@ -96,6 +97,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
 
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
@@ -121,6 +123,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         enable_tuning: bool = True,
         fast_decoding: bool = True,
         propagate_b: bool = BITBLAS_PROPAGATE_WEIGHTS,
@@ -137,6 +140,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=False,
             **kwargs)
 
@@ -287,7 +291,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
         zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales
         self.scales = scales.clone().half()
-        if linear.bias is not None:
+        if linear.bias:
             self.bias = linear.bias.clone().half()
 
         intweight = torch.round((W + scale_zeros[g_idx].T) / scales[g_idx].T).to(torch.int)
@@ -395,6 +399,10 @@ class BitBLASQuantLinear(PackableQuantLinear):
         self.bitblas_matmul.call_lib(
             ctypes.c_void_p(A.data_ptr()) , *self.q_params, ctypes.c_void_p(C.data_ptr()), m
         )
+
+        if self.adapter:
+            C = self.adapter.apply(x=A, out=C)
+
         return C
 
 

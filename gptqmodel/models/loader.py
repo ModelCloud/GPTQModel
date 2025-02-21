@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -30,6 +31,9 @@ if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
         raise ModuleNotFoundError("env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`.")
 else:
     from huggingface_hub import snapshot_download
+
+from gptqmodel.adapter.adapter import Adapter
+from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
@@ -189,7 +193,7 @@ def ModelLoader(cls):
                     model.seqlen = model_config[key]
                     break
         else:
-            logger.warning("can't get model's sequence length from model config, will set to 4096.")
+            logger.warning("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
         model.eval()
 
@@ -213,6 +217,7 @@ def ModelLoader(cls):
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
+            adapter: Optional[Adapter] = None,
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
@@ -290,6 +295,10 @@ def ModelLoader(cls):
             raise TypeError(f"{config.model_type} isn't supported yet.")
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
+
+        # inject adapter into qcfg
+        if adapter is not None:
+            qcfg.adapter = adapter
 
         qcfg.calculate_bits_per_weight()
 
@@ -403,8 +412,17 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            if config.architectures:
+                model_class = getattr(transformers, config.architectures[0], None)
+                if model_class is not None and hasattr(model_class, "_supports_flash_attn_2"):
+                    supports_flash_attn = model_class._supports_flash_attn_2
+                else:
+                    supports_flash_attn = None
+            else:
+                supports_flash_attn = None
+
             args = {}
-            if device in [DEVICE.CUDA, DEVICE.ROCM]:
+            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if ATTN_IMPLEMENTATION in kwargs:
                     args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
                 if USE_FLASH_ATTENTION_2 in kwargs:
@@ -439,25 +457,20 @@ def ModelLoader(cls):
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
                         not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
-                    # log non-lm-head quantizerd modules only
+                    # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         logger.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
             preload_qlinear_kernel = make_quant(
                 model,
-                modules,
-                qcfg.bits,
-                qcfg.group_size,
+                quant_result=modules,
+                qcfg=qcfg,
                 backend=backend,
-                format=qcfg.format,
                 lm_head_name=cls.lm_head,
-                desc_act=qcfg.desc_act,
-                sym=qcfg.sym,
-                dynamic=qcfg.dynamic,
                 device=device,
-                pack_dtype=qcfg.pack_dtype,
             )
+
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
 
@@ -476,17 +489,17 @@ def ModelLoader(cls):
             # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
             if not qcfg.sym and not qcfg.is_quantized_by_v2():
                 raise ValueError(
-                    f"Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
+                    f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
             t = time.time()
-            logger.info(f"Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+            logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
             model = convert_gptq_v1_to_v2_format(
                 model,
                 cfg=qcfg,
                 qlinear_kernel=preload_qlinear_kernel,
             )
-            logger.info(f"Conversion complete: {time.time() - t}s")
+            logger.info(f"Format: Conversion complete: {time.time() - t}s")
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
@@ -495,11 +508,11 @@ def ModelLoader(cls):
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
-                    "The loading of sharded checkpoints with Marlin is currently not supported."
+                    "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
+                    f'Kernel: Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
                 )
 
             # Validate the model can run in Marlin.
@@ -600,7 +613,7 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict())
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
 
                 save_weights(temp_dir, mlx_weights, donate_weights=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")

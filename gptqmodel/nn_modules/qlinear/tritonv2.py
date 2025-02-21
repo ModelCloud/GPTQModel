@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
@@ -60,7 +59,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
-
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
 
@@ -82,6 +81,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         out_features,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs,
     ):
         if not TRITON_AVAILABLE:
@@ -95,13 +95,14 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
             **kwargs)
 
-        if self.group_size != self.in_features:
-            self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
-        else:
-            self.padded_infeatures = self.in_features
+        # if self.group_size != self.in_features:
+        #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
+        # else:
+        #     self.padded_infeatures = self.in_features
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -116,20 +117,21 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         return cls._validate(**args)
 
     def post_init(self):
-        if self.padded_infeatures != self.in_features:
-            self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.out_features)
-            self.qzeros.resize_(
-                math.ceil(self.padded_infeatures / self.group_size),
-                self.out_features // self.pack_factor
-            )
-            self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
-            self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
-                                      device=self.g_idx.device)
+        # if self.padded_infeatures != self.in_features:
+        #     self.qweight.resize_(self.padded_infeatures // self.pack_factor, self.out_features)
+        #     self.qzeros.resize_(
+        #         math.ceil(self.padded_infeatures / self.group_size),
+        #         self.out_features // self.pack_factor
+        #     )
+        #     self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
+        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
+        #                               device=self.g_idx.device)
+        super().post_init()
 
     def forward(self, x):
         # if in_features is padded, we need to pad the input as well
-        if x.size(-1) != self.padded_infeatures:
-            x = F.pad(x, (0, self.padded_infeatures - self.in_features))
+        # if x.size(-1) != self.padded_infeatures:
+        #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
 
         out_shape = x.shape[:-1] + (self.out_features,)
 
@@ -142,11 +144,15 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             self.bits,
             self.pack_dtype_bits,
             self.maxq,
-        )
-        out = out.to(dtype=x.dtype).reshape(out_shape)
+        ).reshape(out_shape)
+
         if self.bias is not None:
             out.add_(self.bias)
-        return out
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
+        return out.to(dtype=x.dtype)
 
 
 __all__ = ["TritonV2QuantLinear"]

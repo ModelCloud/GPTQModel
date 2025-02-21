@@ -40,17 +40,27 @@ class OvisGPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
     ]
 
+    require_monkeypatch = True
+
     modality = [MODALITY.IMAGE_TO_TEXT]
 
     IGNORE_ID = -100
 
+    def monkey_patch(self):
+        # From config.json, we know that visual_tokenizer.dtype is float32 and text model.confi.dtype is bfloat16.
+        # But before transformers<4.49.0, the dtype returned by AutoModel.from_config(config.visual_tokenizer_config)
+        # is bfloat16. This should be a bug, but OVIS generate() unexpectedly works properly.
+        # This bug was fixed in transformers 4.49.0. So visual_tokenizer needs to be converted to model.config.dtype
+        self.model.visual_tokenizer = self.model.visual_tokenizer.to(dtype=self.model.llm.dtype)
+        self.model.vte = self.model.vte.to(dtype=self.model.llm.dtype)
+
     def pre_quantize_generate_hook_start(self):
-        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, self.quantize_config.device)
-        self.model.vte = move_to(self.model.vte, self.quantize_config.device)
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=self.quantize_config.device)
+        self.model.vte = move_to(self.model.vte, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, CPU)
-        self.model.vte = move_to(self.model.vte, CPU)
+        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=CPU)
+        self.model.vte = move_to(self.model.vte, device=CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         text_max_length = 832

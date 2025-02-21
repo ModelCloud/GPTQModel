@@ -33,14 +33,14 @@ from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.utils.eval import lm_eval  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 RAND_SEED = 42
-TASK_NAME = "arc_challenge"
+TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
 
 class TestGroupSize(unittest.TestCase):
     QLINEAR_DICT = {
@@ -117,15 +117,15 @@ class TestGroupSize(unittest.TestCase):
             device_map="auto",
             backend=inference_backend,
         )
-        results = lm_eval(
-            model,
-            model_name="hf",
+        results = GPTQModel.eval(
+            model_or_id_or_path=model,
             output_path=tmp_dir,
             tasks=TASK_NAME,
             apply_chat_template=False,
             trust_remote_code=False,
             batch_size=32,
             gen_kwargs="temperature=0.0,top_k=50",
+            random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
         print(make_table(results))

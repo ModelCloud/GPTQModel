@@ -16,11 +16,10 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
-import math
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
 from ...models._const import DEVICE, PLATFORM
@@ -126,14 +125,14 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
-
+    SUPPORTS_ADAPTERS = [Lora]
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
 
@@ -149,6 +148,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
         **kwargs, ):
 
         if exllama_v2_import_exception is not None:
@@ -157,15 +157,15 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             )
 
         # backup original values
-        self.original_out_features = out_features
-        self.original_in_features = in_features
-
-        # auto pad
-        group_size = group_size if group_size != -1 else in_features
-        out_features = out_features + (-out_features % 32)
-        in_features = in_features + (-in_features % group_size)
-        self.in_features_padding_size = in_features - self.original_in_features
-        self.in_features_padding_shape = (0, self.in_features_padding_size)
+        # self.original_out_features = out_features
+        # self.original_in_features = in_features
+        #
+        # # auto pad
+        # group_size = group_size if group_size != -1 else in_features
+        # out_features = out_features + (-out_features % 32)
+        # in_features = in_features + (-in_features % group_size)
+        # self.in_features_padding_size = in_features - self.original_in_features
+        # self.in_features_padding_shape = (0, self.in_features_padding_size)
 
         super().__init__(
             bits=bits,
@@ -176,9 +176,10 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            adapter=adapter,
             register_buffers=True,
-            register_buffers_in_features=self.original_in_features,
-            register_buffers_out_feature=self.original_out_features,
+            register_buffers_in_features=in_features,
+            register_buffers_out_feature=out_features,
             **kwargs)
 
         self.q_handle = None
@@ -192,16 +193,16 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     def post_init(self, temp_dq):
         # resize due to padding after model weights have been loaded
-        if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
-            self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
-            self.qzeros.resize_(
-                math.ceil(self.in_features / self.group_size),
-                self.out_features // self.pack_dtype_bits * self.bits
-            )
-            self.scales.resize_(math.ceil(self.in_features / self.group_size), self.out_features)
-            self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
-            if self.bias is not None:
-                self.bias.resize_(self.out_features)
+        # if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
+        #     self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
+        #     self.qzeros.resize_(
+        #         math.ceil(self.in_features / self.group_size),
+        #         self.out_features // self.pack_dtype_bits * self.bits
+        #     )
+        #     self.scales.resize_(math.ceil(self.in_features / self.group_size), self.out_features)
+        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.in_features)], dtype=torch.int32, device=self.g_idx.device)
+        #     if self.bias is not None:
+        #         self.bias.resize_(self.out_features)
 
         self.q_tensors = {
             "qweight": self.qweight,
@@ -212,8 +213,11 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
         self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
 
+        super().post_init()
+
     def forward(self, x, force_cuda=False):
-        if x.dtype != torch.float16:
+        x_dtype = x.dtype
+        if x_dtype != torch.float16:
             logger.warning_once(
                 f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
@@ -222,15 +226,19 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
-        if x.size(-1) != self.in_features:
-            x = F.pad(x, self.in_features_padding_shape)
+        # if x.size(-1) != self.in_features:
+        #     x = F.pad(x, self.in_features_padding_shape)
 
-        output = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+
+        out = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
 
         if self.bias is not None:
-            output.add_(self.bias)
+            out.add_(self.bias)
 
-        return output
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
+        return out.to(dtype=x_dtype)
 
     def temp_dq_size(self):
         return self.in_features * self.out_features * 2 + 128

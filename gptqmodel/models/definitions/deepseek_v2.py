@@ -33,15 +33,22 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
     layers_node = "model.layers"
     layer_type = "DeepseekV2DecoderLayer"
 
+    # DeepSeek V2-Lite uses dynamic modules based on lora(rank):
+    # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712
+    layer_modules_strict = False
+
     # DeepSeek-V2 uses 160 experts, v2-lite is auto-switched during __init__
     layer_modules = [
         # DeepSeek-V2 and DeepSeek-V2-Lite use same model_type, but different self_attn
         # so we provide different layer_modules usage.
         # DeepSeek-V2-Lite usage
-        ["self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        #["self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
 
         # DeepSeek-V2 usage, included in layer 0-59
-        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        #["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+
+        # merged v2-lite and v2
+        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
 
         ["self_attn.o_proj"],
 
