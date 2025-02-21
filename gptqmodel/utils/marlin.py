@@ -26,53 +26,6 @@ from .torch import torch_empty_cache
 
 logger = setup_logger()
 
-
-def prepare_model_for_marlin_load(
-    model,
-    qcfg: QuantizeConfig,
-    quant_linear_class,
-    torch_dtype,
-    current_model_save_name,
-    device_map,
-    sym: bool,
-    desc_act: bool,
-    load_checkpoint_in_model: bool,
-):
-    # The model (e.g. model.safetensors) is already serialized in the Marlin format, load it directly.
-    if qcfg.format == FORMAT.MARLIN:
-        model_save_name = current_model_save_name
-        logger.info(f"Loading a GPTQ model, detected Marlin serialized format at {model_save_name}.")
-        model = convert_to_marlin(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
-        load_checkpoint_in_model_then_tie_weights(
-            model,
-            dtype=torch_dtype,
-            checkpoint=model_save_name,
-            device_map=device_map,
-            offload_state_dict=True,
-            offload_buffers=True,
-        )
-    else:
-        # Loading the GPTQ checkpoint to do the conversion.
-        # TODO: Avoid loading the model with wrong QuantLinear, and directly use
-        # Marlin ones. The repacking can be done directly on the safetensors, just
-        # as for AWQ checkpoints.
-        if load_checkpoint_in_model:
-            load_checkpoint_in_model_then_tie_weights(
-                model,
-                dtype=torch_dtype,  # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-                checkpoint=current_model_save_name,
-                device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
-            )
-
-        # Convert model to marlin, repacking weights into Marlin format.
-        model = convert_to_marlin(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
-
-
-    return model
-
-
 # Validate marlin support
 def _validate_marlin_device_support() -> bool:
     """
@@ -139,10 +92,10 @@ def convert_to_marlin(
             import gptqmodel_marlin_cuda
 
             qweight = module.qweight
-            if new_module.in_features != new_module.original_in_features or new_module.out_features != new_module.original_out_features:
-                padded_qweight = torch.zeros((new_module.in_features, new_module.out_features), dtype=torch.int, device=module.qweight.device)
-                padded_qweight[:module.qweight.size(0), :module.qweight.size(1)] = qweight
-                qweight = padded_qweight
+            # if new_module.in_features != new_module.original_in_features or new_module.out_features != new_module.original_out_features:
+            #     padded_qweight = torch.zeros((new_module.in_features, new_module.out_features), dtype=torch.int, device=module.qweight.device)
+            #     padded_qweight[:module.qweight.size(0), :module.qweight.size(1)] = qweight
+            #     qweight = padded_qweight
 
             marlin_repacked_weight = gptqmodel_marlin_cuda.gptq_repack(qweight)
 
