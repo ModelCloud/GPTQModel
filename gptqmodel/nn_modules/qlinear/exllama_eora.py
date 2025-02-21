@@ -35,11 +35,6 @@ except ImportError as e:
 logger = setup_logger()
 
 
-
-# Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-NONE_TENSOR = torch.empty((1, 1), device="meta")
-
-
 # TODO remove this?
 def _torch_device(idx):
     if idx == -1:
