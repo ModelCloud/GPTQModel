@@ -137,19 +137,22 @@ def apply_gptq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
-                                  weight,
-                                  weight_scale,
-                                  weight_zp,
-                                  g_idx,
-                                  g_idx_sort_indices,
-                                  workspace,
-                                  num_bits,
-                                  reshaped_x.shape[0],
-                                  output_size_per_partition,
-                                  input_size_per_partition,
-                                  is_k_full,
-                                  False)
+    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(
+        reshaped_x,
+        weight,
+        weight_scale,
+        weight_zp,
+        g_idx,
+        g_idx_sort_indices,
+        workspace,
+        num_bits,
+        reshaped_x.shape[0],
+        output_size_per_partition,
+        input_size_per_partition,
+        is_k_full,
+        False,
+        False, # <- True: enable fp32 reduce for higher accuracy, False: fp16
+    )
 
     if bias is not None:
         output.add_(bias)  # In-place add
