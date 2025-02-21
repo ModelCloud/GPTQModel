@@ -7,6 +7,7 @@ from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Lora
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -24,7 +25,7 @@ class TestKernelOutput(unittest.TestCase):
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
-        # BACKEND.CUDA: DynamicCudaQuantLinear,
+        BACKEND.CUDA: DynamicCudaQuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
         # BACKEND.IPEX: IPEXQuantLinear,
@@ -85,6 +86,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH),
+        (BACKEND.CUDA),
         (BACKEND.TRITON),
         (BACKEND.EXLLAMA_V1),
         (BACKEND.EXLLAMA_V2),
@@ -102,6 +104,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH),
+        (BACKEND.CUDA),
         (BACKEND.TRITON),
         (BACKEND.EXLLAMA_V1),
         (BACKEND.EXLLAMA_V2),
