@@ -27,6 +27,7 @@ from gptqmodel.utils.backend import BACKEND
 from torch.nn.parameter import Parameter
 
 from ...models._const import DEVICE, PLATFORM
+from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
 marlin_import_exception = None
@@ -35,6 +36,8 @@ try:
 except ImportError as e:
     marlin_import_exception = e
 
+logger = setup_logger()
+fp32_warning_logged = False
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -163,7 +166,6 @@ def apply_gptq_marlin_linear(
 
     return output.reshape(out_shape)
 
-
 class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
@@ -220,7 +222,12 @@ class MarlinQuantLinear(BaseQuantLinear):
             **kwargs)
 
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
-        self.fp32 = True if self.backend is BACKEND.MARLIN else False
+        self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
+
+        global fp32_warning_logged
+        if not fp32_warning_logged:
+            fp32_warning_logged = True
+            logger.warn("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
