@@ -98,7 +98,7 @@ class ProgressBar:
 
         filled_length = int(bar_length * iteration // len(self))
         bar = self.fill * filled_length + '-' * (bar_length - filled_length)
-        self.log(bar=bar, log=log, padding=padding, end='\n' if percent_num >= 1.0 else '')
+        self.log(bar=bar, log=log, padding=padding, end='') # '\n' if percent_num >= 1.0 else ''
 
     def calc_time(self, iteration):
         used_time = int(time.time() - self.time)
@@ -169,18 +169,21 @@ class ProgressBar:
     def __hash__(self):
         return id(self)
 
-    def iter(self):
+    def iter(self) -> int:
+        return self.current_iteration
+
+    def iter_next(self):
         self.current_iteration += 1
 
     def __iter__(self):
         iterable = self.iterable
 
         for obj in iterable:
-            self.iter()
+            self.iter_next()
             self.progress()
             yield obj
 
-        self.progress()
+        # self.progress()
         self.close()
         return
 
