@@ -56,7 +56,6 @@ on:
         description: 'Choose server (zen4 or xeon5)'
         required: true
         type: choice
-        default: zen4
         options:
           - '["self-hosted", "zen4"]'
           - '["self-hosted", "xeon5"]'
@@ -202,7 +201,7 @@ jobs:
           echo "will m4 run: ${{ (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' || needs.list-test-files.outputs.m4-files != '[]') }}"
 
   build:
-    runs-on: ${{ fromJSON(inputs.server ) }}
+    runs-on: ${{ fromJSON(github.event.inputs.server ) }}
     needs:
       - check-vm
       - list-test-files
