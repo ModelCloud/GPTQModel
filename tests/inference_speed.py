@@ -32,7 +32,7 @@ from transformers import AutoTokenizer
 class InferenceSpeed(unittest.TestCase):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2"
     BITBLAS_NATIVE_MODEL_ID = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
-    MAX_NEW_TOEKNS = 10
+    MAX_NEW_TOKENS = 10
     NUM_RUNS = 20
     PROMPTS = [
         "I am in Paris and I",
@@ -70,10 +70,10 @@ class InferenceSpeed(unittest.TestCase):
         if warmup_runs > 0:
             pb = ProgressBar(range(warmup_runs))
             for _ in pb:
-                pb.info(f"warmup run index {pb.iter()} of {warmup_runs}")
+                pb.info(f"warmup run index {pb.step()} of {len(pb)}")
                 pb.progress()
                 start_time = time.time()
-                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
                 elapsed_time = end_time - start_time
                 times.append(elapsed_time)
@@ -100,7 +100,7 @@ class InferenceSpeed(unittest.TestCase):
         for i in pb:
             pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
             start_time = time.time()
-            result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+            result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
             end_time = time.time()
             elapsed_time = end_time - start_time
             times.append(elapsed_time)
