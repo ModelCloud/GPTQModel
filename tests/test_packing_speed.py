@@ -17,6 +17,8 @@
 # -- do not touch
 import os
 
+from gptqmodel import BACKEND
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -86,7 +88,7 @@ class TestRepacking(unittest.TestCase):
     _, linear, s = gen_quant4(k, n, group_size)
     print("gen_quant: start...end")
 
-    def pack(self, qlinearCls):
+    def pack(self, qlinearCls, backend):
         qlinear = qlinearCls(
             bits=4,
             group_size=self.group_size,
@@ -95,6 +97,7 @@ class TestRepacking(unittest.TestCase):
             in_features=self.k,
             out_features=self.n,
             pack_dtype=torch.int32,
+            backend=backend,
             bias=False,
         )
 
@@ -106,14 +109,14 @@ class TestRepacking(unittest.TestCase):
         [
             # [ExllamaQuantLinear, 9.63], # A100 Z3: 36.89 # 4090? 26.5349
             # [TritonV2QuantLinear, 9.67], # A100 Z3: 35.04 # 4090? 26.5268
-            [TorchQuantLinear, 16.63], # A100 Z3 33.56 # 4090? 27.0297
+            [TorchQuantLinear, BACKEND.TORCH,16.63], # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
-    def test_pack_speed(self, qlinearCls, expect_time):
+    def test_pack_speed(self, qlinearCls, backend, expect_time):
         start = time.time()
         with threadpoolctl.threadpool_limits(limits=1):
             for i in range(30):
-                self.pack(qlinearCls)
+                self.pack(qlinearCls, backend)
             time_usage = time.time() - start
             speed = self.k * self.k / time_usage
             print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
@@ -124,14 +127,14 @@ class TestRepacking(unittest.TestCase):
         [
             # [ExllamaQuantLinear, 9.63],  # A100 Z3: 36.89 # 4090? 26.5349
             # [TritonV2QuantLinear, 9.67],  # A100 Z3: 35.04 # 4090? 26.5268
-            [TorchQuantLinear, 12.51],  # A100 Z3 33.56 # 4090? 27.0297
+            [TorchQuantLinear, BACKEND.TORCH, 12.51],  # A100 Z3 33.56 # 4090? 27.0297
         ]
     )
-    def test_pack_speed_2_threads(self, qlinearCls, expect_time):
+    def test_pack_speed_2_threads(self, qlinearCls, backend, expect_time):
         start = time.time()
         with threadpoolctl.threadpool_limits(limits=2):
             for i in range(30):
-                self.pack(qlinearCls)
+                self.pack(qlinearCls, backend)
             time_usage = time.time() - start
             speed = self.k * self.k / time_usage
             print(f"{qlinearCls.__name__}, time={time_usage}, speed={speed:.4f}")
