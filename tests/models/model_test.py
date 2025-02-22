@@ -131,8 +131,11 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer, rows: int = DATASET_SIZE):
+    def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+
+        if not tokenizer:
+            return traindata.select(range(rows))
 
         datas = []
         for index, sample in enumerate(traindata):
