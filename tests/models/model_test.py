@@ -378,4 +378,4 @@ class ModelTest(unittest.TestCase):
                 shutil.rmtree(item_path)
 
     def get_batch_size(self):
-        return 32 if Device(CUDA_0).memory_total() / 1024 / 1024 / 1024 > 24 else 2
+        return 32 if Device(CUDA_0).memory_total / 1024 / 1024 / 1024 > 24 else 2

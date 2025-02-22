@@ -25,11 +25,12 @@ from typing import Union  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 
-class TestEval(unittest.TestCase):
+class TestEval(ModelTest):
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
