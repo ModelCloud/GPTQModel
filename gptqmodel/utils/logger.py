@@ -159,10 +159,12 @@ def setup_logger():
                 else:
                     last_pb_instance = None
 
-
+    original_logger_cls = logging.getLoggerClass()
     logging.setLoggerClass(CustomLogger)
 
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("gptqmodel")
+    logging.setLoggerClass(original_logger_cls)
+
     logger.propagate = False
     logger.setLevel(logging.DEBUG)
 
