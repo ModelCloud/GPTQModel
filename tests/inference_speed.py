@@ -32,7 +32,7 @@ from transformers import AutoTokenizer
 class InferenceSpeed(unittest.TestCase):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2"
     BITBLAS_NATIVE_MODEL_ID = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
-    MAX_NEW_TOEKNS = 10
+    MAX_NEW_TOKENS = 10
     NUM_RUNS = 20
     PROMPTS = [
         "I am in Paris and I",
@@ -69,11 +69,11 @@ class InferenceSpeed(unittest.TestCase):
         # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
         if warmup_runs > 0:
             pb = ProgressBar(range(warmup_runs))
-            for i in pb:
-                pb.info(f"warmup run index {i} of {warmup_runs - 1}")
+            for _ in pb:
+                pb.info(f"warmup run index {pb.step()} of {len(pb)}")
                 pb.progress()
                 start_time = time.time()
-                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
                 elapsed_time = end_time - start_time
                 times.append(elapsed_time)
@@ -97,10 +97,10 @@ class InferenceSpeed(unittest.TestCase):
             print(f"****************  {backend} Warm-up Result Info End****************")
 
         pb = ProgressBar(range(self.NUM_RUNS))
-        for i in pb:
-            pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
+        for _ in pb:
+            pb.info(f"run index {pb.step()} of {len(pb)}")
             start_time = time.time()
-            result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+            result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
             end_time = time.time()
             elapsed_time = end_time - start_time
             times.append(elapsed_time)
