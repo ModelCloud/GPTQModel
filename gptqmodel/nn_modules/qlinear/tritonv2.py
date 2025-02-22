@@ -96,7 +96,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.TRITON),
             adapter=adapter,
             register_buffers=True,
             **kwargs)
