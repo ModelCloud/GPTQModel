@@ -42,17 +42,18 @@ on:
         description: 'max parallel jobs'
         required: false
         default: '20'
-      m4-only:
-        description: 'run only m4 test only'
-        type: boolean
-        required: false
-        default: false
       exclusive-gpu:
         description: 'one test, one gpu. for collecting statistics'
         type: boolean
         required: false
         default: false
-
+      server:
+        description: 'Choose server (zen4 or xeon5)'
+        required: true
+        type: choice
+        options:
+          - '["self-hosted", "zen4"]'
+          - '["self-hosted", "xeon5"]'
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -85,6 +86,7 @@ jobs:
           echo "ref: ${{ env.ref }}"
           echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
           echo "test_names: ${{ github.event.inputs.test_names }}"
+          echo "selected server: ${{ github.event.inputs.server }}"
 
       - name: Select server
         id: get_ip
@@ -108,7 +110,6 @@ jobs:
 
   list-test-files:
     runs-on: ubuntu-24.04
-    if: github.event.inputs.m4-only != 'true'
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
       transformers-files: ${{ steps.files.outputs.transformers-files }}
@@ -178,7 +179,6 @@ jobs:
       - name: Print conditions and parameters
         run: |
           echo "Parameters:"
-          echo "github.event.inputs.m4-only: ${{ github.event.inputs.m4-only }}"
           echo "needs.list-test-files.outputs.torch-files: ${{ needs.list-test-files.outputs.torch-files }}"
           echo "needs.list-test-files.outputs.transformers-files: ${{ needs.list-test-files.outputs.transformers-files }}"
           echo "needs.list-test-files.outputs.m4-files: ${{ needs.list-test-files.outputs.m4-files }}"
@@ -188,17 +188,17 @@ jobs:
           echo ""
 
           echo "Conditions:"
-          echo "will build run: ${{ github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.m4-files == '[]' && needs.list-test-files.outputs.m4-files == '[]') }}"
-          echo "will legacy run: ${{ (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]' }}"
-          echo "will torch run: ${{ (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]' }}"
+          echo "will build run: ${{ needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.m4-files == '[]' && needs.list-test-files.outputs.m4-files == '[]') }}"
+          echo "will legacy run: ${{ (needs.build.result == 'success' || github.event.inputs.artifact_id != '') &&  needs.list-test-files.outputs.transformers-files != '[]' }}"
+          echo "will torch run: ${{ (needs.build.result == 'success' || github.event.inputs.artifact_id != '') &&  needs.list-test-files.outputs.torch-files != '[]' }}"
           echo "will m4 run: ${{ (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' || needs.list-test-files.outputs.m4-files != '[]') }}"
 
   build:
-    runs-on: [ self-hosted, xeon5 ]
+    runs-on: ${{ fromJSON(github.event.inputs.server ) }}
     needs:
       - check-vm
       - list-test-files
-    if: github.event.inputs.m4-only != 'true' && (needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]')
+    if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
@@ -257,12 +257,12 @@ jobs:
           path: dist/gptqmodel_source.tar.gz
 
       - name: Compile
-        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
+        if: github.event.inputs.artifact_id == '' && !cancelled()
         timeout-minutes: 35
         run: python setup.py bdist_wheel
 
       - name: Test install
-        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
+        if: github.event.inputs.artifact_id == '' && !cancelled()
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
@@ -276,12 +276,12 @@ jobs:
           uv pip install dist/$whl
 
       - name: Upload wheel to local
-        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
+        if: github.event.inputs.artifact_id == '' && !cancelled()
         continue-on-error: true
         run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.WHL_HASH }}" -F "file=@dist/${{ env.WHL_NAME }}" http://${{ needs.check-vm.outputs.ip }}/gpu/whl/upload
 
       - name: Upload wheel to github artifact
-        if: github.event.inputs.m4-only != 'true' && github.event.inputs.artifact_id == '' && !cancelled()
+        if: github.event.inputs.artifact_id == '' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: whl
@@ -297,7 +297,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.transformers-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
       volumes:
@@ -454,7 +454,7 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && github.event.inputs.m4-only != 'true' && needs.list-test-files.outputs.torch-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
