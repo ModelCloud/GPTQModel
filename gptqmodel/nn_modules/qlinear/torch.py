@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 
+from ...utils.backend import BACKEND
 from ...models._const import DEVICE, PLATFORM
 from ...utils.torch import torch_compile
 from ...adapter.adapter import Adapter, Lora
@@ -67,6 +68,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.TORCH),
             adapter=adapter,
             register_buffers=True,
             **kwargs)
