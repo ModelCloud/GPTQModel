@@ -328,6 +328,18 @@ class MarlinQuantLinear(BaseQuantLinear):
         if kwargs.get("name") is not None and kwargs.get("lm_head_name") is not None:
             self.is_lm_head = kwargs["name"] == kwargs["lm_head_name"]
 
+        # auto-optimize on post init
+        # self.optimize()
+
+    # def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+    #     if self.optimized:
+    #         return
+    #
+    #     # compile dequantize
+    #     self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
+    #
+    #     super().optimize()
+
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:

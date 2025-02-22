@@ -26,7 +26,9 @@ from gptqmodel.adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from gptqmodel.utils.backend import BACKEND
 
 from ...models._const import DEVICE, PLATFORM
+from ...utils.logger import setup_logger
 
+logger = setup_logger()
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BITS: List[int] = None
@@ -344,6 +346,7 @@ class BaseQuantLinear(nn.Module):
     # override me, to perform any torch.compile logic on the kernel pre forward
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         self.optimized = True
+        logger.info.once(f"Optimize: `{self.__class__.__name__}` compilation triggered.")
         pass
 
 class PackableQuantLinear(BaseQuantLinear):

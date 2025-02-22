@@ -435,7 +435,7 @@ def ModelLoader(cls):
                     elif is_flash_attn_2_available() and not has_attn_implementation:
                         args = {USE_FLASH_ATTENTION_2: True}
 
-                    logger.info("Auto enabling flash attention2")
+                    logger.info("Optimize: Auto enabling flash attention2")
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args

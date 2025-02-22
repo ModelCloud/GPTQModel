@@ -169,11 +169,14 @@ class ProgressBar:
     def __hash__(self):
         return id(self)
 
+    def iter(self):
+        self.current_iteration += 1
+
     def __iter__(self):
         iterable = self.iterable
 
         for obj in iterable:
-            self.current_iteration+=1
+            self.iter()
             self.progress()
             yield obj
 

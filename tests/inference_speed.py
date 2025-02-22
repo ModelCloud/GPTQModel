@@ -70,7 +70,8 @@ class InferenceSpeed(unittest.TestCase):
         if warmup_runs > 0:
             pb = ProgressBar(range(warmup_runs))
             for i in pb:
-                pb.info(f"warmup run index {i} of {self.NUM_RUNS - 1}")
+                pb.info(f"warmup run index {i} of {warmup_runs - 1}")
+                pb.progress()
                 start_time = time.time()
                 result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
