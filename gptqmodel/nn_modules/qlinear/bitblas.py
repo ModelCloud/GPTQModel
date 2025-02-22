@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 from gptqmodel.adapter.adapter import Adapter, Lora
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+from gptqmodel.utils import BACKEND
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
@@ -140,6 +141,7 @@ class BitBLASQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            backend=BACKEND.BITBLAS,
             adapter=adapter,
             register_buffers=False,
             **kwargs)

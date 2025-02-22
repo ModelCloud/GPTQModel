@@ -357,16 +357,11 @@ def hf_convert_gptq_v1_to_v2_format(
     else:
         return model, False
 
-# TODO: FIXME: the v1 -> v2 zeropoint offsets are assuming INT32 pack_dtype
 def convert_gptq_v1_to_v2_format(
     model,
     cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
-    # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
-        return model
-
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
