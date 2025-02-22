@@ -32,30 +32,6 @@ from models.model_test import ModelTest  # noqa: E402
 from tabulate import tabulate  # noqa: E402
 
 
-def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
-    # test post-quant inference
-    model = GPTQModel.load(
-        model_id_or_path=path,
-        backend=backend,
-        adapter=adapter,
-    )
-
-    tokens = model.generate("Capital of France is")[0]
-    result = model.tokenizer.decode(tokens)
-    print(f"BACKEND: {backend}, Result: {result}")
-    assert "paris" in result.lower(), f"`paris` not found in `{result}`"
-
-    bench_result = GPTQModel.eval(
-        model_or_id_or_path=model,
-        framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU],
-        batch_size=32,
-    )
-
-    del model
-    torch_empty_cache()
-
-    return bench_result
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
@@ -158,3 +134,28 @@ class Test(ModelTest):
                 print(make_table(eora_bench))
                 if "groups" in eora_bench:
                     print(make_table(eora_bench, "groups"))
+
+    def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
+        # test post-quant inference
+        model = GPTQModel.load(
+            model_id_or_path=path,
+            backend=backend,
+            adapter=adapter,
+        )
+
+        tokens = model.generate("Capital of France is")[0]
+        result = model.tokenizer.decode(tokens)
+        print(f"BACKEND: {backend}, Result: {result}")
+        assert "paris" in result.lower(), f"`paris` not found in `{result}`"
+
+        bench_result = GPTQModel.eval(
+            model_or_id_or_path=model,
+            framework=EVAL.LM_EVAL,
+            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU],
+            batch_size=self.get_batch_size(),
+        )
+
+        del model
+        torch_empty_cache()
+
+        return bench_result

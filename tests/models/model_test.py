@@ -19,6 +19,10 @@ import os
 import sys
 from typing import Dict, List
 
+from device_smi import Device
+
+from gptqmodel.models._const import CUDA_0
+
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -372,3 +376,6 @@ class ModelTest(unittest.TestCase):
                 os.unlink(item_path)
             elif os.path.isdir(item_path):
                 shutil.rmtree(item_path)
+
+    def get_batch_size(self):
+        return 32 if Device(CUDA_0).memory_total() / 1024 / 1024 / 1024 > 24 else 2
