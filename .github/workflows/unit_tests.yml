@@ -549,12 +549,15 @@ jobs:
       - name: Install wheel
         run: |
           uv pip install -U transformers colorlog
-          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || \
-          [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
-          [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
-          [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
-            echo "===== install auto_round bitblas==0.0.1.dev13 ====="
-            uv pip install auto_round bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
+          if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
+             [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
+             [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
+            echo "===== install bitblas==0.0.1.dev13 ====="
+            uv pip install bitblas==0.0.1.dev13 -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
+          fi
+
+          if [[ "${{ matrix.test_script }}" == *auto_round* ]]; then
+            uv pip install auto_round
           fi
 
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
