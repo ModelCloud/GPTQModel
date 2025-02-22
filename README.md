@@ -259,13 +259,13 @@ dynamic = {
     # layer index start at 0 
     
     # positive match: layer 19, gate module 
-    r"+:.*\.18\..*gate.*": {"bits": 8, "group_size": 64},  
+    r"+:.*\.18\..*gate.*": {"bits": 4, "group_size": 32},  
     
     # positgive match: layer 20, gate module (prefix defaults to positive if missing)
     r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  
     
     # negative match: skip layer 21, gate module
-    r"-:.*\.20\..*gate.*": {"bits": 8, "group_size": 64}, 
+    r"-:.*\.20\..*gate.*": {}, 
     
     # negative match: skip all down modules for all layers
     r"-:.*down.*": {},  
