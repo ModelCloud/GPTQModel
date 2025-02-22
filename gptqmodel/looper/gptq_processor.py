@@ -114,7 +114,7 @@ class GPTQProcessor(LoopProcessor):
         return tmp
 
     def process(self, module: NamedModule):
-        self.pb.info(f"Quantizing {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
+        self.pb.subtitle(f"Quantizing {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
         gptq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")

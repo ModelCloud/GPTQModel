@@ -35,7 +35,7 @@ class ProgressBar:
     def __init__(self,
                  iterable: Iterable=None,
                  total=None,
-                 prefix:str = '',
+                 title:str = '',
                  bar_length:int =60,
                  fill:str = '█',
                  info:str = ""):
@@ -59,18 +59,23 @@ class ProgressBar:
         self.iterable = iterable
         self.total = total
 
-        self.prefix = prefix
+        self.title = title
         self.bar_length = bar_length
         self.fill = fill
         self.info_text = info
         self.current_iter_step = 0
         self.time = time.time()
 
-    def info(self, info:str):
+        self.skip_draw = False
+
+    def subtitle(self, info:str):
         if len(info) > self.max_info_length:
             self.max_info_length = len(info)
 
         self.info_text = info
+
+        self.skip_draw = True
+        return self
 
     def progress(self, iteration:int = None):
         if not iteration:
@@ -78,7 +83,7 @@ class ProgressBar:
 
         columns, _ = terminal_size()
         bar_length = columns
-        bar_length -= len(self.prefix) # +1 for space
+        bar_length -= len(self.title) # +1 for space
         bar_length -= len(self.info_text)
 
         percent_num = iteration / float(len(self))
@@ -107,9 +112,9 @@ class ProgressBar:
         return f"{formatted_time} / {remaining}"
 
     def log(self, bar:str, log:str, padding:str = "", end: str = ""):
-        # print(f'\r{self.prefix} {self.info_text} |{bar}| {log}', end='', flush=True)
-        if self.prefix:
-            print(f'\r{self.prefix} {self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
+        # print(f'\r{self.title} {self.info_text} |{bar}| {log}', end='', flush=True)
+        if self.title:
+            print(f'\r{self.title} {self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
         else:
             print(f'\r{self.info_text}{padding} |{bar}| {log}', end=end, flush=True)
 
@@ -180,7 +185,9 @@ class ProgressBar:
 
         for obj in iterable:
             self.next()
-            self.progress()
+            if self.skip_draw:
+                self.skip_draw = False
+                self.progress()
             yield obj
 
         # self.progress()
