@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Union
 import torch
 import transformers
 
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -342,15 +345,14 @@ def ModelLoader(cls):
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
             backend = BACKEND.MARLIN
 
-        marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
-
-        # check for marlin compat for cuda device onnly
-        if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and device == DEVICE.CUDA:
-            unsupported = _validate_marlin_compatibility(qcfg)
-            if unsupported is None and marlin_compatible:
-                logger.info(
-                    "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
-                )
+        # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
+        # check for marlin compat for cuda device only
+        # if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and device == DEVICE.CUDA:
+        #     unsupported = _validate_marlin_compatibility(qcfg)
+        #     if unsupported is None and marlin_compatible:
+        #         logger.info(
+        #             "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
+        #         )
 
         if qcfg.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
@@ -491,14 +493,16 @@ def ModelLoader(cls):
                     f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
-            t = time.time()
-            logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
-            model = convert_gptq_v1_to_v2_format(
-                model,
-                cfg=qcfg,
-                qlinear_kernel=preload_qlinear_kernel,
-            )
-            logger.info(f"Format: Conversion complete: {time.time() - t}s")
+            # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
+            if preload_qlinear_kernel not in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+                t = time.time()
+                logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+                model = convert_gptq_v1_to_v2_format(
+                    model,
+                    cfg=qcfg,
+                    qlinear_kernel=preload_qlinear_kernel,
+                )
+                logger.info(f"Format: Conversion complete: {time.time() - t}s")
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
