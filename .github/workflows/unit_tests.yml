@@ -201,7 +201,7 @@ jobs:
       - list-test-files
     if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: $RUNNER:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ env.RUNNER }}:5000/modelcloud/gptqmodel:github-ci-v7
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
@@ -300,7 +300,7 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: $RUNNER:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ env.RUNNER }}:5000/modelcloud/gptqmodel:github-ci-v7
       volumes:
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
@@ -457,7 +457,7 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     container:
-      image: $RUNNER:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ env.RUNNER }}:5000/modelcloud/gptqmodel:github-ci-v7
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
