@@ -661,7 +661,7 @@ jobs:
       - name: Clean cache
         if: always()
         run: |
-          rm ~/.cache/evalplus/*pkl || true
+          # rm ~/.cache/evalplus/*pkl || true
           pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   show-statistics:
