@@ -17,11 +17,11 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
 from packaging import version
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+from ...adapter.adapter import Adapter, Lora
 from . import PackableQuantLinear
 
 try:

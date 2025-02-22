@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
@@ -42,12 +43,12 @@ from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
-from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
+from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..quantization.gptq import CPU  # noqa: E402
@@ -412,7 +413,7 @@ class GPTQModel:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
-            from gptqmodel.utils.eval import evalplus, evalplus_make_table
+            from ..utils.eval import evalplus, evalplus_make_table
 
             results = {}
             for task in tasks:

@@ -17,11 +17,11 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.utils.logger import setup_logger
 
 from ...models._const import DEVICE, PLATFORM
+from ...adapter.adapter import Adapter, Lora
+from ...nn_modules.qlinear.torch import TorchQuantLinear
+from ...utils.logger import setup_logger
 
 logger = setup_logger()
 

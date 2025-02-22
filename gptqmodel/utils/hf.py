@@ -1,5 +1,6 @@
-from gptqmodel.utils.logger import setup_logger
 from transformers import GenerationConfig, PreTrainedModel
+
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 

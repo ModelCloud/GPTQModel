@@ -19,10 +19,10 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
+from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.logger import setup_logger
 
 exllama_v2_import_exception = None

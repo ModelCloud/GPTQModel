@@ -18,8 +18,8 @@
 
 import torch
 import torch.nn as nn
-from gptqmodel.quantization import QuantizeConfig
 
+from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 
 logger = setup_logger()

@@ -17,13 +17,13 @@
 
 import torch
 import torch.nn as nn
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
-from gptqmodel.utils.logger import setup_logger
 from transformers import PreTrainedModel
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.torch import torch_compile
+from ...adapter.adapter import Adapter, Lora
+from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...utils.logger import setup_logger
 
 logger = setup_logger()
 

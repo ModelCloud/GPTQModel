@@ -14,19 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-from gptqmodel.looper.input_cache import InputCache
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models._const import CALIBRATION_DATASET_CONCAT_CHAR
-from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.utils.data import collate_data
-from gptqmodel.utils.device import get_cpu_usage_memory, get_gpu_usage_memory
-from gptqmodel.utils.logger import setup_logger
 from torch import Tensor
 from torch.nn import Module
+
+from ..looper.input_cache import InputCache
+from ..looper.named_module import NamedModule
+from ..models import BaseGPTQModel
+from ..quantization.config import QuantizeConfig
+from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 
