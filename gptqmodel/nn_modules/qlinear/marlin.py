@@ -223,7 +223,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
         self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
 
-        logger.warn.once("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
+        if not self.fp32:
+            logger.warn.once("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
