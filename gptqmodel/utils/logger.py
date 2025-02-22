@@ -17,17 +17,17 @@
 import logging
 import sys
 from enum import Enum
-from typing import Callable
-
 from colorlog import ColoredFormatter
+
+from gptqmodel.utils.terminal import terminal_size
 
 # global static/shared logger instance
 logger = None
-last_logging_src = 1 # one for logger, 2 for progressbar
+last_pb_instance = None # one for logger, 2 for progressbar
 
-def update_logging_src(src: int):
-    global last_logging_src
-    last_logging_src = src
+def update_last_pb_instance(src) -> None:
+    global last_pb_instance
+    last_pb_instance = src
 
 class LEVEL(str, Enum):
     CRITICAL = "CRITICAL"
@@ -127,21 +127,38 @@ def setup_logger():
             self.error = self.error_cls(logger=self)
 
         def _process(self, level: LEVEL, msg, *args, **kwargs):
-            global last_logging_src
-            if last_logging_src == 2:
-                print(" ", flush=True)
-                last_logging_src = 1
+            from gptqmodel.utils.progress import ProgressBar # hack: circular import
+
+            columns, _ = terminal_size()
+            columns -= 10 # minus level and spaces
+            str_msg = str(msg)
+            columns -= len(str_msg)
+
+            global last_pb_instance
+            if isinstance(last_pb_instance, ProgressBar) and not last_pb_instance.closed:
+                 buf = f'\r'
+                 if columns > 0:
+                    str_msg += " " * columns
+
+                 print(buf,end='',flush=True)
 
             if level == LEVEL.INFO:
-                self._info(msg, *args, **kwargs)
+                self._info(str_msg, *args, **kwargs)
             elif level == LEVEL.WARN:
-                self._warning(msg, *args, **kwargs)
+                self._warning(str_msg, *args, **kwargs)
             elif level == LEVEL.ERROR:
-                self._error(msg, *args, **kwargs)
+                self._error(str_msg, *args, **kwargs)
             elif level == LEVEL.DEBUG:
-                self._debug(msg, *args, **kwargs)
+                self._debug(str_msg, *args, **kwargs)
             elif level == LEVEL.CRITICAL:
-                self._critical(msg, *args, **kwargs)
+                self._critical(str_msg, *args, **kwargs)
+
+            if isinstance(last_pb_instance, ProgressBar):
+                if not last_pb_instance.closed:
+                    last_pb_instance.progress()
+                else:
+                    last_pb_instance = None
+
 
     logging.setLoggerClass(CustomLogger)
 

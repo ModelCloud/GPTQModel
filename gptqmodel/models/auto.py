@@ -17,14 +17,17 @@
 from __future__ import annotations
 
 import os
+from ..utils.logger import setup_logger
+
+logger = setup_logger()
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
-    print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
+    logger.info("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
-    print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
+    logger.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
 import sys  # noqa: E402
 
@@ -50,7 +53,6 @@ from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
-from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
@@ -108,8 +110,6 @@ from .definitions.yi import YiGPTQ  # noqa: E402
 torch.manual_seed(787)
 random.seed(787)
 numpy.random.seed(787)
-
-logger = setup_logger()
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
