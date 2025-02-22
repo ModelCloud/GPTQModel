@@ -216,7 +216,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", None),
+            backend=kwargs.pop("backend", BACKEND.MARLIN),
             adapter=adapter,
             register_buffers=False,
             **kwargs)
