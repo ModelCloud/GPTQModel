@@ -46,7 +46,7 @@ on:
         description: 'one test, one gpu. for collecting statistics'
         type: boolean
         required: false
-        default: false
+        default: true
       server:
         description: 'Choose server (zen4 or xeon5)'
         required: true
