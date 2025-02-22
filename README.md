@@ -12,7 +12,7 @@
 </p>
   
 ## News
-* 2/22/2025 [2.0.0-dev]: 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. Synced `Marlin` kernel inference quality fix from upstream. Added `MRLIN_FP161`, lower-quality but faster, backend. `ModelScope` support added. Added `calibration_dataset_concat_size` option to `quantize()` api for potential quantization speedup. Logging and cli progress bar output has been revamped with sticky bottom progress. 
+* 2/22/2025 2.0.0-dev: 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. Synced `Marlin` kernel inference quality fix from upstream. Added `MRLIN_FP161`, lower-quality but faster, backend. `ModelScope` support added. Added `calibration_dataset_concat_size` option to `quantize()` api for potential quantization speedup. Logging and cli progress bar output has been revamped with sticky bottom progress. 
 * 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
   Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
