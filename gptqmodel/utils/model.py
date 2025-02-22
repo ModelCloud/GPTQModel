@@ -516,7 +516,7 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
         qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
         if pbar:
-            pbar.current_iteration += 1
+            pbar.iter()
             pbar.progress()
 
 

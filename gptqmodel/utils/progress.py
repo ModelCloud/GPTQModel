@@ -115,6 +115,9 @@ class ProgressBar:
 
         update_last_pb_instance(src=self)  # let logger now we logged
 
+    def iter(self):
+        self.current_iteration += 1
+
     def __bool__(self):
         if self.total is not None:
             return self.total > 0
