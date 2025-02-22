@@ -18,18 +18,19 @@ import copy
 from typing import Callable, Optional, Tuple
 
 import torch
-from gptqmodel import QuantizeConfig
-from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                                     PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
-from gptqmodel.quantization import GPTQ
-from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import move_to, pack_model
-from gptqmodel.utils.torch import torch_sync
 from torch.nn import Module
+
+from ..looper.loop_processor import LoopProcessor
+from ..looper.named_module import NamedModule
+from ..models import BaseGPTQModel
+from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
+                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
+from ..quantization import GPTQ
+from ..quantization.config import QuantizeConfig
+from ..quantization.gptq import CPU
+from ..utils.logger import setup_logger
+from ..utils.model import move_to, pack_model
+from ..utils.torch import torch_sync
 
 logger = setup_logger()
 
@@ -49,7 +50,7 @@ class GPTQProcessor(LoopProcessor):
     def log_plotly(self):
         task = self.logger_task
         if task is not None:
-            from gptqmodel.utils.plotly import create_plotly
+            from ..utils.plotly import create_plotly
             x = list(range(self.layer_count))
             gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
             cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")

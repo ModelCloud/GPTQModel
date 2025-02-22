@@ -380,10 +380,10 @@ class BaseGPTQModel(nn.Module):
         if adapter is not None:
             self.quantize_config.adapter = adapter
 
-        from gptqmodel.adapter.adapter import Lora
-        from gptqmodel.looper.eora_processor import EoraProcessor
-        from gptqmodel.looper.gptq_processor import GPTQProcessor
-        from gptqmodel.looper.module_looper import ModuleLooper
+        from ..adapter.adapter import Lora
+        from ..looper.eora_processor import EoraProcessor
+        from ..looper.gptq_processor import GPTQProcessor
+        from ..looper.module_looper import ModuleLooper
 
         # has lora process
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
@@ -454,10 +454,10 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
-        from gptqmodel.adapter.adapter import Lora
-        from gptqmodel.looper.dequantize_processor import DequantizeProcessor
-        from gptqmodel.looper.eora_processor import EoraProcessor
-        from gptqmodel.looper.module_looper import ModuleLooper
+        from ..adapter.adapter import Lora
+        from ..looper.dequantize_processor import DequantizeProcessor
+        from ..looper.eora_processor import EoraProcessor
+        from ..looper.module_looper import ModuleLooper
 
         self.quantize_config.adapter = adapter
 

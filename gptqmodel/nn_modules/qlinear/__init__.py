@@ -22,10 +22,10 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
-from gptqmodel.adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
-from gptqmodel.utils.backend import BACKEND
 
+from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
+from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
 logger = setup_logger()

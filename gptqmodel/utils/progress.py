@@ -19,8 +19,8 @@ import time
 from typing import Iterable
 from warnings import warn
 
-from gptqmodel.utils.logger import setup_logger, update_last_pb_instance
-from gptqmodel.utils.terminal import terminal_size, terminal_size
+from ..utils.logger import setup_logger, update_last_pb_instance
+from ..utils.terminal import terminal_size
 
 logger = setup_logger()
 

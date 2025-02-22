@@ -21,9 +21,9 @@ def patch_evalplus(model):
     from evalplus.provider.base import DecoderBase
     from evalplus.provider.gptqmodel import GPTQModelDecoder
     from evalplus.provider.utility import extra_eos_for_direct_completion
-    from gptqmodel.models import BaseGPTQModel
 
     from .. import GPTQModel
+    from ..models import BaseGPTQModel
 
     class PatchedGPTQModelDecoder(DecoderBase):
         def __init__(

@@ -18,12 +18,12 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn import Parameter
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+from ...adapter.adapter import Adapter, Lora
+from ...nn_modules.qlinear import BaseQuantLinear
 
 exllama_v2v_import_exception = None
 
