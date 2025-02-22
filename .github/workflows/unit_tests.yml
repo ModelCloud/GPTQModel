@@ -92,7 +92,7 @@ jobs:
           echo "ref: ${{ env.ref }}"
           echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
           echo "test_names: ${{ github.event.inputs.test_names }}"
-          echo "selected server: ${{ inputs.server }}"
+          echo "selected server: ${{ github.event.inputs.server }}"
 
       - name: Select server
         id: get_ip
@@ -202,7 +202,7 @@ jobs:
           echo "will m4 run: ${{ (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' || needs.list-test-files.outputs.m4-files != '[]') }}"
 
   build:
-    runs-on: [ self-hosted, ${{ inputs.server }} ]
+    runs-on: [ self-hosted, ${{ github.event.inputs.server }} ]
     needs:
       - check-vm
       - list-test-files
