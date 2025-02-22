@@ -55,7 +55,7 @@ class TestEval(ModelTest):
             results = GPTQModel.eval(model_or_id_or_path=self.MODEL_ID,
                                      framework=framework,
                                      tasks=[task],
-                                     batch_size=self.get_batch_size(),
+                                     batch_size=1,
                                      output_path=output_path,
                                      llm_backend=llm_backend,
                                      model_args=model_args,
