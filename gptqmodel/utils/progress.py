@@ -118,29 +118,22 @@ class ProgressBar:
         columns, _ = terminal_size()
         bar_length = columns
 
+        pre_bar_size = 0 # char length of content before progress bar
 
         percent_num = self.step() / float(len(self))
         percent = ("{0:.1f}").format(100 * (percent_num))
         log = f"{self.calc_time(self.step())} [{self.step()}/{len(self)}] {percent}%"
 
         if self._title:
-            bar_length -= len(self._title)
+            pre_bar_size += self.max_title_len + 1 # title_ (_ == space)
         if self._subtitle:
-            bar_length -= len(self._subtitle)
-
-        bar_length -= len(log)
-        bar_length -= 5 # space + | chars
-
-        if not self._title and not self._subtitle:
-            bar_length += 2
-        elif (self._title and not self._subtitle) or (self._subtitle and not self._title):
-            bar_length += 1
+            pre_bar_size += self.max_subtitle_len + 1 # subtitle_ (_ == space)
 
         # generate: ui_left_steps
         if self.ui_show_left_steps:
-            self.ui_show_left_steps_text = f"[{self.step()-self.ui_show_left_steps_offset} of {len(self)-self.ui_show_left_steps_offset}]"
+            self.ui_show_left_steps_text = f"[{self.step()-self.ui_show_left_steps_offset} of {len(self)-self.ui_show_left_steps_offset}] "
             self.ui_show_left_steps_text_max_len = len(self.ui_show_left_steps_text)
-            bar_length -= self.ui_show_left_steps_text_max_len
+            pre_bar_size += self.ui_show_left_steps_text_max_len
 
         padding = ""
 
@@ -152,10 +145,7 @@ class ProgressBar:
         if self._subtitle and len(self._subtitle) < self.max_subtitle_len:
             padding += " " * (self.max_subtitle_len - len(self._subtitle))
 
-        bar_length -= len(padding)
-
-        if bar_length < 0:
-            bar_length = 0
+        bar_length = columns - pre_bar_size - len(log) - 2 # bar|_ == 2 chars
 
         filled_length = int(bar_length * self.step() // len(self))
         bar = self._fill * filled_length + '-' * (bar_length - filled_length)
@@ -179,22 +169,11 @@ class ProgressBar:
         out += padding
 
         if self.ui_show_left_steps:
-            out += self.ui_show_left_steps_text + " "
-        else:
-            out += "|"
+            out += self.ui_show_left_steps_text
 
         out += f"{bar}| {log}"
 
         print(f'\r{out}', end=end, flush=True)
-
-        # if self._title and self.subtitle:
-        #     print(f'\r{self._title} {self._subtitle}{self.ui_show_left_steps_text}{padding} |{bar}| {log}', end=end, flush=True)
-        # elif self._title:
-        #     print(f'\r{self._title}{self.ui_show_left_steps_text}{padding} |{bar}| {log}', end=end, flush=True)
-        # elif self._subtitle:
-        #     print(f'\r{self._subtitle}{self.ui_show_left_steps_text}{padding} |{bar}| {log}', end=end, flush=True)
-        # else:
-        #     print(f'\r{self.ui_show_left_steps_text}|{bar}| {log}', end=end, flush=True)
 
         update_last_pb_instance(src=self)  # let logger now we logged
 

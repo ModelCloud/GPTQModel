@@ -65,7 +65,7 @@ class TestProgressBar(unittest.TestCase):
         pb = ProgressBar(range(100)).title("TITLE: FIXED")
         for _ in pb:
             sleep(0.1)
-    #
+
     def test_title_subtitle(self):
         pb = ProgressBar(range(100)).title("[TITLE: FIXED]").manual()
         for _ in pb:
