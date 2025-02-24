@@ -118,23 +118,22 @@ class ProgressBar:
         columns, _ = terminal_size()
         bar_length = columns
 
-        if self._title:
-            bar_length -= self.max_title_len
-
-        if self._subtitle:
-            bar_length -= self.max_subtitle_len
-
-        if self._title and self.subtitle:
-            bar_length -= 1 # space between title and subtitle
 
         percent_num = self.step() / float(len(self))
         percent = ("{0:.1f}").format(100 * (percent_num))
         log = f"{self.calc_time(self.step())} [{self.step()}/{len(self)}] {percent}%"
 
+        if self._title:
+            bar_length -= len(self._title)
+        if self._subtitle:
+            bar_length -= len(self._subtitle)
+
         bar_length -= len(log)
         bar_length -= 5 # space + | chars
 
         if not self._title and not self._subtitle:
+            bar_length += 2
+        elif not self._title or not self._subtitle:
             bar_length += 1
 
         # generate: ui_left_steps
