@@ -498,7 +498,7 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result, layers, pbar=None):
+def pack_module(name, qModules, quant_result, layers):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         r = quant_result[name]

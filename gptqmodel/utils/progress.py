@@ -33,8 +33,8 @@ class ProgressBarWarning(Warning):
             super().__init__(msg, *a, **k)
 
 class RenderMode(str, Enum):
-    AUTO = "AUTO"
-    MANUAL = "MANUAL"
+    AUTO = "AUTO" # pb will auto draw() at the START of each itereation
+    MANUAL = "MANUAL" # pb will not call draw() in each iteration and user must call draw()
 
 
 class ProgressBar:
