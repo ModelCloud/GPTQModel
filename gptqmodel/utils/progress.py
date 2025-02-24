@@ -25,6 +25,7 @@ from gptqmodel.utils.terminal import terminal_size, terminal_size
 
 logger = setup_logger()
 
+# TODO FIXME: what does this do exactly?
 class ProgressBarWarning(Warning):
     def __init__(self, msg, fp_write=None, *a, **k):
         if fp_write is not None:
@@ -237,6 +238,8 @@ class ProgressBar:
             # maybe eager thread cleanup upon external error
             if (exc_type, exc_value, traceback) == (None, None, None):
                 raise
+
+            # TODO FIXME: what does this do exactly?
             warn("AttributeError ignored", ProgressBarWarning, stacklevel=2)
 
     def __del__(self):
