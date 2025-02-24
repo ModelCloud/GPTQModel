@@ -245,6 +245,7 @@ class ProgressBar:
     def __del__(self):
         self.close()
 
+    # TODO FIXME: what does this do exactly? where is this `pos` attr magically coming from? I don't see it anywhere
     @property
     def _comparable(self):
         return abs(getattr(self, "pos", 1 << 31))
