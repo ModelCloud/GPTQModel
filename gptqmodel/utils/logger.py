@@ -155,7 +155,9 @@ def setup_logger():
 
             if isinstance(last_pb_instance, ProgressBar):
                 if not last_pb_instance.closed:
-                    last_pb_instance.progress()
+                    # only do this for our instance
+                    if self == logger:
+                        last_pb_instance.draw()
                 else:
                     last_pb_instance = None
 
@@ -188,6 +190,9 @@ def setup_logger():
     handler.setFormatter(formatter)
     handler.flush = sys.stdout.flush
     logger.addHandler(handler)
+
+    # clear space from previous logs
+    print("")
 
     return logger
 
