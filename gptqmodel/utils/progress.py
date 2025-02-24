@@ -133,7 +133,7 @@ class ProgressBar:
 
         if not self._title and not self._subtitle:
             bar_length += 2
-        elif not self._title or not self._subtitle:
+        elif (self._title and not self._subtitle) or (self._subtitle and not self._title):
             bar_length += 1
 
         # generate: ui_left_steps
