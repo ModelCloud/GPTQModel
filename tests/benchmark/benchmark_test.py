@@ -22,7 +22,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.progress import ProgressBar  # noqa: E402
+from logbar.progress import ProgressBar  # noqa: E402
 
 
 class BenchmarkTest(unittest.TestCase):

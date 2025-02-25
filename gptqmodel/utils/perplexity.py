@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from datasets import load_dataset, load_from_disk
 
-from ..utils.progress import ProgressBar
+from logbar.progress import ProgressBar
 
 
 class Perplexity:

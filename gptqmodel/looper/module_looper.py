@@ -32,7 +32,7 @@ from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.progress import ProgressBar
+from logbar.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
 
 logger = setup_logger()

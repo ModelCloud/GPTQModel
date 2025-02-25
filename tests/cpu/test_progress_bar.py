@@ -1,7 +1,7 @@
 import unittest
 from time import sleep
 
-from gptqmodel.utils.progress import ProgressBar
+from logbar.progress import ProgressBar
 
 
 def generate_epanding_str_a_to_z():

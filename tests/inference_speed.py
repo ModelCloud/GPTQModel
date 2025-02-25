@@ -25,7 +25,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest
 
 from gptqmodel import GPTQModel
-from gptqmodel.utils.progress import ProgressBar
+from logbar.progress import ProgressBar
 from transformers import AutoTokenizer
 
 

@@ -52,7 +52,7 @@ from ..quantization.config import dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
-from .progress import ProgressBar
+from logbar.progress import ProgressBar
 from .torch import torch_empty_cache, torch_new_stream_ctx
 
 logger = setup_logger()

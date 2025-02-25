@@ -7,7 +7,7 @@ from ..models import BaseGPTQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .logger import setup_logger
-from .progress import ProgressBar
+from logbar.progress import ProgressBar
 from .torch import torch_empty_cache
 
 try:

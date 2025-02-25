@@ -132,7 +132,7 @@ def setup_logger():
             self.error = self.error_cls(logger=self)
 
         def _process(self, level: LEVEL, msg, *args, **kwargs):
-            from ..utils.progress import ProgressBar  # hack: circular import
+            from logbar.progress import ProgressBar  # hack: circular import
 
             columns, _ = terminal_size()
             str_msg = str(msg)
