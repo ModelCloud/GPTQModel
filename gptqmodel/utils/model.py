@@ -496,11 +496,9 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result, layers, pbar=None):
+def pack_module(name, qModules, quant_result, layers):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
-        if pbar:
-            pbar.info(f"Packing {name}")
         r = quant_result[name]
         scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device
@@ -513,9 +511,6 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
         )
         qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
-        if pbar:
-            pbar.next()
-            pbar.progress()
 
 
 def pack_model(
@@ -570,9 +565,12 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with ProgressBar(total=len(names)) as pbar:
+        with ProgressBar(names).manual() as pb:
             def wrapper(name):
-                pack_module(name, qModules, quant_result, modules, pbar)
+                # TODO FIX, thread pool executor does not advance iterator
+                pb.next()
+                pb.title(f"Packing {name}").draw()
+                pack_module(name, qModules, quant_result, modules)
 
             for _ in executor.map(wrapper, names):
                 pass

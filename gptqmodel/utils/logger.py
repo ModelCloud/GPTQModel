@@ -18,8 +18,6 @@ import logging
 import sys
 from enum import Enum
 
-from colorlog import ColoredFormatter
-
 from ..utils.terminal import terminal_size
 
 # global static/shared logger instance
@@ -30,10 +28,18 @@ def update_last_pb_instance(src) -> None:
     global last_pb_instance
     last_pb_instance = src
 
+# ANSI color codes
+COLORS = {
+    "DEBUG": "\033[36m",  # Cyan
+    "INFO": "\033[32m",  # Green
+    "WARN": "\033[33m",  # Yellow
+    "ERROR": "\033[31m",  # Red
+    "RESET": "\033[0m",  # Reset to default
+}
+
 class LEVEL(str, Enum):
-    CRITICAL = "CRITICAL"
     DEBUG = "DEBUG"
-    WARN = "WARNING"
+    WARN = "WARN"
     INFO = "INFO"
     ERROR = "ERROR"
 
@@ -115,13 +121,11 @@ def setup_logger():
 
         def __init__(self, name):
             super().__init__(name)
-            self._critical = self.critical
             self._warning = self.warning
             self._debug = self.debug
             self._info = self.info
             self._error = self.error
 
-            self.critical = self.critical_cls(logger=self)
             self.warn = self.warn_cls(logger=self)
             self.debug = self.debug_cls(logger=self)
             self.info = self.info_cls(logger=self)
@@ -131,9 +135,7 @@ def setup_logger():
             from ..utils.progress import ProgressBar  # hack: circular import
 
             columns, _ = terminal_size()
-            columns -= 10 # minus level and spaces
             str_msg = str(msg)
-            columns -= len(str_msg)
 
             global last_pb_instance
             if isinstance(last_pb_instance, ProgressBar) and not last_pb_instance.closed:
@@ -143,20 +145,47 @@ def setup_logger():
 
                  print(buf,end='',flush=True)
 
-            if level == LEVEL.INFO:
-                self._info(str_msg, *args, **kwargs)
-            elif level == LEVEL.WARN:
-                self._warning(str_msg, *args, **kwargs)
-            elif level == LEVEL.ERROR:
-                self._error(str_msg, *args, **kwargs)
-            elif level == LEVEL.DEBUG:
-                self._debug(str_msg, *args, **kwargs)
-            elif level == LEVEL.CRITICAL:
-                self._critical(str_msg, *args, **kwargs)
+            # Get the color for the log level
+
+            reset = COLORS["RESET"]
+            color = COLORS.get(level.value, reset)
+
+            out_len = 5 + 1 + len(str_msg)
+            paddding_end = " " * (columns - out_len)
+
+            padding = " " * (5 - len(level.value)) # 5 is max enum string length
+            print(f"{color}{level.value}{reset}{padding} {str_msg}", end='', flush=True)
+            # if level == LEVEL.INFO:
+            #     print(f"INFO: {str_msg}", end='',flush=True)
+            # elif level == LEVEL.WARN:
+            #     print(f"WARN: {str_msg}", end='',flush=True)
+            # elif level == LEVEL.ERROR:
+            #     print(f"ERROR: {str_msg}", end='',flush=True)
+            # elif level == LEVEL.DEBUG:
+            #     print(f"DEBUG: {str_msg}", end='',flush=True)
+            # else:
+            #     raise RuntimeError(f"Unknown logging level {level}")
+
+            # Print the message with the appropriate color
+            #print(f"{color}{level.value}{reset}{padding} {str_msg}")
+
+            # if level == LEVEL.INFO:
+            #     self._info(str_msg, *args, **kwargs)
+            #
+            # elif level == LEVEL.WARN:
+            #     self._warning(str_msg, *args, **kwargs)
+            # elif level == LEVEL.ERROR:
+            #     self._error(str_msg, *args, **kwargs)
+            # elif level == LEVEL.DEBUG:
+            #     self._debug(str_msg, *args, **kwargs)
+            # else:
+            #     raise RuntimeError(f"Unknown logging level {level}")
 
             if isinstance(last_pb_instance, ProgressBar):
                 if not last_pb_instance.closed:
-                    last_pb_instance.progress()
+                    # only do this for our instance
+                    if self == logger:
+                        last_pb_instance.draw()
                 else:
                     last_pb_instance = None
 
@@ -167,28 +196,15 @@ def setup_logger():
     logging.setLoggerClass(original_logger_cls)
 
     logger.propagate = False
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
-    # Create a colored formatter
-    formatter = ColoredFormatter(
-        "%(log_color)s%(levelname)-8s%(reset)s %(message)s",
-        datefmt=None,
-        reset=True,
-        log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'green',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red,bg_white',
-        },
-        secondary_log_colors={},
-        style='%'
-    )
+    # handler = logging.StreamHandler(sys.stdout)
+    # handler.setFormatter(formatter)
+    # handler.flush = sys.stdout.flush
+    # logger.addHandler(handler)
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-    handler.flush = sys.stdout.flush
-    logger.addHandler(handler)
+    # clear space from previous logs
+    print("")
 
     return logger
 

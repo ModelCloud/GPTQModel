@@ -64,9 +64,8 @@ class BenchmarkTest(unittest.TestCase):
                                max_new_tokens=self.MAX_NEW_TOKENS)
 
         times = []
-        pb = ProgressBar(range(self.NUM_RUNS))
-        for i in pb:
-            pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
+        pb = ProgressBar(range(self.NUM_RUNS)).title("Run")
+        for _ in pb:
             start_time = time.time()
             _ = model.generate(**inp,min_new_tokens=self.MIN_NEW_TOKENS,
                                  max_new_tokens=self.MAX_NEW_TOKENS)

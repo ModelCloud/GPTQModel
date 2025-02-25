@@ -68,10 +68,8 @@ class InferenceSpeed(unittest.TestCase):
 
         # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
         if warmup_runs > 0:
-            pb = ProgressBar(range(warmup_runs))
+            pb = ProgressBar(range(warmup_runs)).title("Warmup")
             for _ in pb:
-                pb.info(f"warmup run index {pb.step()} of {len(pb)}")
-                pb.progress()
                 start_time = time.time()
                 result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
@@ -96,9 +94,8 @@ class InferenceSpeed(unittest.TestCase):
             print(f"New Token Per Second: {avg_tokens_per_second} token/s")
             print(f"****************  {backend} Warm-up Result Info End****************")
 
-        pb = ProgressBar(range(self.NUM_RUNS))
+        pb = ProgressBar(range(self.NUM_RUNS)).title("Run")
         for _ in pb:
-            pb.info(f"run index {pb.step()} of {len(pb)}")
             start_time = time.time()
             result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
             end_time = time.time()
