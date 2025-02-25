@@ -18,21 +18,22 @@ import time
 from typing import List
 
 import torch
-from gptqmodel.looper.dequantize_processor import DequantizeProcessor
-from gptqmodel.looper.eora_processor import EoraProcessor
-from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.input_cache import InputCache
-from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models._const import SUPPORTS_MODULE_TYPES
-from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
-from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
-                                   get_moe_layer_modules, move_to, nested_move_to)
-from gptqmodel.utils.progress import ProgressBar
-from gptqmodel.utils.torch import torch_empty_cache
+
+from ..looper.dequantize_processor import DequantizeProcessor
+from ..looper.eora_processor import EoraProcessor
+from ..looper.gptq_processor import GPTQProcessor
+from ..looper.input_cache import InputCache
+from ..looper.loop_processor import LoopProcessor
+from ..looper.named_module import NamedModule
+from ..models import BaseGPTQModel
+from ..models._const import SUPPORTS_MODULE_TYPES
+from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
+from ..quantization.gptq import CPU
+from ..utils.logger import setup_logger
+from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
+                           get_moe_layer_modules, move_to, nested_move_to)
+from ..utils.progress import ProgressBar
+from ..utils.torch import torch_empty_cache
 
 logger = setup_logger()
 

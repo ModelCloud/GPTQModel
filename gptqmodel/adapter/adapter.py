@@ -5,8 +5,8 @@ from urllib.parse import urlparse
 
 import safetensors
 import torch
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.torch import torch_compile
+
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]

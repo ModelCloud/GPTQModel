@@ -18,7 +18,7 @@ import logging
 import sys
 from enum import Enum
 
-from gptqmodel.utils.terminal import terminal_size
+from ..utils.terminal import terminal_size
 
 # global static/shared logger instance
 logger = None
@@ -132,14 +132,14 @@ def setup_logger():
             self.error = self.error_cls(logger=self)
 
         def _process(self, level: LEVEL, msg, *args, **kwargs):
-            from gptqmodel.utils.progress import ProgressBar # hack: circular import
+            from ..utils.progress import ProgressBar  # hack: circular import
 
             columns, _ = terminal_size()
             str_msg = str(msg)
 
             global last_pb_instance
             if isinstance(last_pb_instance, ProgressBar) and not last_pb_instance.closed:
-                 buf = f'\r'
+                 buf = '\r'
                  if columns > 0:
                     str_msg += " " * columns
 

@@ -46,7 +46,7 @@ on:
         description: 'one test, one gpu. for collecting statistics'
         type: boolean
         required: false
-        default: false
+        default: true
       server:
         description: 'Choose server (zen4 or xeon5)'
         required: true
@@ -417,7 +417,7 @@ jobs:
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://${{ needs.check-vm.outputs.ip }}/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
-              curl http://${{ needs.check-vm.outputs.ip }}/gpu/status2
+              curl http://10.0.14.248/gpu/status2
               sleep 5
             else
               echo "Allocated GPU ID: $gpu_id"
@@ -429,7 +429,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
           echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
-          curl http://${{ needs.check-vm.outputs.ip }}/gpu/status2
+          curl http://10.0.14.248/gpu/status2
 
       - name: Run tests
         if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
@@ -661,12 +661,12 @@ jobs:
       - name: Clean cache
         if: always()
         run: |
-          rm ~/.cache/evalplus/*pkl || true
+          # rm ~/.cache/evalplus/*pkl || true
           pip cache purge && uv cache clean && rm -rf ./* ./.*
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
-    if: github.event.inputs.exclusive-gpu != 'true'
+    if: github.event.inputs.exclusive-gpu == 'true'
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:

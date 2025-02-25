@@ -25,9 +25,9 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.quantization import QuantizeConfig
 
 from ..looper.named_module import NamedModule
+from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer

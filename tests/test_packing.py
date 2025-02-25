@@ -17,6 +17,8 @@
 # -- do not touch
 import os
 
+from gptqmodel import BACKEND
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -83,7 +85,7 @@ class TestRepacking(unittest.TestCase):
 
     _, linear, s = gen_quant4(k, n, group_size)
 
-    def pack(self, qlinearCls):
+    def pack(self, qlinearCls, backend):
         qlinear = qlinearCls(
             bits=4,
             group_size=self.group_size,
@@ -92,6 +94,7 @@ class TestRepacking(unittest.TestCase):
             in_features=self.k,
             out_features=self.n,
             pack_dtype=self.pack_dtype,
+            backend=backend,
             bias=False)
 
         qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
@@ -99,7 +102,7 @@ class TestRepacking(unittest.TestCase):
         return qlinear
 
     def test_compare_exllama_triton_torch(self):
-        triton_linear = self.pack(TritonV2QuantLinear)
+        triton_linear = self.pack(TritonV2QuantLinear, backend=BACKEND.TRITON)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)
@@ -108,7 +111,7 @@ class TestRepacking(unittest.TestCase):
         self.assertTrue(torch.all(dequantized_qzeros == 8))
 
         # validate torch packer
-        torch_linear = self.pack(TorchQuantLinear)
+        torch_linear = self.pack(TorchQuantLinear, backend=BACKEND.TORCH)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(torch_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)

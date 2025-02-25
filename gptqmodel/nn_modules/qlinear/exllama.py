@@ -20,10 +20,11 @@ from logging import getLogger
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
+from ...utils.backend import BACKEND
+from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import BaseQuantLinear
 
 exllama_import_exception = None
 try:
@@ -103,6 +104,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.EXLLAMA_V1),
             adapter=adapter,
             register_buffers=True,
             register_buffers_in_features=in_features,

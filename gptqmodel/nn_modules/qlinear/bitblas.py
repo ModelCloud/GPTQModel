@@ -23,12 +23,12 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-from gptqmodel.utils import BACKEND
 
 from ...models._const import DEVICE, PLATFORM
 from ...utils.logger import setup_logger
+from ...adapter.adapter import Adapter, Lora
+from ...nn_modules.qlinear import PackableQuantLinear
+from ...utils import BACKEND
 
 logger = setup_logger()
 
@@ -42,7 +42,7 @@ try:
 except Exception:
     BITBLAS_AVAILABLE = False
 
-BITBLAS_INSTALL_HINT = "bitblas not installed. Please install via `pip install bitblas`."
+BITBLAS_INSTALL_HINT = "bitblas is not installed. Please install via `pip install bitblas`."
 
 
 def import_bitblas():

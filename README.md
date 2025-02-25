@@ -12,6 +12,7 @@
 </p>
   
 ## News
+* 2/22/2025 2.0.0-dev: 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. Synced `Marlin` kernel inference quality fix from upstream. Added `MRLIN_FP16`, lower-quality but faster, backend. `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress. Fixed `generation_config.json` save and load. Fix Transformers v4.49.0 compat. Fixed compat of models without `bos`. Fixed `group_size=-1` and `bits=3` packing regression. Added CI tests to track regression in kernel inference quality and sweep all bits/group_sizes.
 * 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
   Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
@@ -258,13 +259,13 @@ dynamic = {
     # layer index start at 0 
     
     # positive match: layer 19, gate module 
-    r"+:.*\.18\..*gate.*": {"bits": 8, "group_size": 64},  
+    r"+:.*\.18\..*gate.*": {"bits": 4, "group_size": 32},  
     
     # positgive match: layer 20, gate module (prefix defaults to positive if missing)
     r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  
     
     # negative match: skip layer 21, gate module
-    r"-:.*\.20\..*gate.*": {"bits": 8, "group_size": 64}, 
+    r"-:.*\.20\..*gate.*": {}, 
     
     # negative match: skip all down modules for all layers
     r"-:.*down.*": {},  

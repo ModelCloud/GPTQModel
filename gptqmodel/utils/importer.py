@@ -19,8 +19,8 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
 import torch
-from gptqmodel.adapter.adapter import Adapter
 
+from ..adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
