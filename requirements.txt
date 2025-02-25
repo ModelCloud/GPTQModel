@@ -13,3 +13,4 @@ hf_transfer>=0.1.9
 huggingface_hub>=0.28.1
 lm-eval==0.4.7
 tokenicer>=0.0.4
+logbar>=0.0.1.dev0
