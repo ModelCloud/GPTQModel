@@ -387,7 +387,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install tokenicer==0.04 -U
+          uv pip install tokenicer==0.0.4 -U
           uv pip install logbar==0.0.3 -U
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
