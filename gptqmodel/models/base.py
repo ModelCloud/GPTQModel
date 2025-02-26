@@ -45,7 +45,6 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
-from ..utils.progress import ProgressBar
 from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -821,7 +820,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count)).manual()
+        quant_modules_pb = logger.pb(range(layer_count + 1 if self.quantize_config.lm_head else layer_count)).manual()
         gpu_memorys = []
         cpu_memorys = []
         durations = []

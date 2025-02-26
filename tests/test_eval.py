@@ -19,14 +19,13 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 from typing import Type  # noqa: E402
 from typing import Union  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 

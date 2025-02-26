@@ -32,11 +32,9 @@ from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.progress import ProgressBar
 from ..utils.torch import torch_empty_cache
 
 logger = setup_logger()
-
 
 class ModuleLooper():
     def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
@@ -194,7 +192,7 @@ class ModuleLooper():
                                                   num_experts=num_experts)
 
         layer_count = len(layers)
-        quant_modules_pb = (ProgressBar(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
+        quant_modules_pb = (logger.pb(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
                             .manual()
                             .set(left_steps_offset=1))
 

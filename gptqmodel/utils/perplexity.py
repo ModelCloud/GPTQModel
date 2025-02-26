@@ -19,9 +19,9 @@ import sys
 import numpy as np
 import torch
 from datasets import load_dataset, load_from_disk
+from logbar import LogBar
 
-from ..utils.progress import ProgressBar
-
+logger = LogBar.shared()
 
 class Perplexity:
     """
@@ -150,7 +150,7 @@ class Perplexity:
         curr_ppl = 0
         all_perplexity = []
 
-        with ProgressBar(range(len(tokens[0]) // n_ctx)).title("Perplexity: - ").manual() as pb:
+        with logger.pb(range(len(tokens[0]) // n_ctx)).title("Perplexity: - ").manual() as pb:
             for i in pb:
                 # Process each batch of tokens
                 nll, count = self._process_batch(i, n_ctx, n_batch, tokens, nll, count)

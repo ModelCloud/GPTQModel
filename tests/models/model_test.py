@@ -20,7 +20,6 @@ import sys
 from typing import Dict, List
 
 from device_smi import Device
-
 from gptqmodel.models._const import CUDA_0
 
 if sys.platform == "darwin":

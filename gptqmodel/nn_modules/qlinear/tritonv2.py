@@ -19,10 +19,10 @@ from typing import Optional, Tuple
 import torch
 from packaging import version
 
-from ...utils.backend import BACKEND
-from ...models._const import DEVICE, PLATFORM
-from ...utils.logger import setup_logger
 from ...adapter.adapter import Adapter, Lora
+from ...models._const import DEVICE, PLATFORM
+from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 
 try:
