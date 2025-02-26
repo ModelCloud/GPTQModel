@@ -19,8 +19,9 @@ import sys
 import numpy as np
 import torch
 from datasets import load_dataset, load_from_disk
-from gptqmodel.utils.progress import ProgressBar
+from logbar import LogBar
 
+logger = LogBar.shared()
 
 class Perplexity:
     """
@@ -149,15 +150,15 @@ class Perplexity:
         curr_ppl = 0
         all_perplexity = []
 
-        with ProgressBar(range(len(tokens[0]) // n_ctx), info="Perplexity: - ") as progress:
-            for i in progress:
+        with logger.pb(range(len(tokens[0]) // n_ctx)).title("Perplexity: - ").manual() as pb:
+            for i in pb:
                 # Process each batch of tokens
                 nll, count = self._process_batch(i, n_ctx, n_batch, tokens, nll, count)
 
                 # Calculate and display the current perplexity
                 curr_ppl = np.exp(nll / count)
                 all_perplexity.append(curr_ppl)
-                progress.info(f"Perplexity: {curr_ppl:.4f}")
+                pb.title(f"Perplexity: {curr_ppl:.4f}").draw()
 
         return all_perplexity
 

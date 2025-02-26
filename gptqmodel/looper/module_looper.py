@@ -18,24 +18,23 @@ import time
 from typing import List
 
 import torch
-from gptqmodel.looper.dequantize_processor import DequantizeProcessor
-from gptqmodel.looper.eora_processor import EoraProcessor
-from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.input_cache import InputCache
-from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models._const import SUPPORTS_MODULE_TYPES
-from gptqmodel.nn_modules.hooked_linear import replace_linear_with_hooked_linear
-from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
-                                   get_moe_layer_modules, move_to, nested_move_to)
-from gptqmodel.utils.progress import ProgressBar
-from gptqmodel.utils.torch import torch_empty_cache
+
+from ..looper.dequantize_processor import DequantizeProcessor
+from ..looper.eora_processor import EoraProcessor
+from ..looper.gptq_processor import GPTQProcessor
+from ..looper.input_cache import InputCache
+from ..looper.loop_processor import LoopProcessor
+from ..looper.named_module import NamedModule
+from ..models import BaseGPTQModel
+from ..models._const import SUPPORTS_MODULE_TYPES
+from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
+from ..quantization.gptq import CPU
+from ..utils.logger import setup_logger
+from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
+                           get_moe_layer_modules, move_to, nested_move_to)
+from ..utils.torch import torch_empty_cache
 
 logger = setup_logger()
-
 
 class ModuleLooper():
     def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
@@ -193,7 +192,9 @@ class ModuleLooper():
                                                   num_experts=num_experts)
 
         layer_count = len(layers)
-        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
+        quant_modules_pb = (logger.pb(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
+                            .manual()
+                            .set(left_steps_offset=1))
 
         for processor in self.processors:
             processor.layer_count = layer_count
@@ -208,11 +209,11 @@ class ModuleLooper():
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
-                quant_modules_pb.info("Quantizing lm_head")
+                quant_modules_pb.title("Quantizing lm_head").draw()
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
                 layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.info(f"Quantizing layer {layer_index} of {layer_count - 1}")
+                quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
                 module = layers[layer_index]
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():

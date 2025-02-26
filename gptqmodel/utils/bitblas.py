@@ -23,7 +23,6 @@ from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights
-from .progress import ProgressBar
 from .torch import torch_empty_cache
 
 logger = setup_logger()
@@ -92,7 +91,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
         # Note that due to tvm compilation of per layer modules shapes, the first layer loop is
         # relatively much slower if caching is not available. estimate time remaining is highly inaccurate
-        for name, module in ProgressBar(model.named_modules(), info=message, total=len(list(model.named_modules()))):
+        for name, module in logger.pb(list(model.named_modules())).title(message):
             if not isinstance(module, model_quantlinear):
                 continue
 

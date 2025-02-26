@@ -16,11 +16,11 @@
 
 from typing import Dict
 
-from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.torch import torch_compile
+from ..looper.loop_processor import LoopProcessor
+from ..looper.named_module import NamedModule
+from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..utils.logger import setup_logger
+from ..utils.torch import torch_compile
 
 logger = setup_logger()
 

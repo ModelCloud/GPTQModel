@@ -1099,6 +1099,7 @@ class TestsQ4ExllamaV1(ModelTest):
             out_features=n,
             bias=False,
             pack_dtype=pack_dtype,
+            backend=BACKEND.EXLLAMA_V1,
         )
         self.assertTrue(isinstance(linear, ExllamaQuantLinear))
 

@@ -17,12 +17,13 @@
 
 import torch
 import torch.nn as nn
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
-from gptqmodel.utils.logger import setup_logger
 from transformers import PreTrainedModel
 
+from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
 
 logger = setup_logger()
@@ -67,6 +68,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.TORCH),
             adapter=adapter,
             register_buffers=True,
             **kwargs)

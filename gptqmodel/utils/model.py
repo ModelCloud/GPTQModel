@@ -33,32 +33,28 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
-from .progress import ProgressBar
 from .torch import torch_empty_cache, torch_new_stream_ctx
 
 logger = setup_logger()
-
 
 def recurse_getattr(obj, attr: str):
     """
@@ -226,6 +222,7 @@ def make_quant(
                 device=device,
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
+                backend=backend,
                 adapter=qcfg.adapter,
             )
             logger.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
@@ -252,6 +249,7 @@ def create_quant_layer(
         device: DEVICE,
         lm_head_name: str,
         pack_dtype: torch.dtype,
+        backend: BACKEND,
         adapter: Optional[Adapter] = None,
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -334,6 +332,7 @@ def create_quant_layer(
             #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
             name=name,
             lm_head_name=lm_head_name,
+            backend=backend,
             adapter=adapter,
         )
         new_layer.device = ori_layer_device
@@ -354,17 +353,11 @@ def hf_convert_gptq_v1_to_v2_format(
     else:
         return model, False
 
-# TODO: FIXME: the v1 -> v2 zeropoint offsets are assuming INT32 pack_dtype
 def convert_gptq_v1_to_v2_format(
     model,
     cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
-
-    # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
-        return model
-
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
@@ -501,11 +494,9 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result, layers, pbar=None):
+def pack_module(name, qModules, quant_result, layers):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
-        if pbar:
-            pbar.info(f"Packing {name}")
         r = quant_result[name]
         scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device
@@ -518,8 +509,6 @@ def pack_module(name, qModules, quant_result, layers, pbar=None):
         )
         qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
-        if pbar:
-            pbar.progress()
 
 
 def pack_model(
@@ -574,9 +563,12 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with ProgressBar(total=len(names)) as pbar:
+        with logger.pb(names).manual() as pb:
             def wrapper(name):
-                pack_module(name, qModules, quant_result, modules, pbar)
+                # TODO FIX, thread pool executor does not advance iterator
+                pb.next()
+                pb.title(f"Packing {name}").draw()
+                pack_module(name, qModules, quant_result, modules)
 
             for _ in executor.map(wrapper, names):
                 pass

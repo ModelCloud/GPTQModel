@@ -19,17 +19,17 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 from typing import Type  # noqa: E402
 from typing import Union  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 
-class TestEval(unittest.TestCase):
+class TestEval(ModelTest):
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
@@ -54,7 +54,7 @@ class TestEval(unittest.TestCase):
             results = GPTQModel.eval(model_or_id_or_path=self.MODEL_ID,
                                      framework=framework,
                                      tasks=[task],
-                                     batch_size=16,
+                                     batch_size=1,
                                      output_path=output_path,
                                      llm_backend=llm_backend,
                                      model_args=model_args,

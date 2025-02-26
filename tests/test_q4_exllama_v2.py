@@ -62,6 +62,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             out_features=n,
             bias=False,
             pack_dtype=pack_dtype,
+            backend=BACKEND.EXLLAMA_V2,
         )
 
         self.assertTrue(isinstance(linear, ExllamaV2QuantLinear))

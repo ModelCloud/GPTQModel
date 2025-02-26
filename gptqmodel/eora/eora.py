@@ -17,9 +17,10 @@
 from typing import Dict, Tuple
 
 import torch
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.utils.logger import setup_logger
 from torch import Tensor
+
+from ..looper.named_module import NamedModule
+from ..utils.logger import setup_logger
 
 logger = setup_logger()
 

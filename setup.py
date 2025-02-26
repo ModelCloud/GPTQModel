@@ -329,7 +329,7 @@ setup(
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.9.6", "isort==6.0.0"],
-        'vllm': ["vllm>=0.6.4",  "flashinfer-python>=0.2.1"],
+        'vllm': ["vllm>=0.7.3",  "flashinfer-python>=0.2.1"],
         'sglang': ["sglang[srt]>=0.3.2",  "flashinfer-python>=0.2.1"],
         'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],

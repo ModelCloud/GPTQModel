@@ -22,8 +22,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.progress import ProgressBar  # noqa: E402
+from logbar import LogBar
 
+logger = LogBar.shared()
 
 class BenchmarkTest(unittest.TestCase):
     MODEL_id = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
@@ -64,9 +65,8 @@ class BenchmarkTest(unittest.TestCase):
                                max_new_tokens=self.MAX_NEW_TOKENS)
 
         times = []
-        pb = ProgressBar(range(self.NUM_RUNS))
-        for i in pb:
-            pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
+        pb = logger.pb(range(self.NUM_RUNS)).title("Run")
+        for _ in pb:
             start_time = time.time()
             _ = model.generate(**inp,min_new_tokens=self.MIN_NEW_TOKENS,
                                  max_new_tokens=self.MAX_NEW_TOKENS)

@@ -45,7 +45,6 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
-from ..utils.progress import ProgressBar
 from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -380,10 +379,10 @@ class BaseGPTQModel(nn.Module):
         if adapter is not None:
             self.quantize_config.adapter = adapter
 
-        from gptqmodel.adapter.adapter import Lora
-        from gptqmodel.looper.eora_processor import EoraProcessor
-        from gptqmodel.looper.gptq_processor import GPTQProcessor
-        from gptqmodel.looper.module_looper import ModuleLooper
+        from ..adapter.adapter import Lora
+        from ..looper.eora_processor import EoraProcessor
+        from ..looper.gptq_processor import GPTQProcessor
+        from ..looper.module_looper import ModuleLooper
 
         # has lora process
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
@@ -454,10 +453,10 @@ class BaseGPTQModel(nn.Module):
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
-        from gptqmodel.adapter.adapter import Lora
-        from gptqmodel.looper.dequantize_processor import DequantizeProcessor
-        from gptqmodel.looper.eora_processor import EoraProcessor
-        from gptqmodel.looper.module_looper import ModuleLooper
+        from ..adapter.adapter import Lora
+        from ..looper.dequantize_processor import DequantizeProcessor
+        from ..looper.eora_processor import EoraProcessor
+        from ..looper.module_looper import ModuleLooper
 
         self.quantize_config.adapter = adapter
 
@@ -821,7 +820,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        quant_modules_pb = ProgressBar(range(layer_count + 1 if self.quantize_config.lm_head else layer_count))
+        quant_modules_pb = logger.pb(range(layer_count + 1 if self.quantize_config.lm_head else layer_count)).manual()
         gpu_memorys = []
         cpu_memorys = []
         durations = []
@@ -836,11 +835,11 @@ class BaseGPTQModel(nn.Module):
         for module_index in quant_modules_pb:
             is_lm_head_module = module_index >= layer_count
             if is_lm_head_module:
-                quant_modules_pb.info("Quantizing lm_head")
+                quant_modules_pb.title("Quantizing lm_head").draw()
                 module = get_module(self.model, key=self.lm_head)
                 layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
-                quant_modules_pb.info(f"Quantizing layer {module_index} of {layer_count - 1}")
+                quant_modules_pb.title(f"Quantizing layer {module_index} of {layer_count - 1}").draw()
                 module = layers[module_index]
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
@@ -981,7 +980,7 @@ class BaseGPTQModel(nn.Module):
 
                 for name_index, name in enumerate(subset):
                     layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
-                    quant_modules_pb.info(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
+                    quant_modules_pb._subtitle(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     ## Need to return the quantized_weight for offloading

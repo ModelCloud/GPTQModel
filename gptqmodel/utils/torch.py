@@ -18,8 +18,9 @@ import gc as py_gc
 from typing import Callable, Union
 
 import torch
-from gptqmodel.utils.logger import setup_logger
 from packaging.version import Version
+
+from ..utils.logger import setup_logger
 
 HAS_CUDA = False
 HAS_XPU = False
@@ -54,7 +55,7 @@ except BaseException:
     pass
 
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
-    from gptqmodel.models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
+    from ..models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
 
     if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
         return module

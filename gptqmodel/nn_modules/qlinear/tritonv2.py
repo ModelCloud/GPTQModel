@@ -17,10 +17,11 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
 from packaging import version
 
+from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 
@@ -95,6 +96,7 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.TRITON),
             adapter=adapter,
             register_buffers=True,
             **kwargs)

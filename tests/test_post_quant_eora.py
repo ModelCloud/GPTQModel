@@ -22,7 +22,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
@@ -76,7 +75,7 @@ class TestEoraPostQuant(ModelTest):
         desc_act = True
         rank = 256
         batch_size = 1
-        calibration_dataset_rows = 1024
+        calibration_dataset_rows = 512
         calibration_dataset_concat_size = 0  # disable
         auto_gc = False
         adapter_file_name = "eora.safetensors"
@@ -93,11 +92,7 @@ class TestEoraPostQuant(ModelTest):
             "adapter_file_name": adapter_file_name,
         }
 
-        calibration_dataset = load_dataset(
-            "allenai/c4",
-            data_files="en/c4-train.00001-of-01024.json.gz",
-            split="train"
-        ).select(range(calibration_dataset_rows))["text"]
+        calibration_dataset = self.load_dataset(rows=calibration_dataset_rows)["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
