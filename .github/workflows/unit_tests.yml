@@ -567,7 +567,7 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install colorlog
+            uv pip install colorlog logbar
           fi
 
           if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
