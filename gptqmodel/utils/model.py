@@ -470,7 +470,7 @@ def convert_gptq_v2_to_v1_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for ipex
-    if qlinear_kernel == [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
