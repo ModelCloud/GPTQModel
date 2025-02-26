@@ -387,7 +387,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install colorlog git+https://github.com/ModelCloud/Tokenicer -U
+          uv pip install colorlog logbar git+https://github.com/ModelCloud/Tokenicer -U
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }} --extra-index-url https://pypi.org/simple
           echo "===== install dist/whl ====="
@@ -547,7 +547,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install -U transformers colorlog
+          uv pip install -U transformers colorlog logbar
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
              [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
              [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
