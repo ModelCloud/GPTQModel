@@ -43,13 +43,12 @@ on:
         required: false
         default: '20'
       exclusive-gpu:
-        description: 'one test, one gpu. for collecting statistics'
+        description: 'one test per gpu'
         type: boolean
         required: false
         default: true
       server:
-        description: 'Choose server (zen4 or xeon5)'
-        required: true
+        description: 'build server'
         type: choice
         options:
           - '["self-hosted", "zen4"]'
