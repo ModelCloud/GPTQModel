@@ -724,6 +724,9 @@ jobs:
           echo "=== installing test tools"
           uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
+          echo "=== installing requirements"
+          uv pip install -r requirements.txt -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+
           echo "=== installing gptqmodel"
           uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
