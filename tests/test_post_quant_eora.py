@@ -22,7 +22,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402

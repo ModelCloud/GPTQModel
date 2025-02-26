@@ -52,11 +52,9 @@ from ..quantization.config import dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
-from logbar.progress import ProgressBar
 from .torch import torch_empty_cache, torch_new_stream_ctx
 
 logger = setup_logger()
-
 
 def recurse_getattr(obj, attr: str):
     """
@@ -565,7 +563,7 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with ProgressBar(names).manual() as pb:
+        with logger.pb(names).manual() as pb:
             def wrapper(name):
                 # TODO FIX, thread pool executor does not advance iterator
                 pb.next()

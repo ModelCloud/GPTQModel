@@ -25,9 +25,10 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest
 
 from gptqmodel import GPTQModel
-from logbar.progress import ProgressBar
+from logbar import LogBar
 from transformers import AutoTokenizer
 
+logger = LogBar.shared()
 
 class InferenceSpeed(unittest.TestCase):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2"
@@ -68,7 +69,7 @@ class InferenceSpeed(unittest.TestCase):
 
         # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
         if warmup_runs > 0:
-            pb = ProgressBar(range(warmup_runs)).title("Warmup")
+            pb = logger.pb(range(warmup_runs)).title("Warmup")
             for _ in pb:
                 start_time = time.time()
                 result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)

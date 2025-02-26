@@ -32,7 +32,6 @@ from models.model_test import ModelTest  # noqa: E402
 from tabulate import tabulate  # noqa: E402
 
 
-
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
     #NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
