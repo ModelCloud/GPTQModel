@@ -33,6 +33,8 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
@@ -348,6 +350,10 @@ def hf_convert_gptq_v1_to_v2_format(
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
+        # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
+        if qlinear_kernel not in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+            return model, False
+
         cfg = QuantizeConfig(bits=bits)
         return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
     else:
@@ -464,7 +470,7 @@ def convert_gptq_v2_to_v1_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for ipex
-    if qlinear_kernel == IPEXQuantLinear:
+    if qlinear_kernel == [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
