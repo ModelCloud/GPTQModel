@@ -493,16 +493,11 @@ def ModelLoader(cls):
                     f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
-            # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-            if preload_qlinear_kernel not in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
-                t = time.time()
-                logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
-                model = convert_gptq_v1_to_v2_format(
-                    model,
-                    cfg=qcfg,
-                    qlinear_kernel=preload_qlinear_kernel,
-                )
-                logger.info(f"Format: Conversion complete: {time.time() - t}s")
+            model = convert_gptq_v1_to_v2_format(
+                model,
+                cfg=qcfg,
+                qlinear_kernel=preload_qlinear_kernel,
+            )
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
