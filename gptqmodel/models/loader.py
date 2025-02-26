@@ -17,15 +17,11 @@
 from __future__ import annotations
 
 import os
-import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
-
-from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
@@ -46,7 +42,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
+from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
