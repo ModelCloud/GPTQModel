@@ -95,7 +95,7 @@ class InferenceSpeed(unittest.TestCase):
             print(f"New Token Per Second: {avg_tokens_per_second} token/s")
             print(f"****************  {backend} Warm-up Result Info End****************")
 
-        pb = ProgressBar(range(self.NUM_RUNS)).title("Run")
+        pb = logger.pb(range(self.NUM_RUNS)).title("Run")
         for _ in pb:
             start_time = time.time()
             result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
