@@ -33,6 +33,8 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
@@ -353,13 +355,22 @@ def hf_convert_gptq_v1_to_v2_format(
     else:
         return model, False
 
+# Optionally convert weight from gptq_v1 to v2 format if Kernel is compatible with v2
 def convert_gptq_v1_to_v2_format(
     model,
     cfg: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
+    # skip v2 to v1 conversion for gptq_v1 kernels
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+        return model
+
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
+        t = time.time()
+        logger.info(
+            f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+
         for _, submodule in model.named_modules():
             # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
             # additions here do not overflow.
@@ -438,6 +449,8 @@ def convert_gptq_v1_to_v2_format(
                 else:
                     raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
+        logger.info(f"Format: Conversion complete: {time.time() - t}s")
+
     return model
 
 
@@ -457,14 +470,14 @@ def hf_convert_gptq_v2_to_v1_format(
     else:
         return model, False
 
-
+# Optionally convert weight from gptq_v2 to v1 export format if Kernel is compatible with v2
 def convert_gptq_v2_to_v1_format(
     model,
     quantize_config: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
-    # skip v2 to v1 conversion for ipex
-    if qlinear_kernel == IPEXQuantLinear:
+    # skip v2 to v1 conversion for gptq_v1 kernels
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
