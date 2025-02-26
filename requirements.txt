@@ -12,4 +12,4 @@ pillow>=11.1.0
 hf_transfer>=0.1.9
 huggingface_hub>=0.28.1
 tokenicer>=0.0.4
-logbar>=0.0.2
+logbar==0.0.3
