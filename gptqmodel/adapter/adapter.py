@@ -149,10 +149,9 @@ class Lora(Adapter):
         lora_A_weight_key = f"{weight_key}.lora_A.weight"
         lora_B_weight_key = f"{weight_key}.lora_B.weight"
 
-        print(f"lora_A_weight_key = {lora_A_weight_key}, lora_B_weight_key = {lora_B_weight_key}")
+        # print(f"lora_A_weight_key = {lora_A_weight_key}, lora_B_weight_key = {lora_B_weight_key}")
         pop_keys = []
-        cached_items = adapter_load_cache.items()
-        for k, v in cached_items:
+        for k, v in adapter_load_cache.items():
             if k.endswith(lora_A_weight_key):
                 lora_A = v.T
                 pop_keys.append(k)
