@@ -707,7 +707,7 @@ class BaseGPTQModel(nn.Module):
             lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.quantize_config.dynamic is None:
                 self.quantize_config.dynamic = {self.lm_head: lm_head_quant_config}
-            elif self.quantize_config.dynamic_get(self.lm_head, default_value=None) is None:
+            elif self.quantize_config.dynamic_get(self.lm_head, default=None) is None:
                 self.quantize_config.dynamic[self.lm_head] = lm_head_quant_config
 
         forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False

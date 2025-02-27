@@ -1,13 +1,11 @@
 import json
+import os
 
-import torch
 from dataclasses import dataclass, dataclass, field, asdict, fields
-from typing import Optional, Union, Literal, Any
+from typing import Optional, Union, Literal, Any, Set
 
-from transformers import AutoConfig
-
-from gptqmodel.adapter.remote import resolve_path
-from gptqmodel.utils.logger import setup_logger
+from ..adapter.remote import resolve_path
+from ..utils.logger import setup_logger
 
 log = setup_logger()
 
@@ -304,13 +302,27 @@ class LoraConfig():
         # remove all None valued Keys and values that are empty (str, list, dict, set
         removed_keys = []
         for k, v in kv.items():
-            if v is None or v in ["", {}, []]:
+            if v in [None, "", {}, []]:
                 removed_keys.append(k)
+            # FIX set is not serializable by json
+            elif isinstance(v, Set):
+                kv[k] = list(v)
 
         for k in removed_keys:
             kv.pop(k)
 
         return kv
+
+    def save_pretrained(self, save_dir: str):
+        from ..adapter.adapter import HF_ADAPTER_CONFIG_FILE_NAME
+
+        log.info(f"Adapter: Saving EoRA/Lora config to -> `{save_dir}`")
+
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, HF_ADAPTER_CONFIG_FILE_NAME), "w", encoding="utf-8") as f:
+            d = self.to_dict()
+            log.info(f"Adapter: dict = `{d}`")
+            json.dump(d, f, indent=2)
 
     def __post_init__(self):
         self.peft_type = "LORA"
@@ -323,15 +335,15 @@ class LoraConfig():
 
         # if target_modules is a regex expression, then layers_to_transform should be None
         if isinstance(self.target_modules, str) and self.layers_to_transform is not None:
-            raise ValueError("`layers_to_transform` cannot be used when `target_modules` is a str.")
+            raise ValueError("`Adapter: layers_to_transform` cannot be used when `target_modules` is a str.")
 
         # if target_modules is a regex expression, then layers_pattern should be None
         if isinstance(self.target_modules, str) and self.layers_pattern is not None:
-            raise ValueError("`layers_pattern` cannot be used when `target_modules` is a str.")
+            raise ValueError("Adapter: `layers_pattern` cannot be used when `target_modules` is a str.")
 
         # check for layers_to_transform and layers_pattern
         if self.layers_pattern and not self.layers_to_transform:
-            raise ValueError("When `layers_pattern` is specified, `layers_to_transform` must also be specified. ")
+            raise ValueError("Adapter: When `layers_pattern` is specified, `layers_to_transform` must also be specified. ")
 
         if self.use_dora and self.megatron_config:
             raise ValueError("Adapter: DoRA is not supported")
