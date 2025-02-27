@@ -94,16 +94,16 @@ class TorchQuantLinear(PackableQuantLinear):
         super().post_init()
 
         # torch benefits the most from torch.compile, enable it by default
-        self.optimize()
+        # self.optimize(skip_adapter=True)
 
-    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False, skip_adapter: bool = False):
         if self.optimized:
             return
 
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
 
-        if self.adapter:
+        if not skip_adapter and self.adapter:
             self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
         super().optimize()

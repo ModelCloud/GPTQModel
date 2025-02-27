@@ -33,8 +33,6 @@ class TestKernelOutput(unittest.TestCase):
 
     target = 'model.layers.6.self_attn.v_proj'
 
-
-
     @classmethod
     def setUpClass(cls):
         lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"  # adapter_model.safetensors
