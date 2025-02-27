@@ -1,7 +1,7 @@
 import json
 import os
 
-from dataclasses import dataclass, dataclass, field, asdict, fields
+from dataclasses import dataclass, field, asdict, fields
 from typing import Optional, Union, Literal, Any, Set
 
 from ..adapter.remote import resolve_path
@@ -290,6 +290,13 @@ class LoraConfig():
                 "the bias of those parameters can be taken into account."
             )
         },
+    )
+
+    # from PeftConfigMixin
+    task_type: Optional[str] = field(default=None, metadata={"help": "The type of task."})
+    peft_type: Optional[str] = field(default=None, metadata={"help": "The type of PEFT model."})
+    auto_mapping: Optional[dict] = field(
+        default=None, metadata={"help": "An auto mapping dict to help retrieve the base model class if needed."}
     )
 
     def to_dict(self):
