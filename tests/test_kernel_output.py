@@ -17,7 +17,7 @@ CUDA = torch.device("cuda:0")
 
 class TestKernelOutput(unittest.TestCase):
     model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/"
-    lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/" #adapter_model.safetensors
+
     target_qliner_map = {
         # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         # # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
@@ -32,23 +32,29 @@ class TestKernelOutput(unittest.TestCase):
     }
 
     target = 'model.layers.6.self_attn.v_proj'
-    adapter = Lora(
-        rank=128,
-        path=lora_path)
 
-    m = 1
-    k = -1
-    x = None # random X input of shape (m, k)
 
-    def setUp(self):
-        self.adapter.post_init(self.target, device=CUDA) # trigger adapter weight load from disk
-        self.k = self.adapter.lora_A.shape[1]
-        self.x = torch.rand((self.m, self.k), device=CUDA, dtype=torch.float16)
+
+    @classmethod
+    def setUpClass(cls):
+        lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"  # adapter_model.safetensors
+
+        cls.m = 1
+        cls.k = -1
+        cls.x = None  # random X input of shape (m, k)
+
+        cls.adapter = Lora(
+            rank=128,
+            path=lora_path)
+
+        cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
+        cls.k = cls.adapter.lora_A.shape[1]
+        cls.x = torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16)
         Adapter.reset_loader_cache() # hack reset loader
 
         # TORCH as reference output
-        self.torch_kernel_out_with_lora = self.forward(backend=BACKEND.TORCH, adapter=self.adapter)
-        self.torch_kernel_out = self.forward(backend=BACKEND.TORCH)
+        cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH)
+        cls.torch_kernel_out_with_lora = cls.forward(cls, backend=BACKEND.TORCH, adapter=cls.adapter)
 
     def forward(self, backend, adapter=None):
         model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter)
