@@ -1,14 +1,14 @@
 import os.path
 import unittest
+from typing import Dict
 
 import torch
 from parameterized import parameterized
 from safetensors.torch import load_file
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.model import find_modules
+from gptqmodel.utils.model import find_modules, convert_gptq_v2_to_v1_format
 
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
@@ -45,18 +45,37 @@ class TestPackable(unittest.TestCase):
         del weights
 
     @parameterized.expand(
-        list(QLINEAR_DICT.keys())
+        [
+            (BACKEND.EXLLAMA_V1, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.CUDA, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.CUDA, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.IPEX, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.MARLIN, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
+            (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
+        ]
     )
-    def test_post_init(self, backend: BACKEND):
+    def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
         model = GPTQModel.load(self.model_id, backend=backend, device_map="auto")
+        model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
+
         module = find_modules(model.model, [self.QLINEAR_DICT[backend]])[self.TARGET]
-        # assert len(modules) == 1
         state_dict = module.state_dict()
         device = module.qweight.data.device
-        assert torch.equal(state_dict["qweight"], self.orgi_module_qweight.to(device))
-        # assert torch.equal(state_dict["qzeros"], self.orgi_module_qzeros.to(device))
-        assert torch.equal(state_dict["scales"], self.orgi_module_scales.to(device))
-        assert torch.equal(state_dict["g_idx"], self.orgi_module_g_idx.to(device))
+
+        def check(stat, key, expect_tensor):
+            r = torch.equal(stat[key], expect_tensor)
+            if equal[key]:
+                assert r
+            else:
+                assert not r
+
+        check(state_dict, "qweight", self.orgi_module_qweight.to(device))
+        check(state_dict, "qzeros", self.orgi_module_qzeros.to(device))
+        check(state_dict, "scales", self.orgi_module_scales.to(device))
+        check(state_dict, "g_idx", self.orgi_module_g_idx.to(device))
 
         del state_dict
         del module
