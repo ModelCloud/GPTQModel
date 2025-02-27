@@ -521,7 +521,7 @@ class GPTQModel:
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
 
-            adapter.validate_path(local_only=True)
+            adapter.validate_path(local=True)
 
             quantized_model = GPTQModel.load(
                 model_id_or_path=quantized_model_id_or_path,

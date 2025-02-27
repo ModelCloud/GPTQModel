@@ -10,22 +10,35 @@ from ..utils.logger import setup_logger
 
 logger = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
+HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
+HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
 # TODO FIX ME: cache of adapter tensors loaded from disk
-adapter_load_cache = None
+adapter_load_cache: Dict[str, torch.Tensor] = None
 
 class Adapter():
     def __init__(self, rank: int, path: str = None):
         self.rank = rank
         self.path = path.lower().strip() if isinstance(path, str) else path
 
-    def validate_path(self, local_only=False):
+    @classmethod
+    def reset_loader_cache(cls):
+        global adapter_load_cache
+        adapter_load_cache = None
+
+    def validate_path(self, local=False):
         if not self.path or not isinstance(self.path, str):
             raise ValueError("Adapter: `path` str is required.")
 
-        if local_only:
+        # path should not be a file but a directory
+        if self.path.endswith(".safetensors"):
+            raise ValueError(
+                f"Adapter: `path` must be a directory path or repo depending if you are saving (directory path) or loading (repo): actual = `{self.path}`")
+
+        if local:
             if self.path.startswith("http"):
                 raise ValueError(f"Adapter: `path` str in this context must be a local os path: actual = `{self.path}`.")
+
 
     # override me
     def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
@@ -99,9 +112,9 @@ class Lora(Adapter):
 
         global adapter_load_cache
         if adapter_load_cache is None:
-            if os.path.isfile(self.path):
-                lora_path = self.path
-                logger.info(f"Adapter: Loading `{self.path}` tensors from disk")  # {adapter_load_cache}
+            if os.path.isdir(self.path):
+                lora_path = f"{self.path.removesuffix("/")}/{HF_ADAPTER_FILE_NAME}"
+                logger.info(f"Adapter: Loading EoRA weights from disk: `{lora_path}`")  # {
             elif self.path.startswith("http"):
                 from huggingface_hub import hf_hub_download
                 result = self.parse_url(self.path)
@@ -117,7 +130,7 @@ class Lora(Adapter):
                         for chunk in response.iter_content(chunk_size=8192):
                             f.write(chunk)
                 else:
-                    raise Exception(f"Adapter: Lora path is invalid: `{self.path}`")
+                    raise ValueError(f"Adapter: Lora path is invalid: `{self.path}`")
             else:
                 from huggingface_hub import HfApi, hf_hub_download
                 files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora_test.safetensors"]]
@@ -133,12 +146,25 @@ class Lora(Adapter):
         weight_key = weight_key.lower()
 
         # hack for HF Auto compat
-        if not f"{weight_key}.lora_A.weight" in adapter_load_cache:
-            weight_key = weight_key.removeprefix("model.")
+        lora_A_weight_key = f"{weight_key}.lora_A.weight"
+        lora_B_weight_key = f"{weight_key}.lora_B.weight"
 
-        #print(f"loaded lora weight keys: {adapter_load_cache.keys()}")
-        lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
-        lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
+        print(f"lora_A_weight_key = {lora_A_weight_key}, lora_B_weight_key = {lora_B_weight_key}")
+        pop_keys = []
+        cached_items = adapter_load_cache.items()
+        for k, v in cached_items:
+            if k.endswith(lora_A_weight_key):
+                lora_A = v.T
+                pop_keys.append(k)
+            elif k.endswith(lora_B_weight_key):
+                lora_B = v.T
+                pop_keys.append(k)
+            else:
+                pass
+                #logger.info(f"Adapter: cannot find weight key `{k}` in repo = `{self.path}`")
+
+        for k in pop_keys:
+            adapter_load_cache.pop(k)
 
         # since loder cache is singleton, we need to reset to None to ci loop tests can pass
         if len(adapter_load_cache) == 0:

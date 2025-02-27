@@ -35,6 +35,7 @@ from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
 
+from ..adapter.adapter import HF_ADAPTER_WEIGHT_KEY_PREFIX, HF_ADAPTER_FILE_NAME
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
                                    META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
                                    META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
@@ -70,38 +71,31 @@ def ModelWriter(cls):
 
     cls.save_pretrained = save_pretrained
 
-    def eora_save(self, eora_path: str):
+    def _eora_save(self, eora_path: str):
         # save lora tensors
-        if hasattr(self, 'lora_results'):  # hack: TODO
+        if hasattr(self, 'lora_results'):  # TODO REFRACTOR
             weights = {}
 
             # convert the dict into safetensors compatible dict
             for key, d in self.lora_results.items():
+                key = key.lower().removeprefix('model.').removeprefix(
+                    'model.')  # some HF models use model. or model.model.
+
                 # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
-                key = key.lower().removeprefix("model.")
+                key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"
                 for lora_key, lora_weight in d.items():
                     if isinstance(lora_weight, torch.Tensor):
                         weights[f"{key}.{lora_key}"] = lora_weight
-                        logger.info(f"lora weight: `{key}.{lora_key}`")
+                        logger.info(f"Adapter: EoRA weights found -> `{key}.{lora_key}`")
 
-            # then lora_path from `save()` then lora.path
-            eora_path = eora_path if eora_path else self.quantize_config.adapter.path
-
-            if not eora_path:
-                raise ValueError(f"Invalid EoRA lora path: actual = `{eora_path}`")
-
-            is_file = eora_path.endswith(".safetensors")
-
-            if not is_file:
-                eora_path = f"{eora_path}/eora.safetensors"
-
-            logger.info(f"Found EoRA lora weights: saving to {eora_path}")
-
+            eora_path = f"{eora_path.removesuffix("/")}/{HF_ADAPTER_FILE_NAME}"
+            logger.info(f"Adapter: Saving EoRA weights to -> `{eora_path}`")
             os.makedirs(os.path.dirname(eora_path), exist_ok=True)
-
             save_file(tensors=weights, filename=eora_path, metadata={"format": "pt"})
 
-    cls.eora_save = eora_save
+            del self.lora_results  # TODO REFRACTOR
+
+    cls.eora_save = _eora_save
 
     def save_quantized(
             self,
@@ -368,7 +362,7 @@ def ModelWriter(cls):
                     f.write(content)
 
         # save lora
-        eora_save(self, eora_path=eora_path)
+        _eora_save(self, eora_path=eora_path)
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
