@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Union, Tuple, Optional
 from urllib.parse import urlparse
@@ -197,9 +198,8 @@ class Lora(Adapter):
             elif k.endswith(lora_B_weight_key):
                 lora_B = v.T
                 pop_keys.append(k)
-            else:
-                pass
-                #logger.info(f"Adapter: cannot find weight key `{k}` in repo = `{self.path}`")
+
+
         if pop_keys:
             for k in pop_keys:
                 lora_weights.pop(k) # releasee lora weights from cache memory
@@ -210,7 +210,12 @@ class Lora(Adapter):
                 logger.info("Adapter: Consumed all Lora weights")
 
         else:
-            logger.warn("Adapter: Lora weights not found for `{weight_key}`")
+            logger.warn(f"Adapter: Lora weights not found for `{weight_key}`")
+
+        assert lora_A is not None and lora_B is not None, f"Adapter: `lora_A` and `lora_B` must both be present in the weights: actual = `{lora_A}` and `{lora_B}`"
+
+        # check for rank override from base config
+        self.dynamic_rank_override(lora_cfg=lora_cfg, weight_key=weight_key)
 
         # # since loder cache is singleton, we need to reset to None to ci loop tests can pass
         # if len(lora_weights) == 0:
@@ -226,6 +231,21 @@ class Lora(Adapter):
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
+
+    def dynamic_rank_override(self, lora_cfg: LoraConfig, weight_key: str) -> bool:
+        assert lora_cfg.rank_pattern is not None and weight_key is not None
+        if lora_cfg.rank_pattern:
+            for k, v in lora_cfg.rank_pattern.items():
+                assert isinstance(k, str) and isinstance(v, int)
+                k = k.lower()
+                assert v > 0 # check for invalid rank range
+                # first do string full match, then suffix match, then regex match
+                if weight_key == k or k.endswith(weight_key) or re.match(k, weight_key):
+                    self.rank = v
+                    logger.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
+                    return True
+
+        return False
 
     def parse_url(self, url: str):
         parsed_url = urlparse(url)
