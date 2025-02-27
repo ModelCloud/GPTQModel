@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 import safetensors
 import torch
+from peft import LoraConfig
 
 from ..utils.logger import setup_logger
 
@@ -17,7 +18,7 @@ HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 adapter_load_cache: Dict[str, torch.Tensor] = None
 
 class Adapter():
-    def __init__(self, rank: int, path: str = None):
+    def __init__(self, rank: int = None, path: str = None):
         self.rank = rank
         self.path = path.lower().strip() if isinstance(path, str) else path
 
@@ -112,6 +113,17 @@ class Lora(Adapter):
 
         global adapter_load_cache
         if adapter_load_cache is None:
+            # get lora config
+            lora_cfg = LoraConfig.from_pretrained(self.path)
+            if not isinstance(lora_cfg, LoraConfig):
+                raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
+
+            if self.rank is None:
+                self.rank = lora_cfg.r
+            else:
+                if self.rank != lora_cfg.r:
+                    raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
+
             if os.path.isdir(self.path):
                 lora_path = f"{self.path.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
                 logger.info(f"Adapter: Loading EoRA weights from disk: `{lora_path}`")  # {
@@ -140,6 +152,8 @@ class Lora(Adapter):
                     # print(f"Adapter tensors loaded from `{self.path}`")
                 else:
                     raise Exception(f"Adapter: There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
+
+
 
             adapter_load_cache = safetensors.torch.load_file(lora_path)
 
