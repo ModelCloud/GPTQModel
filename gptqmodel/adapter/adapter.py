@@ -1,18 +1,19 @@
-import os
+
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Union, Tuple, Optional
-from urllib.parse import urlparse
 
 import safetensors
 import torch
-from peft import LoraConfig
 
+from .peft import LoraConfig
+from .remote import resolve_path
 from ..utils.logger import setup_logger
 
 logger = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
 HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
+HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
 
@@ -133,7 +134,7 @@ class Lora(Adapter):
         lora_cache = AdapterCache.get(self.path)
         if lora_cache is None:
             # get lora config
-            lora_cfg = LoraConfig.from_pretrained(self.path)
+            lora_cfg = LoraConfig.from_pretrained(path=self.path, filename=HF_ADAPTER_CONFIG_FILE_NAME)
             lora_cfg.gptqmodel_path = self.path  # hack: save this
 
             if not isinstance(lora_cfg, LoraConfig):
@@ -145,34 +146,7 @@ class Lora(Adapter):
                 if self.rank != lora_cfg.r:
                     raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
-            if os.path.isdir(self.path):
-                lora_path = f"{self.path.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
-                logger.info(f"Adapter: Loading EoRA weights from disk: `{lora_path}`")  # {
-            elif self.path.startswith("http"):
-                from huggingface_hub import hf_hub_download
-                result = self.parse_url(self.path)
-                if len(result) == 3:
-                    logger.info(f"Adapter: Downloading adapter weights from hf repo: `{result[0]}` revision: `{result[1]}` file: `{result[2]}`")
-                    lora_path = hf_hub_download(repo_id=result[0], revision=result[1], filename=result[2])
-                elif len(result) == 1:
-                    logger.info(f"Adapter: Downloading adapter weights from uri = `{self.path}`")
-                    import requests
-                    response = requests.get(self.path, stream=True)
-                    lora_path = "lora.safetensors"
-                    with open(lora_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                else:
-                    raise ValueError(f"Adapter: Lora path is invalid: `{self.path}`")
-            else:
-                from huggingface_hub import HfApi, hf_hub_download
-                files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora_test.safetensors"]]
-
-                if files:
-                    lora_path = hf_hub_download(repo_id=self.path, filename=files[0])
-                    # print(f"Adapter tensors loaded from `{self.path}`")
-                else:
-                    raise Exception(f"Adapter: There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
+            lora_path = resolve_path(self.path, HF_ADAPTER_FILE_NAME)
 
             # save to adapter cache
             AdapterCache.add(self.path, lora_cfg, safetensors.torch.load_file(lora_path))
@@ -247,21 +221,7 @@ class Lora(Adapter):
 
         return False
 
-    def parse_url(self, url: str):
-        parsed_url = urlparse(url)
 
-        if parsed_url.netloc.endswith("huggingface.co") or parsed_url.netloc.endswith("hf.co"):
-            parts = parsed_url.path.strip("/").split("/")
-
-            if "blob" in parts:
-                idx = parts.index("blob")
-                repo_id = "/".join(parts[:idx])
-                rev = parts[idx + 1]
-                filename = parts[idx + 2].split("?")[0] # remove ?download=true
-                return [repo_id, rev, filename]
-        else:
-            return [url]
-        return []
 
     def to_dict(self):
         return {
