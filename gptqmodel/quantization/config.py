@@ -322,7 +322,10 @@ class QuantizeConfig():
         for k, v in self.dynamic.items():
             adapter_override = v.get("adapter", None) # TODO use const, not str
             if adapter_override and isinstance(adapter_override, Dict):
-                adapter_rank_patterns[k] = adapter_override.get("rank")  # TODO use const, not str
+                rank = adapter_override.get("rank", None)
+                if rank and isinstance(rank, int):
+                    # need to strip `+:` positive prefix
+                    adapter_rank_patterns[k.lstrip("+:")] = rank  # TODO use const, not str
 
         return adapter_rank_patterns if len(adapter_rank_patterns) > 0 else None
 
