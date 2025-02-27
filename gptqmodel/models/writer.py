@@ -88,7 +88,7 @@ def ModelWriter(cls):
                         weights[f"{key}.{lora_key}"] = lora_weight
                         logger.info(f"Adapter: EoRA weights found -> `{key}.{lora_key}`")
 
-            eora_path = f"{eora_path.removesuffix("/")}/{HF_ADAPTER_FILE_NAME}"
+            eora_path = f"{eora_path.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
             logger.info(f"Adapter: Saving EoRA weights to -> `{eora_path}`")
             os.makedirs(os.path.dirname(eora_path), exist_ok=True)
             save_file(tensors=weights, filename=eora_path, metadata={"format": "pt"})

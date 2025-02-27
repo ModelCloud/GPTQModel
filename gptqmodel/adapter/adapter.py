@@ -113,7 +113,7 @@ class Lora(Adapter):
         global adapter_load_cache
         if adapter_load_cache is None:
             if os.path.isdir(self.path):
-                lora_path = f"{self.path.removesuffix("/")}/{HF_ADAPTER_FILE_NAME}"
+                lora_path = f"{self.path.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
                 logger.info(f"Adapter: Loading EoRA weights from disk: `{lora_path}`")  # {
             elif self.path.startswith("http"):
                 from huggingface_hub import hf_hub_download

@@ -46,7 +46,7 @@ class TestKernelOutput(unittest.TestCase):
             path=lora_path)
 
         cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
-        cls.k = cls.adapter.lora_A.shape[1]
+        cls.k = cls.adapter.lora_A.shape[0]
         cls.x = torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16)
         Adapter.reset_loader_cache() # hack reset loader
 
