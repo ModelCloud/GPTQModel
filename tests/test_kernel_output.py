@@ -2,7 +2,7 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.adapter.adapter import Lora, Adapter
+from gptqmodel.adapter.adapter import Lora, Adapter, AdapterCache
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
@@ -47,8 +47,9 @@ class TestKernelOutput(unittest.TestCase):
 
         cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
         cls.k = cls.adapter.lora_A.shape[0]
+
         cls.x = torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16)
-        Adapter.reset_loader_cache() # hack reset loader
+        AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
         # TORCH as reference output
         cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH)

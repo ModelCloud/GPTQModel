@@ -1,6 +1,6 @@
 import os
-from dataclasses import dataclass, field
-from typing import Dict, List, Union
+from dataclasses import dataclass
+from typing import Dict, List, Union, Tuple, Optional
 from urllib.parse import urlparse
 
 import safetensors
@@ -14,18 +14,36 @@ LORA_MERGED_WEIGHT_PATHS = [None, ""]
 HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
 HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
-# TODO FIX ME: cache of adapter tensors loaded from disk
-adapter_load_cache: Dict[str, torch.Tensor] = None
+
+class AdapterCache():
+    cache: Dict[str, Dict[str, Union[LoraConfig, torch.Tensor]]] = {}  # first level key is `path`, second level keys [ `config` = LoraConfig, `weights` = Dict[str, Tensors]
+
+    @classmethod
+    def get(cls, path: str) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
+        data = cls.cache.get(path)
+        if not data:
+            return None
+        else:
+            return data["config"], data["weights"]
+
+    @classmethod
+    def reset(cls):
+        logger.info("Adapter Cache: Resetting cache")
+        cls.cache = {}
+
+    @classmethod
+    def add(cls, path: str, config: LoraConfig, weights: Dict[str, torch.Tensor]):
+        cls.cache[path] = {"config": config, "weights": weights}
+
+    @classmethod
+    def remove(cls, path):
+        cls.cache.pop(path, None)
+
 
 class Adapter():
     def __init__(self, rank: int = None, path: str = None):
-        self.rank = rank
+        self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
         self.path = path.lower().strip() if isinstance(path, str) else path
-
-    @classmethod
-    def reset_loader_cache(cls):
-        global adapter_load_cache
-        adapter_load_cache = None
 
     def validate_path(self, local=False):
         if not self.path or not isinstance(self.path, str):
@@ -111,10 +129,12 @@ class Lora(Adapter):
             self.lora_A, self.lora_B = lora_A, lora_B
             return
 
-        global adapter_load_cache
-        if adapter_load_cache is None:
+        lora_cache = AdapterCache.get(self.path)
+        if lora_cache is None:
             # get lora config
             lora_cfg = LoraConfig.from_pretrained(self.path)
+            lora_cfg.gptqmodel_path = self.path  # hack: save this
+
             if not isinstance(lora_cfg, LoraConfig):
                 raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
 
@@ -153,9 +173,14 @@ class Lora(Adapter):
                 else:
                     raise Exception(f"Adapter: There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
 
+            # save to adapter cache
+            AdapterCache.add(self.path, lora_cfg, safetensors.torch.load_file(lora_path))
 
+            lora_cache = AdapterCache.get(self.path)
+            assert lora_cache is not None
 
-            adapter_load_cache = safetensors.torch.load_file(lora_path)
+        # lora_cache result is a tuple
+        lora_cfg, lora_weights = lora_cache
 
         weight_key = weight_key.lower()
 
@@ -165,7 +190,7 @@ class Lora(Adapter):
 
         # print(f"lora_A_weight_key = {lora_A_weight_key}, lora_B_weight_key = {lora_B_weight_key}")
         pop_keys = []
-        for k, v in adapter_load_cache.items():
+        for k, v in lora_weights.items():
             if k.endswith(lora_A_weight_key):
                 lora_A = v.T
                 pop_keys.append(k)
@@ -175,13 +200,21 @@ class Lora(Adapter):
             else:
                 pass
                 #logger.info(f"Adapter: cannot find weight key `{k}` in repo = `{self.path}`")
+        if pop_keys:
+            for k in pop_keys:
+                lora_weights.pop(k) # releasee lora weights from cache memory
 
-        for k in pop_keys:
-            adapter_load_cache.pop(k)
+            # we have consumed all modules
+            if len(lora_weights) == 0:
+                AdapterCache.remove(self.path)
+                logger.info("Adapter: Consumed all Lora weights")
 
-        # since loder cache is singleton, we need to reset to None to ci loop tests can pass
-        if len(adapter_load_cache) == 0:
-            adapter_load_cache = None
+        else:
+            logger.warn("Adapter: Lora weights not found for `{weight_key}`")
+
+        # # since loder cache is singleton, we need to reset to None to ci loop tests can pass
+        # if len(lora_weights) == 0:
+        #     adapter_load_cache = None
 
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")

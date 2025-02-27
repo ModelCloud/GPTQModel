@@ -13,3 +13,4 @@ hf_transfer>=0.1.9
 huggingface_hub>=0.28.1
 tokenicer==0.0.4
 logbar==0.0.3
+peft>=0.14.0
