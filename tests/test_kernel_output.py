@@ -16,7 +16,7 @@ from torch import Tensor
 CUDA = torch.device("cuda:0")
 
 class TestKernelOutput(unittest.TestCase):
-    model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/" # hf "sliuau/llama3.2-1b-4bit-group128"
+    model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
 
     target_qliner_map = {
         # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
@@ -35,7 +35,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"  # adapter_model.safetensors
+        lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
         # hf "sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"
 
         cls.m = 1

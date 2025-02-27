@@ -4,7 +4,7 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
-def parse_url(self, url: str):
+def parse_url(url: str):
     parsed_url = urlparse(url)
 
     if parsed_url.netloc.endswith("huggingface.co") or parsed_url.netloc.endswith("hf.co"):
@@ -46,14 +46,22 @@ def resolve_path(path: str, filename: str) -> str: # return a valid file path to
             # with open(lora_path, "wb") as f:
             #     for chunk in response.iter_content(chunk_size=8192):
             #         f.write(chunk)
-    else:
-        from huggingface_hub import HfApi, hf_hub_download
-        files = [f for f in HfApi().list_repo_files(path) if
-                 f in ["lora.safetensors", "eora_test.safetensors"]]
+    elif not path.startswith("/"):
+        path = path.rstrip("/")
+        subfolder = None
 
-        if files:
-            resolved_path = hf_hub_download(repo_id=path, filename=files[0])
-            return resolved_path
+        # fix HF subfoler path like: sliuau/llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc
+        if path.count("/") > 1:
+            path_split = path.split("/")
+            path = f"{path_split[0]}/{path_split[1]}"
+            subfolder = "/".join(path_split[2:])
+
+        from huggingface_hub import HfApi, hf_hub_download
+        # _ = HfApi().list_repo_files(path)
+
+        resolved_path = hf_hub_download(repo_id=path, filename=filename, subfolder=subfolder)
+        return resolved_path
             # print(f"Adapter tensors loaded from `{self.path}`")
-        else:
-            raise Exception(f"Resolver: File `{filename}` missing from HF repo: `{path}`")
+    else:
+        raise ValueError(
+            f"Resolver: We only support local file path or HF repo id; actual = path: `{path}`, filename = `{filename}`")
