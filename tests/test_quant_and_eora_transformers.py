@@ -19,6 +19,8 @@ import os
 from peft import PeftModel, LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from peft.tuners.lora.gptq import GPTQLoraLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -141,7 +143,7 @@ class Test(ModelTest):
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
-        model = AutoModelForCausalLM.from_pretrained(path)
+        model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
         print("model", model)
         if adapter:
             log.info("PEFT: converting model to lora model")
@@ -150,6 +152,8 @@ class Test(ModelTest):
             # model = PeftModel.from_pretrained(model=model, model_id="", config=lora_config)
             model.load_adapter(adapter.path)
             print("peft model", model)
+
+        assert isinstance(model.model.layers[0].self_attn.v_proj, GPTQLoraLinear)
 
         tokenizer = AutoTokenizer.from_pretrained(path)
         inp = tokenizer("Capital of France is", return_tensors="pt").to(model.device)
