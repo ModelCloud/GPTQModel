@@ -40,8 +40,9 @@ from tabulate import tabulate  # noqa: E402
 
 log = LogBar.shared()
 
+
 class Test(ModelTest):
-    #NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
+    # NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
     # NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
@@ -60,7 +61,7 @@ class Test(ModelTest):
         rank = 128
         batch_size = 1
         calibration_dataset_rows = 512
-        calibration_dataset_concat_size = 0 # disable
+        calibration_dataset_concat_size = 0  # disable
         auto_gc = False
         adapter_path = "eora"
         dataset_id = "allenai/c4"
@@ -88,7 +89,6 @@ class Test(ModelTest):
         ).select(range(calibration_dataset_rows))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir="test_adapter"
             eora = Lora(
                 # for quant, path is save path. for load, it is loading path
                 path=os.path.join(tmpdir, adapter_path),
@@ -100,6 +100,13 @@ class Test(ModelTest):
                 group_size=group_size,
                 desc_act=desc_act,  # bitblas only supports DESC_ACT=False
                 adapter=eora,
+                dynamic={
+                    ".*\\.gate_proj.*": {
+                        "adapter": {
+                            "rank": 256
+                        }
+                    }
+                },
             )
 
             model = GPTQModel.load(
@@ -112,7 +119,7 @@ class Test(ModelTest):
                 batch_size=batch_size,
                 auto_gc=auto_gc,
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
-            ) #
+            )  #
 
             # EoRA adapter is saved according to Lora.path property
             # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
@@ -123,9 +130,9 @@ class Test(ModelTest):
             torch_empty_cache()
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [ BACKEND.MARLIN ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-                eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
-                base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
+            for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+                eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora)  # inference using eora (lora)
+                base_bench = self.bench(path=tmpdir, backend=backend, adapter=None)  # inference using qweights only
 
                 print('--------GPTQModel + EoRA Config ---------')
 
@@ -147,8 +154,10 @@ class Test(ModelTest):
         # test post-quant inference
         if adapter:
             adapter_weights = load_file(os.path.join(adapter.path, HF_ADAPTER_FILE_NAME))
-            origin_lora_a_weight = adapter_weights[f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.6.self_attn.v_proj.lora_A.weight"]
-            origin_lora_b_weight = adapter_weights[f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.6.self_attn.v_proj.lora_B.weight"]
+            origin_lora_a_weight = adapter_weights[
+                f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.5.self_attn.v_proj.lora_A.weight"]
+            origin_lora_b_weight = adapter_weights[
+                f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.5.self_attn.v_proj.lora_B.weight"]
 
             model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
             log.info("PEFT: converting model to lora model")
@@ -163,6 +172,14 @@ class Test(ModelTest):
             self.assert_adapter_load(model, origin_lora_a_weight, origin_lora_b_weight)
             print("peft model", model)
 
+            # assert dynamic rank
+            v_proj_module = model.model.layers[5].self_attn.v_proj
+            assert v_proj_module.lora_A["default"].weight.data.shape[0] == 128
+            assert v_proj_module.lora_B["default"].weight.data.shape[1] == 128
+            gate_proj_module = model.model.layers[5].mlp.gate_proj
+            assert gate_proj_module.lora_A["default"].weight.data.shape[0] == 256
+            assert gate_proj_module.lora_B["default"].weight.data.shape[1] == 256
+
             del origin_lora_a_weight, origin_lora_b_weight, adapter_weights
         else:
             model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
@@ -173,7 +190,7 @@ class Test(ModelTest):
         tokens = model.generate(**inp)[0]
         result = tokenizer.decode(tokens)
         print(f"BACKEND: {backend}, Result: {result}")
-        #assert "paris" in result.lower(), f"`paris` not found in `{result}`"
+        # assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
         bench_result = GPTQModel.eval(
             model_or_id_or_path=model,
@@ -188,7 +205,7 @@ class Test(ModelTest):
         return bench_result
 
     def assert_adapter_load(self, model, origin_lora_a_weight, origin_lora_b_weight):
-        module = model.model.layers[6].self_attn.v_proj
+        module = model.model.layers[5].self_attn.v_proj
         assert isinstance(module, GPTQLoraLinear)
         assert torch.equal(origin_lora_a_weight.to(model.device), module.lora_A["default"].weight.data)
         assert torch.equal(origin_lora_b_weight.to(model.device), module.lora_B["default"].weight.data)
