@@ -72,7 +72,7 @@ def ModelWriter(cls):
 
     cls.save_pretrained = save_pretrained
 
-    def _eora_save(self, save_dir: str):
+    def _eora_save(self, save_dir: str, model_save_dir: str):
         assert isinstance(self.quantize_config.adapter, Lora)
 
         assert hasattr(self, 'lora_results')
@@ -105,7 +105,11 @@ def ModelWriter(cls):
             if self.quantize_config.dynamic:
                 rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
 
-            lora_cfg = LoraConfig(r=self.quantize_config.adapter.rank, lora_alpha=self.quantize_config.adapter.rank, target_modules=list(target_modules), rank_pattern=rank_pattern)
+            lora_cfg = LoraConfig(base_model_name_or_path=model_save_dir,
+                                  r=self.quantize_config.adapter.rank,
+                                  lora_alpha=self.quantize_config.adapter.rank,
+                                  target_modules=list(target_modules),
+                                  rank_pattern=rank_pattern)
             lora_cfg.save_pretrained(save_dir=save_dir)
 
             logger.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
@@ -382,7 +386,7 @@ def ModelWriter(cls):
 
         # save lora
         if self.quantize_config.adapter:
-            _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path)
+            _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:

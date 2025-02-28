@@ -88,9 +88,9 @@ class Test(ModelTest):
         ).select(range(calibration_dataset_rows))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir="test_adapter"
             eora = Lora(
                 # for quant, path is save path. for load, it is loading path
-                # TODO use same dir
                 path=os.path.join(tmpdir, adapter_path),
                 rank=rank,
             )
@@ -124,8 +124,8 @@ class Test(ModelTest):
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             for backend in [ BACKEND.MARLIN ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-                base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
                 eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
+                base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
 
                 print('--------GPTQModel + EoRA Config ---------')
 
@@ -145,27 +145,28 @@ class Test(ModelTest):
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
-        model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
-        print("model", model)
         if adapter:
-            log.info("PEFT: converting model to lora model")
-            # lora_config = LoraConfig.from_pretrained(adapter.path)
-            # assert isinstance(lora_config, LoraConfig)
-            # model = PeftModel.from_pretrained(model=model, model_id="", config=lora_config)
-            model.load_adapter(adapter.path)
-            print("peft model", model)
-
             adapter_weights = load_file(os.path.join(adapter.path, HF_ADAPTER_FILE_NAME))
             origin_lora_a_weight = adapter_weights[f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.6.self_attn.v_proj.lora_A.weight"]
             origin_lora_b_weight = adapter_weights[f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}model.layers.6.self_attn.v_proj.lora_B.weight"]
 
-            module = model.model.layers[6].self_attn.v_proj
+            model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
+            log.info("PEFT: converting model to lora model")
+            model.load_adapter(adapter.path)
 
-            assert isinstance(module, GPTQLoraLinear)
-            assert torch.equal(origin_lora_a_weight.to(model.device), module.lora_A["default"].weight.data)
-            assert torch.equal(origin_lora_b_weight.to(model.device), module.lora_B["default"].weight.data)
+            self.assert_adapter_load(model, origin_lora_a_weight, origin_lora_b_weight)
+            del model
+
+            model = AutoModelForCausalLM.from_pretrained(adapter.path, device_map="cuda")
+            log.info("PEFT: load model by adapter.path")
+
+            self.assert_adapter_load(model, origin_lora_a_weight, origin_lora_b_weight)
+            print("peft model", model)
 
             del origin_lora_a_weight, origin_lora_b_weight, adapter_weights
+        else:
+            model = AutoModelForCausalLM.from_pretrained(path, device_map="cuda")
+            print("model", model)
 
         tokenizer = AutoTokenizer.from_pretrained(path)
         inp = tokenizer("Capital of France is", return_tensors="pt").to(model.device)
@@ -185,3 +186,9 @@ class Test(ModelTest):
         torch_empty_cache()
 
         return bench_result
+
+    def assert_adapter_load(self, model, origin_lora_a_weight, origin_lora_b_weight):
+        module = model.model.layers[6].self_attn.v_proj
+        assert isinstance(module, GPTQLoraLinear)
+        assert torch.equal(origin_lora_a_weight.to(model.device), module.lora_A["default"].weight.data)
+        assert torch.equal(origin_lora_b_weight.to(model.device), module.lora_B["default"].weight.data)
