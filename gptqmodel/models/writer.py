@@ -87,8 +87,8 @@ def ModelWriter(cls):
                 simple_module_name = key.split(".")[-1] # mlp.gate_proj => gate_proj
                 target_modules.add(simple_module_name)
 
-                while key.startswith('model.'):
-                    key = key.removeprefix('model.') # some HF models use model. or model.model.
+                # while key.startswith('model.'):
+                #     key = key.removeprefix('model.') # some HF models use model. or model.model.
 
                 # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
                 key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"

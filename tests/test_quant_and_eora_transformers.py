@@ -38,7 +38,7 @@ log = LogBar.shared()
 
 class Test(ModelTest):
     #NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
-    #NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
+    # NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
@@ -142,12 +142,13 @@ class Test(ModelTest):
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
         model = AutoModelForCausalLM.from_pretrained(path)
-        print("model",model)
+        print("model", model)
         if adapter:
             log.info("PEFT: converting model to lora model")
-            lora_config = LoraConfig.from_pretrained(adapter.path)
-            assert isinstance(lora_config, LoraConfig)
-            model = PeftModel.from_pretrained(model=model, model_id="", config=lora_config)
+            # lora_config = LoraConfig.from_pretrained(adapter.path)
+            # assert isinstance(lora_config, LoraConfig)
+            # model = PeftModel.from_pretrained(model=model, model_id="", config=lora_config)
+            model.load_adapter(adapter.path)
             print("peft model", model)
 
         tokenizer = AutoTokenizer.from_pretrained(path)
