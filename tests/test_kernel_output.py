@@ -2,15 +2,10 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.adapter.adapter import Lora, Adapter, AdapterCache
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.adapter.adapter import AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
 from parameterized import parameterized
-from safetensors import safe_open
 from torch import Tensor
 
 CUDA = torch.device("cuda:0")

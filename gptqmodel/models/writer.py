@@ -35,7 +35,7 @@ from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
 
-from ..adapter.adapter import HF_ADAPTER_WEIGHT_KEY_PREFIX, HF_ADAPTER_FILE_NAME, Lora
+from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
                                    META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,

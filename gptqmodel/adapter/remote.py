@@ -1,5 +1,6 @@
 import os
 from urllib.parse import urlparse
+
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -57,6 +58,7 @@ def resolve_path(path: str, filename: str) -> str: # return a valid file path to
             subfolder = "/".join(path_split[2:])
 
         from huggingface_hub import HfApi, hf_hub_download
+
         # _ = HfApi().list_repo_files(path)
 
         resolved_path = hf_hub_download(repo_id=path, filename=filename, subfolder=subfolder)

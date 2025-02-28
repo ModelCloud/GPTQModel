@@ -44,7 +44,6 @@ from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-
 from tokenicer import Tokenicer  # noqa: E402
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
@@ -360,7 +359,7 @@ class GPTQModel:
                 model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
-            from lm_eval.utils import make_table # hack: circular import
+            from lm_eval.utils import make_table  # hack: circular import
 
             for task in tasks:
                 if task not in EVAL.get_task_enums():
