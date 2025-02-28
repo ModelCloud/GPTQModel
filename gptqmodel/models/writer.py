@@ -105,7 +105,7 @@ def ModelWriter(cls):
             if self.quantize_config.dynamic:
                 rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
 
-            lora_cfg = LoraConfig(r=self.quantize_config.adapter.rank, target_modules=list(target_modules), rank_pattern=rank_pattern)
+            lora_cfg = LoraConfig(r=self.quantize_config.adapter.rank, lora_alpha=self.quantize_config.adapter.rank, target_modules=list(target_modules), rank_pattern=rank_pattern)
             lora_cfg.save_pretrained(save_dir=save_dir)
 
             logger.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
