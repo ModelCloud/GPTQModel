@@ -106,6 +106,7 @@ class LoraConfig():
             disabled. The main use case for this is when the LoRA weights were extracted from fully fine-tuned
             parameters so the bias of those parameters can be taken into account.
     """
+    base_model_name_or_path: str = field(default="", metadata={"help": "base_model_name_or_path"}) # required by hf auto api
 
     r: int = field(default=8, metadata={"help": "Lora attention dimension"})
     target_modules: Optional[Union[list[str], str]] = field(
@@ -293,8 +294,8 @@ class LoraConfig():
     )
 
     # from PeftConfigMixin
-    task_type: Optional[str] = field(default=None, metadata={"help": "The type of task."})
-    peft_type: Optional[str] = field(default=None, metadata={"help": "The type of PEFT model."})
+    task_type: Optional[str] = field(default="CAUSAL_LM", metadata={"help": "The type of task."})
+    peft_type: Optional[str] = field(default="LORA", metadata={"help": "The type of PEFT model."})
     auto_mapping: Optional[dict] = field(
         default=None, metadata={"help": "An auto mapping dict to help retrieve the base model class if needed."}
     )
@@ -309,7 +310,7 @@ class LoraConfig():
         # remove all None valued Keys and values that are empty (str, list, dict, set
         removed_keys = []
         for k, v in kv.items():
-            if v in [None, "", {}, []]:
+            if v in [None, {}, []]:
                 removed_keys.append(k)
             # FIX set is not serializable by json
             elif isinstance(v, Set):

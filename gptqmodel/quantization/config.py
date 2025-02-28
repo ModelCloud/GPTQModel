@@ -312,11 +312,11 @@ class QuantizeConfig():
         return False
 
     def extract_adapter_rank_patterns(self) -> Optional[Dict[str, int]]:
+        adapter_rank_patterns = {}
+
         # no rank can be had if there is no dynamic or adapter
         if not self.dynamic or not self.adapter:
-            return None
-
-        adapter_rank_patterns = {}
+            return adapter_rank_patterns
 
         # override format: `{ "adapter": { "rank": 512 } }`
         for k, v in self.dynamic.items():
@@ -327,7 +327,7 @@ class QuantizeConfig():
                     # need to strip `+:` positive prefix
                     adapter_rank_patterns[k.lstrip("+:")] = rank  # TODO use const, not str
 
-        return adapter_rank_patterns if len(adapter_rank_patterns) > 0 else None
+        return adapter_rank_patterns
 
 
     def save_pretrained(self, save_dir: str, **kwargs):

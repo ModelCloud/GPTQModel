@@ -101,7 +101,7 @@ def ModelWriter(cls):
             weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
 
             # dynamic rank
-            rank_pattern = set()
+            rank_pattern = {}
             if self.quantize_config.dynamic:
                 rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
 

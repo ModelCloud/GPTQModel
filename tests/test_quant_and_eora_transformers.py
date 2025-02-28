@@ -16,6 +16,7 @@
 # -- do not touch
 import os
 
+from peft import PeftModel, LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -23,7 +24,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
-
+from logbar import LogBar
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
@@ -33,11 +34,12 @@ from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from tabulate import tabulate  # noqa: E402
 
+log = LogBar.shared()
 
 class Test(ModelTest):
     #NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
-    NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
-    # NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
+    #NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
+    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
@@ -82,11 +84,10 @@ class Test(ModelTest):
         ).select(range(calibration_dataset_rows))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = "test_adapter_safetensors"
             eora = Lora(
                 # for quant, path is save path. for load, it is loading path
                 # TODO use same dir
-                path=tmpdir,
+                path=os.path.join(tmpdir, adapter_path),
                 rank=rank,
             )
 
@@ -118,7 +119,7 @@ class Test(ModelTest):
             torch_empty_cache()
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [ BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [ BACKEND.MARLIN ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 # base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
                 eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
@@ -142,6 +143,13 @@ class Test(ModelTest):
         # test post-quant inference
         model = AutoModelForCausalLM.from_pretrained(path)
         print("model",model)
+        if adapter:
+            log.info("PEFT: converting model to lora model")
+            lora_config = LoraConfig.from_pretrained(adapter.path)
+            assert isinstance(lora_config, LoraConfig)
+            model = PeftModel.from_pretrained(model=model, model_id="", config=lora_config)
+            print("peft model", model)
+
         tokenizer = AutoTokenizer.from_pretrained(path)
         inp = tokenizer("Capital of France is", return_tensors="pt").to(model.device)
         tokens = model.generate(**inp)[0]
