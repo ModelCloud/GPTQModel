@@ -328,8 +328,9 @@ class LoraConfig():
         os.makedirs(save_dir, exist_ok=True)
         with open(os.path.join(save_dir, HF_ADAPTER_CONFIG_FILE_NAME), "w", encoding="utf-8") as f:
             d = self.to_dict()
-            log.info(f"Adapter: dict = `{d}`")
-            json.dump(d, f, indent=2)
+            json_str = json.dumps(d, indent=2)
+            log.info(f"Saved Adapter Config: \n{json_str}")
+            f.write(json_str)
 
     def __post_init__(self):
         self.peft_type = "LORA"

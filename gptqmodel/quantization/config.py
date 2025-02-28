@@ -329,10 +329,12 @@ class QuantizeConfig():
 
         return adapter_rank_patterns
 
-
     def save_pretrained(self, save_dir: str, **kwargs):
         with open(join(save_dir, QUANT_CONFIG_FILENAME), "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
+            d = self.to_dict()
+            json_str = json.dumps(d, indent=2)
+            logger.info(f"Saved Quantize Config: \n{json_str}")
+            f.write(json_str)
 
     @classmethod
     # normalize quant config for compat and also performs validation
@@ -444,6 +446,16 @@ class QuantizeConfig():
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
+
+        dynamic = out["dynamic"]
+        # dynamic adapter config is only used in the quantize phase and is deleted when saving.
+        for _, v in dynamic.items():
+            v.pop("adapter", None)
+
+        # clear empty dynamic value
+        keys_to_delete = [key for key, value in dynamic.items() if not value]
+        for key in keys_to_delete:
+            del dynamic[key]
 
         # simplify: clean keys where the value is None or empty [list, dict]
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
