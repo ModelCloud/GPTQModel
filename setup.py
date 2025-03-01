@@ -41,8 +41,7 @@ ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
 SKIP_ROCM_VERSION_CHECK = os.environ.get('SKIP_ROCM_VERSION_CHECK', None)
 
 if ROCM_VERSION is None and torch.version.hip:
-    hip_ver = torch.version.hip
-    ROCM_VERSION = ".".join(hip_ver.split(".")[:2]) # print(torch.version.hip) -> 6.3.42131-fa1d09cbd
+    ROCM_VERSION = ".".join(torch.version.hip.split(".")[:2]) # print(torch.version.hip) -> 6.3.42131-fa1d09cbd
     os.environ["ROCM_VERSION"] = ROCM_VERSION
 
 if ROCM_VERSION is not None and float(ROCM_VERSION) < 6.2 and not SKIP_ROCM_VERSION_CHECK:
@@ -131,7 +130,6 @@ requirements = []
 if not os.getenv("CI"):
     with open('requirements.txt') as f:
         requirements = [line.strip() for line in f if line.strip()]
-        #subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 
 if TORCH_CUDA_ARCH_LIST is None:
