@@ -40,7 +40,7 @@ TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
 SKIP_ROCM_VERSION_CHECK = os.environ.get('SKIP_ROCM_VERSION_CHECK', None)
 
-if ROCM_VERSION is None:
+if ROCM_VERSION is None and torch.version.hip:
     hip_ver = torch.version.hip
     ROCM_VERSION = ".".join(hip_ver.split(".")[:2])
     os.environ["ROCM_VERSION"] = ROCM_VERSION
