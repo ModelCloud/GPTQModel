@@ -23,6 +23,8 @@ from pathlib import Path
 
 from setuptools import find_packages, setup
 
+import torch
+
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 except BaseException:
@@ -37,6 +39,11 @@ TORCH_CUDA_ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
 ROCM_VERSION = os.environ.get('ROCM_VERSION', None)
 SKIP_ROCM_VERSION_CHECK = os.environ.get('SKIP_ROCM_VERSION_CHECK', None)
+
+if ROCM_VERSION is None:
+    hip_ver = torch.version.hip
+    ROCM_VERSION = ".".join(hip_ver.split(".")[:2])
+    os.environ["ROCM_VERSION"] = ROCM_VERSION
 
 if ROCM_VERSION is not None and float(ROCM_VERSION) < 6.2 and not SKIP_ROCM_VERSION_CHECK:
     sys.exit(
@@ -126,7 +133,6 @@ if not os.getenv("CI"):
         requirements = [line.strip() for line in f if line.strip()]
         #subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
-import torch  # noqa: E402
 
 if TORCH_CUDA_ARCH_LIST is None:
     HAS_CUDA_V8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
