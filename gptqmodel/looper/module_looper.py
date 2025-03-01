@@ -149,7 +149,7 @@ class ModuleLooper():
             lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.gptq_model.quantize_config.dynamic is None:
                 self.gptq_model.quantize_config.dynamic = {self.gptq_model.lm_head: lm_head_quant_config}
-            elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default_value=None) is None:
+            elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default=None) is None:
                 self.gptq_model.quantize_config.dynamic[self.gptq_model.lm_head] = lm_head_quant_config
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False

@@ -88,9 +88,12 @@ class EoraProcessor(LoopProcessor):
 
         adapter_cfg = copy.deepcopy(self.qcfg.adapter)
 
-        # dynamic overrides
-        if self.qcfg.dynamic is not None:
-            adapter_cfg.adapter = self.qcfg.dynamic_get(module.full_name, "adapter", adapter_cfg)
+        # dynamic override of adapter.rank
+        adapter_cfg.rank = self.qcfg.dynamic_get(
+                module.full_name,
+                key="adapter",
+                sub_key="rank",
+                default=adapter_cfg.rank)
 
         # hack store property inside module
         module.adapter_cfg = adapter_cfg
@@ -183,6 +186,7 @@ class EoraProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {
+            "rank": module.adapter_cfg.rank,
             "lora_A.weight": move_to(A.to(dtype=torch.float16), device=CPU, stream=self.stream),
             "lora_B.weight": move_to(B.to(dtype=torch.float16), device=CPU, stream=self.stream),
         })

@@ -44,7 +44,6 @@ from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
@@ -313,6 +312,7 @@ class GPTQModel:
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
             **args
     ):
+        from peft import PeftModel
         if model_args is None:
             model_args = {}
         if tasks is None:
@@ -336,7 +336,7 @@ class GPTQModel:
         if isinstance(model_or_id_or_path, str):
             model = GPTQModel.load(model_id_or_path=model_or_id_or_path, backend=backend)
             model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, PreTrainedModel):
+        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
             model = model_or_id_or_path
             model_id_or_path = model.config.name_or_path  #
         else:
@@ -359,6 +359,8 @@ class GPTQModel:
                 model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
+            from lm_eval.utils import make_table  # hack: circular import
+
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
@@ -521,7 +523,7 @@ class GPTQModel:
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
 
-            adapter.validate_path(local_only=True)
+            adapter.validate_path(local=True)
 
             quantized_model = GPTQModel.load(
                 model_id_or_path=quantized_model_id_or_path,

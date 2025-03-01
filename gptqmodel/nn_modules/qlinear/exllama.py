@@ -23,7 +23,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import PackableQuantLinear
 from ...utils.backend import BACKEND
 
 exllama_import_exception = None

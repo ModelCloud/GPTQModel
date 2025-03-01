@@ -119,10 +119,10 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
             dict_scale_dtype_to_str(value)
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
-                default_value: Union[int, bool] = None) -> Union[Dict, int, bool]:
+                default: Union[int, bool] = None, sub_key: str = None) -> Union[Dict, int, bool]:
 
     if dynamic is None:
-        return default_value
+        return default
 
     for pattern, overrides in dynamic.items():
         if pattern.startswith("-:"):
@@ -132,8 +132,16 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
             if key is None:
                 return overrides
             else:
-                return overrides.get(key, default_value)
-    return default_value
+                # subkey example: Lora override format: `{ "adapter": { "rank": 512 } }`
+                if sub_key:
+                    sub_value = overrides.get(key, None)
+                    if isinstance(sub_value, Dict):
+                        return sub_value.get(sub_key, default)
+                    else:
+                        logger.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
+                else:
+                    return overrides.get(key, default)
+    return default
 
 @dataclass
 class QuantizeConfig():
@@ -270,9 +278,9 @@ class QuantizeConfig():
     def meta_get(self, key: str) -> Any:
         return self.meta.get(key)
 
-    def dynamic_get(self, layer_name: str, key: str = None, default_value: Union[int, bool, float] = None
+    def dynamic_get(self, layer_name: str, key: str = None, default: Union[int, bool, float] = None, sub_key: str = None
                     ) -> Union[Dict, int, bool, float]:
-        return dynamic_get(self.dynamic, layer_name, key, default_value)
+        return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"
     def meta_set_versionable(self, key: str, value: List[str]):
@@ -303,9 +311,30 @@ class QuantizeConfig():
 
         return False
 
+    def extract_adapter_rank_patterns(self) -> Optional[Dict[str, int]]:
+        adapter_rank_patterns = {}
+
+        # no rank can be had if there is no dynamic or adapter
+        if not self.dynamic or not self.adapter:
+            return adapter_rank_patterns
+
+        # override format: `{ "adapter": { "rank": 512 } }`
+        for k, v in self.dynamic.items():
+            adapter_override = v.get("adapter", None) # TODO use const, not str
+            if adapter_override and isinstance(adapter_override, Dict):
+                rank = adapter_override.get("rank", None)
+                if rank and isinstance(rank, int):
+                    # need to strip `+:` positive prefix
+                    adapter_rank_patterns[k.lstrip("+:")] = rank  # TODO use const, not str
+
+        return adapter_rank_patterns
+
     def save_pretrained(self, save_dir: str, **kwargs):
         with open(join(save_dir, QUANT_CONFIG_FILENAME), "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
+            d = self.to_dict()
+            json_str = json.dumps(d, indent=2)
+            logger.info(f"Saved Quantize Config: \n{json_str}")
+            f.write(json_str)
 
     @classmethod
     # normalize quant config for compat and also performs validation
@@ -417,6 +446,17 @@ class QuantizeConfig():
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
+
+        dynamic = out["dynamic"]
+        if dynamic:
+            # dynamic adapter config is only used in the quantize phase and is deleted when saving.
+            for _, v in dynamic.items():
+                v.pop("adapter", None)
+
+            # clear empty dynamic value
+            keys_to_delete = [key for key, value in dynamic.items() if not value]
+            for key in keys_to_delete:
+                del dynamic[key]
 
         # simplify: clean keys where the value is None or empty [list, dict]
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}

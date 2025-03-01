@@ -553,6 +553,7 @@ jobs:
           uv pip install -U transformers 
           uv pip install -U logbar==0.0.3
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
+             [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
              [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
              [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
             echo "===== install bitblas==0.0.1.dev13 ====="
