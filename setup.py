@@ -107,8 +107,6 @@ def get_version_tag() -> str:
     if not BUILD_CUDA_EXT:
         return "cpu"
 
-    import torch
-
     if ROCM_VERSION:
         return f"rocm{ROCM_VERSION}"
 
