@@ -23,7 +23,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import PackableQuantLinear
 from ...utils.backend import BACKEND
 
 exllama_import_exception = None
@@ -46,7 +46,7 @@ def ext_make_q4(qweight, qzeros, scales, g_idx, device):
 
 
 
-class ExllamaQuantLinear(BaseQuantLinear):
+class ExllamaQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -161,7 +161,12 @@ class ExllamaQuantLinear(BaseQuantLinear):
         return output.view(outshape)
 
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
+        # TODO FIXME: parent should never call us if there is no data to process
+        # check: https://github.com/ModelCloud/GPTQModel/issues/1361
+        if x.shape[0] == 0:
+            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+
         x_dtype = x.dtype
         if x_dtype != torch.float16:
             logger.warning_once(

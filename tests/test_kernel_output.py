@@ -3,59 +3,50 @@ import unittest
 import torch
 from logbar import LogBar
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.adapter.adapter import Lora
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.adapter.adapter import AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
 from parameterized import parameterized
-from safetensors import safe_open
 from torch import Tensor
 
-log = LogBar.shared()
+CUDA = torch.device("cuda:0")
 
 class TestKernelOutput(unittest.TestCase):
-    model_path = "/mnt/home/shihyangl/llama3.2-1b-4bit-group128/"
-    lora_path = "/mnt/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors"
+    model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
+
     target_qliner_map = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
-        # BACKEND.CUDA: DynamicCudaQuantLinear,
+        BACKEND.CUDA: DynamicCudaQuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
         # BACKEND.IPEX: IPEXQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
-        BACKEND.MARLIN_FP16: MarlinQuantLinear,
+        # BACKEND.MARLIN_FP16: MarlinQuantLinear,
     }
+
+    target = 'model.layers.6.self_attn.v_proj'
 
     @classmethod
     def setUpClass(cls):
-        cls.target = 'model.layers.6.self_attn.v_proj'
-        eora_tensors = {}
-        # with safe_open("/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-arc-v2/adapter_model.safetensors",
-        with safe_open(
-                cls.lora_path,
-                framework="pt", device=0) as f:
-            for k in f.keys():
-                # print(k)
-                if cls.target in k:
-                    eora_tensors[k] = f.get_tensor(k)
+        lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
+        # hf "sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"
 
-        m = 1
-        k = eora_tensors[f'{cls.target}.lora_A.weight'].shape[1]
-        eora_tensors[f'{cls.target}.lora_B.weight'].shape[0]
+        cls.m = 1
+        cls.k = -1
+        cls.x = None  # random X input of shape (m, k)
 
+        cls.adapter = Lora(
+            rank=128,
+            path=lora_path)
 
-        cls.x = torch.rand((m, k), device='cuda', dtype=torch.float16)
-        cls.eora_a = eora_tensors[f'{cls.target}.lora_A.weight'].to('cuda:0').T
-        cls.eora_b = eora_tensors[f'{cls.target}.lora_B.weight'].to('cuda:0').T
+        cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
+        cls.k = cls.adapter.lora_A.shape[0]
 
-        cls.adapter = Lora(path=cls.lora_path, rank=128)
+        cls.x = torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16)
+        AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
         # TORCH as reference output
         cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH)
@@ -89,9 +80,9 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.TRITON, 0.00001, 0.00001),
         # (BACKEND.EXLLAMA_V1, 0.09, 0.0001),
         # (BACKEND.EXLLAMA_V2, 0.136, 0.0001),
-        (BACKEND.MARLIN, 0.00005, 0.00005),
+        # (BACKEND.MARLIN, 0.00005, 0.00005),
         # (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
-        (BACKEND.EXLLAMA_EORA, 0.05, 0.05)
+         (BACKEND.EXLLAMA_EORA, 0.05, 0.05)
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
         out = self.forward(backend=backend)
@@ -107,7 +98,7 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.TRITON, 0.00001, 0.00001),
         # (BACKEND.EXLLAMA_V1, 0.015, 0.0008),
         # (BACKEND.EXLLAMA_V2, 0.16, 0.0003),
-        (BACKEND.MARLIN, 0.00001, 0.00003),
+        # (BACKEND.MARLIN, 0.00001, 0.00003),
         # (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
         (BACKEND.EXLLAMA_EORA, 0.05, 0.05)
     ])

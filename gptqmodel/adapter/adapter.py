@@ -1,31 +1,65 @@
-import os
-from dataclasses import dataclass, field
-from typing import Dict, List, Union
-from urllib.parse import urlparse
+
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
 
 import safetensors
 import torch
 
 from ..utils.logger import setup_logger
+from .peft import LoraConfig
+from .remote import resolve_path
 
 logger = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
+HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
+HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
+HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
-# TODO FIX ME: cache of adapter tensors loaded from disk
-adapter_load_cache = None
+
+class AdapterCache():
+    cache: Dict[str, Dict[str, Union[LoraConfig, torch.Tensor]]] = {}  # first level key is `path`, second level keys [ `config` = LoraConfig, `weights` = Dict[str, Tensors]
+
+    @classmethod
+    def get(cls, path: str) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
+        data = cls.cache.get(path)
+        if not data:
+            return None
+        else:
+            return data["config"], data["weights"]
+
+    @classmethod
+    def reset(cls):
+        logger.info("Adapter Cache: Resetting cache")
+        cls.cache = {}
+
+    @classmethod
+    def add(cls, path: str, config: LoraConfig, weights: Dict[str, torch.Tensor]):
+        cls.cache[path] = {"config": config, "weights": weights}
+
+    @classmethod
+    def remove(cls, path):
+        cls.cache.pop(path, None)
+
 
 class Adapter():
-    def __init__(self, rank: int, path: str = None):
-        self.rank = rank
+    def __init__(self, rank: int = None, path: str = None):
+        self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
         self.path = path.lower().strip() if isinstance(path, str) else path
 
-    def validate_path(self, local_only=False):
+    def validate_path(self, local=False):
         if not self.path or not isinstance(self.path, str):
             raise ValueError("Adapter: `path` str is required.")
 
-        if local_only:
+        # path should not be a file but a directory
+        if self.path.endswith(".safetensors"):
+            raise ValueError(
+                f"Adapter: `path` must be a directory path or repo depending if you are saving (directory path) or loading (repo): actual = `{self.path}`")
+
+        if local:
             if self.path.startswith("http"):
                 raise ValueError(f"Adapter: `path` str in this context must be a local os path: actual = `{self.path}`.")
+
 
     # override me
     def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
@@ -97,54 +131,69 @@ class Lora(Adapter):
             self.lora_A, self.lora_B = lora_A, lora_B
             return
 
-        global adapter_load_cache
-        if adapter_load_cache is None:
-            if os.path.isfile(self.path):
-                lora_path = self.path
-                logger.info(f"Adapter: Loading `{self.path}` tensors from disk")  # {adapter_load_cache}
-            elif self.path.startswith("http"):
-                from huggingface_hub import hf_hub_download
-                result = self.parse_url(self.path)
-                if len(result) == 3:
-                    logger.info(f"Adapter: Downloading adapter weights from hf repo: `{result[0]}` revision: `{result[1]}` file: `{result[2]}`")
-                    lora_path = hf_hub_download(repo_id=result[0], revision=result[1], filename=result[2])
-                elif len(result) == 1:
-                    logger.info(f"Adapter: Downloading adapter weights from uri = `{self.path}`")
-                    import requests
-                    response = requests.get(self.path, stream=True)
-                    lora_path = "lora.safetensors"
-                    with open(lora_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                else:
-                    raise Exception(f"Adapter: Lora path is invalid: `{self.path}`")
+        lora_cache = AdapterCache.get(self.path)
+        if lora_cache is None:
+            # get lora config
+            lora_cfg = LoraConfig.from_pretrained(path=self.path, filename=HF_ADAPTER_CONFIG_FILE_NAME)
+            lora_cfg.gptqmodel_path = self.path  # hack: save this
+
+            if not isinstance(lora_cfg, LoraConfig):
+                raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
+
+            if self.rank is None:
+                self.rank = lora_cfg.r
             else:
-                from huggingface_hub import HfApi, hf_hub_download
-                files = [f for f in HfApi().list_repo_files(self.path) if f in ["lora.safetensors", "eora_test.safetensors"]]
+                if self.rank != lora_cfg.r:
+                    raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
-                if files:
-                    lora_path = hf_hub_download(repo_id=self.path, filename=files[0])
-                    # print(f"Adapter tensors loaded from `{self.path}`")
-                else:
-                    raise Exception(f"Adapter: There's no lora.safetensors or eora_test.safetensors on repo `{self.path}`")
+            lora_path = resolve_path(self.path, HF_ADAPTER_FILE_NAME)
 
-            adapter_load_cache = safetensors.torch.load_file(lora_path)
+            # save to adapter cache
+            AdapterCache.add(self.path, lora_cfg, safetensors.torch.load_file(lora_path))
+
+            lora_cache = AdapterCache.get(self.path)
+            assert lora_cache is not None
+
+        # lora_cache result is a tuple
+        lora_cfg, lora_weights = lora_cache
 
         weight_key = weight_key.lower()
 
         # hack for HF Auto compat
-        if not f"{weight_key}.lora_A.weight" in adapter_load_cache:
-            weight_key = weight_key.removeprefix("model.")
+        lora_A_weight_key = f"{weight_key}.lora_A.weight"
+        lora_B_weight_key = f"{weight_key}.lora_B.weight"
 
-        #print(f"loaded lora weight keys: {adapter_load_cache.keys()}")
-        lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
+        # print(f"lora_A_weight_key = {lora_A_weight_key}, lora_B_weight_key = {lora_B_weight_key}")
+        pop_keys = []
+        for k, v in lora_weights.items():
+            if k.endswith(lora_A_weight_key):
+                lora_A = v.T
+                pop_keys.append(k)
+            elif k.endswith(lora_B_weight_key):
+                lora_B = v.T
+                lora_B = torch.clone(v.T, memory_format=torch.contiguous_format)
+                pop_keys.append(k)
 
-        ## I assume that I should fix it here: torch.clone(eora_tensors[f'{target}.lora_B.weight'].T, memory_format=torch.contiguous_format)
-        lora_B = torch.clone(adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T, memory_format=torch.contiguous_format)
+        if pop_keys:
+            for k in pop_keys:
+                lora_weights.pop(k) # releasee lora weights from cache memory
 
-        # since loder cache is singleton, we need to reset to None to ci loop tests can pass
-        if len(adapter_load_cache) == 0:
-            adapter_load_cache = None
+            # we have consumed all modules
+            if len(lora_weights) == 0:
+                AdapterCache.remove(self.path)
+                logger.info("Adapter: Consumed all Lora weights")
+
+        else:
+            logger.warn(f"Adapter: Lora weights not found for `{weight_key}`")
+
+        assert lora_A is not None and lora_B is not None, f"Adapter: `lora_A` and `lora_B` must both be present in the weights: actual = `{lora_A}` and `{lora_B}`"
+
+        # check for rank override from base config
+        self.dynamic_rank_override(lora_cfg=lora_cfg, weight_key=weight_key)
+
+        # # since loder cache is singleton, we need to reset to None to ci loop tests can pass
+        # if len(lora_weights) == 0:
+        #     adapter_load_cache = None
 
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
@@ -157,21 +206,22 @@ class Lora(Adapter):
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
 
-    def parse_url(self, url: str):
-        parsed_url = urlparse(url)
+    def dynamic_rank_override(self, lora_cfg: LoraConfig, weight_key: str) -> bool:
+        assert lora_cfg.rank_pattern is not None and weight_key is not None
+        if lora_cfg.rank_pattern:
+            for k, v in lora_cfg.rank_pattern.items():
+                assert isinstance(k, str) and isinstance(v, int)
+                k = k.lower()
+                assert v > 0 # check for invalid rank range
+                # first do string full match, then suffix match, then regex match
+                if weight_key == k or k.endswith(weight_key) or re.match(k, weight_key):
+                    self.rank = v
+                    logger.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
+                    return True
 
-        if parsed_url.netloc.endswith("huggingface.co") or parsed_url.netloc.endswith("hf.co"):
-            parts = parsed_url.path.strip("/").split("/")
+        return False
 
-            if "blob" in parts:
-                idx = parts.index("blob")
-                repo_id = "/".join(parts[:idx])
-                rev = parts[idx + 1]
-                filename = parts[idx + 2].split("?")[0] # remove ?download=true
-                return [repo_id, rev, filename]
-        else:
-            return [url]
-        return []
+
 
     def to_dict(self):
         return {

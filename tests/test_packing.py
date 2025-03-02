@@ -18,6 +18,10 @@
 import os
 
 from gptqmodel import BACKEND
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
+from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
+from parameterized import parameterized
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -75,6 +79,16 @@ def gen_quant4(k, n, groupsize=-1):
 
 
 class TestRepacking(unittest.TestCase):
+    QLINEAR_DICT = {
+        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+        BACKEND.TRITON: TritonV2QuantLinear,
+        BACKEND.CUDA: DynamicCudaQuantLinear,
+        BACKEND.TORCH: TorchQuantLinear,
+        # BACKEND.BITBLAS: BitBLASQuantLinear,
+        BACKEND.IPEX: IPEXQuantLinear,
+    }
+
+
     k = 2048
     n = 1024 * 100
     group_size = 128
@@ -101,8 +115,11 @@ class TestRepacking(unittest.TestCase):
 
         return qlinear
 
-    def test_compare_exllama_triton_torch(self):
-        triton_linear = self.pack(TritonV2QuantLinear, backend=BACKEND.TRITON)
+    @parameterized.expand(
+        list(QLINEAR_DICT.keys())
+    )
+    def test_compare_exllama_triton_torch(self, backend):
+        triton_linear = self.pack(self.QLINEAR_DICT[backend], backend=backend)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_linear)
         dequantized_weight = dequantized_weight.to(torch.float16)

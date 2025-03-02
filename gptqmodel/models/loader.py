@@ -17,15 +17,11 @@
 from __future__ import annotations
 
 import os
-import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
-
-from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
@@ -46,7 +42,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
+from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
@@ -494,16 +490,11 @@ def ModelLoader(cls):
                     f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
-            # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-            if preload_qlinear_kernel not in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
-                t = time.time()
-                logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
-                model = convert_gptq_v1_to_v2_format(
-                    model,
-                    cfg=qcfg,
-                    qlinear_kernel=preload_qlinear_kernel,
-                )
-                logger.info(f"Format: Conversion complete: {time.time() - t}s")
+            model = convert_gptq_v1_to_v2_format(
+                model,
+                cfg=qcfg,
+                qlinear_kernel=preload_qlinear_kernel,
+            )
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
