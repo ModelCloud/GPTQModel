@@ -18,8 +18,8 @@ from gptqmodel.utils.model import find_modules
 
 
 class TestKernelOutput(unittest.TestCase):
-    model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/"
-    lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors"
+    model_path = "/mnt/home/shihyangl/llama3.2-1b-4bit-group128/"
+    lora_path = "/mnt/home/shihyangl/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors"
     target_qliner_map = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
@@ -41,6 +41,7 @@ class TestKernelOutput(unittest.TestCase):
                 cls.lora_path,
                 framework="pt", device=0) as f:
             for k in f.keys():
+                # print(k)
                 if cls.target in k:
                     eora_tensors[k] = f.get_tensor(k)
 
@@ -114,6 +115,7 @@ class TestKernelOutput(unittest.TestCase):
     def test_kernel_output_with_lora(self, backend: BACKEND):
         out = self.forward(backend=backend, adapter=self.adapter)
 
+        print(f"torch output with lora {self.torch_kernel_out_with_lora[0][:10]}")
         print(f"backend: {backend} with lora")
         print(out[0][:10])
 
