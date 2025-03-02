@@ -32,7 +32,7 @@ try:
 except ImportError as e:
     exllama_v2v_import_exception = e
 
-logger = setup_logger()
+log = setup_logger()
 
 
 # TODO remove this?
@@ -54,7 +54,7 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 
 
 class ExllamaEoraQuantLinear(BaseQuantLinear):
-    SUPPORTS_BITS = [4] # fused eora only validated for 4 bits
+    SUPPORTS_BITS = [4, 8] # fused eora only validated for 4 bits
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True] # TODO: validate False
@@ -156,15 +156,25 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     def forward(self, x):
         x_dtype = x.dtype
         if x_dtype != torch.float16:
-            logger.warning_once(
+            log.warn.once(
                 f"Exllama EoRA kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
 
             x = x.to(dtype=torch.float16)
 
         # sync with vllm
-        out_shape = x.shape[:-1] + (self.qweight.shape[-1],)
+        # log.info(f"x shape: {x.shape}")
+        # log.info(f"qweight shape: {self.qweight.shape}")
+        # log.info(f"in_features: {self.in_features}")
+        # log.info(f"out_features: {self.out_features}")
+        # log.info(f"x.shape[:-1]: {x.shape[:-1]}")
+        # log.info(f"self.qweight.shape[-1],: {self.qweight.shape[-1],}")
+
+        out_shape = x.shape[:-1] + (self.out_features,)
         reshaped_x = x.reshape(-1, x.shape[-1])
+
+        # log.info(f"out_shape: {out_shape}")
+        # log.info(f"reshaped_x: {reshaped_x.shape}")
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
@@ -172,8 +182,11 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
         if self.adapter:
-            output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
-            # output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
+            # only 4 bits fused eora kernel has been validated
+            if self.bits == 4:
+                output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
+            else:
+                output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
         else:
             output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
 
@@ -181,7 +194,10 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         if self.bias is not None:
             output.add_(self.bias)
 
+        # log.info(f"output: {output.shape}")
+
         # sync with vllm
         output = output.reshape(out_shape)
+        # log.info(f"output reshaped: {output.shape}")
 
         return output.to(dtype=x_dtype)
