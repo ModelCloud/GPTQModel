@@ -1,14 +1,12 @@
+import copy
+import math
+
+import gptqmodel_exllama_eora
 import torch
 # from eora_test import fused_concurrent, fused_sequential, cublas_reference, gptq_gemm_eora, gptq_gemm
 from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_lora
 from gptqmodel_exllama_kernels import make_q4, q4_matmul
-
 from safetensors import safe_open
-import math
-
-import gptqmodel_exllama_eora
-
-import copy
 
 # model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/"
 # lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors"

@@ -21,9 +21,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from setuptools import find_packages, setup
-
 import torch
+from setuptools import find_packages, setup
 
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel

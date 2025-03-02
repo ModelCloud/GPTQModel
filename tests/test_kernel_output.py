@@ -1,7 +1,6 @@
 import unittest
 
 import torch
-from logbar import LogBar
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
