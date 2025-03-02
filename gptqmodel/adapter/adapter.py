@@ -138,7 +138,9 @@ class Lora(Adapter):
 
         #print(f"loaded lora weight keys: {adapter_load_cache.keys()}")
         lora_A = adapter_load_cache.pop(f"{weight_key}.lora_A.weight").T
-        lora_B = adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T
+
+        ## I assume that I should fix it here: torch.clone(eora_tensors[f'{target}.lora_B.weight'].T, memory_format=torch.contiguous_format)
+        lora_B = torch.clone(adapter_load_cache.pop(f"{weight_key}.lora_B.weight").T, memory_format=torch.contiguous_format)
 
         # since loder cache is singleton, we need to reset to None to ci loop tests can pass
         if len(adapter_load_cache) == 0:

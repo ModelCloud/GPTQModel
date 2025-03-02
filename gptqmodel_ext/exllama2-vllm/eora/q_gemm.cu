@@ -53,7 +53,6 @@ __host__ __forceinline__ hipblasStatus_t __compat_hipblasHgemm(
   #define rocblas_hgemm __compat_hipblasHgemm
 #endif
 
-
 __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr,
                                          const half2 g_result) {
   half2 result = {};
@@ -212,7 +211,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
     MatrixView_half Ax_(Ax, size_m, size_r);
     MatrixView_half eora_b_(eora_b, size_r, size_n);
 
-    double block_r_size = size_r;
+    // double block_r_size = size_r;
+    double block_r_size = BLOCK_KN_SIZE * size_r / double(size_k);
 
     int t = threadIdx.x;
 

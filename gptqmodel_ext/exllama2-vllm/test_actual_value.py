@@ -8,7 +8,7 @@ import math
 
 import gptqmodel_exllama_eora
 
-
+import copy
 
 # model_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/"
 # lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/adapter_model.safetensors"
@@ -42,17 +42,38 @@ use_exllama = True
 
 x = torch.rand((m, k), device='cuda', dtype=torch.float16)
 eora_a = eora_tensors[f'{target}.lora_A.weight'].to('cuda:0').T
-eora_b = eora_tensors[f'{target}.lora_B.weight'].to('cuda:0').T 
+eora_b = torch.clone(eora_tensors[f'{target}.lora_B.weight'].T, memory_format=torch.contiguous_format)
+# torch.zeros((r, n),device='cuda'
+# eora_b.data = torch.transpose(eora_tensors[f'{target}.lora_B.weight'], 0, 1)
+# eora_b = eora_tensors[f'{target}.lora_B.weight'].to('cuda:0').T
+
+
+
+# print(eora_b)
+# print(eora_b)
 
 # eora_b = torch.rand((r, n), device='cuda', dtype=torch.float16) / (100 * 4)
 # eora_b = torch.normal(-2.7120113372802734e-05, 0.0248565673828125, size=(r, n), device='cuda', dtype=torch.float16)
+
+# eora_b = torch.normal(-2.7120113372802734e-05, 0.0248565673828125, size=(n, r), device='cuda', dtype=torch.float16).T
+
+# eora_b.data = torch.normal(-2.7120113372802734e-05, 0.0248565673828125, size=(n, r), device='cuda', dtype=torch.float16).T
+
+
+# eora_b[[0,2,4,6,8],:] = 0
 # eora_b_mean = eora_b.mean()
 # eora_b_std = eora_b.std()
 # sample_range = 2040
 # sample_idx = torch.randint(0,2048,(1,sample_range)).flatten()
 # eora_b[:,sample_idx] = 0
-eora_b[[0,2,4,6,8],:] = 0
-print(eora_b.shape)
+
+# list_range = list(range(1,128))
+# eora_b[list_range,:] = 0
+# print(eora_b)
+
+
+# print(eora_b.shape)
+# print(eora_b)
 # print(eora_b)
 # print(f"eora_b max {eora_b.max()}")
 # print(f"eora_b max {eora_b.min()}")

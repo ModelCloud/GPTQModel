@@ -16,12 +16,16 @@ x = torch.rand((m, k), device='cuda', dtype=torch.float16)
 eora_a = torch.randn((k, r), device='cuda', dtype=torch.float16) / 10.
 eora_b = torch.randn((r, n), device='cuda', dtype=torch.float16) / 10.
 
+eora_b[[0,1],:] = 0
+
+# eora_b[:,[0,1]] = 0
+# print(eora_b)
 # gptq data
 gptq_groups = 32
 # weight = torch.randint(-2000000, 2000000, (int(k / 2 / bit), n), device='cuda', dtype=torch.int32)
 weight = torch.zeros((int(k / 2 / bit), n), device='cuda', dtype=torch.int32)
 zeros = torch.zeros((gptq_groups, int(n / 2 / bit)), device='cuda', dtype=torch.int32)
-scales = torch.rand((gptq_groups, n), device='cuda', dtype=torch.float16) / 1000.0
+scales = torch.zeros((gptq_groups, n), device='cuda', dtype=torch.float16) / 1000.0
 idx = torch.empty((0, ), device='cuda', dtype=torch.int32)
 
 ax = x @ eora_a
