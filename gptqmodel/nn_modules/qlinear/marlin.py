@@ -400,12 +400,17 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         super().post_init()
 
-    def forward(self, A: torch.Tensor):
-        if A.dtype != torch.float16:
-            A = A.to(torch.float16)
+    def forward(self, x: torch.Tensor):
+        # TODO FIXME: parent should never call us if there is no data to process
+        # check: https://github.com/ModelCloud/GPTQModel/issues/1361
+        if x.shape[0] == 0:
+            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+
+        if x.dtype != torch.float16:
+            x = x.to(torch.float16)
 
         out = apply_gptq_marlin_linear(
-            input=A.contiguous() if self.is_lm_head else A,
+            input=x.contiguous() if self.is_lm_head else x,
             weight=self.qweight,
             weight_scale=self.scales,
             weight_zp=self.zp,
@@ -421,7 +426,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         if self.adapter:
-            out = self.adapter.apply(x=A, out=out)
+            out = self.adapter.apply(x=x, out=out)
 
         return out
 
