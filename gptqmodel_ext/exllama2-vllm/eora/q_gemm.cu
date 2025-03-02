@@ -212,7 +212,7 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
     MatrixView_half Ax_(Ax, size_m, size_r);
     MatrixView_half eora_b_(eora_b, size_r, size_n);
 
-    double block_r_size = BLOCK_KN_SIZE * size_r / double(size_k);
+    double block_r_size = size_r;
 
     int t = threadIdx.x;
 
