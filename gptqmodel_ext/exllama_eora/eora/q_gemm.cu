@@ -335,8 +335,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
         for (int j = 0; j < 4; ++j) {
 #pragma unroll
             for (int m = 0; m < m_count; m++) {
-                auto a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
-                auto a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
+                float a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
+                float a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
                 float product = a1 * a2;
                 block_c[m][j] = block_c[m][j] + product;
             }
