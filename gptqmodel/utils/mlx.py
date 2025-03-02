@@ -7,7 +7,6 @@ from ..models import BaseGPTQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .logger import setup_logger
-from .progress import ProgressBar
 from .torch import torch_empty_cache
 
 try:
@@ -49,9 +48,9 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
     # Convert weights
     weights = {}
     n = 1
-    pb = ProgressBar(model.named_modules(), prefix="Format: Converting to mlx ->", total=len(list(model.named_modules())))
+    pb = logger.pb(model.named_modules()).title("Format: Converting to mlx ->").manual()
     for name, module in pb:
-        pb.info(f"{name}")
+        pb.subtitle(f"{name}").draw()
         if isinstance(module, TorchQuantLinear):
             weights[f"{name}.weight"] = mx.array(
                 module.dequantize_weight().T.detach().to("cpu", torch.float16).numpy()

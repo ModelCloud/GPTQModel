@@ -21,11 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from torch.nn.parameter import Parameter
 
+from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import BaseQuantLinear
+from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
 marlin_import_exception = None
@@ -34,6 +36,7 @@ try:
 except ImportError as e:
     marlin_import_exception = e
 
+logger = setup_logger()
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -133,29 +136,34 @@ def apply_gptq_marlin_linear(
         output_size_per_partition: int,
         input_size_per_partition: int,
         is_k_full: bool,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        bias: torch.Tensor,
+        fp32: bool,
+) -> torch.Tensor:
+
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
-                                  weight,
-                                  weight_scale,
-                                  weight_zp,
-                                  g_idx,
-                                  g_idx_sort_indices,
-                                  workspace,
-                                  num_bits,
-                                  reshaped_x.shape[0],
-                                  output_size_per_partition,
-                                  input_size_per_partition,
-                                  is_k_full,
-                                  False)
+    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(
+        reshaped_x,
+        weight,
+        weight_scale,
+        weight_zp,
+        g_idx,
+        g_idx_sort_indices,
+        workspace,
+        num_bits,
+        reshaped_x.shape[0],
+        output_size_per_partition,
+        input_size_per_partition,
+        is_k_full,
+        False,
+        fp32, # <- True: enable fp32 reduce for higher accuracy, False: fp16
+    )
 
     if bias is not None:
         output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)
-
 
 class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4, 8]
@@ -208,9 +216,16 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.MARLIN),
             adapter=adapter,
             register_buffers=False,
             **kwargs)
+
+        # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
+        self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
+
+        if not self.fp32:
+            logger.warn.once("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -314,6 +329,18 @@ class MarlinQuantLinear(BaseQuantLinear):
         if kwargs.get("name") is not None and kwargs.get("lm_head_name") is not None:
             self.is_lm_head = kwargs["name"] == kwargs["lm_head_name"]
 
+        # auto-optimize on post init
+        # self.optimize()
+
+    # def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+    #     if self.optimized:
+    #         return
+    #
+    #     # compile dequantize
+    #     self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
+    #
+    #     super().optimize()
+
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
@@ -390,6 +417,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
             bias=self.bias,
+            fp32=self.fp32,
         )
 
         if self.adapter:

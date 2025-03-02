@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Union
 import torch
 import transformers
 
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -32,7 +35,6 @@ if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
 else:
     from huggingface_hub import snapshot_download
 
-from gptqmodel.adapter.adapter import Adapter
 from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
@@ -40,6 +42,7 @@ from transformers.modeling_utils import no_init_weights
 from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
 
+from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
@@ -47,8 +50,7 @@ from ..quantization.config import FORMAT, FORMAT_FIELD_JSON, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.marlin import (_validate_marlin_compatibility,
-                            _validate_marlin_device_support)
+from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
                            make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
@@ -340,19 +342,18 @@ def ModelLoader(cls):
 
         if qcfg.format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            if backend != BACKEND.MARLIN and backend != BACKEND.AUTO:
+            if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
             backend = BACKEND.MARLIN
 
-        marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
-
-        # check for marlin compat for cuda device onnly
-        if backend != BACKEND.MARLIN and device == DEVICE.CUDA:
-            unsupported = _validate_marlin_compatibility(qcfg)
-            if unsupported is None and marlin_compatible:
-                logger.info(
-                    "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
-                )
+        # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
+        # check for marlin compat for cuda device only
+        # if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and device == DEVICE.CUDA:
+        #     unsupported = _validate_marlin_compatibility(qcfg)
+        #     if unsupported is None and marlin_compatible:
+        #         logger.info(
+        #             "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
+        #         )
 
         if qcfg.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
@@ -435,7 +436,7 @@ def ModelLoader(cls):
                     elif is_flash_attn_2_available() and not has_attn_implementation:
                         args = {USE_FLASH_ATTENTION_2: True}
 
-                    logger.info("Auto enabling flash attention2")
+                    logger.info("Optimize: Auto enabling flash attention2")
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
@@ -493,19 +494,21 @@ def ModelLoader(cls):
                     f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                 )
 
-            t = time.time()
-            logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
-            model = convert_gptq_v1_to_v2_format(
-                model,
-                cfg=qcfg,
-                qlinear_kernel=preload_qlinear_kernel,
-            )
-            logger.info(f"Format: Conversion complete: {time.time() - t}s")
+            # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
+            if preload_qlinear_kernel not in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+                t = time.time()
+                logger.info(f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+                model = convert_gptq_v1_to_v2_format(
+                    model,
+                    cfg=qcfg,
+                    qlinear_kernel=preload_qlinear_kernel,
+                )
+                logger.info(f"Format: Conversion complete: {time.time() - t}s")
 
             load_checkpoint_in_model = False
             qcfg.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MARLIN and (
+        if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
@@ -542,7 +545,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,

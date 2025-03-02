@@ -18,15 +18,17 @@ from __future__ import annotations
 
 import os
 
-from gptqmodel.adapter.adapter import Adapter, normalize_adapter
+from ..utils.logger import setup_logger
+
+logger = setup_logger()
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
-    print("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
+    logger.info("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
-    print("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
+    logger.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
 import sys  # noqa: E402
 
@@ -41,18 +43,17 @@ from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
-from gptqmodel.adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
 from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
 
+from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
-from ..utils.logger import setup_logger  # noqa: E402
 from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
@@ -110,8 +111,6 @@ from .definitions.yi import YiGPTQ  # noqa: E402
 torch.manual_seed(787)
 random.seed(787)
 numpy.random.seed(787)
-
-logger = setup_logger()
 
 MODEL_MAP = {
     "bloom": BloomGPTQ,
@@ -197,10 +196,6 @@ class GPTQModel:
 
         if isinstance(backend, str):
             backend = BACKEND(backend)
-
-        # if backend == BACKEND.VLLM:
-        #     from ..integration.integration_vllm import patch_vllm
-        #     patch_vllm()
 
         is_quantized = False
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
@@ -414,7 +409,7 @@ class GPTQModel:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
-            from gptqmodel.utils.eval import evalplus, evalplus_make_table
+            from ..utils.eval import evalplus, evalplus_make_table
 
             results = {}
             for task in tasks:

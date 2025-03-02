@@ -17,9 +17,10 @@
 from typing import Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Adapter, Lora
-from gptqmodel.models._const import DEVICE, PLATFORM
 
+from ...adapter.adapter import Adapter, Lora
+from ...models._const import DEVICE, PLATFORM
+from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
 from . import PackableQuantLinear
@@ -127,6 +128,7 @@ class IPEXQuantLinear(PackableQuantLinear):
             pack_dtype=pack_dtype,
             adapter=adapter,
             register_buffers=True,
+            backend=kwargs.pop("backend", BACKEND.IPEX),
             **kwargs)
 
         self.weight_dtype = torch.float16

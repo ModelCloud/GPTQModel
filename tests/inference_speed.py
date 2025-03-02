@@ -25,14 +25,15 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest
 
 from gptqmodel import GPTQModel
-from gptqmodel.utils.progress import ProgressBar
+from logbar import LogBar
 from transformers import AutoTokenizer
 
+logger = LogBar.shared()
 
 class InferenceSpeed(unittest.TestCase):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2"
     BITBLAS_NATIVE_MODEL_ID = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
-    MAX_NEW_TOEKNS = 10
+    MAX_NEW_TOKENS = 10
     NUM_RUNS = 20
     PROMPTS = [
         "I am in Paris and I",
@@ -68,11 +69,10 @@ class InferenceSpeed(unittest.TestCase):
 
         # compile kernels need JIT compile (Bitblas, IPEX, Triton) so we should do some warmup before actual speed run
         if warmup_runs > 0:
-            pb = ProgressBar(range(warmup_runs))
-            for i in pb:
-                pb.info(f"warmup run index {i} of {self.NUM_RUNS - 1}")
+            pb = logger.pb(range(warmup_runs)).title("Warmup")
+            for _ in pb:
                 start_time = time.time()
-                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+                result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
                 end_time = time.time()
                 elapsed_time = end_time - start_time
                 times.append(elapsed_time)
@@ -95,11 +95,10 @@ class InferenceSpeed(unittest.TestCase):
             print(f"New Token Per Second: {avg_tokens_per_second} token/s")
             print(f"****************  {backend} Warm-up Result Info End****************")
 
-        pb = ProgressBar(range(self.NUM_RUNS))
-        for i in pb:
-            pb.info(f"run index {i} of {self.NUM_RUNS - 1}")
+        pb = logger.pb(range(self.NUM_RUNS)).title("Run")
+        for _ in pb:
             start_time = time.time()
-            result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOEKNS, pad_token_id=tokenizer.pad_token_id)
+            result = model.generate(**inp, max_new_tokens=self.MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
             end_time = time.time()
             elapsed_time = end_time - start_time
             times.append(elapsed_time)

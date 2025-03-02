@@ -19,19 +19,20 @@ import time
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
-from gptqmodel.adapter.adapter import Lora
-from gptqmodel.eora.eora import eora_compute_lora, eora_process_input
-from gptqmodel.looper.loop_processor import LoopProcessor
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.models import BaseGPTQModel
-from gptqmodel.models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER,
-                                     PROCESS_LOG_MODULE, PROCESS_LOG_NAME, PROCESS_LOG_TIME)
-from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.quantization.gptq import CPU
-from gptqmodel.utils.logger import setup_logger
-from gptqmodel.utils.model import move_to
-from gptqmodel.utils.torch import torch_compile, torch_sync
 from torch.nn import Module
+
+from ..adapter.adapter import Lora
+from ..eora.eora import eora_compute_lora, eora_process_input
+from ..looper.loop_processor import LoopProcessor
+from ..looper.named_module import NamedModule
+from ..models import BaseGPTQModel
+from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER,
+                             PROCESS_LOG_MODULE, PROCESS_LOG_NAME, PROCESS_LOG_TIME)
+from ..quantization.config import QuantizeConfig
+from ..quantization.gptq import CPU
+from ..utils.logger import setup_logger
+from ..utils.model import move_to
+from ..utils.torch import torch_compile, torch_sync
 
 logger = setup_logger()
 
@@ -66,7 +67,7 @@ class EoraProcessor(LoopProcessor):
     def log_plotly(self):
         task = self.logger_task
         if task is not None:
-            from gptqmodel.utils.plotly import create_plotly
+            from ..utils.plotly import create_plotly
             x = list(range(self.layer_count))
             gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
             cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
@@ -115,7 +116,7 @@ class EoraProcessor(LoopProcessor):
     def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)
 
-        self.pb.info(f"EoRA gen: {module.name} in layer {module.layer_index} of {self.layer_count - 1}")
+        self.pb.title(f"EoRA gen: {module.name} in layer").draw()
 
         start = time.time()
 
