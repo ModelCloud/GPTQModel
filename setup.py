@@ -215,8 +215,8 @@ if BUILD_CUDA_EXT:
         cpp_ext.CUDAExtension(
             'gptqmodel_exllama_eora',
             [
-                "gptqmodel_ext/exllama2-vllm/eora/q_gemm.cu",
-                "gptqmodel_ext/exllama2-vllm/eora/pybind.cu",
+                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
             ],
             extra_link_args=extra_link_args,
             extra_compile_args=extra_compile_args,

@@ -54,7 +54,7 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 
 
 class ExllamaEoraQuantLinear(BaseQuantLinear):
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_BITS = [4] # fused eora only validated for 4 bits
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True] # TODO: validate False

@@ -5,7 +5,6 @@ Copied from https://github.com/turboderp/exllamav2
 #ifndef _compat_cuh
 #define _compat_cuh
 
-namespace vllm {
 namespace gptq {
 // atomicAdd for half types, to support CC < 7.x
 
@@ -60,5 +59,4 @@ __device__ __forceinline__ void atomicAdd(half2* address, half2 val) {
 #endif
 
 }  // namespace gptq
-}  // namespace vllm
 #endif
