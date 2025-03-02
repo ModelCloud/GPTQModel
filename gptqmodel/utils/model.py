@@ -351,6 +351,10 @@ def hf_convert_gptq_v1_to_v2_format(
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
+        # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
+        if qlinear_kernel not in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+            return model, False
+
         cfg = QuantizeConfig(bits=bits)
         return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
     else:
@@ -477,6 +481,7 @@ def convert_gptq_v2_to_v1_format(
     quantize_config: QuantizeConfig,
     qlinear_kernel: Type[BaseQuantLinear],
 ):
+
     # skip v2 to v1 conversion for gptq_v1 kernels
     if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
         return model

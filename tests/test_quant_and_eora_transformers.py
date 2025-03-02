@@ -17,10 +17,9 @@
 import os
 
 import torch
+from peft.tuners.lora.gptq import GPTQLoraLinear
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from peft.tuners.lora.gptq import GPTQLoraLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -30,7 +29,7 @@ from typing import Optional  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.adapter.adapter import Lora, HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX  # noqa: E402
+from gptqmodel.adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402

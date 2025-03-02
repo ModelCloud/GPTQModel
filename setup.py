@@ -21,9 +21,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from setuptools import find_packages, setup
-
 import torch
+from setuptools import find_packages, setup
 
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
@@ -213,6 +212,20 @@ if BUILD_CUDA_EXT:
         ]
 
     extensions = [
+        cpp_ext.CUDAExtension(
+            'gptqmodel_exllama_eora',
+            [
+                "gptqmodel_ext/exllama2-vllm/eora/q_gemm.cu",
+                "gptqmodel_ext/exllama2-vllm/eora/pybind.cu",
+            ],
+            extra_link_args=extra_link_args,
+            extra_compile_args=extra_compile_args,
+            # include_dirs=[os.path.abspath("."), os.path.abspath("eora")],
+            # extra_compile_args={
+            #     'cxx': ['-std=c++20'],
+            #     'nvcc': ['-std=c++20'],
+            # }
+        ),
         cpp_ext.CUDAExtension(
             "gptqmodel_cuda_64",
             [

@@ -323,6 +323,7 @@ def ModelLoader(cls):
                 model, hf_config = load_model_by_sglang(
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
+                    dtype=torch.float16,
                     **kwargs,
                 )
                 model.config = hf_config

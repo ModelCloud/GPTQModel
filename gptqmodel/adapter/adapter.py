@@ -171,8 +171,8 @@ class Lora(Adapter):
                 pop_keys.append(k)
             elif k.endswith(lora_B_weight_key):
                 lora_B = v.T
+                lora_B = torch.clone(v.T, memory_format=torch.contiguous_format)
                 pop_keys.append(k)
-
 
         if pop_keys:
             for k in pop_keys:

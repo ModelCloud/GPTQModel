@@ -19,13 +19,14 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
 import torch
+from gptqmodel.adapter.adapter import Adapter
 
-from ..adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
@@ -42,6 +43,7 @@ logger = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
+    BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
     BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
     BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
@@ -52,8 +54,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16], # BACKEND.EXLLAMA_EORA
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH], # , BACKEND.EXLLAMA_EORA
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_EORA, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -230,8 +232,8 @@ def select_quant_linear(
         qlinear = BitBLASQuantLinear
     elif backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16]:
         qlinear = MarlinQuantLinear
-    # elif backend == BACKEND.EXLLAMA_EORA:
-    #     qlinear = ExllamaEoraQuantLinear
+    elif backend == BACKEND.EXLLAMA_EORA:
+        qlinear = ExllamaEoraQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:

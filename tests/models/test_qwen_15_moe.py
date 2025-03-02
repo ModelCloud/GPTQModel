@@ -1,10 +1,7 @@
-from gptqmodel import GPTQModel, BACKEND
-import torch
-
 import unittest
 
-from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+import torch
+from gptqmodel import BACKEND, GPTQModel
 
 
 class TestQwen15Moe(unittest.TestCase):
