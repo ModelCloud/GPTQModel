@@ -189,6 +189,9 @@ class GPTQModel:
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ):
+        if isinstance(model_id_or_path, str):
+            model_id_or_path = model_id_or_path.strip()
+
         # normalize config to cfg instance
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)
