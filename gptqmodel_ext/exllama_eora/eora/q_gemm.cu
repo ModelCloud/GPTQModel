@@ -19,7 +19,6 @@ https://github.com/qwopqwop200/GPTQ-for-LLaMa
 #include "qdq_4.cuh"
 #include "qdq_8.cuh"
 
-namespace vllm {
 namespace gptq {
 
 #define BLOCK_KN_SIZE 128
@@ -336,8 +335,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
         for (int j = 0; j < 4; ++j) {
 #pragma unroll
             for (int m = 0; m < m_count; m++) {
-                auto a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
-                auto a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
+                float a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
+                float a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
                 float product = a1 * a2;
                 block_c[m][j] = block_c[m][j] + product;
             }
@@ -2074,7 +2073,6 @@ void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height,
 }
 
 }  // namespace gptq
-}  // namespace vllm
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
@@ -2086,7 +2084,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
   at::Tensor temp_dq = torch::empty(
       {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
 
-  vllm::gptq::gemm_half_q_half_cuda(
+ gptq::gemm_half_q_half_cuda(
       at::cuda::getCurrentCUDABlasHandle(), (const half*)a.data_ptr(),
       (const uint32_t*)b_q_weight.data_ptr(),
       (const uint32_t*)b_gptq_qzeros.data_ptr(),
@@ -2112,7 +2110,7 @@ torch::Tensor gptq_gemm_lora(torch::Tensor a, torch::Tensor b_q_weight,
     at::Tensor temp_dq = torch::empty(
             {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
 
-    vllm::gptq::gemm_half_q_half_cuda_eora(
+    gptq::gemm_half_q_half_cuda_eora(
             at::cuda::getCurrentCUDABlasHandle(), (const half*)a.data_ptr(),
             (const uint32_t*)b_q_weight.data_ptr(),
             (const uint32_t*)b_gptq_qzeros.data_ptr(),
@@ -2133,7 +2131,7 @@ torch::Tensor gptq_gemm_lora(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
-  vllm::gptq::shuffle_exllama_weight(
+  gptq::shuffle_exllama_weight(
       (uint32_t*)q_weight.data_ptr(),
       q_perm.device().is_meta() || q_perm.numel() == 0
           ? NULL

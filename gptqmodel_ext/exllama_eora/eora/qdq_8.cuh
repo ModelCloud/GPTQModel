@@ -7,7 +7,6 @@ Copied from https://github.com/turboderp/exllamav2
 
 #include "qdq_util.cuh"
 
-namespace vllm {
 namespace gptq {
 
 __forceinline__ __device__ void shuffle_8bit_4(uint32_t* q, int stride) {}
@@ -25,6 +24,5 @@ __forceinline__ __device__ void dequant_8bit_8(const uint32_t q_0,
 }
 
 }  // namespace gptq
-}  // namespace vllm
 
 #endif

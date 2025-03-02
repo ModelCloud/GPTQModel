@@ -3,7 +3,6 @@
 
 #include "qdq_util.cuh"
 
-namespace vllm {
 namespace gptq {
 // Permutation:
 //
@@ -144,6 +143,5 @@ __forceinline__ __device__ void dequant_3bit_32(const uint32_t q_0,
 }
 
 }  // namespace gptq
-}  // namespace vllm
 
 #endif
