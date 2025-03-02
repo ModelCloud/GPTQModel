@@ -54,7 +54,7 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 
 
 class ExllamaEoraQuantLinear(BaseQuantLinear):
-    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True] # TODO: validate False
@@ -157,7 +157,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         x_dtype = x.dtype
         if x_dtype != torch.float16:
             logger.warning_once(
-                f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+                f"Exllama EoRA kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
 
             x = x.to(dtype=torch.float16)

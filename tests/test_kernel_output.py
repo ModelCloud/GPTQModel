@@ -2,11 +2,20 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.adapter.adapter import AdapterCache, Lora
+from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
+from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
+from logbar import LogBar
 from parameterized import parameterized
 from torch import Tensor
+
+log = LogBar.shared()
 
 CUDA = torch.device("cuda:0")
 
@@ -23,7 +32,7 @@ class TestKernelOutput(unittest.TestCase):
         # BACKEND.BITBLAS: BitBLASQuantLinear,
         # BACKEND.IPEX: IPEXQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
-        # BACKEND.MARLIN_FP16: MarlinQuantLinear,
+        BACKEND.MARLIN_FP16: MarlinQuantLinear,
     }
 
     target = 'model.layers.6.self_attn.v_proj'
@@ -51,7 +60,7 @@ class TestKernelOutput(unittest.TestCase):
         cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH)
         cls.torch_kernel_out_with_lora = cls.forward(cls, backend=BACKEND.TORCH, adapter=cls.adapter)
 
-    def forward(self, backend, adapter=None):
+    def forward(self, backend: BACKEND, adapter: Adapter = None):
         model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter)
 
         target_qlinear_cls = self.target_qliner_map[backend]
@@ -76,12 +85,12 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000, 0.0000),
-        # (BACKEND.TRITON, 0.00001, 0.00001),
-        # (BACKEND.EXLLAMA_V1, 0.09, 0.0001),
-        # (BACKEND.EXLLAMA_V2, 0.136, 0.0001),
-        # (BACKEND.MARLIN, 0.00005, 0.00005),
-        # (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
-         (BACKEND.EXLLAMA_EORA, 0.05, 0.05)
+        (BACKEND.TRITON, 0.00001, 0.00001),
+        (BACKEND.EXLLAMA_V1, 0.09, 0.0001),
+        (BACKEND.EXLLAMA_V2, 0.136, 0.0001),
+        (BACKEND.MARLIN, 0.00005, 0.00005),
+        (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
+        (BACKEND.EXLLAMA_EORA, 0.00001, 0.00147)
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
         out = self.forward(backend=backend)
@@ -94,12 +103,12 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000, 0.0000),
-        # (BACKEND.TRITON, 0.00001, 0.00001),
-        # (BACKEND.EXLLAMA_V1, 0.015, 0.0008),
-        # (BACKEND.EXLLAMA_V2, 0.16, 0.0003),
-        # (BACKEND.MARLIN, 0.00001, 0.00003),
-        # (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
-        (BACKEND.EXLLAMA_EORA, 0.05, 0.05)
+        (BACKEND.TRITON, 0.00001, 0.00001),
+        (BACKEND.EXLLAMA_V1, 0.015, 0.0008),
+        (BACKEND.EXLLAMA_V2, 0.16, 0.0003),
+        (BACKEND.MARLIN, 0.00001, 0.00003),
+        (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
+        (BACKEND.EXLLAMA_EORA, 0.00001, 0.00147)
     ])
     def test_kernel_output_with_lora(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
         out = self.forward(backend=backend, adapter=self.adapter)
@@ -108,5 +117,5 @@ class TestKernelOutput(unittest.TestCase):
         print(f"backend: {backend} with lora")
         print(out[0][:10])
 
-        # torch vs exllama v1
+        # compare kernel output with torch kernel reference
         self.assert_on_mismatch(self.torch_kernel_out_with_lora, out, r_tolerance, a_tolerance)  # use torch as reference
