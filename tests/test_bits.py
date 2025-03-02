@@ -89,7 +89,7 @@ class TestBits(unittest.TestCase):
 
         # TODO Only CUDA Quant Linear is tested for now
         cls.pack_backends = [BACKEND.TORCH]
-        cls.backends = list([BACKEND.EXLLAMA_EORA])
+        cls.backends = [BACKEND.EXLLAMA_EORA]
 
     def test_bits(self):
         # quantize
