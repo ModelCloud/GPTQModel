@@ -42,6 +42,7 @@ from transformers.utils.hub import cached_file
 
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from .logger import setup_logger
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
@@ -61,7 +62,6 @@ from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
-from .log import setup_logger
 from .torch import torch_empty_cache, torch_new_stream_ctx
 
 
