@@ -27,7 +27,7 @@ from ..quantization.config import QuantizeConfig
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.logger import setup_logger
 
-logger = setup_logger()
+log = setup_logger()
 
 
 # LoopProcessor is a singleton(), not per module instance
@@ -91,7 +91,7 @@ class LoopProcessor:
             min_calibration_dataset_size = 256
             min_calibration_dataset_input_ids_avg_length = 256
             if len(calibration_dataset) < min_calibration_dataset_size:
-                logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                                f"Current: {len(calibration_dataset)}.")
 
             calibration_dataset = prepare_dataset_func(calibration_dataset=calibration_dataset,
@@ -119,7 +119,7 @@ class LoopProcessor:
             avg = total_input_ids_length / len(calibration_dataset)
 
             if avg < min_calibration_dataset_input_ids_avg_length:
-                logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
+                log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                                f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
             self.num_batches = len(calibration_dataset)

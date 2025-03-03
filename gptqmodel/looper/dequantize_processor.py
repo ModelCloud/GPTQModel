@@ -22,7 +22,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_compile
 
-logger = setup_logger()
+log = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):
     def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):

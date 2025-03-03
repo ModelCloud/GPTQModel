@@ -30,7 +30,8 @@ from ...nn_modules.qlinear import PackableQuantLinear
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
 
-logger = setup_logger()
+
+log = setup_logger()
 
 BITBLAS_TARGET = None
 BITBLAS_DATABASE_PATH = None
@@ -253,13 +254,13 @@ class BitBLASQuantLinear(PackableQuantLinear):
                 global_operator_cache.save_into_database(
                     BITBLAS_DATABASE_PATH, BITBLAS_TARGET
                 )
-                logger.info(
+                log.info(
                     "BitBLAS Tuning done, appended operator to global_operator_cache."
                 )
             else:
-                logger.info("BitBLAS Operator created.")
+                log.info("BitBLAS Operator created.")
         else:
-            logger.info("BitBLAS Operator found in global_operator_cache.")
+            log.info("BitBLAS Operator found in global_operator_cache.")
         return bitblas_matmul
 
     def reset_parameters(self):

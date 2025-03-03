@@ -26,13 +26,14 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
+
 exllama_v2_import_exception = None
 try:
     from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
 except ImportError as e:
     exllama_v2_import_exception = e
 
-logger = setup_logger()
+log = setup_logger()
 
 
 
@@ -225,7 +226,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
         x_dtype = x.dtype
         if x_dtype != torch.float16:
-            logger.warning_once(
+            log.warn.once(
                 f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
 

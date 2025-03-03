@@ -22,7 +22,8 @@ import torch.nn as nn
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 
-logger = setup_logger()
+
+log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
 

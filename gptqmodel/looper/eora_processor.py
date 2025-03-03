@@ -34,7 +34,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.torch import torch_compile, torch_sync
 
-logger = setup_logger()
+log = setup_logger()
 
 
 class EoraProcessor(LoopProcessor):
@@ -182,7 +182,7 @@ class EoraProcessor(LoopProcessor):
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
         self.log.append(stat)
-        logger.info(stat)
+        log.info(stat)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {

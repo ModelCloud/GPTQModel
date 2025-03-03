@@ -21,7 +21,8 @@ from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from .rocm import IS_ROCM
 
-logger = setup_logger()
+
+log = setup_logger()
 
 # Validate marlin support
 def _validate_marlin_device_support() -> bool:

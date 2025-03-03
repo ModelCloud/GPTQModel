@@ -23,7 +23,8 @@ from tvm.target.tag import list_tags
 
 from ...utils.logger import setup_logger
 
-logger = setup_logger()
+
+log = setup_logger()
 
 TARGET_MISSING_ERROR = (
     "TVM target not found. Please set the TVM target environment variable using `export TVM_TARGET=<target>`, "
@@ -44,10 +45,10 @@ def find_best_match(tags, query):
 
     if check_target(best_match, "cuda") == best_match:
         match = best_match if score >= MATCH_THRESHOLD else "cuda"
-        logger.info(f"found best match: {match}")
+        log.info(f"found best match: {match}")
         return match
     else:
-        logger.warning(TARGET_MISSING_ERROR)
+        log.warn(TARGET_MISSING_ERROR)
         return "cuda"
 
 

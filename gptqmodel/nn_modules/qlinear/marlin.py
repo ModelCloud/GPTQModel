@@ -30,13 +30,14 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
+
 marlin_import_exception = None
 try:
     import gptqmodel_marlin_kernels
 except ImportError as e:
     marlin_import_exception = e
 
-logger = setup_logger()
+log = setup_logger()
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -225,7 +226,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
 
         if not self.fp32:
-            logger.warn.once("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
+            log.warn.once("Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,

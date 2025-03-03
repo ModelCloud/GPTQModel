@@ -25,6 +25,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 
+
 try:
     import triton
     import triton.language as tl
@@ -43,7 +44,7 @@ except BaseException:
 TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
 TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
 
-logger = setup_logger()
+log = setup_logger()
 
 
 class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):

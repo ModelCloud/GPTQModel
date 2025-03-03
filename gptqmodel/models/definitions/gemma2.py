@@ -18,7 +18,8 @@ from ...utils import BACKEND
 from ...utils.logger import setup_logger
 from ..base import BaseGPTQModel
 
-logger = setup_logger()
+
+log = setup_logger()
 
 SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly inference a quantized Gemma2-27B model. Pre-quantized model with sample vLLM code: https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit ."
 
@@ -44,7 +45,7 @@ class Gemma2GPTQ(BaseGPTQModel):
             # The gemma-2 model 9b has 42 hidden layers, while the gemma-2 model 27b has 46 hidden layers.
             if num_hidden_layers > 42:
                 if not self.quantized:
-                    logger.warning(SUPPORT_ERR)
+                    log.warn(SUPPORT_ERR)
                     return
 
                 # quantized gemma-2 27b model only support vLLM/SGLang load.

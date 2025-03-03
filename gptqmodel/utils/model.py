@@ -34,18 +34,25 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
-from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
-                             EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
+from ..models._const import (
+    CPU,
+    DEVICE,
+    EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
+    EXPERT_INDEX_PLACEHOLDER,
+    SUPPORTED_MODELS,
+    SUPPORTS_MODULE_TYPES,
+)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -54,10 +61,11 @@ from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
-from .logger import setup_logger
+from .log import setup_logger
 from .torch import torch_empty_cache, torch_new_stream_ctx
 
-logger = setup_logger()
+
+log = setup_logger()
 
 def recurse_getattr(obj, attr: str):
     """
@@ -203,7 +211,7 @@ def make_quant(
         adapter=extension,
     )
 
-    logger.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
+    log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
 
     # loop over actual QLinear init, catch errors and use fallbacks if applicable
     for cls in quant_linear_candidates:
@@ -228,10 +236,10 @@ def make_quant(
                 backend=backend,
                 adapter=qcfg.adapter,
             )
-            logger.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
+            log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
         except NotImplementedError as e:
-            logger.info(f"Kernel: skipped -> `{cls}`.")
+            log.info(f"Kernel: skipped -> `{cls}`.")
 
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
@@ -373,7 +381,7 @@ def convert_gptq_v1_to_v2_format(
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         t = time.time()
-        logger.info(
+        log.info(
             f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 
         for _, submodule in model.named_modules():
@@ -454,7 +462,7 @@ def convert_gptq_v1_to_v2_format(
                 else:
                     raise NotImplementedError("Only 2,3,4,8 bits are supported.")
 
-        logger.info(f"Format: Conversion complete: {time.time() - t}s")
+        log.info(f"Format: Conversion complete: {time.time() - t}s")
 
     return model
 
@@ -556,7 +564,7 @@ def pack_model(
 
     model.to(CPU)
 
-    logger.info("Packing model...")
+    log.info("Packing model...")
 
     modules = find_modules(model)
 
@@ -582,7 +590,7 @@ def pack_model(
         max_workers = 1
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        with logger.pb(names).manual() as pb:
+        with log.pb(names).manual() as pb:
             def wrapper(name):
                 # TODO FIX, thread pool executor does not advance iterator
                 pb.next()
@@ -592,7 +600,7 @@ def pack_model(
             for _ in executor.map(wrapper, names):
                 pass
 
-    logger.info("Model packed.")
+    log.info("Model packed.")
     return quant_linear_cls
 
 
@@ -623,7 +631,7 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
 
     for shard_file, expected_hash in zip(shard_files, verify_hash):
         if not verify_model_hash(shard_file, expected_hash):
-            logger.info(f"Hash verification failed for {shard_file}")
+            log.info(f"Hash verification failed for {shard_file}")
             return False
     return True
 
@@ -721,7 +729,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
                 max_input_len = max_input_length
         else:
             if max_input_length is not None:
-                logger.info(
+                log.info(
                     "Using exllama backend without act-order, the parameter max_input_length was set although not needed, it will be ignored."
                 )
             max_input_len = 1
@@ -1019,7 +1027,7 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
                     del state_dict[name]
                     warn_names.add(name)
     if len(warn_names) > 0:
-        logger.warning_once(
+        log.warn.once(
             f"Removed shared tensor {warn_names} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading",
         )
     return state_dict

@@ -10,7 +10,7 @@ from ..utils.logger import setup_logger
 from .peft import LoraConfig
 from .remote import resolve_path
 
-logger = setup_logger()
+log = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
 HF_ADAPTER_FILE_NAME = "adapter_model.safetensors"
 HF_ADAPTER_CONFIG_FILE_NAME = "adapter_config.json"
@@ -30,7 +30,7 @@ class AdapterCache():
 
     @classmethod
     def reset(cls):
-        logger.info("Adapter Cache: Resetting cache")
+        log.info("Adapter Cache: Resetting cache")
         cls.cache = {}
 
     @classmethod
@@ -181,10 +181,10 @@ class Lora(Adapter):
             # we have consumed all modules
             if len(lora_weights) == 0:
                 AdapterCache.remove(self.path)
-                logger.info("Adapter: Consumed all Lora weights")
+                log.info("Adapter: Consumed all Lora weights")
 
         else:
-            logger.warn(f"Adapter: Lora weights not found for `{weight_key}`")
+            log.warn(f"Adapter: Lora weights not found for `{weight_key}`")
 
         assert lora_A is not None and lora_B is not None, f"Adapter: `lora_A` and `lora_B` must both be present in the weights: actual = `{lora_A}` and `{lora_B}`"
 
@@ -198,7 +198,7 @@ class Lora(Adapter):
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
         if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
-            logger.warn(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
+            log.warn(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
 
         self.lora_A = lora_A.to(device=device, dtype=torch.float16)
         self.lora_B = lora_B.to(device=device, dtype=torch.float16)
@@ -216,7 +216,7 @@ class Lora(Adapter):
                 # first do string full match, then suffix match, then regex match
                 if weight_key == k or k.endswith(weight_key) or re.match(k, weight_key):
                     self.rank = v
-                    logger.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
+                    log.info(f"Adapter: Base Lora `rank` = `{self.rank}` has been overridden by `{k}` due to dynamic `LoraConfig.rank_pattern` control.")
                     return True
 
         return False

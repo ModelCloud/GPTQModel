@@ -37,19 +37,37 @@ from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
-                                   META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
-                                   META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
+from ..quantization.config import (
+    FORMAT,
+    META_FIELD_DAMP_AUTO_INCREMENT,
+    META_FIELD_DAMP_PERCENT,
+    META_FIELD_MSE,
+    META_FIELD_QUANTIZER,
+    META_FIELD_STATIC_GROUPS,
+    META_FIELD_TRUE_SEQUENTIAL,
+    META_FIELD_URI,
+    META_QUANTIZER_GPTQMODEL,
+    META_VALUE_URI,
+    MIN_VERSION_WITH_V2,
+)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules,
-                           get_model_files_size, get_moe_layer_modules, get_state_dict_for_save,
-                           load_checkpoint_in_model_then_tie_weights, make_quant)
+from ..utils.model import (
+    convert_gptq_v2_to_v1_format,
+    copy_py_files,
+    find_modules,
+    get_model_files_size,
+    get_moe_layer_modules,
+    get_state_dict_for_save,
+    load_checkpoint_in_model_then_tie_weights,
+    make_quant,
+)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
 
-logger = setup_logger()
+
+log = setup_logger()
 
 PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
@@ -67,7 +85,7 @@ def ModelWriter(cls):
             save_dir: str,
             **kwargs,
     ):
-        logger.warning("You are using save_pretrained, which will re-direct to save_quantized.")
+        log.warn("You are using save_pretrained, which will re-direct to save_quantized.")
         self.save_quantized(save_dir=save_dir, **kwargs)
 
     cls.save_pretrained = save_pretrained
@@ -96,7 +114,7 @@ def ModelWriter(cls):
                 for lora_key, lora_weight in d.items():
                     assert isinstance(lora_weight, torch.Tensor)
                     weights[f"{key}.{lora_key}"] = lora_weight
-                    logger.info(f"Adapter: EoRA weights found -> `{key}.{lora_key}`, rank = `{lora_rank}`")
+                    log.info(f"Adapter: EoRA weights found -> `{key}.{lora_key}`, rank = `{lora_rank}`")
 
             weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
 
@@ -112,7 +130,7 @@ def ModelWriter(cls):
                                   rank_pattern=rank_pattern)
             lora_cfg.save_pretrained(save_dir=save_dir)
 
-            logger.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
+            log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
             os.makedirs(os.path.dirname(save_dir), exist_ok=True)
             save_file(tensors=weights, filename=weight_file_path, metadata={"format": "pt"})
 
@@ -146,7 +164,7 @@ def ModelWriter(cls):
             if len(meta_quantizer.split(":")) == 2:
                 quantizers.append(meta_quantizer.replace(" ",""))
             else:
-                logger.warning(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
+                log.warn(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
 
         # write gptqmodel tooling fingerprint to config
         self.quantize_config.meta_set_versionable(
@@ -192,7 +210,7 @@ def ModelWriter(cls):
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
         if quantize_config.format == FORMAT.GPTQ_V2:
-            logger.warning(
+            log.warn(
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
@@ -273,7 +291,7 @@ def ModelWriter(cls):
         model_save_name = model_base_name + ".safetensors"
 
         if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
-            logger.warning("Sharding is not supported for this quant. Disabling sharding.")
+            log.warn("Sharding is not supported for this quant. Disabling sharding.")
             max_shard_size = None
 
         if max_shard_size is None:
@@ -282,7 +300,7 @@ def ModelWriter(cls):
             elif not isinstance(safetensors_metadata, dict):
                 raise TypeError("safetensors_metadata must be a dictionary.")
             else:
-                logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                log.debug(f"Received safetensors_metadata: {safetensors_metadata}")
                 new_safetensors_metadata = {}
                 converted_keys = False
                 for key, value in safetensors_metadata.items():
@@ -296,13 +314,13 @@ def ModelWriter(cls):
                                 f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
                             )
                         if new_key in new_safetensors_metadata:
-                            logger.warning(
+                            log.warn(
                                 f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
                             )
                         new_safetensors_metadata[new_key] = new_value
                 safetensors_metadata = new_safetensors_metadata
                 if converted_keys:
-                    logger.debug(
+                    log.debug(
                         f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
                     )
 
@@ -342,7 +360,7 @@ def ModelWriter(cls):
                 elif not isinstance(safetensors_metadata, dict):
                     raise TypeError("safetensors_metadata must be a dictionary.")
                 else:
-                    logger.debug(f"Received safetensors_metadata: {safetensors_metadata}")
+                    log.debug(f"Received safetensors_metadata: {safetensors_metadata}")
                     new_safetensors_metadata = {}
                     converted_keys = False
                     for key, value in safetensors_metadata.items():
@@ -355,12 +373,12 @@ def ModelWriter(cls):
                                 raise TypeError(
                                     f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
                             if new_key in new_safetensors_metadata:
-                                logger.warning(
+                                log.warn(
                                     f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
                             new_safetensors_metadata[new_key] = new_value
                     safetensors_metadata = new_safetensors_metadata
                     if converted_keys:
-                        logger.debug(
+                        log.debug(
                             f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
 
                 # Format is required to enable Accelerate to load the metadata
@@ -394,9 +412,9 @@ def ModelWriter(cls):
             size_diff_mb = pre_quantized_size_mb - total_size_mb
             size_diff_gb = size_diff_mb / 1024
             percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
-            logger.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
-            logger.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
-            logger.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+            log.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
+            log.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+            log.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
@@ -457,7 +475,7 @@ def ModelWriter(cls):
                 ):
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:
-                        logger.info(f"The layer {name} is not quantized.")
+                        log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
             make_quant(
