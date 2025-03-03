@@ -20,17 +20,19 @@ import os
 
 from ..utils.logger import setup_logger
 
-logger = setup_logger()
+
+log = setup_logger()
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
-    logger.info("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
+    log.info("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
-    logger.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
+    log.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
 import sys  # noqa: E402
+
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -105,6 +107,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -247,13 +250,13 @@ class GPTQModel:
     ) -> BaseGPTQModel:
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
                    "quantization_config"):
-            logger.warning("Model is already quantized, will use `from_quantized` to load quantized model.\n"
+            log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if quantize_config and quantize_config.dynamic:
-            logger.warning(
+            log.warn(
                 "GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)

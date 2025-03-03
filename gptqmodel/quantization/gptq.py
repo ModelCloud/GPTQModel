@@ -32,7 +32,8 @@ from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
-logger = setup_logger()
+
+log = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -229,10 +230,10 @@ class GPTQ:
                 break
             except torch._C._LinAlgError as e:
                 if  self.qcfg.damp_auto_increment != 0:
-                    logger.warning(f"Quantization: Current `damp_percent = {damp_percent:.5f}` is too low, auto-incrementing by `{ self.qcfg.damp_auto_increment:.5f}`")
+                    log.warn(f"Quantization: Current `damp_percent = {damp_percent:.5f}` is too low, auto-incrementing by `{ self.qcfg.damp_auto_increment:.5f}`")
                     damp_percent +=  self.qcfg.damp_auto_increment
                 else:
-                    logger.warning("Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
+                    log.warn("Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
                     raise e
 
         if not (0 < damp_percent < 1):

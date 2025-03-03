@@ -25,7 +25,8 @@ from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights
 from .torch import torch_empty_cache
 
-logger = setup_logger()
+
+log = setup_logger()
 
 def prepare_model_for_bitblas_load(
         model,
@@ -41,7 +42,7 @@ def prepare_model_for_bitblas_load(
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
     if qcfg.format == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
-        logger.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
+        log.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
         load_checkpoint_in_model_then_tie_weights(
             model,
@@ -91,7 +92,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
         # Note that due to tvm compilation of per layer modules shapes, the first layer loop is
         # relatively much slower if caching is not available. estimate time remaining is highly inaccurate
-        for name, module in logger.pb(list(model.named_modules())).title(message):
+        for name, module in log.pb(list(model.named_modules())).title(message):
             if not isinstance(module, model_quantlinear):
                 continue
 

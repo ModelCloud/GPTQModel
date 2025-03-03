@@ -2,26 +2,27 @@ from transformers import GenerationConfig, PreTrainedModel
 
 from ..utils.logger import setup_logger
 
-logger = setup_logger()
+
+log = setup_logger()
 
 # TODO FIXME! Pre-quantized use AutoModelForCausalLM.from_pretrained() but post-quantized use AutoModelForCausalLM.from_config()
 def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
     if model.can_generate():
         # sync config first
         if path:
-            logger.info(f"Model: Loaded `generation_config`: {model.generation_config}")
+            log.info(f"Model: Loaded `generation_config`: {model.generation_config}")
             try:
                 cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
                 if cfg != model.generation_config:
                     model.generation_config = cfg
-                    logger.info(
+                    log.info(
                         "Model: Auto-fixed `generation_config` mismatch between model and `generation_config.json`.")
-                    logger.info(f"Model: Updated `generation_config`: {model.generation_config}")
+                    log.info(f"Model: Updated `generation_config`: {model.generation_config}")
                 else:
                     pass
                     # logger.info(f"Model: loaded `generation_config` matching `generation_config.json`.")
             except Exception:
-                logger.info("Model: `generation_config.json` not found. Skipped checking.")
+                log.info("Model: `generation_config.json` not found. Skipped checking.")
 
         # print(f"Before autofix_hf_model_config: {model.generation_config}")
         autofix_hf_generation_config(model.generation_config)
@@ -51,5 +52,5 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
         # fix wrong do_sample
         if errors > 0:
             cfg.do_sample = True
-            logger.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
+            log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 

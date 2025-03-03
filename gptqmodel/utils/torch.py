@@ -22,6 +22,7 @@ from packaging.version import Version
 
 from ..utils.logger import setup_logger
 
+
 HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False
@@ -29,7 +30,7 @@ HAS_MLX = False
 
 STREAM = None # cache
 
-logger = setup_logger()
+log = setup_logger()
 
 # reset dynamo cache on each model load since during ci loop model inference may exhuast cache
 torch._dynamo.reset()
@@ -62,7 +63,7 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
     try:
         return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
     except BaseException:
-        logger.warning(f"Failed to compile `{module}`")
+        log.warn(f"Failed to compile `{module}`")
         return module
 
 def torch_new_stream():

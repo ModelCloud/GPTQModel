@@ -32,7 +32,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
 from ..utils.torch import torch_sync
 
-logger = setup_logger()
+log = setup_logger()
 
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
@@ -90,7 +90,7 @@ class GPTQProcessor(LoopProcessor):
         # deepseek has massive # of sub-modules per layer, causing vram pressure
         # buffered mode is slower due to gpu<->cpu movement
         if buffered_fwd:  # TODO tweak this number for masive MoE
-            logger.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
+            log.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
@@ -160,7 +160,7 @@ class GPTQProcessor(LoopProcessor):
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
         self.log.append(stat)
-        logger.info(stat)
+        log.info(stat)
 
         self.result_save(module.full_name, {
             "scale": move_to(scale, device=CPU, stream=self.stream),

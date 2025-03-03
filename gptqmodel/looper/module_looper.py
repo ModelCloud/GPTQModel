@@ -34,7 +34,7 @@ from ..utils.model import (find_modules, get_device, get_module, get_module_by_n
                            get_moe_layer_modules, move_to, nested_move_to)
 from ..utils.torch import torch_empty_cache
 
-logger = setup_logger()
+log = setup_logger()
 
 class ModuleLooper():
     def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
@@ -192,7 +192,7 @@ class ModuleLooper():
                                                   num_experts=num_experts)
 
         layer_count = len(layers)
-        quant_modules_pb = (logger.pb(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
+        quant_modules_pb = (log.pb(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
                             .manual()
                             .set(left_steps_offset=1))
 
@@ -419,7 +419,7 @@ class ModuleLooper():
                 # ignore log
                 pass
             else:
-                logger.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
+                log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
 
             processor_name = reverse_p.name()
             total_log[processor_name] = reverse_p.log
@@ -427,7 +427,7 @@ class ModuleLooper():
                 self.gptq_model.quant_log = reverse_p.log
 
             for module_log in reverse_p.log:
-                logger.info(module_log)
+                log.info(module_log)
             reverse_p.log_plotly()
 
             reverse_p.finalize(model=self.gptq_model, **kwargs)

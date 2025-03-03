@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 from setuptools import find_packages, setup
 
+
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 except BaseException:

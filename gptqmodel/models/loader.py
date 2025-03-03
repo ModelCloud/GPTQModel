@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import transformers
 
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -47,12 +48,23 @@ from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
-from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
-                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+from ..utils.model import (
+    auto_dtype,
+    convert_gptq_v1_to_v2_format,
+    find_modules,
+    get_checkpoints,
+    get_moe_layer_modules,
+    gptqmodel_post_init,
+    load_checkpoint_in_model_then_tie_weights,
+    make_quant,
+    simple_dispatch_model,
+    verify_model_hash,
+    verify_sharded_model_hashes,
+)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
 
-logger = setup_logger()
+
+log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
 USE_FLASH_ATTENTION_2 = "use_flash_attention_2"
@@ -191,7 +203,7 @@ def ModelLoader(cls):
                     model.seqlen = model_config[key]
                     break
         else:
-            logger.warning("Model: can't get model's sequence length from model config, will set to 4096.")
+            log.warn("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
         model.eval()
 
@@ -395,7 +407,7 @@ def ModelLoader(cls):
                 verfieid = verify_model_hash(model_save_name, verify_hash)
             if not verfieid:
                 raise ValueError(f"Hash verification failed for {model_save_name}")
-            logger.info(f"Hash verification succeeded for {model_save_name}")
+            log.info(f"Hash verification succeeded for {model_save_name}")
 
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
@@ -432,7 +444,7 @@ def ModelLoader(cls):
                     elif is_flash_attn_2_available() and not has_attn_implementation:
                         args = {USE_FLASH_ATTENTION_2: True}
 
-                    logger.info("Optimize: Auto enabling flash attention2")
+                    log.info("Optimize: Auto enabling flash attention2")
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
@@ -457,7 +469,7 @@ def ModelLoader(cls):
                 ):
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
-                        logger.info(f"The layer {name} is not quantized.")
+                        log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
             preload_qlinear_kernel = make_quant(
@@ -571,7 +583,7 @@ def ModelLoader(cls):
                     model.seqlen = model_config[key]
                     break
         else:
-            logger.warning("can't get model's sequence length from model config, will set to 4096.")
+            log.warn("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
 
         # Any post-initialization that require device information, for example buffers initialization on device.

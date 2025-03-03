@@ -29,7 +29,8 @@ from packaging import version
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
 
-logger = setup_logger()
+
+log = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_JSON = "checkpoint_format"
@@ -138,7 +139,7 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
                     if isinstance(sub_value, Dict):
                         return sub_value.get(sub_key, default)
                     else:
-                        logger.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
+                        log.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
                 else:
                     return overrides.get(key, default)
     return default
@@ -333,7 +334,7 @@ class QuantizeConfig():
         with open(join(save_dir, QUANT_CONFIG_FILENAME), "w", encoding="utf-8") as f:
             d = self.to_dict()
             json_str = json.dumps(d, indent=2)
-            logger.info(f"Saved Quantize Config: \n{json_str}")
+            log.info(f"Saved Quantize Config: \n{json_str}")
             f.write(json_str)
 
     @classmethod
@@ -386,17 +387,17 @@ class QuantizeConfig():
             elif key in field_names:
                 normalized[key] = val
             else:
-                logger.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
+                log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
 
         if format_auto_inferred:
-            logger.info(f"QuantizeConfig: `{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
+            log.info(f"QuantizeConfig: `{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
 
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
             # AWQ and Marlin do not reorder the rows.
             normalized["desc_act"] = False
 
         if "sym" not in normalized:
-            logger.warning(
+            log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
 
@@ -483,7 +484,7 @@ class QuantizeConfig():
         else:
             # there is only one scale int32 + one qzero int32 per entire module so overall it contributes to close to 0 bpw
             bpw = self.bits
-        logger.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
+        log.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
 @dataclass
 class AutoRoundQuantizeConfig(QuantizeConfig):
@@ -549,4 +550,4 @@ class AutoRoundQuantizeConfig(QuantizeConfig):
 class BaseQuantizeConfig(QuantizeConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        logger.warning("QuantizeConfig: BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")
+        log.warn("QuantizeConfig: BaseQuantizeConfig is re-named and pending deprecation. Please use `QuantizeConfig` instead.")

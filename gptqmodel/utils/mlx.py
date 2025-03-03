@@ -6,8 +6,9 @@ from transformers import PreTrainedModel
 from ..models import BaseGPTQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .logger import setup_logger
+from .log import setup_logger
 from .torch import torch_empty_cache
+
 
 try:
     import mlx.core as mx
@@ -17,7 +18,7 @@ try:
 except ImportError:
     MLX_AVAILABLE = False
 
-logger = setup_logger()
+log = setup_logger()
 
 def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseGPTQModel], gptq_config: QuantizeConfig, lm_head_name: str):
     if not MLX_AVAILABLE:
@@ -48,7 +49,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
     # Convert weights
     weights = {}
     n = 1
-    pb = logger.pb(model.named_modules()).title("Format: Converting to mlx ->").manual()
+    pb = log.pb(model.named_modules()).title("Format: Converting to mlx ->").manual()
     for name, module in pb:
         pb.subtitle(f"{name}").draw()
         if isinstance(module, TorchQuantLinear):
@@ -85,11 +86,11 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
     mlx_model = model_class(model_args_class.from_dict(config))
 
     # Load and quantize weights
-    logger.info("Starting MLX quantization...")
+    log.info("Starting MLX quantization...")
     mlx_model.load_weights(list(weights.items()))
     weights, mlx_config = quantize_model(mlx_model, config, q_group_size=gptq_config["group_size"],
                                      q_bits=gptq_config["bits"])
-    logger.info("MLX quantization completed")
+    log.info("MLX quantization completed")
 
     return weights, mlx_config
 

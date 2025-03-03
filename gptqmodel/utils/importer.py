@@ -19,6 +19,7 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
 import torch
+
 from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
@@ -38,8 +39,9 @@ from . import BACKEND
 from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
+
 message_logged = False
-logger = setup_logger()
+log = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
@@ -197,7 +199,7 @@ def select_quant_linear(
                 adapter=adapter,
             )
             if os.environ.get("DEBUG") and not validate:
-                logger.info(f"skip {k} for {str(err)}")
+                log.info(f"skip {k} for {str(err)}")
             if validate:
                 if pack:
                     check_pack_func = issubclass(cls, PackableQuantLinear)
@@ -205,7 +207,7 @@ def select_quant_linear(
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         #    message_logged = True
-                        logger.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                        log.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                         validated_qlinears.append(cls)
                         if not multi_select:
                             return cls
@@ -213,7 +215,7 @@ def select_quant_linear(
                     #if not message_logged:
                     #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                     #    message_logged = True
-                    logger.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                    log.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
                         return cls
@@ -249,7 +251,7 @@ def select_quant_linear(
 
         cpu_vendor = Device("cpu").vendor
         if cpu_vendor != "intel":
-            logger.warning(f"Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
+            log.warn(f"Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
 
         qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:

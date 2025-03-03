@@ -22,7 +22,7 @@ from torch import Tensor
 from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
 
-logger = setup_logger()
+log = setup_logger()
 
 def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.dtype], sample_size: int):
     inp = input[0].to(dtype=torch.float32)
@@ -54,7 +54,7 @@ def eora_compute_lora(
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
     if (L < 0).any():
         ## When expanding the calibration data size for EoRA, I suggest maintaining the balance by allocating 50% to general input (C4) and the remaining 50% to downstream task data.
-        logger.warn(f"Found negative eigenvalues in `{module.name}`. Please increase your calibration data set for EoRA.")
+        log.warn(f"Found negative eigenvalues in `{module.name}`. Please increase your calibration data set for EoRA.")
         minimum = torch.min(L[L > 0])
         L[L < 0] = minimum
 
@@ -64,7 +64,7 @@ def eora_compute_lora(
     try:
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
     except Exception:
-        logger.warn("`scaling_diag_matrix` is not full rank!") # TODO: assert?
+        log.warn("`scaling_diag_matrix` is not full rank!") # TODO: assert?
         scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(device)
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
 

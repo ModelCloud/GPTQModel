@@ -28,8 +28,14 @@ import torch.nn as nn
 from packaging import version
 from packaging.version import Version
 from tokenicer import Tokenicer
-from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
-                          PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoProcessor,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+    modeling_utils,
+)
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
@@ -43,13 +49,31 @@ from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
-                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
+from ..utils.model import (
+    MODALITY,
+    check_to_quantized,
+    find_modules,
+    get_device,
+    get_module,
+    get_module_by_name_prefix,
+    get_moe_layer_modules,
+    move_to,
+    nested_move_to,
+    pack_model,
+)
 from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
-from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                     PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, ModelWriter)
+from .writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_TIME,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    ModelWriter,
+)
+
 
 # pytorch 2.6.0 fixes many compilation errors
 TORCH_MIN_VERSION_STR = '2.6.0'
@@ -63,7 +87,7 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 # See https://github.com/huggingface/transformers/issues/34366
 modeling_utils.check_support_param_buffer_assignment = check_support_param_buffer_assignment
 
-logger = setup_logger()
+log = setup_logger()
 
 class BaseGPTQModel(nn.Module):
     # these modules are non-repeating and at the root level
@@ -183,10 +207,10 @@ class BaseGPTQModel(nn.Module):
                 if all(hasattr(m.adapter, name) for name in Lora.parameter_keys()):
                     loaded_loras += 1
 
-            logger.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded for `{len(qmodules)}` modules.")
+            log.info(f"Adapter: `{loaded_loras}` EoRA/Lora adapters loaded for `{len(qmodules)}` modules.")
 
         # print kernel info:
-        logger.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
+        log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
 
     def prepare_dataset(
         self,
@@ -566,7 +590,7 @@ class BaseGPTQModel(nn.Module):
         min_calibration_dataset_input_ids_avg_length = 256
 
         if len(calibration_dataset) < min_calibration_dataset_size:
-            logger.warning(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+            log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                            f"Current: {len(calibration_dataset)}.")
 
         if self.quantize_config.format == FORMAT.BITBLAS:
@@ -599,7 +623,7 @@ class BaseGPTQModel(nn.Module):
         avg = total_input_ids_length / len(calibration_dataset)
 
         if avg < min_calibration_dataset_input_ids_avg_length:
-            logger.warning(f"The average length of input_ids of calibration_dataset should be greater than "
+            log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                            f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
         if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
@@ -820,7 +844,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        quant_modules_pb = logger.pb(range(layer_count + 1 if self.quantize_config.lm_head else layer_count)).manual()
+        quant_modules_pb = log.pb(range(layer_count + 1 if self.quantize_config.lm_head else layer_count)).manual()
         gpu_memorys = []
         cpu_memorys = []
         durations = []
@@ -881,7 +905,7 @@ class BaseGPTQModel(nn.Module):
                         layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
-                            logger.info(f"skip module: {layer_name}")
+                            log.info(f"skip module: {layer_name}")
 
                             skipped_modules.append(name)
                             continue
@@ -903,7 +927,7 @@ class BaseGPTQModel(nn.Module):
                     # deepseek has massive # of sub-modules per layer, causing vram pressure
                     # buffered mode is slower due to gpu<->cpu movement
                     if buffered_fwd: # TODO tweak this number for masive MoE
-                        logger.info(f"Experimental: enabling fwd buffered mode for: `{name}`")
+                        log.info(f"Experimental: enabling fwd buffered mode for: `{name}`")
                         tmp.fwd_inputs_buffered = True
 
                     tmp.quantizer.configure(
@@ -1016,7 +1040,7 @@ class BaseGPTQModel(nn.Module):
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
 
                     self.quant_log.append(stat)
-                    logger.info(stat)
+                    log.info(stat)
 
                     quantizers[layer_name] = (
                         gptq[name].quantizer.to(CPU),
@@ -1079,9 +1103,9 @@ class BaseGPTQModel(nn.Module):
             if auto_gc:
                 torch_empty_cache()
 
-        logger.info(f"Quantization summary:\n{self.quant_log}")
+        log.info(f"Quantization summary:\n{self.quant_log}")
         for module_log in self.quant_log:
-            logger.info(module_log)
+            log.info(module_log)
         if task is not None:
             x = list(range(layer_count))
             gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
@@ -1153,7 +1177,7 @@ class BaseGPTQModel(nn.Module):
                     exists_ok: bool = False,  # set to true if repo already exists
                     token: Optional[str] = None):
 
-        logger.error("`push_to_hub()` api cannot be used on the model instance. Please use `GPTQModel.push_to_hub()` static api instead.")
+        log.error("`push_to_hub()` api cannot be used on the model instance. Please use `GPTQModel.push_to_hub()` static api instead.")
 
     def save(
             self,
@@ -1199,31 +1223,31 @@ class BaseGPTQModel(nn.Module):
         return list(loaded_kernels)
 
     def compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
-        logger.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
+        log.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
         return self.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if not self.quantized:
-            logger.warning("model is not quantized, skip compiling...")
+            log.warn("model is not quantized, skip compiling...")
             return self
 
         if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
             self.compiled = False
-            logger.warning(f"To use compile(), you need to have torch version >= {TORCH_MIN_VERSION_STR}, please "
+            log.warn(f"To use compile(), you need to have torch version >= {TORCH_MIN_VERSION_STR}, please "
                            f"upgrade it by `pip install torch -U`")
             return self
 
         # needed by eora
         # torch._dynamo.config.capture_scalar_outputs = True
 
-        logger.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
+        log.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
         modules = find_modules(self.model, layers=[BaseQuantLinear])
         for name in modules.keys():
             modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
 
         # supress errors until PyTorch fixed: https://github.com/pytorch/pytorch/issues/132635
         # torch._dynamo.config.suppress_errors = True
-        logger.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
+        log.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
         self.model = torch_compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
 

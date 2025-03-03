@@ -26,6 +26,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import PackableQuantLinear
 from ...utils.backend import BACKEND
 
+
 exllama_import_exception = None
 try:
     from gptqmodel_exllama_kernels import make_q4, q4_matmul
@@ -169,7 +170,7 @@ class ExllamaQuantLinear(PackableQuantLinear):
 
         x_dtype = x.dtype
         if x_dtype != torch.float16:
-            logger.warning_once(
+            logger.warn.once(
                 f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             )
 
