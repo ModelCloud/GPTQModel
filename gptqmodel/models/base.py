@@ -487,7 +487,7 @@ class BaseGPTQModel(nn.Module):
             auto_gc=auto_gc,
         )
 
-        self.eora_save(eora_path=adapter.path)
+        self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
 
     @torch.no_grad()
