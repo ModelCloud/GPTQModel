@@ -54,10 +54,10 @@ def eora_compute_lora(
 
     if IS_ROCM:
         # hip cannot resolve linalg ops
+        original_backend = torch.backends.cuda.preferred_linalg_library()
         torch.backends.cuda.preferred_linalg_library(backend="magma")
-        L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
-    else:
-        L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
+
+    L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
 
     if (L < 0).any():
         ## When expanding the calibration data size for EoRA, I suggest maintaining the balance by allocating 50% to general input (C4) and the remaining 50% to downstream task data.
@@ -95,5 +95,9 @@ def eora_compute_lora(
     del L, Q, U, S, V,
     del w_wq_delta, raw_scaling_diag_matrix, sqrtEigenvalues, scaling_diag_matrix, scaling_matrix_inv, delta_scale
     del truc_s, truc_u, truc_v, truc_sigma, sqrtS
-    
+
+    # revert linalg backend
+    if IS_ROCM:
+        torch.backends.cuda.preferred_linalg_library(original_backend)
+
     return A, B
