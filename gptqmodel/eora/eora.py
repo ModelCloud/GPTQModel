@@ -21,6 +21,7 @@ from torch import Tensor
 
 from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
+from ..utils.rocm import IS_ROCM
 
 log = setup_logger()
 
@@ -51,7 +52,12 @@ def eora_compute_lora(
     # save this later for SVD
     raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=device)
 
-    L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
+    if IS_ROCM:
+        # hip cannot resolve linalg ops
+        L, Q = torch.backends.cuda.preferred_linalg_library()(raw_scaling_diag_matrix)
+    else:
+        L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
+
     if (L < 0).any():
         ## When expanding the calibration data size for EoRA, I suggest maintaining the balance by allocating 50% to general input (C4) and the remaining 50% to downstream task data.
         log.warn(f"Found negative eigenvalues in `{module.name}`. Please increase your calibration data set for EoRA.")
