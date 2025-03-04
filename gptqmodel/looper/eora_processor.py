@@ -58,11 +58,11 @@ class EoraProcessor(LoopProcessor):
         # needed by eora
         # torch._dynamo.config.capture_scalar_outputs = True
 
-        self.eora_compute_lora = torch_compile(eora_compute_lora)
-        self.eora_process_input = torch_compile(eora_process_input)
+        #self.eora_compute_lora = torch_compile(eora_compute_lora)
+        #self.eora_process_input = torch_compile(eora_process_input)
 
-        # self.eora_compute_lora = eora_compute_lora
-        # self.eora_process_input = eora_process_input
+        self.eora_compute_lora = eora_compute_lora
+        self.eora_process_input = eora_process_input
 
     def log_plotly(self):
         task = self.logger_task
