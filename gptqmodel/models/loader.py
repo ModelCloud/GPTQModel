@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
@@ -437,7 +438,7 @@ def ModelLoader(cls):
                     args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
                 if USE_FLASH_ATTENTION_2 in kwargs:
                     args[USE_FLASH_ATTENTION_2] = kwargs.pop(USE_FLASH_ATTENTION_2, None)
-                if not args:
+                if not args and importlib.util.find_spec("flash_attn") is not None:
                     has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
                     if is_flash_attn_2_available() and has_attn_implementation:
                         args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
