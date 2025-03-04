@@ -54,7 +54,7 @@ def eora_compute_lora(
 
     if IS_ROCM:
         # hip cannot resolve linalg ops
-        torch.backends.cuda.preferred_linalg_library(backend="ck")
+        torch.backends.cuda.preferred_linalg_library(backend="magma")
         L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
     else:
         L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
