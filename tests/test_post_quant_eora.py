@@ -16,19 +16,21 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
+from lm_eval.utils import make_table  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
+from tabulate import tabulate  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
@@ -97,7 +99,7 @@ class TestEoraPostQuant(ModelTest):
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
                 # for eora generation, path is adapter save path; for load, it is loading path
-                path=os.path.join(tmpdir, adapter_file_name),
+                path=os.path.join(tmpdir),
                 rank=rank,
             )
 
