@@ -45,8 +45,8 @@ def gptq_gemm(x, qweight, qzeros, scales, g_idx, bit):
     return gptqmodel_exllama_eora.gptq_gemm(x, qweight, qzeros, scales, g_idx, True, bit)
 
 
-def gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, bit, A, B):
-    return gptqmodel_exllama_eora.gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
+def gptq_gemm_eora(x, qweight, qzeros, scales, g_idx, bit, A, B):
+    return gptqmodel_exllama_eora.gptq_gemm_eora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
@@ -184,7 +184,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         if self.adapter:
             # only 4 bits fused eora kernel has been validated
             if self.bits == 4:
-                output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
+                output = gptq_gemm_eora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
             else:
                 output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
         else:

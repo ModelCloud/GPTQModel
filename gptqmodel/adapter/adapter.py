@@ -163,14 +163,13 @@ class Lora(Adapter):
         lora_A_weight_key = f"{weight_key}.lora_A.weight"
         lora_B_weight_key = f"{weight_key}.lora_B.weight"
 
-        # print(f"lora_A_weight_key = {lora_A_weight_key}, lora_B_weight_key = {lora_B_weight_key}")
+        
         pop_keys = []
         for k, v in lora_weights.items():
             if k.endswith(lora_A_weight_key):
                 lora_A = v.T
                 pop_keys.append(k)
             elif k.endswith(lora_B_weight_key):
-                lora_B = v.T
                 lora_B = torch.clone(v.T, memory_format=torch.contiguous_format)
                 pop_keys.append(k)
 
