@@ -113,7 +113,7 @@ def ModelWriter(cls):
             lora_cfg.save_pretrained(save_dir=save_dir)
 
             log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")
-            os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+
             save_file(tensors=weights, filename=weight_file_path, metadata={"format": "pt"})
 
             del self.lora_results  # TODO REFRACTOR
