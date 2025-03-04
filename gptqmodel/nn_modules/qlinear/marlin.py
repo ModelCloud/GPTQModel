@@ -30,7 +30,6 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
-
 marlin_import_exception = None
 try:
     import gptqmodel_marlin_kernels

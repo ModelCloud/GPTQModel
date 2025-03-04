@@ -26,7 +26,6 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
-
 exllama_v2_import_exception = None
 try:
     from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix

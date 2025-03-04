@@ -23,7 +23,6 @@ from tvm.target.tag import list_tags
 
 from ...utils.logger import setup_logger
 
-
 log = setup_logger()
 
 TARGET_MISSING_ERROR = (

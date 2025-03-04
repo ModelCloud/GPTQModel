@@ -25,7 +25,6 @@ from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
 from . import PackableQuantLinear
 
-
 log = setup_logger()
 
 BITS_DTYPE_MAPPING = {

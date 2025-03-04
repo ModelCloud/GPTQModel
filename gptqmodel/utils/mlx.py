@@ -9,7 +9,6 @@ from ..quantization import FORMAT, QuantizeConfig
 from .log import setup_logger
 from .torch import torch_empty_cache
 
-
 try:
     import mlx.core as mx
     from mlx_lm import generate

@@ -29,7 +29,6 @@ from packaging import version
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
 
-
 log = setup_logger()
 
 FORMAT_FIELD_CODE = "format"

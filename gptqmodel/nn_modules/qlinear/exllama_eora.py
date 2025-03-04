@@ -25,13 +25,12 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.logger import setup_logger
 
-
-exllama_v2v_import_exception = None
+exllama_eora_import_exception = None
 
 try:
     import gptqmodel_exllama_eora
 except ImportError as e:
-    exllama_v2v_import_exception = e
+    exllama_eora_import_exception = e
 
 log = setup_logger()
 
@@ -65,7 +64,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -85,9 +84,9 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
          adapter: Adapter,
          bias: bool, **kwargs,
     ):
-        if exllama_v2v_import_exception is not None:
+        if exllama_eora_import_exception is not None:
             raise ValueError(
-                f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_v2v_import_exception}"
+                f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_eora_import_exception}"
             )
 
         # # backup original values
@@ -119,8 +118,8 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if exllama_v2v_import_exception is not None:
-            return False, exllama_v2v_import_exception
+        if exllama_eora_import_exception is not None:
+            return False, exllama_eora_import_exception
         return cls._validate(**args)
 
     def post_init(self):

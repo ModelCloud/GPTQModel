@@ -1,7 +1,6 @@
 import unittest
 
 import torch
-
 from gptqmodel import BACKEND, GPTQModel
 
 

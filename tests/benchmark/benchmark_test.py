@@ -17,15 +17,12 @@
 import os
 import time
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import unittest  # noqa: E402
 
-from logbar import LogBar
-
 from gptqmodel import GPTQModel  # noqa: E402
-
+from logbar import LogBar
 
 logger = LogBar.shared()
 
