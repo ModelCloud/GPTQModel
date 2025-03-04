@@ -72,7 +72,7 @@ def ModelWriter(cls):
 
     cls.save_pretrained = save_pretrained
 
-    def _eora_save(self, save_dir: str, model_save_dir: str):
+    def _eora_save(self, save_dir: str, model_save_dir: str = None):
         assert isinstance(self.quantize_config.adapter, Lora)
 
         assert hasattr(self, 'lora_results')
