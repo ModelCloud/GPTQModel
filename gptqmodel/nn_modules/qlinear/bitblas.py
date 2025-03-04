@@ -30,7 +30,6 @@ from ...nn_modules.qlinear import PackableQuantLinear
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
 
-
 log = setup_logger()
 
 BITBLAS_TARGET = None

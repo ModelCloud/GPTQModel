@@ -25,7 +25,6 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import PackableQuantLinear
 
-
 try:
     import triton
     import triton.language as tl

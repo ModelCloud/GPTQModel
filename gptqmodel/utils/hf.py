@@ -2,7 +2,6 @@ from transformers import GenerationConfig, PreTrainedModel
 
 from ..utils.logger import setup_logger
 
-
 log = setup_logger()
 
 # TODO FIXME! Pre-quantized use AutoModelForCausalLM.from_pretrained() but post-quantized use AutoModelForCausalLM.from_config()

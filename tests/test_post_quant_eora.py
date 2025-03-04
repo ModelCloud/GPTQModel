@@ -99,7 +99,7 @@ class TestEoraPostQuant(ModelTest):
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
                 # for eora generation, path is adapter save path; for load, it is loading path
-                path=os.path.join(tmpdir, adapter_file_name),
+                path=os.path.join(tmpdir),
                 rank=rank,
             )
 

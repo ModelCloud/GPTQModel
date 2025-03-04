@@ -23,12 +23,10 @@ from typing import Dict, List, Optional
 
 import torch
 from datasets import Dataset, load_dataset
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from logbar import LogBar
 from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation.logits_process import LogitsProcessor
-
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
-
 
 logger = LogBar.shared()
 

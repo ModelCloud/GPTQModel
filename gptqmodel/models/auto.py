@@ -20,7 +20,6 @@ import os
 
 from ..utils.logger import setup_logger
 
-
 log = setup_logger()
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
@@ -32,7 +31,6 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
     log.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
 import sys  # noqa: E402
-
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
 if sys.platform == "darwin":
@@ -107,7 +105,6 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
-
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)

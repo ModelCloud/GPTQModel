@@ -32,7 +32,6 @@ from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
-
 log = setup_logger()
 
 torch.backends.cuda.matmul.allow_tf32 = False

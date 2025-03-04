@@ -22,7 +22,6 @@ from packaging.version import Version
 
 from ..utils.logger import setup_logger
 
-
 HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False

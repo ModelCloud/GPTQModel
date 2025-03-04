@@ -24,7 +24,6 @@ from typing import Dict, List, Optional, Union
 import torch
 import transformers
 
-
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -49,21 +48,10 @@ from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
-from ..utils.model import (
-    auto_dtype,
-    convert_gptq_v1_to_v2_format,
-    find_modules,
-    get_checkpoints,
-    get_moe_layer_modules,
-    gptqmodel_post_init,
-    load_checkpoint_in_model_then_tie_weights,
-    make_quant,
-    simple_dispatch_model,
-    verify_model_hash,
-    verify_sharded_model_hashes,
-)
+from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
+                           get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
+                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
-
 
 log = setup_logger()
 

@@ -17,14 +17,11 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+from gptqmodel.utils import BACKEND  # noqa: E402
 # -- end do not touch
 from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
-
-from gptqmodel.utils import BACKEND  # noqa: E402
-
 
 '''
 NATIVE_MODEL_ID = /monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortext-v1
