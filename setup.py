@@ -24,7 +24,6 @@ from pathlib import Path
 import torch
 from setuptools import find_packages, setup
 
-
 try:
     from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 except BaseException:
@@ -214,20 +213,6 @@ if BUILD_CUDA_EXT:
 
     extensions = [
         cpp_ext.CUDAExtension(
-            'gptqmodel_exllama_eora',
-            [
-                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-            # include_dirs=[os.path.abspath("."), os.path.abspath("eora")],
-            # extra_compile_args={
-            #     'cxx': ['-std=c++20'],
-            #     'nvcc': ['-std=c++20'],
-            # }
-        ),
-        cpp_ext.CUDAExtension(
             "gptqmodel_cuda_64",
             [
                 "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
@@ -247,11 +232,26 @@ if BUILD_CUDA_EXT:
         ),
     ]
 
+    # Exllama Eora not yet compilable for ROCm
+    if not ROCM_VERSION:
+        extensions += [
+            cpp_ext.CUDAExtension(
+                'gptqmodel_exllama_eora',
+                [
+                    "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                    "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                ],
+                extra_link_args=extra_link_args,
+                extra_compile_args=extra_compile_args,
+            )
+        ]
+
     if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
         # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
         # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
         if HAS_CUDA_V8 and not ROCM_VERSION:
-            marlin_kernel = cpp_ext.CUDAExtension(
+            extensions += [
+            cpp_ext.CUDAExtension(
                 "gptqmodel_marlin_kernels",
                 [
                     "gptqmodel_ext/marlin/marlin_cuda.cpp",
@@ -261,35 +261,35 @@ if BUILD_CUDA_EXT:
                 extra_link_args=extra_link_args,
                 extra_compile_args=extra_compile_args,
             )
-            extensions.append(marlin_kernel)
+            ]
         elif not HAS_CUDA_V8:
             print("marlin kernel only supports compute capability >= 8.0, there's no such cuda device, skipped.")
-        extensions += [
-            # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-            cpp_ext.CUDAExtension(
-                "gptqmodel_exllama_kernels",
-                [
-                    "gptqmodel_ext/exllama/exllama_ext.cpp",
-                    "gptqmodel_ext/exllama/cuda_buffers.cu",
-                    "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                    "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                    "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            ),
-            # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-            cpp_ext.CUDAExtension(
-                "gptqmodel_exllamav2_kernels",
-                [
-                    "gptqmodel_ext/exllamav2/ext.cpp",
-                    "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
-                    "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            )
-        ]
+            extensions += [
+                # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_exllama_kernels",
+                    [
+                        "gptqmodel_ext/exllama/exllama_ext.cpp",
+                        "gptqmodel_ext/exllama/cuda_buffers.cu",
+                        "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                        "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                        "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
+                    ],
+                    extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                ),
+                # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_exllamav2_kernels",
+                    [
+                        "gptqmodel_ext/exllamav2/ext.cpp",
+                        "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                        "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
+                    ],
+                    extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                )
+            ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
