@@ -71,7 +71,6 @@ def eora_compute_lora(
     try:
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
     except Exception:
-        log.warn("`scaling_diag_matrix` is not full rank!") # TODO: assert?
         scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(device)
         scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
 

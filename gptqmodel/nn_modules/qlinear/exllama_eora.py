@@ -169,7 +169,6 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         # log.info(f"out_features: {self.out_features}")
         # log.info(f"x.shape[:-1]: {x.shape[:-1]}")
         # log.info(f"self.qweight.shape[-1],: {self.qweight.shape[-1],}")
-
         out_shape = x.shape[:-1] + (self.out_features,)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
@@ -184,7 +183,8 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         if self.adapter:
             # only 4 bits fused eora kernel has been validated
             if self.bits == 4:
-                output = gptq_gemm_eora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
+                output = gptq_gemm_eora(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, reshaped_x @ self.adapter.lora_A, self.adapter.lora_B) # fused
+                # output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B)
             else:
                 output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
         else:

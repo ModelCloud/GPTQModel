@@ -407,7 +407,7 @@ class BaseGPTQModel(nn.Module):
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration_dataset=adapter_calibration_dataset,
+                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset != None else calibration_dataset,
                     prepare_dataset_func=self.prepare_dataset,
                     calibration_dataset_concat_size=calibration_dataset_concat_size,
                     batch_size=batch_size,
