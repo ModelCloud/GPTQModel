@@ -563,6 +563,9 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *auto_round* ]]; then
             uv pip install auto_round
           fi
+          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning" ]]; then
+            uv pip install git+https://github.com/huggingface/peft trl
+          fi
 
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
