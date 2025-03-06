@@ -170,6 +170,7 @@ def select_quant_linear(
 
     # Bitblas needs conversion, not direct quant linear load, return generic Torch linear
     if backend == BACKEND.BITBLAS and format != FORMAT.BITBLAS:
+        log.info(f"Kernel: selected: `{TorchQuantLinear.__name__}`")
         if multi_select:
             return [TorchQuantLinear]
         else:
@@ -258,6 +259,8 @@ def select_quant_linear(
         qlinear = TorchQuantLinear
 
     validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
+
+    log.info(f"Kernel: selected: `{qlinear.__name__}`")
     if not validate:
         raise ValueError(err)
     else:
