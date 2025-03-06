@@ -172,6 +172,7 @@ SUPPORTED_MODELS = [
     "olmo2",
     "ovis",
     "telechat",
+    "instella",
 ]
 
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048

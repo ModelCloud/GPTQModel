@@ -1,16 +1,15 @@
 import unittest
 
 import torch
-from logbar import LogBar
-from parameterized import parameterized
-from torch import Tensor
-
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
+from logbar import LogBar
+from parameterized import parameterized
+from torch import Tensor
 
 log = LogBar.shared()
 
@@ -29,7 +28,6 @@ class TestKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
 
         cls.m = 1
         cls.k = 2048
