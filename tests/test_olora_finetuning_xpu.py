@@ -106,6 +106,7 @@ def train(
     )
 
     model = get_peft_model(model, config)
+    assert model.device.type == "xpu"
 
     data = load_dataset(data_path)
 
