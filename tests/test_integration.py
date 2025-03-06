@@ -22,7 +22,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from peft import LoraConfig, get_peft_model  # noqa: E402
+from peft import AdaLoraConfig, get_peft_model  # noqa: E402
 from trl import SFTConfig, SFTTrainer  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 
@@ -125,19 +125,18 @@ class TestIntegration(unittest.TestCase):
         return output
 
     def test_peft(self):
-        dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-
-        model_kwargs = {"torch_dtype": torch.bfloat16, "device_map": "auto"}
-
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=dataset["text"])
+        model_kwargs = {"torch_dtype": torch.bfloat16, "device_map": "cuda"}
+        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'])
 
         model = AutoModelForCausalLM.from_pretrained("/monster/data/model/opt-125m", **model_kwargs)
         tokenizer = AutoTokenizer.from_pretrained("/monster/data/model/opt-125m")
         dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        lora_config = LoraConfig(
-            init_lora_weights="olora"
+
+        config = AdaLoraConfig(
+            total_step=20,
         )
-        peft_model = get_peft_model(model, lora_config)
+
+        peft_model = get_peft_model(model, config)
         training_args = SFTConfig(dataset_text_field="text", max_seq_length=128)
         trainer = SFTTrainer(
             model=peft_model,
