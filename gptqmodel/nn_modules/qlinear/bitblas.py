@@ -26,7 +26,7 @@ import torch.nn as nn
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import PackableQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
 
@@ -84,7 +84,7 @@ def unpack_qzeros(qzeros, bits):
     return unpacked_zeros
 
 
-class BitBLASQuantLinear(PackableQuantLinear):
+class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [1, 2, 4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]

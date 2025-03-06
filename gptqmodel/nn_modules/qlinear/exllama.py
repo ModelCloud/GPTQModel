@@ -23,7 +23,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import PackableQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 
 exllama_import_exception = None
@@ -46,7 +46,7 @@ def ext_make_q4(qweight, qzeros, scales, g_idx, device):
 
 
 
-class ExllamaQuantLinear(PackableQuantLinear):
+class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
