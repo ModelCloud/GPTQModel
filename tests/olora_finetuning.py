@@ -155,7 +155,7 @@ class Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             train(
                 base_model="/monster/data/model/opt-125m",
-                data_path="yahma/alpaca-cleaned",
+                data_path="/monster/data/model/dataset/yahma-alpaca-cleaned",
                 output_dir=tmp_dir,
                 batch_size=16,
                 num_epochs=1,
