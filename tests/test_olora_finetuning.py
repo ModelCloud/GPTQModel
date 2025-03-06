@@ -58,11 +58,12 @@ def train(
     # Set seed
     if seed is not None:
         set_seed(seed)
-    model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": "cuda"}
+    model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": "xpu"}
     if quantize:
         model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'])
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
+    assert model.device.type == "xpu"
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     # For some tokenizer with no pad token like llama
