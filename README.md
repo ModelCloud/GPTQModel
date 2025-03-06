@@ -110,18 +110,18 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 ![image](https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e)
 
 ## Model Support  
-| Model             |    |                |    |                  |    |            |    |    |   |
-|-------------------|----|----------------|----|------------------|----|------------|----|----|---|
-| Baichuan          | ✅  | Falcon         | ✅  | Llama 1-3.3      | ✅  | OLMo2      | ✅ | Yi | ✅ |
-| Bloom             | ✅  | Gemma 2        | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6   | ✅ |   XVERSE | ✅  |
-| ChatGLM           | ✅ | GPTBigCod      | ✅  | LongLLaMA        | ✅  | Phi 1-4    | ✅ |    |   |
-| CodeGen           | ✅  | GPTNeoX        | ✅  | MiniCPM3         | ✅  | Qwen       | ✅  |    |   |
-| Cohere 1-2        | ✅  | GPT-2          | ✅  | Mistral          | ✅  | Qwen2 MoE   | ✅ |    |   |
-| DBRX Converted    | ✅ | GPT-J          | ✅  | Mixtral          | ✅  | Qwen2 VL    | ✅ |    |   |
-| Deci              | ✅  | Granite        | ✅ | MobileLLM        | ✅ | RefinedWeb | ✅  |    |   |
-| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE       | ✅ | MOSS             | ✅  | StableLM   | ✅  |    |   |
-| DeepSeek-V2-Lite  | ✅ | Hymba          | ✅ | MPT              | ✅  | StarCoder2 | ✅  |    |   |
-| EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | OPT              | ✅  | TeleChat2 | ✅  |    |   |
+| Model             |   |           |   |                |   |            |   |           |   |
+|-------------------|---|-----------|---|----------------|---|------------|---|-----------|---|
+| Baichuan          | ✅ | Falcon    | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
+| Bloom             | ✅ | Gemma 2   | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
+| ChatGLM           | ✅ | GPTBigCod | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6   | ✅ | XVERSE    | ✅ |
+| CodeGen           | ✅ | GPTNeoX   | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
+| Cohere 1-2        | ✅ | GPT-2     | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J     | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite   | ✅ | Mixtral        | ✅ | Qwen2 VL   | ✅ |           |   |
+| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE  | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
+| DeepSeek-V2-Lite  | ✅ | Hymba     | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
+| EXAONE 3.0        | ✅ | Instella  | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
 
 ## Platform and HW Support 
 
