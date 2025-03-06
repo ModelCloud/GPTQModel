@@ -86,7 +86,7 @@ class TestKernelOutput(unittest.TestCase):
         torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
     @parameterized.expand([
-        (BACKEND.TORCH, 0.0000, 0.00025),
+        (BACKEND.TORCH, 0.0000, 0.000031),
         (BACKEND.TRITON,  0.0000, 0.00025),
         (BACKEND.IPEX,  0.0000, 0.0005),
         # (BACKEND.EXLLAMA_V1, 0.09, 0.0001),
