@@ -36,6 +36,7 @@ from .gptj import GPTJGPTQ
 from .granite import GraniteGPTQ
 from .grinmoe import GrinMOEGPTQ
 from .hymba import HymbaGPTQ
+from .instella import InstellaGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ

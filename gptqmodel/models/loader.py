@@ -16,8 +16,8 @@
 
 from __future__ import annotations
 
-import os
 import importlib.util
+import os
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 

@@ -78,6 +78,7 @@ from .definitions.gptj import GPTJGPTQ  # noqa: E402
 from .definitions.granite import GraniteGPTQ  # noqa: E402
 from .definitions.grinmoe import GrinMOEGPTQ  # noqa: E402
 from .definitions.hymba import HymbaGPTQ  # noqa: E402
+from .definitions.instella import InstellaGPTQ  # noqa: E402
 from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
@@ -165,6 +166,7 @@ MODEL_MAP = {
     "olmo2": Olmo2GPTQ,
     "ovis": OvisGPTQ,
     "telechat": TeleChat2GPTQ,
+    "instella": InstellaGPTQ,
 }
 
 
