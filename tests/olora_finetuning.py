@@ -14,37 +14,40 @@
 
 
 import os
-from typing import List, Optional
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-import torch
-import transformers
-from datasets import load_dataset
-from peft import (
-    get_peft_model, AdaLoraConfig,
-)
-from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed, GPTQConfig
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from typing import List, Optional  # noqa: E402
+
+import torch  # noqa: E402
+import transformers  # noqa: E402
+from datasets import load_dataset  # noqa: E402
+from peft import get_peft_model, AdaLoraConfig  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed, GPTQConfig  # noqa: E402
+
 
 
 def train(
-    base_model: str = "path/to/model",
-    data_path: str = "yahma/alpaca-cleaned",
-    output_dir: str = "olora",
-    batch_size: int = 16,
-    num_epochs: int = 1,
-    learning_rate: float = 3e-4,
-    cutoff_len: int = 256,
-    val_set_size: int = 16,
-    quantize: bool = False,
-    eval_step: int = 100,
-    save_step: int = 100,
-    device_map: str = "auto",
-    lora_r: int = 32,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
-    lora_target_modules: List[str] = None,
-    torch_dtype: str = "float16",
-    init_lora_weights="olora",
-    seed: Optional[int] = None,
+        base_model: str = "path/to/model",
+        data_path: str = "yahma/alpaca-cleaned",
+        output_dir: str = "olora",
+        batch_size: int = 16,
+        num_epochs: int = 1,
+        learning_rate: float = 3e-4,
+        cutoff_len: int = 256,
+        val_set_size: int = 16,
+        quantize: bool = False,
+        eval_step: int = 100,
+        save_step: int = 100,
+        device_map: str = "auto",
+        lora_r: int = 32,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_target_modules: List[str] = None,
+        torch_dtype: str = "float16",
+        init_lora_weights="olora",
+        seed: Optional[int] = None,
 ):
     # Set device_map to the right place when enabling DDP.
     world_size = int(os.environ.get("WORLD_SIZE", 0)) or int(os.environ.get("PMI_SIZE", 0))
@@ -75,9 +78,9 @@ def train(
             return_tensors=None,
         )
         if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
-            and len(result["input_ids"]) < cutoff_len
-            and add_eos_token
+                result["input_ids"][-1] != tokenizer.eos_token_id
+                and len(result["input_ids"]) < cutoff_len
+                and add_eos_token
         ):
             result["input_ids"].append(tokenizer.eos_token_id)
             result["attention_mask"].append(1)
@@ -140,56 +143,34 @@ def train(
 
 def generate_prompt(example):
     return f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
-            ### Instruction:
-            {example["instruction"]}
-            ### Response:
-            {example["output"]}"""
+                ### Instruction:
+                {example["instruction"]}
+                ### Response:
+                {example["output"]}"""
 
-# CUDA_DEVICE_ORDER=PCI_BUS_ID;CUDA_VISIBLE_DEVICES=2 python3 olora_finetuning.py --base_model /monster/data/model/opt-125m --quantize
-if __name__ == "__main__":
-    import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base_model", type=str, default="path/to/model")
-    parser.add_argument("--data_path", type=str, default="yahma/alpaca-cleaned")
-    parser.add_argument("--output_dir", type=str, default="olora")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--cutoff_len", type=int, default=256)
-    parser.add_argument("--val_set_size", type=int, default=16)
-    parser.add_argument("--quantize", action="store_true")
-    parser.add_argument("--eval_step", type=int, default=100)
-    parser.add_argument("--save_step", type=int, default=100)
-    parser.add_argument("--device_map", type=str, default="auto")
-    parser.add_argument("--lora_r", type=int, default=32)
-    parser.add_argument("--lora_alpha", type=int, default=16)
-    parser.add_argument("--lora_dropout", type=float, default=0.05)
-    parser.add_argument("--lora_target_modules", type=str, default=None)
-    parser.add_argument("--torch_dtype", type=str, default="float16")
-    parser.add_argument("--init_lora_weights", type=str, default="olora")
-    parser.add_argument("--seed", type=int, default=None)
+class Test(unittest.TestCase):
 
-    args = parser.parse_args()
-
-    train(
-        base_model=args.base_model,
-        data_path=args.data_path,
-        output_dir=args.output_dir,
-        batch_size=args.batch_size,
-        num_epochs=args.num_epochs,
-        learning_rate=args.learning_rate,
-        cutoff_len=args.cutoff_len,
-        val_set_size=args.val_set_size,
-        quantize=args.quantize,
-        eval_step=args.eval_step,
-        save_step=args.save_step,
-        device_map=args.device_map,
-        lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        lora_target_modules=args.lora_target_modules,
-        torch_dtype=args.torch_dtype,
-        init_lora_weights=args.init_lora_weights,
-        seed=args.seed,
-    )
+    def test_peft(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            train(
+                base_model="/monster/data/model/opt-125m",
+                data_path="yahma/alpaca-cleaned",
+                output_dir=tmp_dir,
+                batch_size=16,
+                num_epochs=1,
+                learning_rate=3e-4,
+                cutoff_len=256,
+                val_set_size=16,
+                quantize=True,
+                eval_step=100,
+                save_step=100,
+                device_map="cuda",
+                lora_r=32,
+                lora_alpha=16,
+                lora_dropout=0.05,
+                lora_target_modules=None,
+                torch_dtype="float16",
+                init_lora_weights="olora",
+                seed=1234,
+            )
