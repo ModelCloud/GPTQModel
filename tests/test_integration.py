@@ -15,14 +15,21 @@
 # limitations under the License.
 import os
 
+from gptqmodel import GPTQModel
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+import torch  # noqa: E402
+from peft import LoraConfig, get_peft_model  # noqa: E402
+from trl import SFTConfig, SFTTrainer  # noqa: E402
+from datasets import load_dataset  # noqa: E402
+
 import transformers  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from packaging.version import Version  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPTQConfig  # noqa: E402
 
 
 class TestIntegration(unittest.TestCase):
@@ -116,3 +123,31 @@ class TestIntegration(unittest.TestCase):
         output = tokenizer.decode(res[0])
         print(f"Result is: >>\n{output}\n<<")
         return output
+
+    def test_peft(self):
+        dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+
+        model_kwargs = {"torch_dtype": torch.bfloat16, "device_map": "auto"}
+
+        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=dataset["text"])
+
+        model = AutoModelForCausalLM.from_pretrained("/monster/data/model/opt-125m", **model_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained("/monster/data/model/opt-125m")
+        dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        lora_config = LoraConfig(
+            init_lora_weights="olora"
+        )
+        peft_model = get_peft_model(model, lora_config)
+        training_args = SFTConfig(dataset_text_field="text", max_seq_length=128)
+        trainer = SFTTrainer(
+            model=peft_model,
+            train_dataset=dataset,
+            tokenizer=tokenizer,
+            args=training_args,
+        )
+        trainer.train()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            peft_model.save_pretrained(tmpdir)
+            model = GPTQModel.load(tmpdir)
+            generated = self.generate(model, tokenizer, "Which city is the capital of France? The city name is ").lower()
+            self.assertIn("paris", generated)
