@@ -23,7 +23,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import PackableQuantLinear
+from . import BaseQuantLinear
 
 try:
     import triton
@@ -46,7 +46,7 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 log = setup_logger()
 
 
-class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

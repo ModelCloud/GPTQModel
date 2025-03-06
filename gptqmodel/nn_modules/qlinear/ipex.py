@@ -23,7 +23,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
-from . import PackableQuantLinear
+from . import BaseQuantLinear
 
 log = setup_logger()
 
@@ -86,7 +86,7 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(PackableQuantLinear):
+class IPEXQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
