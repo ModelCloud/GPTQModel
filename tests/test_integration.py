@@ -25,7 +25,7 @@ from packaging.version import Version  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 
-class TestTransformersIntegration(unittest.TestCase):
+class TestIntegration(unittest.TestCase):
     INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
     INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
 
