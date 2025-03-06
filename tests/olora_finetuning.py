@@ -91,11 +91,6 @@ def train(
         tokenized_full_prompt = tokenize(full_prompt)
         return tokenized_full_prompt
 
-    print(f"lora_r={lora_r}")
-    print(f"lora_alpha={lora_alpha}")
-    print(f"lora_target_modules={lora_target_modules}")
-    print(f"lora_dropout={lora_dropout}")
-
     config = AdaLoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
