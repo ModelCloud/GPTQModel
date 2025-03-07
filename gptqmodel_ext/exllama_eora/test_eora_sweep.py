@@ -1,8 +1,5 @@
-import time
-
 import pytest
 import torch
-# from eora import fused_concurrent, fused_sequential, cublas_reference, gptq_gemm_eora, gptq_gemm
 from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_eora
 
 m = 1
@@ -10,7 +7,7 @@ k = 4096
 n = 6144
 r = 128
 
-bit = 4
+bit = 2
 use_exllama = True
 
 BLOCK_KN_SIZE=128

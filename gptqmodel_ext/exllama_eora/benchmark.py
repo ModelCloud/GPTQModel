@@ -1,5 +1,4 @@
 import time
-
 import torch
 from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_eora
 
@@ -12,7 +11,7 @@ bit = 4
 use_exllama = True
 
 warmup_iterations = 50
-total_iterations = 1000
+total_iterations = 10000
 
 x = torch.rand((m, k), device='cuda', dtype=torch.float16) * 10.
 W = torch.randn((k, n), device='cuda', dtype=torch.float16)
@@ -49,7 +48,7 @@ def benchmark_pytorch_reference(W, x, eora_b, eora_a):
     print(f"pytorch LORA baseline: {(time.time() - tick) / total_iterations * 1000} msec")
 
 
-def benchmark_gptq_kernel(m, weight, zeros, scales, idx, x, eora_b, eora_a):
+def benchmark_gptq_kernel(m, weight, zeros, scales, idx, x, eora_b, eora_a) -> float:
     x = torch.rand((m, k), device='cuda', dtype=torch.float16) * 10.
 
     for i in range(warmup_iterations):
@@ -98,12 +97,16 @@ def benchmark_gptq_kernel(m, weight, zeros, scales, idx, x, eora_b, eora_a):
     torch.cuda.synchronize()
     gptq_fused_kernel_time = (time.time() - tick) / total_iterations * 1000
     print(f"gptq eora kernel: {gptq_fused_kernel_time} msec")
-    print(f"gptq+pytorch/fused_kernel ratio for batch size {m}: {gptq_lora_pytorch_time / gptq_fused_kernel_time}")
-    print(f"pytorch_lora/fused_kernel ratio for batch size {m}: {pytorch_lora_time / gptq_fused_kernel_time}")
+    speedup = gptq_lora_pytorch_time / gptq_fused_kernel_time
+    print(f"speedup (gptq+pytorch/fused_kernel ratio) for batch size {m}: {speedup}")
+    # print(f"pytorch_lora/fused_kernel ratio for batch size {m}: {pytorch_lora_time / gptq_fused_kernel_time}")
     print("")
+    return speedup
 
 
 
 benchmark_pytorch_reference(W, x, eora_b, eora_a)
+speedups = []
 for i in range(1, 50):
-    benchmark_gptq_kernel(i, weight, zeros, scales, idx, x, eora_b, eora_a)
+    speedups.append(benchmark_gptq_kernel(i, weight, zeros, scales, idx, x, eora_b, eora_a))
+print(speedups)
