@@ -393,13 +393,27 @@ class GPTQModel:
                     trust_remote_code=trust_remote_code,
                 )
 
+            gen_kwargs = args.pop("gen_kwargs", None)
+
+            # use model.generation_config whenever possible
+            if gen_kwargs is None:
+                if hasattr(model_name, "generation_config"):
+                    gen_kwargs = ','.join(f"{key}={value}" for key, value in model_name.generation_config.items())
+                else:
+                    gen_kwargs = "temperature=0.0,top_k=50" # default
+
+            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}")
+
+            apply_chat_template = args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
+            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}")
+
             results = simple_evaluate(
                 model=model_name,
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
                 batch_size=batch_size,
-                apply_chat_template=args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False),
-                gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
+                apply_chat_template=apply_chat_template,
+                gen_kwargs=gen_kwargs,
                 random_seed=random_seed,
                 numpy_random_seed=random_seed,
                 torch_random_seed=random_seed,
