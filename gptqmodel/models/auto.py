@@ -409,7 +409,8 @@ class GPTQModel:
 
             log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
 
-            apply_chat_template = args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
+            # lm-eval has very low scores if apply_chat_template is enabled
+            apply_chat_template = args.pop("apply_chat_template", False) # args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
             log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
 
             results = simple_evaluate(
