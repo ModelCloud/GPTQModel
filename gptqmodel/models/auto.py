@@ -30,6 +30,10 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
     log.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
+# FIX ROCm env conflict with CUDA_VISIBLE_DEVICES if both exits
+if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ:
+    del os.environ['ROCR_VISIBLE_DEVICES']
+
 import sys  # noqa: E402
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
@@ -45,7 +49,7 @@ import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
-from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
+from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig  # noqa: E402
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -358,10 +362,7 @@ class GPTQModel:
 
 
         if backend=="gptqmodel": # vllm loads tokenizer
-            if isinstance(tokenizer, Tokenicer):
-                model_args["tokenizer"] = tokenizer.tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
-            else:
-                model_args["tokenizer"] = tokenizer
+            model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
             from lm_eval.utils import make_table  # hack: circular import
@@ -389,13 +390,37 @@ class GPTQModel:
                     trust_remote_code=trust_remote_code,
                 )
 
+            gen_kwargs = args.pop("gen_kwargs", None)
+
+            # use model.generation_config whenever possible
+            if gen_kwargs is None:
+                # TODO: move to utils
+                if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
+                    gen_dict = {
+                        "do_sample": model.generation_config.do_sample,
+                        "temperature": model.generation_config.temperature,
+                        "top_k": model.generation_config.top_k,
+                        "top_p": model.generation_config.top_p,
+                        "min_p": model.generation_config.min_p,
+
+                    }
+                    gen_kwargs = ','.join(f"{key}={value}" for key, value in gen_dict.items() if value not in ["", {}, None, []])
+                else:
+                    gen_kwargs = "temperature=0.0,top_k=50" # default
+
+            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
+
+            # lm-eval has very low scores if apply_chat_template is enabled
+            apply_chat_template = args.pop("apply_chat_template", False) # args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
+            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
+
             results = simple_evaluate(
                 model=model_name,
                 model_args=model_args,
                 tasks=[task.value for task in tasks],
                 batch_size=batch_size,
-                apply_chat_template=args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False),
-                gen_kwargs=args.pop("gen_kwargs", "temperature=0.0,top_k=50"),
+                apply_chat_template=apply_chat_template,
+                gen_kwargs=gen_kwargs,
                 random_seed=random_seed,
                 numpy_random_seed=random_seed,
                 torch_random_seed=random_seed,
