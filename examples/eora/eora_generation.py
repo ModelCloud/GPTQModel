@@ -16,26 +16,14 @@
 # -- do not touch
 import os
 
-import torch
-from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import tempfile  # noqa: E402
-from typing import Optional  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
-from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 # from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 from eora_calibration_data_construction import construct_c4
-
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 # class Test(ModelTest):
 #     # NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"

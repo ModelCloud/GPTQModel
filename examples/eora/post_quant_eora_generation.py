@@ -16,21 +16,13 @@
 # -- do not touch
 import os
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import tempfile  # noqa: E402
-from typing import Optional  # noqa: E402
 
-from tabulate import tabulate  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
-from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from eora_calibration_data_construction import *
-
-
+from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel.adapter.adapter import Lora  # noqa: E402
 
 if __name__ == '__main__':
     import argparse
@@ -86,4 +78,4 @@ if __name__ == '__main__':
         calibration_dataset=calibration_dataset,
         calibration_dataset_concat_size=0,
         auto_gc=False)
-    
+
