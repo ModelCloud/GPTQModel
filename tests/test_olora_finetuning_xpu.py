@@ -60,7 +60,7 @@ def train(
         set_seed(seed)
     model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": "xpu"}
     if quantize:
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'])
+        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['c4/c4-train.00000-of-01024.json.gz'])
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
     assert model.device.type == "xpu"
@@ -156,8 +156,8 @@ class Test(unittest.TestCase):
     def test_peft(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             train(
-                base_model="/monster/data/model/opt-125m",
-                data_path="/monster/data/model/dataset/yahma-alpaca-cleaned",
+                base_model="hugging-quants/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4", # "/monster/data/model/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4",
+                data_path="yahma/alpaca-cleaned", # "/monster/data/model/dataset/yahma-alpaca-cleaned",
                 output_dir=tmp_dir,
                 batch_size=16,
                 num_epochs=1,
