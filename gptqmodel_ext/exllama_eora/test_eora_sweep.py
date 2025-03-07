@@ -7,31 +7,31 @@ k = 4096
 n = 6144
 r = 128
 
-bit = 2
+bit_default = 4
 use_exllama = True
 
-BLOCK_KN_SIZE=128
+BLOCK_KN_SIZE=32
 r_size = BLOCK_KN_SIZE * r / k
 
 
 max_k1 = 16384
 k_step1 = 128
-input1 = [(k, r) for k in range(k_step1, max_k1, k_step1) for r in range(k_step1, k, k_step1)]
+input1 = [(k, r, bit_default) for k in range(k_step1, max_k1, k_step1) for r in range(k_step1, k, k_step1)]
 
 max_k2 = 4096
 k_step2 = 32
-input2 = [(k, r) for k in range(k_step2, max_k2, k_step2) for r in range(k_step2, k, k_step2)]
+input2 = [(k, r, bits) for k in range(k_step2, max_k2, k_step2) for r in range(k_step2, k, k_step2) for bits in [2, 3, 4]]
 
 #same as input 2 but r is not divisible by 32 (35, 67, etc)
-input3 = [(k, r) for k in range(k_step2, max_k2, k_step2) for r in range(k_step2 + 3, k, k_step2)]
+input3 = [(k, r, bit_default) for k in range(k_step2, max_k2, k_step2) for r in range(k_step2 + 3, k, k_step2)]
 
 input = input1 + input2 + input3
 
 @pytest.mark.parametrize(
-    "k, r",
+    "k, r, bit",
     input,
 )
-def test_eora_kernel_sizes(k, r):
+def test_eora_kernel_sizes(k, r, bit):
     x = torch.rand((m, k), device='cuda', dtype=torch.float16)
     eora_a = torch.randn((k, r), device='cuda', dtype=torch.float16) / 10.
     eora_b = torch.randn((r, n), device='cuda', dtype=torch.float16) / 10.
