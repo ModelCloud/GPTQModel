@@ -16,6 +16,7 @@
 
 import os
 import time
+
 from gptqmodel import BACKEND
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -23,11 +24,11 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
 from gptqmodel import GPTQModel  # noqa: E40
-from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
+from gptqmodel.adapter.adapter import Lora
+
 
 def benchmark_full(full_precision_model):
 
-    MODEL_id = full_precision_model
     MIN_NEW_TOKENS = 10
     MAX_NEW_TOKENS = 20
     NUM_RUNS = 50
@@ -43,8 +44,6 @@ def benchmark_full(full_precision_model):
         "Which is the most widely used Internet search engine in the world?",
         "What is the official language of France?",
     ]
-    MAX_DELTA_FLOOR_PERCENT = 0.25
-    MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
     model = AutoModelForCausalLM.from_pretrained(
         full_precision_model,
@@ -57,7 +56,7 @@ def benchmark_full(full_precision_model):
     tokenizer.pad_token = tokenizer.eos_token
 
     inp = tokenizer(PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to("cuda")
-    
+
     warmup_iter = 100
     print(f"Warming up: warmup_iter = `{warmup_iter}`")
     for i in range(warmup_iter):
@@ -104,8 +103,6 @@ def benchmark_GPTQModel(quantized_model):
         "Which is the most widely used Internet search engine in the world?",
         "What is the official language of France?",
     ]
-    MAX_DELTA_FLOOR_PERCENT = 0.25
-    MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
     model = GPTQModel.load(
             MODEL_id,
@@ -119,7 +116,7 @@ def benchmark_GPTQModel(quantized_model):
 
     tokenizer = model.tokenizer
     inp = tokenizer(PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to("cuda")
-    
+
     warmup_iter = 100
     print(f"Warming up: warmup_iter = `{warmup_iter}`")
     for i in range(warmup_iter):
@@ -168,8 +165,6 @@ def benchmark_EORA(quantized_model, eora_path, eora_rank):
         "Which is the most widely used Internet search engine in the world?",
         "What is the official language of France?",
     ]
-    MAX_DELTA_FLOOR_PERCENT = 0.25
-    MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0
 
     ## Load EoRA Here:
     eora = Lora(
@@ -182,7 +177,7 @@ def benchmark_EORA(quantized_model, eora_path, eora_rank):
 
     tokenizer = model.tokenizer
     inp = tokenizer(PROMPTS, padding=True, padding_side="left", pad_to_multiple_of=16, truncation=True, return_tensors="pt",).to("cuda")
-    
+
     warmup_iter = 100
     print(f"Warming up: warmup_iter = `{warmup_iter}`")
     for i in range(warmup_iter):

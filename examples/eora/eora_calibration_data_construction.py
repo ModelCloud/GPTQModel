@@ -1,9 +1,8 @@
 from datasets import load_dataset
-from gptqmodel import GPTQModel, QuantizeConfig
 
 
 def question_answering_format(question, answer):
-    
+
     return f"Question: {question}\nAnswer: {answer}"
 
 def multiple_choices_question_answering_format(question, choices, answer):
@@ -20,7 +19,7 @@ def construct_c4():
     return calibration_dataset
 
 def construct_ARC():
-    nsamples = 1024 
+    nsamples = 1024
     arc_easy_calibration_dataset = load_dataset('ai2_arc', 'ARC-Easy', split='train').select(range(nsamples))
     arc_challenge_calibration_dataset = load_dataset('ai2_arc', 'ARC-Challenge', split='train').select(range(nsamples))
     dataset = []
@@ -29,16 +28,16 @@ def construct_ARC():
         answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
         question = example['question']
         dataset.append(question_answering_format(question=question,answer=answer))
-    
+
     for example in arc_challenge_calibration_dataset:
         answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
         question = example['question']
         dataset.append(question_answering_format(question=question,answer=answer))
-   
+
     return dataset
 
 def construct_ARC_c4():
-    nsamples = 1024 
+    nsamples = 1024
     arc_easy_calibration_dataset = load_dataset('ai2_arc', 'ARC-Easy', split='train').select(range(nsamples))
     arc_challenge_calibration_dataset = load_dataset('ai2_arc', 'ARC-Challenge', split='train').select(range(nsamples))
     dataset = []
@@ -47,7 +46,7 @@ def construct_ARC_c4():
         answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
         question = example['question']
         dataset.append(question_answering_format(question=question,answer=answer))
-    
+
     for example in arc_challenge_calibration_dataset:
         answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
         question = example['question']
@@ -59,7 +58,7 @@ def construct_ARC_c4():
         data_files="en/c4-train.00001-of-01024.json.gz",
         split="train"
     ).select(range(nsamples))["text"]
-   
+
     return dataset + c4_dataset
 
 def construct_mmlu():
@@ -72,7 +71,7 @@ def construct_mmlu():
         answer = ['A','B','C','D'][example['answer']]
         dataset.append(multiple_choices_question_answering_format(question, choices, answer))
 
-    return dataset 
+    return dataset
 
 
 def construct_mmlu_c4():
@@ -91,5 +90,5 @@ def construct_mmlu_c4():
         data_files="en/c4-train.00001-of-01024.json.gz",
         split="train"
     ).select(range(1024))["text"]
-   
+
     return dataset + c4_dataset

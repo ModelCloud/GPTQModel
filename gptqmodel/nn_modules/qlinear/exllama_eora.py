@@ -181,10 +181,9 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
         if self.adapter:
-            # only 4 bits fused eora kernel has been validated
-            if self.bits == 4:
+            # only 2 to 4 bits have been validated for fused operation
+            if self.bits in [2, 3, 4]:
                 output = gptq_gemm_eora(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, reshaped_x @ self.adapter.lora_A, self.adapter.lora_B) # fused
-                # output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B)
             else:
                 output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
         else:
