@@ -49,7 +49,7 @@ import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
-from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
+from transformers import AutoConfig, PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig  # noqa: E402
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -394,8 +394,16 @@ class GPTQModel:
 
             # use model.generation_config whenever possible
             if gen_kwargs is None:
-                if hasattr(model_name, "generation_config"):
-                    gen_kwargs = ','.join(f"{key}={value}" for key, value in model_name.generation_config.items())
+                # TODO: move to utils
+                if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
+                    gen_dict = {
+                        "temperature": model.generation_config.temperature,
+                        "top_k": model.generation_config.top_k,
+                        "top_p": model.generation_config.top_p,
+                        "min_p": model.generation_config.min_p,
+
+                    }
+                    gen_kwargs = ','.join(f"{key}={value}" for key, value in gen_dict.items() if value not in ["", {}, None, []])
                 else:
                     gen_kwargs = "temperature=0.0,top_k=50" # default
 
