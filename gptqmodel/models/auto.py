@@ -397,6 +397,7 @@ class GPTQModel:
                 # TODO: move to utils
                 if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
                     gen_dict = {
+                        "do_sample": model.generation_config.do_sample,
                         "temperature": model.generation_config.temperature,
                         "top_k": model.generation_config.top_k,
                         "top_p": model.generation_config.top_p,
