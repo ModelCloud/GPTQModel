@@ -402,10 +402,10 @@ class GPTQModel:
                 else:
                     gen_kwargs = "temperature=0.0,top_k=50" # default
 
-            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}")
+            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
 
             apply_chat_template = args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
-            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}")
+            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
 
             results = simple_evaluate(
                 model=model_name,
