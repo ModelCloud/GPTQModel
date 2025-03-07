@@ -80,6 +80,8 @@ class BaseGPTQModel(nn.Module):
     layer_type: Union[List[str], str] = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
+    # moe require some special attention/stats as they may get routed enough calibration input
+    moe_modules: list[str] = None
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -875,10 +877,10 @@ class BaseGPTQModel(nn.Module):
                 gptq = {}
                 for name in subset:
                     qcfg_clone = copy.deepcopy(self.quantize_config)
-
+                    module_full_prefix = f"{self.layers_node}.{module_index}.{name}"
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
-                        layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
+                        layer_name = self.lm_head if is_lm_head_module else module_full_prefix
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
                             log.info(f"skip module: {layer_name}")
@@ -894,7 +896,16 @@ class BaseGPTQModel(nn.Module):
                         qcfg_clone.damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", qcfg_clone.damp_percent)
                         qcfg_clone.static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", qcfg_clone.static_groups)
 
-                    tmp = GPTQ(module=subset[name], qcfg=qcfg_clone)
+                    is_moe = False
+                    log.info(f"Moe?: `{mself.moe_modules}` matching `{module_full_prefix}`")
+                    if self.moe_modules is not None:
+                        for m in self.moe_modules:
+                            log.info(f"Moe: `{m}` matching `{module_full_prefix}`")
+                            # postfix check
+                            if module_full_prefix.endswith(m):
+                                is_moe = True
+
+                    tmp = GPTQ(module=subset[name], qcfg=qcfg_clone, moe=is_moe)
                     gptq[name] = tmp
 
                     # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer

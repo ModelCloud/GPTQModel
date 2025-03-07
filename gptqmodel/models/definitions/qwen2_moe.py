@@ -38,3 +38,11 @@ class Qwen2MoeGPTQ(BaseGPTQModel):
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
     ]
+
+    # TODO: REMOVE THiS: Extra values from layer_modules
+    # moe require some special attention/stats as they may get routed enough calibration input
+    moe_modules = [
+        r"mlp\.experts\.\d+\.up_proj",
+        r"mlp\.experts\.\d+\.gate_proj",
+        r"mlp\.experts\.\d+\.down_proj",
+    ]

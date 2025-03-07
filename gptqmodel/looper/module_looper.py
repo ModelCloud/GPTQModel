@@ -264,7 +264,7 @@ class ModuleLooper():
                             subset[name] = named_module
                             full[name] = named_module
 
-                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                        processor.preprocess(self.gptq_model, subset[name], buffered_fwd=buffered_fwd)
                         # some modules are skipped
                         if processor.is_skipped(subset[name]):
                             skipped_modules.append(name)

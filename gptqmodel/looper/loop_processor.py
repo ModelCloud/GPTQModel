@@ -166,7 +166,7 @@ class LoopProcessor:
         self.fwd_time = fwd_time
 
     # called first
-    def preprocess(self, module: NamedModule, **kwargs):
+    def preprocess(self, model: BaseGPTQModel, module: NamedModule, **kwargs):
         pass
 
     # after preproces, this process may be skipped due to dynamic override (lora adapter = None)

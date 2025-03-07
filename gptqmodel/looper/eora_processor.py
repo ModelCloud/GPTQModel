@@ -80,7 +80,7 @@ class EoraProcessor(LoopProcessor):
         self.calibration_dataset = calibration_dataset
         self.num_batches = len(calibration_dataset)
 
-    def preprocess(self, module: NamedModule, **kwargs):
+    def preprocess(self, model: BaseGPTQModel, module: NamedModule, **kwargs):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             module.adapter_cfg = None # hack
