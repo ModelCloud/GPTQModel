@@ -362,10 +362,7 @@ class GPTQModel:
 
 
         if backend=="gptqmodel": # vllm loads tokenizer
-            if isinstance(tokenizer, Tokenicer):
-                model_args["tokenizer"] = tokenizer.tokenizer # lm-eval checks if tokenizer's type is PretrainedTokenizer
-            else:
-                model_args["tokenizer"] = tokenizer
+            model_args["tokenizer"] = tokenizer
 
         if framework == EVAL.LM_EVAL:
             from lm_eval.utils import make_table  # hack: circular import
