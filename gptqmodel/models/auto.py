@@ -30,6 +30,10 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
     log.info("ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.")
 
+# FIX ROCm env conflict with CUDA_VISIBLE_DEVICES if both exits
+if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ:
+    del os.environ['ROCR_VISIBLE_DEVICES']
+
 import sys  # noqa: E402
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS
