@@ -28,6 +28,7 @@ class EVAL:
         MMLU = "mmlu"
         HELLASWAG = "hellaswag"
         GSM8K_COT = "gsm8k_cot"
+        GSM8K_PLATINUM_COT = "gsm8k_platinum_cot"
         GPQA = "gpqa"
 
     class EVALPLUS(str, Enum):
