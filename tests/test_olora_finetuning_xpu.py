@@ -60,7 +60,7 @@ def train(
         set_seed(seed)
     model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": "xpu"}
     if quantize:
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['c4/c4-train.00000-of-01024.json.gz'])
+        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['allenai/c4']) # /monster/data/model/dataset/c4-train.00000-of-01024.json.gz
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
     assert model.device.type == "xpu"
