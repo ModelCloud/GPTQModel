@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import re
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -64,7 +65,7 @@ class GPTQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, buffered_fwd: bool):
+    def preprocess(self, model: BaseGPTQModel, module: NamedModule, buffered_fwd: bool):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -82,7 +83,16 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
-        tmp = GPTQ(module=module, qcfg=qcfg_clone)
+        is_moe = False
+
+        if model.moe_modules:
+            for m in model.moe_modules:
+                if module.name == m or re.fullmatch(m, module.name):
+                    log.info(f"MoE: found `{module.name}`")
+                    is_moe = True
+                    break
+
+        tmp = GPTQ(module=module, qcfg=qcfg_clone, moe=is_moe)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd

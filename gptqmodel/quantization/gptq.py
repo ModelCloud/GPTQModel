@@ -40,7 +40,7 @@ torch.backends.cudnn.allow_tf32 = False
 CPU = torch.device("cpu")
 
 class GPTQ:
-    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None, moe: bool = False):
         if isinstance(module, NamedModule):
             self.module = module.module
             name = module.name
@@ -48,6 +48,7 @@ class GPTQ:
             name = HF_OPTIMUM
             self.module = module
 
+        self.moe = moe
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
         self.module_copy = self._clone_module()
@@ -61,6 +62,9 @@ class GPTQ:
         # fwd input buffer
         self.fwd_inputs_buffered = False
         self.fwd_inputs_buffered_data = []
+
+        # capture input counter
+        self.cap_inputs_counter = 0
 
 
     def shape(self):
@@ -81,6 +85,8 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp, out):
+        self.cap_inputs_counter += 1
+
         if self.fwd_inputs_buffered:
             self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
         else:
@@ -159,6 +165,9 @@ class GPTQ:
         self,
         blocksize=128,
     ):
+        if self.moe:
+            log.info(f"MoE Module: Inputs Captured = `{self.cap_inputs_counter}`, name = `{self.module.module.name}`")
+
         start = time.time()
 
         # process buffered inputs
@@ -182,6 +191,10 @@ class GPTQ:
             self.module_copy = None
 
         self.quantizer.find_params(W, weight=True)
+
+        # for moe like deepseek, some moe modules may not get activated so no calibration data is caught by forward hook
+        if not hasattr(self, "H"):
+            raise RuntimeError("Please increase your calibration dataset to `moe` modules are all activated.")
 
         H = self.H
         del self.H
