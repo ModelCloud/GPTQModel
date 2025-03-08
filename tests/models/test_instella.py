@@ -18,7 +18,7 @@ from model_test import ModelTest
 
 
 class TestInstella(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Instella-3B-Instruct/" 
+    NATIVE_MODEL_ID = "/monster/data/model/Instella-3B-Instruct/"
     NATIVE_ARC_CHALLENGE_ACC = 0.4377
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4804
     TRUST_REMOTE_CODE = True

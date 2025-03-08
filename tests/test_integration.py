@@ -22,7 +22,7 @@ import unittest  # noqa: E402
 import transformers  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from packaging.version import Version  # noqa: E402
-from transformers import AutoTokenizer, AutoModelForCausalLM, GPTQConfig  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 
 class TestIntegration(unittest.TestCase):
