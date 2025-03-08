@@ -189,7 +189,7 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "-diag-suppress=179,39,186",
+            "-diag-suppress=179,39", # 186
         ],
     }
 
@@ -202,8 +202,10 @@ if BUILD_CUDA_EXT:
     # nvidia (nvcc) only compile flags that rocm doesn't support
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
-            "--threads",
-            "4",
+            "--threads", "8",
+            "--optimize=3",
+            "-lineinfo",
+            "--resource-usage",
             "-Xfatbin",
             "-compress-all",
             "--expt-relaxed-constexpr",
