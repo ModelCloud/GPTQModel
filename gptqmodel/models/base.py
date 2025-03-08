@@ -1210,7 +1210,7 @@ class BaseGPTQModel(nn.Module):
         if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
             self.compiled = False
             log.warn(f"To use compile(), you need to have torch version >= {TORCH_MIN_VERSION_STR}, please "
-                           f"upgrade it by `pip install torch -U`")
+                           f"upgrade it by `pip install -U torch torchaudio torchvision`")
             return self
 
         # needed by eora

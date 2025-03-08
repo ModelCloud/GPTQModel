@@ -24,7 +24,6 @@ from gptqmodel.adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
-from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -54,8 +53,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -239,8 +238,6 @@ def select_quant_linear(
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
         qlinear = ExllamaQuantLinear
-    elif backend == BACKEND.CUDA:
-        qlinear = DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
