@@ -211,26 +211,7 @@ if BUILD_CUDA_EXT:
             "--use_fast_math",
         ]
 
-    extensions = [
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_64",
-            [
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_256",
-            [
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
-    ]
+    extensions = []
 
     # Exllama Eora not yet compilable for ROCm
     if not ROCM_VERSION:
