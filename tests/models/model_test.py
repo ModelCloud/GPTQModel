@@ -80,10 +80,10 @@ class ModelTest(unittest.TestCase):
     LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
     SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
-    INFERENCE_PROMPT = "Which city is the capital of France? The city name is "
-    INFERENCE_RESULT_KEYWORDS = ["paris", "eiffel", "country"]
-    GENERATE_EVAL_SIZE_MIN = 20
-    GENERATE_EVAL_SIZE_MAX = 50
+    INFERENCE_PROMPT = "The capital city of France is named"
+    INFERENCE_RESULT_KEYWORDS = ["paris"]
+    GENERATE_EVAL_SIZE_MIN = 128
+    GENERATE_EVAL_SIZE_MAX = 128
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
