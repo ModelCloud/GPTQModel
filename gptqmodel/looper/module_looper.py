@@ -332,6 +332,14 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = None
 
+                    skipped_modules.clear()
+                    for name in subset :
+                        if processor.tasks[name].fwd_counter == 0:
+                            log.warn(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
+                            skipped_modules.append(name)
+                    for name in skipped_modules:
+                        subset.pop(name)
+                    
                     for name_index, name in enumerate(subset):
                         m = subset[name]
                         processor.process(module=m)

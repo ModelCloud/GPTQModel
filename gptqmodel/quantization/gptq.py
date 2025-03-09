@@ -61,6 +61,9 @@ class GPTQ:
         # fwd input buffer
         self.fwd_inputs_buffered = False
         self.fwd_inputs_buffered_data = []
+        
+        # fwd counter
+        self.fwd_counter = 0
 
 
     def shape(self):
@@ -81,6 +84,8 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp, out):
+        self.fwd_counter += 1
+        
         if self.fwd_inputs_buffered:
             self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
         else:
