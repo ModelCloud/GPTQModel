@@ -1282,6 +1282,26 @@ class BaseGPTQModel(nn.Module):
     def post_quantize(self, module: nn.Module) -> nn.Module:
         return move_to(module, device=CPU)
 
+    ## overrides nn.module.train()
+    # def train(self, mode=True):
+    #     old_mode = self.training
+    #     # Call the parent class's train() method to set the training mode
+    #     super().train(mode)
+    #
+    #     if old_mode == mode:
+    #         return
+    #
+    #     # Custom behavior when switching to training mode
+    #     if mode:
+    #         if not self.SUPPORTS_TRAINING:
+    #             err = f"{self.__class__.__name__}: MODEL switching to training mode."
+    #             log.error(err)
+    #             raise NotImplementedError(err)
+    #         else:
+    #             log.info(f"{self.__class__.__name__}: MODEL switching to training mode.")
+    #     else:
+    #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
+
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)

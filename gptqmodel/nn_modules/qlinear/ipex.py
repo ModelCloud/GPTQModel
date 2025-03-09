@@ -18,12 +18,12 @@ from typing import Optional, Tuple
 
 import torch
 
+from .torch import TorchQuantLinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
-from . import BaseQuantLinear
 
 log = setup_logger()
 
@@ -86,7 +86,7 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(BaseQuantLinear):
+class IPEXQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -155,6 +155,9 @@ class IPEXQuantLinear(BaseQuantLinear):
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor):
+        if self.training:
+            return super().forward(x)
+
         if self.adapter:
             return self.adapter(x=x, out=self.ipex_linear(x))
         else:

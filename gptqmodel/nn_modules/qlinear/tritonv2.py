@@ -19,6 +19,7 @@ from typing import Optional, Tuple
 import torch
 from packaging import version
 
+from .torch import TorchQuantLinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
@@ -46,13 +47,13 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 log = setup_logger()
 
 
-class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
+    SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
@@ -131,6 +132,9 @@ class TritonV2QuantLinear(BaseQuantLinear, TritonModuleMixin):
         super().post_init()
 
     def forward(self, x):
+        if self.training:
+            return super().forward(x)
+
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.padded_infeatures:
         #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
