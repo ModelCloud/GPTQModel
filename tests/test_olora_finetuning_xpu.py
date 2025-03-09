@@ -27,6 +27,7 @@ from datasets import load_dataset  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig, set_seed  # noqa: E402
 
+DEVICE = torch.device("cuda:0")
 
 def train(
         base_model: str = "path/to/model",
@@ -47,23 +48,13 @@ def train(
         lora_target_modules: List[str] = None,
         torch_dtype: str = "float16",
         init_lora_weights="olora",
-        seed: Optional[int] = None,
 ):
-    # Set device_map to the right place when enabling DDP.
-    world_size = int(os.environ.get("WORLD_SIZE", 0)) or int(os.environ.get("PMI_SIZE", 0))
-    if world_size > 1 and device_map != "cpu":
-        from accelerate import Accelerator
-
-        device_map = {"": Accelerator().process_index}
-    # Set seed
-    if seed is not None:
-        set_seed(seed)
-    model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": "xpu"}
+    model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": DEVICE}
     if quantize:
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'])
+        model_kwargs["quantization_config"] = GPTQConfig(bits=4, true_sequential=False, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'], backend="auto_trainable")
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
-    assert model.device.type == "xpu"
+    assert model.device.type == DEVICE.type
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     # For some tokenizer with no pad token like llama
@@ -106,11 +97,11 @@ def train(
     )
 
     model = get_peft_model(model, config)
-    assert model.device.type == "xpu"
+    assert model.device.type == DEVICE.type
 
     data = load_dataset(data_path)
 
-    train_val = data["train"].train_test_split(test_size=val_set_size, shuffle=True, seed=42)
+    train_val = data["train"].train_test_split(test_size=val_set_size, shuffle=True)
     train_data = train_val["train"].shuffle().map(generate_and_tokenize_prompt)
     val_data = train_val["test"].shuffle().map(generate_and_tokenize_prompt)
 
@@ -132,7 +123,7 @@ def train(
             output_dir=output_dir,
             save_total_limit=3,
             load_best_model_at_end=True,
-            ddp_find_unused_parameters=False if world_size > 1 else None,
+            ddp_find_unused_parameters=None,
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
@@ -156,7 +147,7 @@ class Test(unittest.TestCase):
     def test_peft(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             train(
-                base_model="/monster/data/model/opt-125m",
+                base_model="/monster/data/model/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4", #"/monster/data/model/opt-125m",
                 data_path="/monster/data/model/dataset/yahma-alpaca-cleaned",
                 output_dir=tmp_dir,
                 batch_size=16,
@@ -174,5 +165,4 @@ class Test(unittest.TestCase):
                 lora_target_modules=None,
                 torch_dtype="float16",
                 init_lora_weights="olora",
-                seed=1234,
             )
