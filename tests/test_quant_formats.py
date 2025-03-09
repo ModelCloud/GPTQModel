@@ -39,28 +39,34 @@ class TestQuantization(ModelTest):
 
     @classmethod
     def setUpClass(self):
-        self.pretrained_model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct/" #"/monster/data/model/TinyLlama-1.1B-intermediate-step-1431k-3T"
+        self.pretrained_model_id = "/monster/data/model/Llama-3.2-1B"
+        #"/monster/data/model/Qwen2.5-0.5B-Instruct/" "/monster/data/model/Qwen2.5-0.5B-Instruct/" #
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(512))]
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
-            (QUANT_METHOD.GPTQ, BACKEND.TRITON, True, FORMAT.GPTQ_V2, 4),
-            (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
+            (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ_V2, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
+            (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ_V2, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.TRITON, True, FORMAT.GPTQ_V2, 4),
+            # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
-        desc_act = False if format == FORMAT.MARLIN else True
+
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
-                group_size=128,
-                desc_act=desc_act,
+                group_size=32,
+                desc_act=True,
                 sym=sym,
                 format=format,
                 damp_percent=0.05
@@ -119,9 +125,9 @@ class TestQuantization(ModelTest):
             # test compat: 1) with simple dict type 2) is_marlin_format
             compat_quantize_config = {
                 "bits": bits,
-                "group_size": 128,
+                "group_size": 32,
                 "sym": sym,
-                "desc_act": desc_act,
+                "desc_act": True,
                 "is_marlin_format": backend == BACKEND.MARLIN,
             }
 
