@@ -51,10 +51,10 @@ def mul(
     @A: `torch.int8` input matrix of shape `(m, k)` in standard row-major layout
     @B: `torch.int32` weight matrix of original shape `(k, n)` in the specified format; see `Layer.pack()`
     @C: `torch.int32` reduce buffer of shape `(max_par * 64, n)` in standard row-major layout
-    @D: `torch.half` out matrix of shape `(m, n)` in standard row-major layout
+    @D: `torch.float16` out matrix of shape `(m, n)` in standard row-major layout
     @s1: `torch.float32` activation per-token quantization scales of shape `(m, 1)`
     @s2: `torch.float32` weight per-channel quantization scales of shape `(1, n)`
-    @s3: `torch.half` weight per-group quantization scales of shape `(m / groupsize, n)`, it should be empty when group_size != -1
+    @s3: `torch.float16` weight per-group quantization scales of shape `(m / groupsize, n)`, it should be empty when group_size != -1
     @workspace: `torch.int32` tensor with at least `n / 128 * max_par` entries that are all zero
     @thread_k: `k` size of a thread_tile in `B` (can usually be left as auto -1)
     @thread_n: `n` size of a thread_tile in `B` (can usually be left as auto -1)
@@ -141,13 +141,13 @@ class QQQQuantLinear(BaseQuantLinear):
                 "s_group",
                 torch.empty(
                     (self.in_features // self.group_size, self.out_features),
-                    dtype=torch.half,
+                    dtype=torch.float16,
                 ),
             )
         else:
             self.register_buffer(
                 "s_group",
-                torch.tensor([], dtype=torch.half),
+                torch.tensor([], dtype=torch.float16),
             )
         # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
         self.register_buffer(
@@ -162,7 +162,7 @@ class QQQQuantLinear(BaseQuantLinear):
         )
         self.wf = torch.tensor(list(range(0, 32, 4)), dtype=torch.int32).unsqueeze(0)
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.half))
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
         else:
             self.bias = None
         self._perm, self._scale_perm, self._scale_perm_single = self._get_perms()
@@ -239,16 +239,16 @@ class QQQQuantLinear(BaseQuantLinear):
     #def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None):
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
         """Pack a fake-quantized linear layer into this actual Marlin representation.
-        @linear: fake-quantized `torch.nn.Linear` layer to convert (must be of type `torch.half`)
+        @linear: fake-quantized `torch.nn.Linear` layer to convert (must be of type `torch.float16`)
         @scales: corresponding quantization scales of shape `(infeatures, groups)`
         @s_extra: corresponding quantization scales of shape `(1, outfeatures)`
         """
         if self.group_size != self.in_features:
             assert s_extra is not None, "s_extra is needed"
-        if linear.weight.dtype != torch.half:
+        if linear.weight.dtype != torch.float16:
             log.warn(
-                f"""The dtype of weights is {linear.weight.dtype}, while our w4a8 GEMM's output is torch.half.
-                If you can ensure your GEMM results don't overflow torch.half, it will still function correctly.
+                f"""The dtype of weights is {linear.weight.dtype}, while our w4a8 GEMM's output is torch.float16.
+                If you can ensure your GEMM results don't overflow torch.float16, it will still function correctly.
                 Otherwise, it will yield incorrect results."""
             )
         s = scales.t()
@@ -266,7 +266,7 @@ class QQQQuantLinear(BaseQuantLinear):
             w = torch.clamp(w, -self.maxq, self.maxq)
         if self.group_size != self.in_features:
             s_extra = s_extra.reshape(1, -1).to(dtype=torch.float32)
-            s = (s.reshape(-1, self.out_features) / s_extra).to(dtype=torch.half)
+            s = (s.reshape(-1, self.out_features) / s_extra).to(dtype=torch.float16)
 
             w = w.reshape((self.group_size, -1, self.out_features))
             w = w.permute(1, 0, 2)
@@ -311,14 +311,14 @@ class QQQQuantLinear(BaseQuantLinear):
             self.s_channel[:, :] = s_extra.to(self.s_channel.device)
         else:
             self.s_group = torch.tensor(
-                [], dtype=torch.half, device=self.s_channel.device
+                [], dtype=torch.float16, device=self.s_channel.device
             )
             self.s_channel[:, :] = s.to(self.s_channel.device)
         if linear.bias is not None:
             if self.bias is not None:
-                self.bias[:] = linear.bias.data.to(self.bias.device).to(torch.half)
+                self.bias[:] = linear.bias.data.to(self.bias.device).to(torch.float16)
             else:
-                self.bias = linear.bias.clone().to(torch.half)
+                self.bias = linear.bias.clone().to(torch.float16)
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
@@ -330,10 +330,10 @@ class QQQQuantLinear(BaseQuantLinear):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
         if A.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+            return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
 
         out_shape = A.shape[:-1] + (self.out_features,)
-        A = A.reshape(-1, A.shape[-1]).half()
+        A = A.reshape(-1, A.shape[-1]).to(dtype=torch.float16)
         quant_A, s1 = self.dynamic_quant(A)
         D = torch.empty(A.shape[0], self.out_features, dtype=A.dtype, device=A.device)
         mul(
