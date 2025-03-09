@@ -17,7 +17,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch

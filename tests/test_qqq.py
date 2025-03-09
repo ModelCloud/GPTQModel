@@ -3,9 +3,9 @@ import os
 import unittest
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+from gptqmodel import GPTQModel  # noqa: E402
 # -- end do not touch
-from logbar import LogBar, LogBar
-from gptqmodel import GPTQModel, BACKEND # noqa: E402
+from logbar import LogBar
 
 log = LogBar.shared()
 
