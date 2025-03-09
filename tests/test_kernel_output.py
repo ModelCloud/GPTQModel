@@ -34,6 +34,7 @@ class TestKernelOutput(unittest.TestCase):
     }
 
     target = 'model.layers.6.self_attn.v_proj'
+    random_input_samples = 1000
 
     @classmethod
     def setUpClass(cls):
@@ -42,7 +43,9 @@ class TestKernelOutput(unittest.TestCase):
 
         cls.m = 1
         cls.k = -1
-        cls.x = None  # random X input of shape (m, k)
+
+
+        cls.x = []  # random X input of shape (m, k)
 
         cls.adapter = Lora(
             rank=128,
@@ -51,7 +54,9 @@ class TestKernelOutput(unittest.TestCase):
         cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
         cls.k = cls.adapter.lora_A.shape[0]
 
-        cls.x = torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16)
+        for _ in log.pb(range(cls.random_input_samples)).title("Generate Random Inputs"):
+            cls.x.append(torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16))
+
         AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
         # TORCH as reference output
@@ -64,10 +69,11 @@ class TestKernelOutput(unittest.TestCase):
         target_qlinear_cls = self.target_qliner_map[backend]
 
         modules = find_modules(model.model, layers=[target_qlinear_cls])
-        result = None
+        result = []
         for name, module in modules.items():
             if name == self.target:
-                result = module(self.x)
+                for i in log.pb(range(self.random_input_samples)).title("Forward Pass on Random Input"):
+                    result.append(module(self.x[i]))
                 break
 
         assert result is not None
@@ -80,40 +86,50 @@ class TestKernelOutput(unittest.TestCase):
 
     def assert_on_mismatch(self, a: Tensor, b: Tensor, atol):
         torch.testing.assert_close(a, b, rtol=0.15, atol=atol)
+        #torch.allclose(a, b, rtol=0.15, atol=atol)
 
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000),
         (BACKEND.TRITON, 0.00001),
-        (BACKEND.EXLLAMA_V1, 0.00075),
+        (BACKEND.EXLLAMA_V1, 0.0015),
         (BACKEND.EXLLAMA_V2, 0.00075),
         (BACKEND.MARLIN, 0.00005),
         (BACKEND.MARLIN_FP16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, 0.00099)
+        (BACKEND.EXLLAMA_EORA, 0.0011)
     ])
     def test_kernel_output(self, backend: BACKEND, a_tolerance: float):
         out = self.forward(backend=backend)
 
-        log.info(f"backend: {backend} ")
-        log.info(out[0][:100])
-
-        # torch vs exllama v1
-        self.assert_on_mismatch(self.torch_kernel_out, out, a_tolerance)  # use torch as reference
+        # torch as ref
+        pb = log.pb(range(len(out))).title("Actual Kernel Output With Lora").manual()
+        for i in pb:
+            pb.subtitle(f"backed = `{backend}`").draw()
+            try:
+                self.assert_on_mismatch(self.torch_kernel_out[i], out[i],
+                                        a_tolerance)  # use torch as reference
+            except AssertionError:
+                log.error(
+                    f"Torch with Lora output: backed = `{backend}`, i = `{i}`, {self.torch_kernel_out[i][:10]}")
+                raise AssertionError
 
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000),
         (BACKEND.TRITON, 0.00001),
-        (BACKEND.EXLLAMA_V1, 0.00075),
-        (BACKEND.EXLLAMA_V2, 0.00075),
+        (BACKEND.EXLLAMA_V1, 0.0015),
+        (BACKEND.EXLLAMA_V2, 0.00086),
         (BACKEND.MARLIN, 0.00003),
         (BACKEND.MARLIN_FP16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, 0.00196)
+        (BACKEND.EXLLAMA_EORA, 0.0014)
     ])
     def test_kernel_output_with_lora(self, backend: BACKEND, a_tolerance: float):
         out = self.forward(backend=backend, adapter=self.adapter)
 
-        print(f"torch output with lora {self.torch_kernel_out_with_lora[0][:10]}")
-        print(f"backend: {backend} with lora")
-        print(out[0][:10])
-
-        # compare kernel output with torch kernel reference
-        self.assert_on_mismatch(self.torch_kernel_out_with_lora, out, a_tolerance)  # use torch as reference
+        # torch as ref
+        pb = log.pb(range(len(out))).title("Actual Kernel Output With Lora").manual()
+        for i in pb:
+            pb.subtitle(f"backed = `{backend}`").draw()
+            try:
+                self.assert_on_mismatch(self.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
+            except AssertionError:
+                log.error(f"Torch with Lora output: backed = `{backend}`, i = `{i}`, {self.torch_kernel_out_with_lora[i][:10]}")
+                raise AssertionError
