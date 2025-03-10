@@ -373,40 +373,38 @@ class BaseQuantLinear(nn.Module):
             # log.info(f"{self.__class__.__name__}: `{self.name}` switching to eval mode.")
 
 class PackableQuantLinear(BaseQuantLinear):
-    def post_init(self, **kwargs):
-        super().post_init(**kwargs)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
+        # self.wf is used for module training
         if self.bits in [2, 4, 8]:
-            wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
-                device=self.g_idx.device)
+            self.wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0)
         elif self.bits == 3:
-            wf = t.tensor(
+            self.wf = t.tensor(
                 [
                     [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
                     [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
                     [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
                 ],
                 dtype=t.int32,
-            ).reshape(1, 3, 12).to(device=self.g_idx.device)
+            ).reshape(1, 3, 12)
 
-        # self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device))
-        # self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device))
-        #
-        self.wf_unsqueeze_zero = wf.unsqueeze(0).to(device=self.g_idx.device)
-        self.wf_unsqueeze_neg_one = wf.unsqueeze(-1).to(device=self.g_idx.device)
+    def train(self, mode=True):
+        if mode and self.wf.device != self.g_idx.device:
+            self.wf = self.wf.to(self.g_idx.device)
 
     def dequantize_weight(self, num_itr: int = 1):
         if self.bits in [2, 4, 8]:
             zeros = t.bitwise_right_shift(
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-                self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
+                self.wf.unsqueeze(0),
             ).to(self.dequant_dtype)
             zeros = t.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
 
             weight = t.bitwise_and(
                 t.bitwise_right_shift(
                     t.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                    self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
+                    self.wf.unsqueeze(-1)
                 ).to(self.dequant_dtype),
                 self.maxq
             )
@@ -414,7 +412,7 @@ class PackableQuantLinear(BaseQuantLinear):
             zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(
                 -1, -1, -1, 12
             )
-            zeros = zeros >> self.wf_unsqueeze_zero  # self.wf.unsqueeze(0)
+            zeros = zeros >> self.wf.unsqueeze(0)
             zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
             zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
             zeros = zeros & 0x7
@@ -426,7 +424,7 @@ class PackableQuantLinear(BaseQuantLinear):
             weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(
                 -1, -1, 12, -1
             )
-            weight = (weight >> self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
+            weight = (weight >> self.wf.unsqueeze(-1)) & 0x7
             weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
             weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
             weight = weight & 0x7

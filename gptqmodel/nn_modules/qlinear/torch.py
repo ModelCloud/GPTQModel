@@ -81,6 +81,8 @@ class TorchQuantLinear(PackableQuantLinear):
         # else:
         #     self.padded_infeatures = self.in_features
 
+
+
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
