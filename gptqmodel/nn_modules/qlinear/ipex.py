@@ -18,12 +18,12 @@ from typing import Optional, Tuple
 
 import torch
 
+from .torch import TorchQuantLinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
-from . import PackableQuantLinear
 
 log = setup_logger()
 
@@ -86,13 +86,13 @@ if HAS_IPEX:
         # if import GPTQShuffle failed, do nothing
         pass
 
-class IPEXQuantLinear(PackableQuantLinear):
+class IPEXQuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
+    SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
@@ -153,14 +153,20 @@ class IPEXQuantLinear(PackableQuantLinear):
             quant_method=QuantMethod.GPTQ_GEMM,
             dtype=QuantDtype.INT4)
 
-    @torch.no_grad()
+        super().post_init()
+
     def forward(self, x: torch.Tensor):
+        if self.training:
+            return super().forward(x)
+
         if self.adapter:
             return self.adapter(x=x, out=self.ipex_linear(x))
         else:
             return self.ipex_linear(x)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
-        self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
+        # self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
+        # torch.compile is incompatible with ipex woq linear, will enable it after we fix this issue.
+        pass
 
 __all__ = ["IPEXQuantLinear"]

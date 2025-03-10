@@ -4,7 +4,6 @@ from typing import Dict
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
@@ -21,7 +20,6 @@ class TestPackable(unittest.TestCase):
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.CUDA: DynamicCudaQuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
         BACKEND.IPEX: IPEXQuantLinear,
@@ -47,9 +45,7 @@ class TestPackable(unittest.TestCase):
             (BACKEND.EXLLAMA_V1, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.CUDA, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.CUDA, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.IPEX, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
             (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),

@@ -349,6 +349,29 @@ class BaseQuantLinear(nn.Module):
         log.info.once(f"Optimize: `{self.__class__.__name__}` compilation triggered.")
         pass
 
+    # overrides nn.module.train()
+    def train(self, mode=True):
+        old_mode = self.training
+
+        if old_mode == mode:
+            return
+
+        # Call the parent class's train() method to set the training mode
+        super().train(mode)
+
+        # Custom behavior when switching to training mode
+        if mode:
+            if not self.SUPPORTS_TRAINING:
+                err = f"{self.__class__.__name__}: `{self.name}` switching to training mode."
+                log.error(err)
+                raise NotImplementedError(err)
+            else:
+                pass
+                # log.info(f"{self.__class__.__name__}: `{self.name}` switching to training mode.")
+        else:
+            pass
+            # log.info(f"{self.__class__.__name__}: `{self.name}` switching to eval mode.")
+
 class PackableQuantLinear(BaseQuantLinear):
     def post_init(self, **kwargs):
         super().post_init(**kwargs)

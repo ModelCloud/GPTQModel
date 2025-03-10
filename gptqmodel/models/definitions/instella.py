@@ -14,18 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from gptqmodel import BACKEND
-from gptqmodel.utils.importer import AUTO_SELECT_BACKEND_ORDER
-from model_test import ModelTest
+from ..base import BaseGPTQModel
 
 
-class TestOpt(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/opt-125m"  # "facebook/opt-125m"
-    NATIVE_ARC_CHALLENGE_ACC = 0.1894
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
+class InstellaGPTQ(BaseGPTQModel):
+    require_trust_remote_code = True
 
-    KERNEL_QUANT = {AUTO_SELECT_BACKEND_ORDER[BACKEND.TORCH]}
-    KERNEL_INFERENCE = {AUTO_SELECT_BACKEND_ORDER[BACKEND.MARLIN]}
+    base_modules = ["model.embed_tokens", "model.norm"]
+    pre_lm_head_norm_module = "model.norm"
 
-    def test_opt(self):
-        self.quant_lm_eval()
+    layers_node = "model.layers"
+    layer_type = "InstellaDecoderLayer"
+    layer_modules = [
+        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.up_proj", "mlp.gate_proj"],
+        ["mlp.down_proj"],
+    ]

@@ -18,7 +18,6 @@
 import os
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
 from parameterized import parameterized
@@ -82,7 +81,6 @@ class TestRepacking(unittest.TestCase):
     QLINEAR_DICT = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.CUDA: DynamicCudaQuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
         BACKEND.IPEX: IPEXQuantLinear,

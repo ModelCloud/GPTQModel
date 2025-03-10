@@ -26,7 +26,6 @@ import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
@@ -47,7 +46,6 @@ class TestGroupSize(unittest.TestCase):
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.CUDA: DynamicCudaQuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.BITBLAS: BitBLASQuantLinear,
         BACKEND.IPEX: IPEXQuantLinear,
@@ -57,7 +55,7 @@ class TestGroupSize(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH, BACKEND.BITBLAS,
+        cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS,
                              BACKEND.IPEX]
         cls.backends = list(cls.pack_backends)
         cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])

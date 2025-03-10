@@ -129,7 +129,7 @@ class InferenceSpeed(unittest.TestCase):
         positive_pct = 100 * (1 + self.MAX_POSITIVE_DELTA_CEIL_PERCENT)
 
         self.assertTrue(negative_pct <= diff_pct <= positive_pct,
-                        f"Tokens Per Second: {avg_tokens_per_second} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+                        f"{backend}: Actual tokens Per Second: {avg_tokens_per_second}, expected = `{tokens_per_second}` diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
 
         del model
         torch_empty_cache()

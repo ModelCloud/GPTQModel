@@ -19,11 +19,12 @@ from typing import Optional, Tuple
 import torch
 from packaging import version
 
+from .torch import TorchQuantLinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import PackableQuantLinear
+from . import BaseQuantLinear
 
 try:
     import triton
@@ -46,18 +47,18 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 log = setup_logger()
 
 
-class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
+    SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.XPU]
+    SUPPORTS_DEVICES = [DEVICE.CUDA] # Intel XPU can use Triton but this has been validated
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
     SUPPORTS_ADAPTERS = [Lora]
@@ -131,6 +132,9 @@ class TritonV2QuantLinear(PackableQuantLinear, TritonModuleMixin):
         super().post_init()
 
     def forward(self, x):
+        if self.training:
+            return super().forward(x)
+
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.padded_infeatures:
         #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))

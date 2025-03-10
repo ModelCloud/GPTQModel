@@ -25,9 +25,10 @@ from .evalplus import patch_evalplus
 class EVAL:
     class LM_EVAL(str, Enum):
         ARC_CHALLENGE = "arc_challenge"
-        MMLU = "mmlu"
-        HELLASWAG = "hellaswag"
         GSM8K_COT = "gsm8k_cot"
+        GSM8K_PLATINUM_COT = "gsm8k_platinum_cot"
+        HELLASWAG = "hellaswag"
+        MMLU = "mmlu"
         GPQA = "gpqa"
 
     class EVALPLUS(str, Enum):

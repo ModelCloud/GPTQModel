@@ -332,6 +332,18 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = None
 
+                    # TODO FIXME: MoE modules forward() may not trigger if dataset is too small
+                    # and moe gating logic does not trigger some moes
+                    if isinstance(processor, GPTQProcessor):
+                        moe_skip_modules = []
+                        for name in subset :
+                            if processor.tasks[name].fwd_counter == 0:
+                                log.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
+                                moe_skip_modules.append(name)
+
+                        for name in moe_skip_modules:
+                            subset.pop(name)
+                    
                     for name_index, name in enumerate(subset):
                         m = subset[name]
                         processor.process(module=m)

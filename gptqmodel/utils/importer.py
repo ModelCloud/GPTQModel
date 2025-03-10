@@ -24,7 +24,6 @@ from gptqmodel.adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
-from ..nn_modules.qlinear.dynamic_cuda import DynamicCudaQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
@@ -54,8 +53,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
@@ -170,10 +169,11 @@ def select_quant_linear(
 
     # Bitblas needs conversion, not direct quant linear load, return generic Torch linear
     if backend == BACKEND.BITBLAS and format != FORMAT.BITBLAS:
+        log.info(f"{'Packing' if pack else ''} Kernel: selected: `{TorchQuantLinear.__name__}`")
         if multi_select:
-            return [TorchQuantLinear]
+            return [IPEXQuantLinear]
         else:
-            return TorchQuantLinear
+            return IPEXQuantLinear
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
 
@@ -205,7 +205,7 @@ def select_quant_linear(
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         #    message_logged = True
-                        log.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                        log.info(f"{'Packing' if pack else ''} Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                         validated_qlinears.append(cls)
                         if not multi_select:
                             return cls
@@ -213,7 +213,7 @@ def select_quant_linear(
                     #if not message_logged:
                     #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                     #    message_logged = True
-                    log.info(f"Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                    log.info(f"{'Packing' if pack else ''} Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
                         return cls
@@ -238,18 +238,16 @@ def select_quant_linear(
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
         qlinear = ExllamaQuantLinear
-    elif backend == BACKEND.CUDA:
-        qlinear = DynamicCudaQuantLinear
     elif backend == BACKEND.IPEX:
         from ..nn_modules.qlinear.ipex import HAS_IPEX
         if not HAS_IPEX:
-            raise ValueError("Kernel: IPEX is not installed. Please install it via `pip install gptqmodel['ipex']`")
+            raise ValueError("{'Packing' if pack else ''} Kernel: IPEX is not installed. Please install it via `pip install gptqmodel['ipex']`")
 
         from device_smi import Device
 
         cpu_vendor = Device("cpu").vendor
         if cpu_vendor != "intel":
-            log.warn(f"Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
+            log.warn(f"{'Packing' if pack else ''} Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
 
         qlinear = IPEXQuantLinear
     elif backend == BACKEND.TORCH:
@@ -258,6 +256,8 @@ def select_quant_linear(
         qlinear = TorchQuantLinear
 
     validate, err = qlinear.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, pack_dtype=pack_dtype, dynamic=dynamic, device=device, trainable=trainable)
+
+    log.info(f"{'Packing' if pack else ''} Kernel: selected: `{qlinear.__name__}`")
     if not validate:
         raise ValueError(err)
     else:

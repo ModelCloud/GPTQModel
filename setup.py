@@ -189,7 +189,7 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "-diag-suppress=179,39,186",
+            "-diag-suppress=179,39", # 186
         ],
     }
 
@@ -202,8 +202,10 @@ if BUILD_CUDA_EXT:
     # nvidia (nvcc) only compile flags that rocm doesn't support
     if not ROCM_VERSION:
         extra_compile_args["nvcc"] += [
-            "--threads",
-            "4",
+            "--threads", "8",
+            "--optimize=3",
+            "-lineinfo",
+            "--resource-usage",
             "-Xfatbin",
             "-compress-all",
             "--expt-relaxed-constexpr",
@@ -211,61 +213,40 @@ if BUILD_CUDA_EXT:
             "--use_fast_math",
         ]
 
-    extensions = [
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_64",
-            [
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_64.cpp",
-                "gptqmodel_ext/cuda_64/gptqmodel_cuda_kernel_64.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
-        cpp_ext.CUDAExtension(
-            "gptqmodel_cuda_256",
-            [
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_256.cpp",
-                "gptqmodel_ext/cuda_256/gptqmodel_cuda_kernel_256.cu"
-            ],
-            extra_link_args=extra_link_args,
-            extra_compile_args=extra_compile_args,
-        ),
-    ]
+    extensions = []
 
-    # Exllama Eora not yet compilable for ROCm
-    if not ROCM_VERSION:
-        extensions += [
-            cpp_ext.CUDAExtension(
-                'gptqmodel_exllama_eora',
-                [
-                    "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                    "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            )
-        ]
-
+    # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
     if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
         # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
         # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
-        if HAS_CUDA_V8 and not ROCM_VERSION:
+        if not ROCM_VERSION:
+            if HAS_CUDA_V8:
+                extensions += [
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_marlin_kernels",
+                    [
+                        "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                        "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                        "gptqmodel_ext/marlin/marlin_repack.cu",
+                    ],
+                    extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                )
+                ]
+
             extensions += [
-            cpp_ext.CUDAExtension(
-                "gptqmodel_marlin_kernels",
-                [
-                    "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                    "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                    "gptqmodel_ext/marlin/marlin_repack.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            )
+                cpp_ext.CUDAExtension(
+                    'gptqmodel_exllama_eora',
+                    [
+                        "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                        "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                    ],
+                    extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                )
             ]
-        elif not HAS_CUDA_V8:
-            print("marlin kernel only supports compute capability >= 8.0, there's no such cuda device, skipped.")
+
             extensions += [
-                # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
                 cpp_ext.CUDAExtension(
                     "gptqmodel_exllama_kernels",
                     [
@@ -292,7 +273,6 @@ if BUILD_CUDA_EXT:
             ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
-
 
 class CachedWheelsCommand(_bdist_wheel):
     def run(self):

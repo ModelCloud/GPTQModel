@@ -575,6 +575,10 @@ jobs:
             uv pip install -U logbar==0.0.3
           fi
 
+          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
+            uv pip install git+https://github.com/huggingface/peft trl wandb
+          fi
+
           if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
             uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
             uv pip install torchvision torch
