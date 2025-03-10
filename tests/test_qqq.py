@@ -9,6 +9,8 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME
+from gptqmodel.utils.torch import torch_empty_cache
+from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 from gptqmodel import GPTQModel, QuantizeConfig, BACKEND  # noqa: E402
@@ -27,13 +29,14 @@ class TestGroupSize(unittest.TestCase):
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1))]
-
+        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     def test_load_group_128(self):
         model = GPTQModel.load(
             "/monster/data/model/QQQ-Llama-3-8b-g128",
         )
+
+        self.assert_qqq_linear(model)
 
         result = model.generate("Uncovering deep insights begins with")[0] # tokens
         log.info(f"Output: {model.tokenizer.decode(result)}") # string output
@@ -61,8 +64,26 @@ class TestGroupSize(unittest.TestCase):
                 assert model.quantize_config.to_dict() == file_dict
                 logging.info(f"Saved config file: {file_dict}")
 
+            del model
+            torch_empty_cache()
+
+            model = GPTQModel.load(
+                tmp_dir_name,
+            )
+
+            self.assert_qqq_linear(model)
+
             tokens = model.generate("Capital of France is")[0]
             result = model.tokenizer.decode(tokens)
             print(f"BACKEND: {BACKEND.QQQ}, Result: {result}")
             if "paris" not in result.lower():
                 raise AssertionError(" `paris` not found in `result`")
+
+    def assert_qqq_linear(self, model):
+        has_qqq = False
+        for _, module in model.named_modules():
+            linear = QQQQuantLinear
+            if isinstance(module, linear):
+                has_qqq = True
+                break
+        self.assertTrue(has_qqq)
