@@ -141,9 +141,6 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
             response_batch.append(generated_text)
             pred = extract_answer(generated_text)
             pred_batch.append(pred)
-    print("~~~~~~~~~~~~~~~\n")
-    print(pred_batch)
-    print("~~~~~~~~~~~~~~~\n")
     return pred_batch, response_batch
 
 
@@ -253,9 +250,6 @@ def mmlupro(model: PreTrainedModel,
         test_df = select_by_category(full_test_df, subject)
         val_df = select_by_category(full_val_df, subject)
         output_path = os.path.join(save_result_dir, "{}.json".format(subject))
-
-        test_df = test_df[:20]
-        val_df = val_df[:20]
 
         acc, corr_count, wrong_count = eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size)
 
