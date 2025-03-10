@@ -119,7 +119,7 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
     pb = log.pb(dataloader).title("Inference Progress:")
 
     for batch in pb:
-        input_tensor = tokenizer(batch, return_tensors="pt", padding=True, padding_side='left').to(model.device)
+        input_tensor = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_model_length, padding_side='left').to(model.device)
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_tensor["input_ids"],
