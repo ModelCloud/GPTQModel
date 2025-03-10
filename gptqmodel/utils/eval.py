@@ -35,6 +35,22 @@ class EVAL:
         HUMAN = "humaneval"
         MBPP = "mbpp"
 
+    class MMLUPRO(str, Enum):
+        BIOLOGY = "biology"
+        BUSINESS = "business"
+        CHEMISTRY = "chemistry"
+        COMPUTER_SCIENCE = "computer science"
+        ECONOMICS = "economics"
+        ENGINEERING = "engineering"
+        HEALTH = "health"
+        HISTORY = "history"
+        LAW = "law"
+        MATH = "math"
+        OTHER = "other"
+        PHILOSOPHY = "philosophy"
+        PHYSICS = "physics"
+        PSYCHOLOGY = "psychology"
+
     @classmethod
     def get_task_enums(cls):
         task_lists = []
