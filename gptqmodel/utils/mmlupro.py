@@ -4,13 +4,11 @@ import os
 import random
 import time
 import re
-from tqdm import tqdm
-import logging
 import sys
 from datasets import load_dataset
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
-from logbar import LogBar
+from ..utils.logger import setup_logger
 from torch.utils.data import DataLoader
 
 choices = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
@@ -18,7 +16,7 @@ max_model_length = 4096
 max_new_tokens = 2048
 stop_string = "Question:"
 
-logger = LogBar.shared()
+log = setup_logger()
 
 def load_mmlu_pro():
     dataset = load_dataset("TIGER-Lab/MMLU-Pro")
@@ -43,6 +41,8 @@ def preprocess(test_df):
 
 def args_generate_path(model_name, selected_subjects):
     scoring_method = "CoT"
+    if isinstance(selected_subjects, list):
+        selected_subjects = ",".join(selected_subjects)
     subjects = selected_subjects.replace(",", "-").replace(" ", "_")
     return [model_name, scoring_method, subjects]
 
@@ -73,7 +73,7 @@ def format_cot_example(example, including_answer=True):
 
 
 def generate_cot_prompt(val_df, curr, k):
-    prompt = "The following are multiple choice questions (with answers) about {$}. Think step by step and then finish your answer with 'the answer is (X)' where X is the correct letter choice."
+    prompt = "The following are multiple choice questions (with answers) about {$}. Think step by step and then finish your answer with 'the answer is (X)' where X is the correct letter choice.\n\n\n"
     subject = curr["category"]
     val_df = select_by_category(val_df, subject)
     val_df = val_df[: k]
@@ -90,7 +90,7 @@ def extract_answer(text):
     if match:
         return match.group(1)
     else:
-        logging.info("1st answer extract failed\n" + text)
+        log.info("1st answer extract failed\n" + text)
         return extract_again(text)
 
 
@@ -116,15 +116,16 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
     pred_batch = []
 
     dataloader = DataLoader(inference_batchs, batch_size=batch_size)
-    pb = logger.pb(dataloader).title("Inference Progress:")
+    pb = log.pb(dataloader).title("Inference Progress:")
 
     for batch in pb:
-        input_tensor = tokenizer(batch, return_tensors="pt", padding=True, padding_side='left', truncation=True).to(model.device)
+        input_tensor = tokenizer(batch, return_tensors="pt", padding=True, padding_side='left').to(model.device)
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_tensor["input_ids"],
                 tokenizer=tokenizer,
-                temperature=0,
+                do_sample=True,
+                temperature=0.0,
                 max_new_tokens=max_new_tokens,
                 stop_strings=[stop_string]
             )
@@ -140,11 +141,9 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
             response_batch.append(generated_text)
             pred = extract_answer(generated_text)
             pred_batch.append(pred)
-
-    print("~~CL->DEBUG~~~~")
+    print("~~~~~~~~~~~~~~~\n")
     print(pred_batch)
-    print("~~CL->DEBUG END~~~~")
-
+    print("~~~~~~~~~~~~~~~\n")
     return pred_batch, response_batch
 
 
@@ -172,10 +171,12 @@ def save_res(res, output_path):
 @torch.no_grad()
 def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size):
     global choices
-    logging.info("evaluating " + subject)
+    log.info("evaluating " + subject)
     inference_batches = []
 
-    for i in tqdm(range(len(test_df))):
+    pb = log.pb(range(len(test_df))).title("Generate Prompt Progress:")
+
+    for i in pb:
         k = ntrain
         curr = test_df[i]
         prompt_length_ok = False
@@ -197,7 +198,7 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
         curr["model_outputs"] = response_batch[j]
         res.append(curr)
     accu, corr, wrong = save_res(res, output_path)
-    logging.info("this batch accu is: {}, corr: {}, wrong: {}\n".format(str(accu), str(corr), str(wrong)))
+    log.info("this batch accu is: {}, corr: {}, wrong: {}\n".format(str(accu), str(corr), str(wrong)))
 
     accu, corr, wrong = save_res(res, output_path)
     return accu, corr, wrong
@@ -224,13 +225,6 @@ def mmlupro(model: PreTrainedModel,
     summary_path = os.path.join(save_dir, "summary", file_name)
     os.makedirs(os.path.join(save_dir, "summary"), exist_ok=True)
     os.makedirs(save_result_dir, exist_ok=True)
-    save_log_dir = os.path.join(save_dir, "log")
-    os.makedirs(save_log_dir, exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s',
-                        handlers=[logging.FileHandler(os.path.join(save_log_dir,
-                                                                   file_name.replace("_summary.txt",
-                                                                                     "_logfile.log"))),
-                                  logging.StreamHandler(sys.stdout)])
 
     if not os.path.exists(save_result_dir):
         os.makedirs(save_result_dir)
@@ -249,7 +243,7 @@ def mmlupro(model: PreTrainedModel,
                 if each.replace(" ", "_") in sub.replace(" ", "_"):
                     selected_subjects.append(sub)
 
-    logging.info("selected subjects:\n" + "\n".join(selected_subjects))
+    log.info("selected subjects:\n" + "\n".join(selected_subjects))
     sta_dict = {}
     selected_subjects = sorted(selected_subjects)
 
@@ -262,6 +256,10 @@ def mmlupro(model: PreTrainedModel,
         test_df = select_by_category(full_test_df, subject)
         val_df = select_by_category(full_val_df, subject)
         output_path = os.path.join(save_result_dir, "{}.json".format(subject))
+
+        test_df = test_df[:20]
+        val_df = val_df[:20]
+
         acc, corr_count, wrong_count = eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size)
         sta_dict[subject]["corr"] = corr_count
         sta_dict[subject]["wrong"] = wrong_count

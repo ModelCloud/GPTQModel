@@ -21,18 +21,18 @@ import tempfile
 from gptqmodel import GPTQModel
 from gptqmodel.utils.eval import EVAL
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 
 class TestMMLUPRO(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+        self.MODEL_ID = "/monster/data/model/QwQ-32B-4bit-gp32-verify-data"
 
 
     def test_mmlupro(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            results = GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLUPRO, tasks=EVAL.MMLUPRO.MATH, output_path=tmp_dir, batch_size=20)
+            results = GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLUPRO, tasks=EVAL.MMLUPRO.MATH, output_path=tmp_dir, batch_size=5, ntrain=1)
             print(results)
 
