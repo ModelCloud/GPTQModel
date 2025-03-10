@@ -1204,22 +1204,32 @@ class BaseGPTQModel(nn.Module):
             task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
             task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
+        from gptqmodel.quantization.qqq.pack_model import pack_model as qqq_pack_model
+        # self.qlinear_kernel = pack_model(
+        #     model=self.model,
+        #     quant_result=quantizers,
+        #     bits=self.quantize_config.bits,
+        #     group_size=self.quantize_config.group_size,
+        #     backend=backend,
+        #     desc_act=self.quantize_config.desc_act,
+        #     format=self.quantize_config.format,
+        #     lm_head_name=self.lm_head,
+        #     dynamic=self.quantize_config.dynamic,
+        #     parallel_packing=self.quantize_config.parallel_packing,
+        #     pack_dtype=self.quantize_config.pack_dtype,
+        # )
 
-        self.qlinear_kernel = pack_model(
+        self.qlinear_kernel = qqq_pack_model(
             model=self.model,
             quant_result=quantizers,
             bits=self.quantize_config.bits,
             group_size=self.quantize_config.group_size,
-            backend=backend,
-            desc_act=self.quantize_config.desc_act,
-            format=self.quantize_config.format,
-            lm_head_name=self.lm_head,
-            dynamic=self.quantize_config.dynamic,
-            parallel_packing=self.quantize_config.parallel_packing,
-            pack_dtype=self.quantize_config.pack_dtype,
         )
 
         self.model.config.use_cache = forward_pass_use_cache
+
+        # quant_config
+        self.quantize_config.quant_method = "qqq"
 
         self.quantized = True
         if auto_gc:
