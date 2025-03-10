@@ -393,6 +393,8 @@ class PackableQuantLinear(BaseQuantLinear):
         if mode and self.wf.device != self.g_idx.device:
             self.wf = self.wf.to(self.g_idx.device)
 
+        super().train(mode)
+
     def dequantize_weight(self, num_itr: int = 1):
         if self.bits in [2, 4, 8]:
             zeros = t.bitwise_right_shift(
