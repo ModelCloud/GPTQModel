@@ -170,7 +170,7 @@ class QuantizeConfig():
 
     lm_head: bool = field(default=False)
 
-    quant_method: str = field(default=QUANT_METHOD.GPTQ)
+    quant_method: QUANT_METHOD = field(default=QUANT_METHOD.GPTQ)
 
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result

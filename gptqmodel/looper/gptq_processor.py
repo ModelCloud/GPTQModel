@@ -26,7 +26,7 @@ from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
 from ..quantization import GPTQ
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import QuantizeConfig, QUANT_METHOD
 from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
@@ -205,6 +205,7 @@ class GPTQProcessor(LoopProcessor):
             backend=backend,
             desc_act=self.qcfg.desc_act,
             format=self.qcfg.format,
+            quant_method=self.qcfg.quant_method,
             lm_head_name=model.lm_head,
             dynamic=self.qcfg.dynamic,
             parallel_packing=self.qcfg.parallel_packing,
@@ -213,6 +214,8 @@ class GPTQProcessor(LoopProcessor):
 
         # set quantized state
         model.quantized = True
+
+        model.quantize_config.quant_method = QUANT_METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)
 

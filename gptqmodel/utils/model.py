@@ -52,7 +52,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get
+from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get, QUANT_METHOD
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -529,7 +529,7 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
         )
         if quant_linear_cls.QUANT_TYPE == "qqq":
             scale_extra = r["scale_extra"].to(CPU)
-            qModules[name].pack(linear=layers[name], scales=scale, scale_extra=scale_extra)
+            qModules[name].pack(linear=layers[name], scales=scale, s_extra=scale_extra)
         else:
             qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
@@ -542,6 +542,7 @@ def pack_model(
     group_size,
     backend: BACKEND,
     format: str | FORMAT,
+    quant_method: str | QUANT_METHOD,
     lm_head_name: str,
     desc_act=False,
     sym: bool = True,
@@ -553,6 +554,7 @@ def pack_model(
         bits=bits,
         group_size=group_size,
         format=format,
+        quant_method=quant_method,
         desc_act=desc_act,
         sym=sym,
         dynamic=dynamic,

@@ -36,7 +36,7 @@ from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
+from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, QUANT_METHOD
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
@@ -381,137 +381,32 @@ class BaseGPTQModel(nn.Module):
 
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
-        from ..looper.gptq_processor import GPTQProcessor
         from ..looper.module_looper import ModuleLooper
 
         # has lora process
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
 
-        # init processor with default GPTQ processor
-        processors = [
-            GPTQProcessor(
-                tokenizer=self.tokenizer,
-                qcfg=self.quantize_config,
-                calibration_dataset=calibration_dataset,
-                prepare_dataset_func=self.prepare_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
-                batch_size=batch_size,
-                logger_board=logger_board,
-                retain_w=needs_lora, # eora needs original w
-            )
-        ]
-
-        # Append EoRA processor for lora adapter
-        if needs_lora:
-            processors.append(
-                EoraProcessor(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                    calibration_dataset=adapter_calibration_dataset,
-                    prepare_dataset_func=self.prepare_dataset,
-                    calibration_dataset_concat_size=calibration_dataset_concat_size,
-                    batch_size=batch_size,
-                    logger_board=logger_board,
-                )
-            )
-
-        # prepare processor worker (looper)
-        module_looper = ModuleLooper(self, processors=processors)
-
-        return module_looper.loop(
-            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
-            buffered_fwd=buffered_fwd,
-            auto_gc=auto_gc,
-            backend=backend,
-        )
-
-    def qqq_quantize(
-        self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
-        calibration_dataset_concat_size: Optional[int] = None,
-        batch_size: int = 1,
-        calibration_enable_gpu_cache: bool = True,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        logger_board: Optional[str] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
-        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
-        buffered_fwd: bool = False,
-        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-        auto_gc: bool = True,
-        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
-        adapter: Adapter = None,
-        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
-    ) -> Dict[str, List[Dict[str, str]]]:
-        if self.quantized:
-            raise EnvironmentError("quantize() is called a model that is already quantized")
-
-        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
-            raise ValueError(
-                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
-            )
-
-        if backend == BACKEND.IPEX:
-            self.quantize_config.format = FORMAT.IPEX
-
-        if self.quantize_config.format == FORMAT.MARLIN:
-            raise ValueError(
-                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
-            )
-
-        # Validate quant linear before quantization starts
-        _ = select_quant_linear(
-            bits=self.quantize_config.bits,
-            dynamic=self.quantize_config.dynamic,
-            group_size=self.quantize_config.group_size,
-            desc_act=self.quantize_config.desc_act,
-            sym=self.quantize_config.sym,
-            backend=backend,
-            device=DEVICE(self.quantize_config.device),
-            pack=True,
-            format=self.quantize_config.format,
-            pack_dtype=self.quantize_config.pack_dtype,
-        )
-
-        # Use the provided tokenizer if one is passed to quantize()
-        if tokenizer is not None:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
-                # TODO FIX ME...this is a bug
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
-            else:
-                raise ValueError(
-                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
-
-        if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
-            if BITBLAS_AVAILABLE is False:
-                raise ValueError(BITBLAS_INSTALL_HINT)
-
-        # overwrite quantize_config.adapter
-        if adapter is not None:
-            self.quantize_config.adapter = adapter
-
-        from ..adapter.adapter import Lora
-        from ..looper.eora_processor import EoraProcessor
-        from ..looper.module_looper import ModuleLooper
-        from ..looper.qqq_processor import QQQProcessor
-
-        # has lora process
-        needs_lora = isinstance(self.quantize_config.adapter, Lora)
+        args = {
+            "tokenizer": self.tokenizer,
+            "qcfg": self.quantize_config,
+            "calibration_dataset": calibration_dataset,
+            "prepare_dataset_func": self.prepare_dataset,
+            "calibration_dataset_concat_size": calibration_dataset_concat_size,
+            "batch_size": batch_size,
+            "logger_board": logger_board,
+            "retain_w": needs_lora,  # lora needs original w
+        }
 
         # init processor with default GPTQ processor
-        processors = [
-            QQQProcessor(
-                tokenizer=self.tokenizer,
-                qcfg=self.quantize_config,
-                calibration_dataset=calibration_dataset,
-                prepare_dataset_func=self.prepare_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
-                batch_size=batch_size,
-                logger_board=logger_board,
-                retain_w=needs_lora, # eora needs original w
-            )
-        ]
+        if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
+            from ..looper.qqq_processor import QQQProcessor
+            quantize_processor = QQQProcessor(**args)
+        else:
+            from ..looper.gptq_processor import GPTQProcessor
+            quantize_processor = GPTQProcessor(**args)
+            
+        
+        processors = [quantize_processor]
 
         # Append EoRA processor for lora adapter
         if needs_lora:
@@ -792,6 +687,7 @@ class BaseGPTQModel(nn.Module):
                 backend=backend,
                 desc_act=self.quantize_config.desc_act,
                 format=self.quantize_config.format,
+                quant_method=self.quantize_config.quant_method,
                 lm_head_name=self.lm_head,
                 parallel_packing=self.quantize_config.parallel_packing,
             )
@@ -1213,6 +1109,7 @@ class BaseGPTQModel(nn.Module):
             backend=backend,
             desc_act=self.quantize_config.desc_act,
             format=self.quantize_config.format,
+            quant_method=self.quantize_config.quant_method,
             lm_head_name=self.lm_head,
             dynamic=self.quantize_config.dynamic,
             parallel_packing=self.quantize_config.parallel_packing,

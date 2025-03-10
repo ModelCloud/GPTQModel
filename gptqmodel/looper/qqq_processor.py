@@ -20,6 +20,7 @@ from typing import Callable, Optional, Tuple
 import torch
 from torch.nn import Module
 
+from .. import BACKEND
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
@@ -197,27 +198,20 @@ class QQQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
             model=model.model,
             quant_result=self.results(),
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
-            backend=backend,
+            backend=BACKEND.QQQ,
             desc_act=self.qcfg.desc_act,
             format=self.qcfg.format,
+            quant_method=self.qcfg.quant_method,
             lm_head_name=model.lm_head,
             dynamic=self.qcfg.dynamic,
             parallel_packing=self.qcfg.parallel_packing,
             pack_dtype=self.qcfg.pack_dtype,
         )
-
-        # model.qlinear_kernel = pack_model(
-        #     model=model.model,
-        #     quantizers=self.results(),
-        #     bits=self.qcfg.bits,
-        #     group_size=self.qcfg.group_size,
-        # )
 
         # set quantized state
         model.quantized = True

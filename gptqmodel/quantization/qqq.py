@@ -25,7 +25,6 @@ class QQQ(GPTQ):
             qcfg.sym = True
             qcfg.mse = 0.0
 
-
             quantizer_extra = QQQQuantizer(qcfg, name=self.quantizer.name)
             quantizer_extra.configure(
                 perchannel=True,
