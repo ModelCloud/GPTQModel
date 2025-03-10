@@ -468,7 +468,7 @@ class GPTQModel:
                     raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
             from ..utils.mmlupro import mmlupro
             selected_subjects = ",".join(tasks)
-            summary = mmlupro(model,
+            results = mmlupro(model,
                               tokenizer,
                               save_dir=output_path,
                               seed=random_seed,
@@ -477,8 +477,9 @@ class GPTQModel:
                               batch_size=batch_size)
 
             print('--------MMLUPro Eval Result---------')
-            print(summary)
+            print(results)
             print('--------MMLUPro Result End---------')
+            return results
         else:
             raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
 

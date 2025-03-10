@@ -173,10 +173,7 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
     global choices
     log.info("evaluating " + subject)
     inference_batches = []
-
-    pb = log.pb(range(len(test_df))).title("Generate Prompt Progress:")
-
-    for i in pb:
+    for i in range(len(test_df)):
         k = ntrain
         curr = test_df[i]
         prompt_length_ok = False
@@ -261,6 +258,9 @@ def mmlupro(model: PreTrainedModel,
         val_df = val_df[:20]
 
         acc, corr_count, wrong_count = eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size)
+
+        log.info(f"subject: {subject}, acc: {acc}, corr_count: {corr_count}, wrong_count: {wrong_count}")
+
         sta_dict[subject]["corr"] = corr_count
         sta_dict[subject]["wrong"] = wrong_count
         sta_dict[subject]["accu"] = acc

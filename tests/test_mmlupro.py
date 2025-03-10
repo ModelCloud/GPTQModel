@@ -33,6 +33,4 @@ class TestMMLUPRO(unittest.TestCase):
 
     def test_mmlupro(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            results = GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLUPRO, tasks=EVAL.MMLUPRO.MATH, output_path=tmp_dir, batch_size=5, ntrain=1)
-            print(results)
-
+            results = GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLUPRO, tasks=EVAL.MMLUPRO.MATH, output_path=tmp_dir, batch_size=1, ntrain=1)
