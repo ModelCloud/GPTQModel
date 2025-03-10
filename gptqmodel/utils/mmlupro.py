@@ -124,7 +124,7 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
             outputs = model.generate(
                 input_ids=input_tensor["input_ids"],
                 tokenizer=tokenizer,
-                do_sample=True,
+                do_sample=False,
                 temperature=0.0,
                 max_new_tokens=max_new_tokens,
                 stop_strings=[stop_string]
