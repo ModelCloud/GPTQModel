@@ -200,10 +200,10 @@ from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 ## meta-llama/Meta-Llama-3-8B
 ## meta-llama/Llama-3.1-8B
 ## meta-llama/Meta-Llama-3-70B
-NATIVE_MODEL_ID = "meta-llama/Meta-Llama-3-8B"
+NATIVE_MODEL_ID = "meta-llama/Llama-3.2-3B"
 
 
-bits = 4
+bits = 2
 group_size = 128
 desc_act = True
 rank = 128
@@ -213,7 +213,7 @@ calibration_dataset_concat_size = 0  # disable
 auto_gc = False
 
 # quant_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-1B_{bits}bits_{group_size}group_size"
-quant_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Meta-Llama-3-8B_{bits}bits_{group_size}group_size"
+quant_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_{bits}bits_{group_size}group_size"
 
 # eora_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-1B_{bits}bits_{group_size}group_size_eora_rank{rank}_c4"
 
@@ -267,62 +267,62 @@ torch_empty_cache()
 #     backend=BACKEND.EXLLAMA_EORA,
 #     adapter=,
 # )
-model = GPTQModel.load(
-    model_id_or_path=quant_path,
-    backend=BACKEND.TORCH
-)
-
-tokens = model.generate("Capital of France is")[0]
-result = model.tokenizer.decode(tokens)
-print(f"Result: {result}")
-del model
-torch_empty_cache()
-
-
-#####
-## meta-llama/Meta-Llama-3-70B
-NATIVE_MODEL_ID = "meta-llama/Meta-Llama-3-70B"
-
-quant_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Meta-Llama-3-70B_{bits}bits_{group_size}group_size"
-
-# eora_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-1B_{bits}bits_{group_size}group_size_eora_rank{rank}_c4"
-
-## C4 for quant
-calibration_dataset = construct_c4()
-
-
-# eora = Lora(
-#     # for quant, path is save path. for load, it is loading path
-#     path=os.path.join(quant_path, adapter_path),
-#     rank=rank,
+# model = GPTQModel.load(
+#     model_id_or_path=quant_path,
+#     backend=BACKEND.TORCH
 # )
 
-quant_config = QuantizeConfig(
-    bits=bits,
-    group_size=group_size,
-    desc_act=desc_act,  # bitblas only supports DESC_ACT=False
-    # adapter=eora
-)
+# tokens = model.generate("Capital of France is")[0]
+# result = model.tokenizer.decode(tokens)
+# print(f"Result: {result}")
+# del model
+# torch_empty_cache()
 
-model = GPTQModel.load(
-    model_id_or_path=NATIVE_MODEL_ID,
-    quantize_config=quant_config,
-)
 
-model.quantize(
-    calibration_dataset=calibration_dataset,
-    batch_size=batch_size,
-    auto_gc=auto_gc,
-    calibration_dataset_concat_size=calibration_dataset_concat_size,
-)  #
+# #####
+# ## meta-llama/Meta-Llama-3-70B
+# NATIVE_MODEL_ID = "meta-llama/Meta-Llama-3-70B"
 
-# EoRA adapter is saved according to Lora.path property
-# if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
-# You can also pass `eora_path` to `model.save()` to override this save path
-model.save(quant_path)
+# quant_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Meta-Llama-3-70B_{bits}bits_{group_size}group_size"
 
-del model
-torch_empty_cache()
+# # eora_path = f"/mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-1B_{bits}bits_{group_size}group_size_eora_rank{rank}_c4"
+
+# ## C4 for quant
+# calibration_dataset = construct_c4()
+
+
+# # eora = Lora(
+# #     # for quant, path is save path. for load, it is loading path
+# #     path=os.path.join(quant_path, adapter_path),
+# #     rank=rank,
+# # )
+
+# quant_config = QuantizeConfig(
+#     bits=bits,
+#     group_size=group_size,
+#     desc_act=desc_act,  # bitblas only supports DESC_ACT=False
+#     # adapter=eora
+# )
+
+# model = GPTQModel.load(
+#     model_id_or_path=NATIVE_MODEL_ID,
+#     quantize_config=quant_config,
+# )
+
+# model.quantize(
+#     calibration_dataset=calibration_dataset,
+#     batch_size=batch_size,
+#     auto_gc=auto_gc,
+#     calibration_dataset_concat_size=calibration_dataset_concat_size,
+# )  #
+
+# # EoRA adapter is saved according to Lora.path property
+# # if Lora.path is not set, we will save the lora as "lora.safetensors" in the same path as quant model
+# # You can also pass `eora_path` to `model.save()` to override this save path
+# model.save(quant_path)
+
+# del model
+# torch_empty_cache()
 
 
 ## Load the model
@@ -337,11 +337,11 @@ torch_empty_cache()
 #     backend=BACKEND.EXLLAMA_EORA,
 #     adapter=,
 # )
-model = GPTQModel.load(
-    model_id_or_path=quant_path,
-    backend=BACKEND.TORCH
-)
+# model = GPTQModel.load(
+#     model_id_or_path=quant_path,
+#     backend=BACKEND.TORCH
+# )
 
-tokens = model.generate("Capital of France is")[0]
-result = model.tokenizer.decode(tokens)
-print(f"Result: {result}")
+# tokens = model.generate("Capital of France is")[0]
+# result = model.tokenizer.decode(tokens)
+# print(f"Result: {result}")

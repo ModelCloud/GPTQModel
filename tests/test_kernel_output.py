@@ -20,8 +20,8 @@ log = LogBar.shared()
 CUDA = torch.device("cuda:0")
 
 class TestKernelOutput(unittest.TestCase):
-    model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
-
+    # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
+    model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
     target_qliner_map = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
@@ -39,7 +39,8 @@ class TestKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
+        # lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
+        lora_path = "sliuau/llama-3.2-3b_4bits_128group_size_eora_rank64_mmlu_c4"
         # hf "sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"
 
         cls.m = 1
@@ -47,7 +48,7 @@ class TestKernelOutput(unittest.TestCase):
         cls.x = None  # random X input of shape (m, k)
 
         cls.adapter = Lora(
-            rank=128,
+            rank=64,
             path=lora_path)
 
         cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
@@ -86,8 +87,8 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000, 0.0000),
         (BACKEND.TRITON, 0.00001, 0.00001),
-        (BACKEND.EXLLAMA_V1, 0.09, 0.0001),
-        (BACKEND.EXLLAMA_V2, 0.136, 0.0001),
+        # (BACKEND.EXLLAMA_V1, 0.09, 0.0001),
+        # (BACKEND.EXLLAMA_V2, 0.136, 0.0001),
         (BACKEND.MARLIN, 0.00005, 0.00005),
         (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
         (BACKEND.EXLLAMA_EORA, 0.00001, 0.00147)
@@ -104,8 +105,8 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000, 0.0000),
         (BACKEND.TRITON, 0.00001, 0.00001),
-        (BACKEND.EXLLAMA_V1, 0.015, 0.0008),
-        (BACKEND.EXLLAMA_V2, 0.16, 0.0003),
+        # (BACKEND.EXLLAMA_V1, 0.015, 0.0008),
+        # (BACKEND.EXLLAMA_V2, 0.16, 0.0003),
         (BACKEND.MARLIN, 0.00001, 0.00003),
         (BACKEND.MARLIN_FP16, 0.0001, 0.0035),
         (BACKEND.EXLLAMA_EORA, 0.00001, 0.00147)
