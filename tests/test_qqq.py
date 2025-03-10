@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 from datasets import load_dataset
+from parameterized import parameterized
+
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from gptqmodel.quantization import QUANT_CONFIG_FILENAME, QUANT_METHOD, FORMAT
 from gptqmodel.utils.torch import torch_empty_cache
@@ -40,9 +42,11 @@ class TestGroupSize(unittest.TestCase):
         result = model.generate("Uncovering deep insights begins with")[0] # tokens
         log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
-    def test_quant_and_inference(self):
+    @parameterized.expand([-1, 128])
+    def test_quant_and_inference(self, group_size: int):
         quantize_config = QuantizeConfig(
             bits=4,
+            group_size=group_size,
             quant_method=QUANT_METHOD.QQQ,
             format=FORMAT.QQQ,
         )
