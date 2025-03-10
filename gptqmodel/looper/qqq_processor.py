@@ -27,12 +27,10 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
 from ..quantization.config import QuantizeConfig, QUANT_METHOD
 from ..quantization.gptq import CPU
-from ..quantization.qqq.gptq import GPTQ
-from ..quantization.qqq.quant import Quantizer
+from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
-from ..utils.model import move_to
+from ..utils.model import move_to, pack_model
 from ..utils.torch import torch_sync
-from gptqmodel.quantization.qqq.pack_model import pack_model
 
 log = setup_logger()
 
@@ -84,9 +82,7 @@ class QQQProcessor(LoopProcessor):
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
-        # TODO pass qcfg to qqq.GPTQ
-        tmp = GPTQ(module)
-        tmp.qcfg = qcfg_clone
+        tmp = QQQ(module=module, qcfg=qcfg_clone)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
@@ -97,13 +93,8 @@ class QQQProcessor(LoopProcessor):
             log.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
-        tmp.quantizer = Quantizer()
         tmp.quantizer.configure(
-            qcfg_clone.bits,
             perchannel=True,
-            sym=qcfg_clone.sym,
-            mse=qcfg_clone.mse,
-            groupsize=qcfg_clone.group_size,
         )
         self.tasks[module.name] = tmp
 
@@ -129,13 +120,7 @@ class QQQProcessor(LoopProcessor):
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         g = gptq[module.name]
-        # wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize()
-        scale, zero, g_idx, scale_extra = g.fasterquant(
-            percdamp=g.qcfg.damp_percent,
-            groupsize=g.qcfg.group_size,
-            actorder=g.qcfg.desc_act,
-            static_groups=g.qcfg.static_groups,
-        )
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra = g.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -156,17 +141,17 @@ class QQQProcessor(LoopProcessor):
         #         value=duration,
         #         iteration=name_index,
         #     )
-        # self.durations.append(duration)
-        # self.avg_losses.append(avg_loss)
+        self.durations.append(duration)
+        self.avg_losses.append(avg_loss)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
         stat = {
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
-            # QUANT_LOG_LOSS: f"{avg_loss:.5f}",
-            # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
-            # PROCESS_LOG_TIME: f"{duration:.3f}",
+            QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+            QUANT_LOG_DAMP: f"{damp_percent:.5f}",
+            PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
         }
 
@@ -194,19 +179,18 @@ class QQQProcessor(LoopProcessor):
         gptq[module.name].free()
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        # module.state.update({
-        #     "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
-        # })
-        #
-        # # prepare for module.forward post generate
-        # module.weight.data = wq
+        module.state.update({
+            "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+        })
+
+        # prepare for module.forward post generate
+        module.weight.data = wq
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
-        # module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
-        # module.state.pop("w", None) # no need for original weights now
-        pass
+        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
+        module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
@@ -214,26 +198,26 @@ class QQQProcessor(LoopProcessor):
             torch_sync()
 
         backend = kwargs.pop("backend")
-        # model.qlinear_kernel = pack_model(
-        #     model=model.model,
-        #     quant_result=self.results(),
-        #     bits=self.qcfg.bits,
-        #     group_size=self.qcfg.group_size,
-        #     backend=backend,
-        #     desc_act=self.qcfg.desc_act,
-        #     format=self.qcfg.format,
-        #     lm_head_name=model.lm_head,
-        #     dynamic=self.qcfg.dynamic,
-        #     parallel_packing=self.qcfg.parallel_packing,
-        #     pack_dtype=self.qcfg.pack_dtype,
-        # )
-
         model.qlinear_kernel = pack_model(
             model=model.model,
-            quantizers=self.results(),
+            quant_result=self.results(),
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
+            backend=backend,
+            desc_act=self.qcfg.desc_act,
+            format=self.qcfg.format,
+            lm_head_name=model.lm_head,
+            dynamic=self.qcfg.dynamic,
+            parallel_packing=self.qcfg.parallel_packing,
+            pack_dtype=self.qcfg.pack_dtype,
         )
+
+        # model.qlinear_kernel = pack_model(
+        #     model=model.model,
+        #     quantizers=self.results(),
+        #     bits=self.qcfg.bits,
+        #     group_size=self.qcfg.group_size,
+        # )
 
         # set quantized state
         model.quantized = True
@@ -250,4 +234,4 @@ class QQQProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
-        return "gptq"
+        return "qqq"
