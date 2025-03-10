@@ -15,7 +15,7 @@
 </p>
   
 ## News
-* 03/07/2025 2.1.0-dev: New AMD `Instella` model support. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes. 
+* 03/07/2025 2.1.0-dev: ✨ Add `QQQ` quantization and inference support. New AMD `Instella` model support. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes. 
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
 `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress.
@@ -290,6 +290,7 @@ dynamic = {
 ## Citation
 
 ```
+# GPTQModel
 @misc{gptqmodel,
     author = {ModelCloud.ai and qubitium@modelcloud.ai},
     title = {GPTQModel},
@@ -300,6 +301,7 @@ dynamic = {
     note = {Contact: qubitium@modelcloud.ai}
 }
 
+# GPTQ
 @article{frantar-gptq,
   title={{GPTQ}: Accurate Post-training Compression for Generative Pretrained Transformers}, 
   author={Elias Frantar and Saleh Ashkboos and Torsten Hoefler and Dan Alistarh},
@@ -307,10 +309,19 @@ dynamic = {
   journal={arXiv preprint arXiv:2210.17323}
 }
 
+# GPTQ Marlin Kernel
 @article{frantar2024marlin,
   title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
   author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
   journal={arXiv preprint arXiv:2408.11743},
   year={2024}
+}
+
+# QQQ 
+@article{zhang2024qqq,
+      title={QQQ: Quality Quattuor-Bit Quantization for Large Language Models}, 
+      author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
+      journal={arXiv preprint arXiv:2406.09904},
+      year={2024}
 }
 ```

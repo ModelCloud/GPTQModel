@@ -32,3 +32,5 @@ class InternLM2GPTQ(BaseGPTQModel):
         ["feed_forward.w1", "feed_forward.w3"],
         ["feed_forward.w2"],
     ]
+
+    lm_head = "output"

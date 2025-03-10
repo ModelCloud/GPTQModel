@@ -18,12 +18,12 @@ from typing import Optional, Tuple
 
 import torch
 
-from .torch import TorchQuantLinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
+from .torch import TorchQuantLinear
 
 log = setup_logger()
 

@@ -55,13 +55,13 @@ class TestQuantization(ModelTest):
             (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ_V2, 4),
+            (QUANT_METHOD.QQQ, BACKEND.AUTO, True, FORMAT.QQQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TRITON, True, FORMAT.GPTQ_V2, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
-
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
@@ -77,6 +77,16 @@ class TestQuantization(ModelTest):
                 group_size=128,
                 sym=sym,
                 format=format,
+            )
+        elif method == QUANT_METHOD.QQQ:
+            quantize_config = QuantizeConfig(
+                bits=bits,
+                group_size=128,
+                desc_act=True,
+                sym=sym,
+                format=format,
+                damp_percent=0.05,
+                quant_method=method,
             )
         else:
             raise ValueError(f"Invalid quantization method: {method}")

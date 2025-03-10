@@ -36,6 +36,7 @@ import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from transformers import AutoConfig, PretrainedConfig
@@ -51,7 +52,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get
+from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -367,7 +368,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -483,7 +484,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -513,11 +514,11 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result, layers):
+def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers, quant_linear_cls):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         r = quant_result[name]
-        scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
+        scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device
         qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
@@ -526,7 +527,11 @@ def pack_module(name, qModules, quant_result, layers):
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
+        if quant_linear_cls.QUANT_TYPE == "qqq":
+            scale_extra = r["scale_extra"].to(CPU)
+            qModules[name].pack(linear=layers[name], scales=scale, s_extra=scale_extra)
+        else:
+            qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
 
 
@@ -537,6 +542,7 @@ def pack_model(
     group_size,
     backend: BACKEND,
     format: str | FORMAT,
+    quant_method: str | QUANT_METHOD,
     lm_head_name: str,
     desc_act=False,
     sym: bool = True,
@@ -548,6 +554,7 @@ def pack_model(
         bits=bits,
         group_size=group_size,
         format=format,
+        quant_method=quant_method,
         desc_act=desc_act,
         sym=sym,
         dynamic=dynamic,
@@ -587,7 +594,8 @@ def pack_model(
                 # TODO FIX, thread pool executor does not advance iterator
                 pb.next()
                 pb.title(f"Packing {name}").draw()
-                pack_module(name, qModules, quant_result, modules)
+                pack_module(name=name, qModules=qModules, quant_result=quant_result, layers=modules,
+                            quant_linear_cls=quant_linear_cls)
 
             for _ in executor.map(wrapper, names):
                 pass

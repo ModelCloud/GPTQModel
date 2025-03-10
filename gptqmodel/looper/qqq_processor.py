@@ -20,21 +20,22 @@ from typing import Callable, Optional, Tuple
 import torch
 from torch.nn import Module
 
+from .. import BACKEND
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
-from ..quantization import GPTQ
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU
+from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
 from ..utils.torch import torch_sync
 
 log = setup_logger()
 
-class GPTQProcessor(LoopProcessor):
+class QQQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
@@ -82,7 +83,7 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
-        tmp = GPTQ(module=module, qcfg=qcfg_clone)
+        tmp = QQQ(module=module, qcfg=qcfg_clone)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
@@ -115,12 +116,12 @@ class GPTQProcessor(LoopProcessor):
 
     def process(self, module: NamedModule):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
+        gptq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        g = self.tasks[module.name]
-        # TODO FIX ME, quantize does NOT need to pass any args! Check HF compat!
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize()
+        g = gptq[module.name]
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra = g.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -165,20 +166,22 @@ class GPTQProcessor(LoopProcessor):
             "scale": move_to(scale, device=CPU, stream=self.stream),
             "zero": move_to(zero, device=CPU, stream=self.stream),
             "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
+            "scale_extra": move_to(scale_extra, device=CPU, stream=self.stream),
         })
 
         if self.retain_w:
+            # TODO need modify qqq.GPTQ
             # original weights
             w = module.weight.data
             module.state.update({
                 "w": w,  # bf16/fp16, non-quantized native weight
             })
 
-        self.tasks[module.name].free()
+        gptq[module.name].free()
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
-            "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
+            "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
 
         # prepare for module.forward post generate
@@ -195,13 +198,12 @@ class GPTQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
             model=model.model,
             quant_result=self.results(),
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
-            backend=backend,
+            backend=BACKEND.QQQ,
             desc_act=self.qcfg.desc_act,
             format=self.qcfg.format,
             quant_method=self.qcfg.quant_method,
@@ -214,7 +216,7 @@ class GPTQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = QUANT_METHOD.GPTQ
+        model.quantize_config.quant_method = QUANT_METHOD.QQQ
 
         super().finalize(model=model, **kwargs)
 
@@ -226,4 +228,4 @@ class GPTQProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
-        return "gptq"
+        return "qqq"
