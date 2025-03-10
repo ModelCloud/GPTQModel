@@ -52,7 +52,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get, QUANT_METHOD
+from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger

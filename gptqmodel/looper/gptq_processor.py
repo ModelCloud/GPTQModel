@@ -26,7 +26,7 @@ from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
 from ..quantization import GPTQ
-from ..quantization.config import QuantizeConfig, QUANT_METHOD
+from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model

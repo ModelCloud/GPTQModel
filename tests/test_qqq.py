@@ -6,11 +6,10 @@ import tempfile
 import unittest
 
 from datasets import load_dataset
-from parameterized import parameterized
-
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
-from gptqmodel.quantization import QUANT_CONFIG_FILENAME, QUANT_METHOD, FORMAT
+from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD
 from gptqmodel.utils.torch import torch_empty_cache
+from parameterized import parameterized
 from transformers import AutoTokenizer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -58,8 +57,6 @@ class TestGroupSize(unittest.TestCase):
         model.quantize(self.calibration_dataset, batch_size=1, calibration_dataset_concat_size=2048)
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
-            tmp_dir_name = "test_qqq_quant_model"
-
             model.save(tmp_dir_name)
 
             with open(tmp_dir_name + "/" + QUANT_CONFIG_FILENAME, "r") as f:

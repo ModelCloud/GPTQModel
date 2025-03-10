@@ -36,7 +36,7 @@ from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import FORMAT, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig, QUANT_METHOD
+from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
@@ -404,8 +404,8 @@ class BaseGPTQModel(nn.Module):
         else:
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = GPTQProcessor(**args)
-            
-        
+
+
         processors = [quantize_processor]
 
         # Append EoRA processor for lora adapter
