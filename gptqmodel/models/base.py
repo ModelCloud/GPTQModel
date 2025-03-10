@@ -493,8 +493,8 @@ class BaseGPTQModel(nn.Module):
 
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
-        from ..looper.qqq_processor import QQQProcessor
         from ..looper.module_looper import ModuleLooper
+        from ..looper.qqq_processor import QQQProcessor
 
         # has lora process
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
