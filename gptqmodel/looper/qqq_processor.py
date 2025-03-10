@@ -25,12 +25,14 @@ from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import QuantizeConfig, QUANT_METHOD
 from ..quantization.gptq import CPU
 from ..quantization.qqq.gptq import GPTQ
+from ..quantization.qqq.quant import Quantizer
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
+from ..utils.model import move_to
 from ..utils.torch import torch_sync
+from gptqmodel.quantization.qqq.pack_model import pack_model
 
 log = setup_logger()
 
@@ -95,6 +97,7 @@ class QQQProcessor(LoopProcessor):
             log.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
+        tmp.quantizer = Quantizer()
         tmp.quantizer.configure(
             qcfg_clone.bits,
             perchannel=True,
@@ -128,10 +131,10 @@ class QQQProcessor(LoopProcessor):
         g = gptq[module.name]
         # wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize()
         scale, zero, g_idx, scale_extra = g.fasterquant(
-            percdamp=g.qfcg.damp_percent,
-            groupsize=g.qfcg.group_size,
-            actorder=g.qfcg.desc_act,
-            static_groups=g.qfcg.static_groups,
+            percdamp=g.qcfg.damp_percent,
+            groupsize=g.qcfg.group_size,
+            actorder=g.qcfg.desc_act,
+            static_groups=g.qcfg.static_groups,
         )
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
@@ -201,8 +204,9 @@ class QQQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
-        module.state.pop("w", None) # no need for original weights now
+        # module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
+        # module.state.pop("w", None) # no need for original weights now
+        pass
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # block for streams
@@ -210,22 +214,31 @@ class QQQProcessor(LoopProcessor):
             torch_sync()
 
         backend = kwargs.pop("backend")
+        # model.qlinear_kernel = pack_model(
+        #     model=model.model,
+        #     quant_result=self.results(),
+        #     bits=self.qcfg.bits,
+        #     group_size=self.qcfg.group_size,
+        #     backend=backend,
+        #     desc_act=self.qcfg.desc_act,
+        #     format=self.qcfg.format,
+        #     lm_head_name=model.lm_head,
+        #     dynamic=self.qcfg.dynamic,
+        #     parallel_packing=self.qcfg.parallel_packing,
+        #     pack_dtype=self.qcfg.pack_dtype,
+        # )
+
         model.qlinear_kernel = pack_model(
             model=model.model,
-            quant_result=self.results(),
+            quantizers=self.results(),
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
-            backend=backend,
-            desc_act=self.qcfg.desc_act,
-            format=self.qcfg.format,
-            lm_head_name=model.lm_head,
-            dynamic=self.qcfg.dynamic,
-            parallel_packing=self.qcfg.parallel_packing,
-            pack_dtype=self.qcfg.pack_dtype,
         )
 
         # set quantized state
         model.quantized = True
+
+        model.quantize_config.quant_method = QUANT_METHOD.QQQ
 
         super().finalize(model=model, **kwargs)
 

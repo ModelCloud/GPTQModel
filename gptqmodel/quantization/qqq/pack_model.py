@@ -6,9 +6,10 @@ from tqdm import tqdm
 from torch import nn
 
 from gptqmodel import BACKEND
-from gptqmodel.eora import find_layers, recurse_setattr
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
+from gptqmodel.utils.model import find_modules, recurse_setattr
+
 
 @torch.no_grad()
 def pack_model(
@@ -23,7 +24,7 @@ def pack_model(
         model.to(CPU)
 
     # logger.info("Packing model...")
-    layers = find_layers(model)
+    layers = find_modules(model)
     layers = {n: layers[n] for n in quantizers}
     make_quant(
         model,
@@ -31,13 +32,13 @@ def pack_model(
         bits,
         group_size,
     )
-    qlayers = find_layers(model, [QQQQuantLinear])
+    qlayers = find_modules(model, [QQQQuantLinear])
 
     pbar = tqdm(qlayers.keys(), leave=True)
     for name in pbar:
         pbar.set_description(f"Packing {name}...", refresh=True)
 
-        scale, zero, g_idx, scale_extra = quantizers[name]
+        scale, zero, g_idx, scale_extra = quantizers[name]["scale"], quantizers[name]["zero"], quantizers[name]["g_idx"], quantizers[name]["scale_extra"]
         # so far can only pack layer on CPU
         layer_device = qlayers[name].device
         qlayers[name].to(CPU)
@@ -82,8 +83,8 @@ def make_quant(
             new_layer = QQQQuantLinear(
                 bits=bits,
                 group_size=group_size,
-                desc_act=False, # TODO use real value
-                sym=False, # TODO use real value
+                desc_act=True, # TODO use real value
+                sym=True, # TODO use real value
                 in_features=in_features,
                 out_features=out_features,
                 pack_dtype=torch.int32, # TODO use real value

@@ -6,7 +6,8 @@ import torch.nn as nn
 import transformers
 
 from .quant import *
-
+from ..quantizer import HF_OPTIMUM
+from ...looper.named_module import NamedModule
 
 DEBUG = False
 
@@ -16,7 +17,13 @@ torch.backends.cudnn.allow_tf32 = False
 
 class GPTQ:
     def __init__(self, layer):
-        self.layer = layer
+        if isinstance(layer, NamedModule):
+            self.layer = layer.module
+            name = layer.name
+        else:
+            name = HF_OPTIMUM
+            self.layer = layer
+
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
@@ -28,7 +35,12 @@ class GPTQ:
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
         self.nsamples = 0
 
+        # fwd counter
+        self.fwd_counter = 0
+
     def add_batch(self, inp, out):
+        self.fwd_counter += 1
+
         if DEBUG:
             self.inp1 = inp
             self.out1 = out
@@ -175,7 +187,7 @@ class GPTQ:
 
         torch.cuda.synchronize()
         print("time %.2f" % (time.time() - tick))
-        print("error", torch.sum(Losses).item())
+        print("error", torch.sum(Losses).item() / self.nsamples)
 
         groupsize = groupsize if groupsize != -1 else self.columns
         if static_groups and actorder:
