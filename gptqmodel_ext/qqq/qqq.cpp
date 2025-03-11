@@ -1,4 +1,4 @@
-# Adapted from https://github.com/HandH1998/QQQ
+// Adapted from https://github.com/HandH1998/QQQ
 
 #include "qqq_gemm.h"
 
