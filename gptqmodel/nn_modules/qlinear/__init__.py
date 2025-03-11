@@ -37,7 +37,10 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_SYM: List[bool] = None
     SUPPORTS_SHARDS: bool = None
     SUPPORTS_TRAINING: bool = None
+
+    # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
+
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
