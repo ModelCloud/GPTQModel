@@ -199,7 +199,7 @@ class BaseQuantLinear(nn.Module):
         if self.adapter is not None:
             self.adapter.post_init(
                 weight_key=self.name,
-                device=next(self.parameters()).device,
+                device=self.B.device if self.QUANT_TYPE == "qqq" else self.qweight.device,
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
 
