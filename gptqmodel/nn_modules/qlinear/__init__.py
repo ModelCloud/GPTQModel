@@ -374,10 +374,7 @@ class BaseQuantLinear(nn.Module):
         old_mode = self.training
 
         if old_mode == mode:
-            return
-
-        # Call the parent class's train() method to set the training mode
-        super().train(mode)
+            return self
 
         # Custom behavior when switching to training mode
         if mode:
@@ -391,6 +388,8 @@ class BaseQuantLinear(nn.Module):
         else:
             pass
             # log.info(f"{self.__class__.__name__}: `{self.name}` switching to eval mode.")
+
+        return super().train(mode)
 
 class PackableQuantLinear(BaseQuantLinear):
     def post_init(self, **kwargs):
