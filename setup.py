@@ -75,7 +75,7 @@ common_setup_kwargs = {
     "name": "gptqmodel",
     "author": "ModelCloud",
     "author_email": "qubitium@modelcloud.ai",
-    "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",
+    "description": "A modern LLM quantization package with user-friendly api and full hardware accelerated support on all major gpu/cpu platforms. Supports GPTQ and QQQ quantization and inference.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
     "url": "https://github.com/ModelCloud/GPTQModel",
