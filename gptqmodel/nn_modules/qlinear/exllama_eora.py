@@ -155,12 +155,13 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
 
     def forward(self, x):
         x_dtype = x.dtype
-        if x_dtype != torch.float16:
-            log.warn.once(
-                f"Exllama EoRA kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
-            )
-
-            x = x.to(dtype=torch.float16)
+        # if x_dtype != torch.float16:
+        #     # log.warn.once(
+        #     #     f"Exllama EoRA kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+        #     # )
+        #
+        #     # TODO FIXME...Exllam EoRA kernel must run in fp16 or else output (bfloat16) is junk
+        #     x = x.to(dtype=torch.float16)
 
         # sync with vllm
         # log.info(f"x shape: {x.shape}")
@@ -181,23 +182,18 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         # if x.size(-1) != self.in_features:
         #     x = F.pad(x, self.in_features_padding_shape)
 
-        if self.adapter:
-            # only 4 bits fused eora kernel has been validated
-            if self.bits == 4:
-                output = gptq_gemm_lora(x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, x @ self.adapter.lora_A, self.adapter.lora_B) # fused
-            else:
-                output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
-        else:
-            output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
-
+        out = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
 
         if self.bias is not None:
-            output.add_(self.bias)
+            out.add_(self.bias)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         # log.info(f"output: {output.shape}")
 
         # sync with vllm
-        output = output.reshape(out_shape)
+        out = out.reshape(out_shape)
         # log.info(f"output reshaped: {output.shape}")
 
-        return output.to(dtype=x_dtype)
+        return out.to(dtype=x_dtype)

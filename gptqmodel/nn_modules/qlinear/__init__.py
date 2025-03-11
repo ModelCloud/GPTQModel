@@ -137,7 +137,7 @@ class BaseQuantLinear(nn.Module):
                 "scales",
                 t.zeros(
                     (math.ceil(in_features / self.group_size), out_features),
-                    dtype=t.float16,  # Scales are always float16
+                    dtype=t.float16,
                 ),
             )
             self.register_buffer(

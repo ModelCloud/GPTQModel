@@ -416,9 +416,6 @@ class MarlinQuantLinear(BaseQuantLinear):
         if x.shape[0] == 0:
             return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
 
-        if x.dtype != torch.float16:
-            x = x.to(torch.float16)
-
         out = apply_gptq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
             weight=self.qweight,

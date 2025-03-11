@@ -25,6 +25,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 
 exllama_import_exception = None
 try:
@@ -32,8 +33,7 @@ try:
 except ImportError as e:
     exllama_import_exception = e
 
-logger = getLogger(__name__)
-
+log = setup_logger()
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 NON_TENSOR = torch.empty((1, 1), device="meta")
@@ -42,9 +42,6 @@ NON_TENSOR = torch.empty((1, 1), device="meta")
 def ext_make_q4(qweight, qzeros, scales, g_idx, device):
     """Construct Q4Matrix, return handle"""
     return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NON_TENSOR, device)
-
-
-
 
 class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
@@ -130,6 +127,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
         #     if self.bias is not None:
         #         self.bias.resize_(self.out_features)
 
+        # ext_make_q4 only accept float16 scales
+        self.scales = self.scales.to(dtype=torch.float16)
 
         self.width = self.qweight.shape[1]
 
@@ -166,7 +165,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         return output.view(outshape)
 
-
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -175,11 +173,11 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         x_dtype = x.dtype
         if x_dtype != torch.float16:
-            logger.warn.once(
-                f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
-            )
+            #log.warn.once(
+            #    f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+            #)
 
-            x = x.half()
+            x = x.to(dtype=torch.float16)
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
@@ -187,5 +185,11 @@ class ExllamaQuantLinear(BaseQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
         out = self.ext_q4_matmul(x, self.q4, self.width)
+
+        if self.bias is not None:
+            out.add_(self.bias)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         return out.to(x_dtype)
