@@ -101,9 +101,6 @@ GPTQModel not only supports GPTQ but also QQQ with more quantization methods sup
 | GPTQ          | ✅ | ✅ | ✅ | ✅ | ✅ | 
 | QQQ          | ✅ | x | ✅ | ✅ | x | 
 
-* GPTQ: GPTQModel, HF Transformers, vLLM, SGLang
-* QQQ: GPTQodel, vLLM, SGLang
-
 ## Features
 * ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
@@ -302,7 +299,7 @@ dynamic = {
 
 ## Citation
 
-```
+```bibtex
 # GPTQModel
 @misc{gptqmodel,
     author = {ModelCloud.ai and qubitium@modelcloud.ai},
