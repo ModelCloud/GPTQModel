@@ -50,17 +50,17 @@ def train(
         cutoff_len: int = 256,
         val_set_size: int = 16,
         quantize: bool = False,
-        eval_step: int = 100,
-        save_step: int = 100,
+        eval_step: int = 10,
+        save_step: int = 10000,
         device_map: str = "auto",
         lora_r: int = 32,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
         lora_target_modules: List[str] = None,
-        torch_dtype: str = "bloat16",
+        torch_dtype: torch.dtype = torch.bfloat16,
         init_lora_weights="olora",
 ):
-    model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": DEVICE}
+    model_kwargs = {"torch_dtype": torch_dtype, "device_map": DEVICE}
     if quantize:
         model_kwargs["quantization_config"] = GPTQConfig(bits=4, true_sequential=False, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'], backend="triton")
 
@@ -165,13 +165,13 @@ class Test(unittest.TestCase):
                 cutoff_len=256,
                 val_set_size=16,
                 quantize=True,
-                eval_step=100,
-                save_step=100,
+                eval_step=10,
+                save_step=10000,
                 device_map="cuda",
                 lora_r=32,
                 lora_alpha=16,
                 lora_dropout=0.05,
                 lora_target_modules=None,
-                torch_dtype="bfloat16",
+                torch_dtype=torch.bfloat16,
                 init_lora_weights="olora",
             )
