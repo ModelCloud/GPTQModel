@@ -120,7 +120,8 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def _forward(self, x, x_dtype, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self.dequantize_weight(num_itr=num_itr)
+        # make sure dequant dtype matches input x
+        weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
 
         out = torch.matmul(x, weights).reshape(out_shape)
 

@@ -109,6 +109,12 @@ class Lora(Adapter):
         # original code
         # out = out + ((x @ self.lora_A) @ self.lora_B)
 
+        # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
+        if x.dtype != self.lora_A.dtype:
+            log.info(f"Adapter: Lora A/B dtype changed to match input dtype: `{x.dtype}`")
+            self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
+            self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
+
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.
         # out.dim() > x.dim() is used to exclude these kernels without additional processing
