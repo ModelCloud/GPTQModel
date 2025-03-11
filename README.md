@@ -299,7 +299,7 @@ dynamic = {
 
 ## Citation
 
-```
+```bibtex
 # GPTQModel
 @misc{gptqmodel,
     author = {ModelCloud.ai and qubitium@modelcloud.ai},
