@@ -82,6 +82,8 @@ class QQQQuantLinear(BaseQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "qqq"
 
+    IN_OUTPUT_FEATURES_DIVISIBLE_BY = [(64, 256), (128, 128), (128, 64), (64, 128)]
+
     def __init__(
         self, bits: int,
         group_size: int,
@@ -214,6 +216,17 @@ class QQQQuantLinear(BaseQuantLinear):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if qqq_import_exception is not None:
             return False, qqq_import_exception
+
+        in_features = args["in_features"]
+        out_features = args["out_features"]
+        if not any(
+                [
+                    in_features % thread_k == 0 and out_features % thread_n == 0
+                    for thread_k, thread_n in cls.IN_OUTPUT_FEATURES_DIVISIBLE_BY
+                ]
+        ):
+            raise ValueError(f"{cls} not supported `infeatures`: {in_features} and `outfeatures`: {out_features}.")
+
         return cls._validate(**args)
 
     @classmethod
