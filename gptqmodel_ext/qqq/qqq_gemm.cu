@@ -1,3 +1,5 @@
+// Adapted from https://github.com/HandH1998/QQQ
+
 /*
  * Adapted from https://github.com/IST-DASLab/marlin/blob/master/marlin/marlin_cuda_kernel.cu
  * https://github.com/IST-DASLab/marlin/blob/master/marlin/marlin_cuda.cpp
