@@ -50,7 +50,7 @@ from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.ipex import IPEXQuantLinear, HAS_IPEX
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from .backend import BACKEND
@@ -892,15 +892,15 @@ def auto_dtype(config: PretrainedConfig,
 
     assert isinstance(device, DEVICE)
 
-    # for inference, DynamicCuda, Exllama, Triton, and Marlin are all fp16 kernels
-    if quant_inference and device != DEVICE.CPU:
-        return torch.float16
-
     # TODO: both MPS and XPU are locked to float16
     # XPU stack is missing bfloat16 (hardware supports it)
     # MPS stack has bfloat16 bugs in pytorch
     if device in [DEVICE.MPS, DEVICE.XPU]:
         return torch.float16
+
+    # IPEX for CPU is optimized for bfloat16
+    if device in [DEVICE.CPU] and HAS_IPEX:
+        return torch.bfloat16
 
     # get dtype from config
     dtype = getattr(config, "torch_dtype")
