@@ -57,7 +57,7 @@ class TestQ4Marlin(ModelTest):
     )
     def test_generation(self, model_id):
         try:
-            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN, torch_dtype=torch.bfloat16)
+            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         except ValueError as e:
             raise e
 

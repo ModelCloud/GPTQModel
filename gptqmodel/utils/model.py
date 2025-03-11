@@ -896,10 +896,12 @@ def auto_dtype(config: PretrainedConfig,
     # XPU stack is missing bfloat16 (hardware supports it)
     # MPS stack has bfloat16 bugs in pytorch
     if device in [DEVICE.MPS, DEVICE.XPU]:
+        log.info("Loader: Auto dtype (MPS or XPU): `torch.float16`")
         return torch.float16
 
     # IPEX for CPU is optimized for bfloat16
     if device in [DEVICE.CPU] and HAS_IPEX:
+        log.info("Loader: Auto dtype (CPU + IPEX): `torch.bfloat16`")
         return torch.bfloat16
 
     # get dtype from config
@@ -907,13 +909,19 @@ def auto_dtype(config: PretrainedConfig,
     if dtype and not isinstance(dtype, torch.dtype):
         raise ValueError(f"torch_dtype in config must be a torch.dtype, but got {dtype}")
 
-    if dtype == torch.float32:
+    if dtype in [torch.float32, torch.float64]:
+        log.info("Loader: Auto dtype (float32 down-cast): `torch.bfloat16`")
         return torch.bfloat16
     elif dtype == torch.float16:
+        log.info("Loader: Auto dtype (native float16): `torch.float16`")
         return torch.float16
+    elif dtype == torch.bfloat16:
+        log.info("Loader: Auto dtype (native bfloat16): `torch.bfloat16`")
+        return torch.bfloat16
     else:
         # TODO: extract weights from model file to check their original type, instead of forcing bfloat16
         # up/down-cast everything else to bfloat16 if not already in bfloat16
+        log.info(f"Loader: Auto dtype (native = `{dtype}`): `torch.bfloat16`")
         return torch.bfloat16
 
 
