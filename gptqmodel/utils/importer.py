@@ -29,6 +29,7 @@ from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
@@ -50,6 +51,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
     BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
     BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
+
+    BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
 })
 
 FORMAT_DICT = {
@@ -58,6 +61,7 @@ FORMAT_DICT = {
     FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
+    FORMAT.QQQ: [BACKEND.QQQ],
 }
 
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
@@ -250,6 +254,8 @@ def select_quant_linear(
             log.warn(f"{'Packing' if pack else ''} Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
 
         qlinear = IPEXQuantLinear
+    elif backend == BACKEND.QQQ:
+        qlinear = QQQQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
     else:

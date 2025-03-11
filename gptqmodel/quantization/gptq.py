@@ -56,15 +56,17 @@ class GPTQ:
         # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
 
-        self.quantizer = Quantizer(qcfg=self.qcfg, name=name)
+        self.quantizer = self.create_quantizer(name=name)
 
         # fwd input buffer
         self.fwd_inputs_buffered = False
         self.fwd_inputs_buffered_data = []
-        
+
         # fwd counter
         self.fwd_counter = 0
 
+    def create_quantizer(self, name: str) -> Quantizer:
+        return Quantizer(qcfg=self.qcfg, name=name)
 
     def shape(self):
         if hasattr(self, "module"):
@@ -85,7 +87,7 @@ class GPTQ:
 
     def add_batch(self, inp, out):
         self.fwd_counter += 1
-        
+
         if self.fwd_inputs_buffered:
             self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
         else:

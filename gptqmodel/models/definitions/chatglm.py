@@ -35,6 +35,7 @@ class ChatGLM(BaseGPTQModel):
         ["mlp.dense_h_to_4h"],
         ["mlp.dense_4h_to_h"],
     ]
+    lm_head = "transformer.output_layer"
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if not self.config.post_layer_norm:

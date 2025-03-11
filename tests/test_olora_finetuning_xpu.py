@@ -22,7 +22,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
-from typing import List, Optional  # noqa: E402
+from typing import List  # noqa: E402
 
 import torch  # noqa: E402
 import transformers  # noqa: E402
