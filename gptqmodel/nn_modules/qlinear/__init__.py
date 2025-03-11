@@ -184,7 +184,7 @@ class BaseQuantLinear(nn.Module):
 
     def qzero_format(self, format: int = None) -> int:
         # get
-        if not format:
+        if format is None:
             return self._qzeros_format
 
         # set
