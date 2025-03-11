@@ -165,7 +165,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         return output.view(outshape)
 
-
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -178,7 +177,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
             #    f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
             #)
 
-            x = x.half()
+            x = x.to(dtype=torch.float16)
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
@@ -186,5 +185,11 @@ class ExllamaQuantLinear(BaseQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
         out = self.ext_q4_matmul(x, self.q4, self.width)
+
+        if self.bias is not None:
+            out.add_(self.bias)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         return out.to(x_dtype)
