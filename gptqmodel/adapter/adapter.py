@@ -45,7 +45,7 @@ class AdapterCache():
 class Adapter():
     def __init__(self, rank: int = None, path: str = None):
         self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
-        self.path = path.lower().strip() if isinstance(path, str) else path
+        self.path = path.strip() if isinstance(path, str) else path
 
     def validate_path(self, local=False):
         if not self.path or not isinstance(self.path, str):
