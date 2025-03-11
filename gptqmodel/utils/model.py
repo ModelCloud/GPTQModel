@@ -535,7 +535,7 @@ def convert_gptq_v2_to_v1_format(
         for _, submodule in model.named_modules():
             # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
             if isinstance(submodule, qlinear_kernel):
-                convert_gptq_v2_to_v1_format_module(module=submodule, cfg=cfg)
+                convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
 
     return model
 

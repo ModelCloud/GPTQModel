@@ -16,6 +16,10 @@
 # -- do not touch
 import os
 
+from parameterized import parameterized
+
+from gptqmodel.quantization import QUANT_METHOD, FORMAT
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -45,7 +49,13 @@ class Test(ModelTest):
     def setUpClass(cls):
         pass
 
-    def test_quant_and_eora(self):
+    @parameterized.expand(
+        [
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
+            (QUANT_METHOD.QQQ, FORMAT.QQQ),
+        ]
+    )
+    def test_quant_and_eora(self, quant_method: QUANT_METHOD, format: FORMAT):
         bits = 4
         group_size = 128
         desc_act = True
@@ -91,6 +101,8 @@ class Test(ModelTest):
                 group_size=group_size,
                 desc_act=desc_act,  # bitblas only supports DESC_ACT=False
                 adapter=eora,
+                format=format,
+                quant_method=quant_method,
             )
 
             model = GPTQModel.load(
