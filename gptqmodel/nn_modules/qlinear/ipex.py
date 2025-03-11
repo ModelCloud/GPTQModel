@@ -153,7 +153,8 @@ class IPEXQuantLinear(TorchQuantLinear):
             quant_method=QuantMethod.GPTQ_GEMM,
             dtype=QuantDtype.INT4)
 
-    @torch.no_grad()
+        super().post_init()
+
     def forward(self, x: torch.Tensor):
         if self.training:
             return super().forward(x)
@@ -164,6 +165,8 @@ class IPEXQuantLinear(TorchQuantLinear):
             return self.ipex_linear(x)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
-        self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
+        # self.forward = torch_compile(self.forward, backend=backend, mode=mode, fullgraph=fullgraph)
+        # torch.compile is incompatible with ipex woq linear, will enable it after we fix this issue.
+        pass
 
 __all__ = ["IPEXQuantLinear"]

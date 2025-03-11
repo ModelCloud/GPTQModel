@@ -25,9 +25,16 @@ import torch  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig, TrainerCallback,TrainingArguments,TrainerState,TrainerControl  # noqa: E402
 
-DEVICE = torch.device("cuda:0")
+DEVICE = torch.device("xpu:0")
+
+
+class TrainCallback(TrainerCallback):
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.log_history and 'loss' in state.log_history[-1]:
+            print(f"Step {state.global_step}, loss: {state.log_history[-1]['loss']}")
+            assert state.log_history[-1]['loss'] <= 5
 
 def train(
         base_model: str = "path/to/model",
@@ -114,7 +121,7 @@ def train(
             warmup_steps=100,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
-            logging_steps=100,
+            logging_steps=1,
             optim="adamw_torch",
             evaluation_strategy="steps",
             save_strategy="steps",
@@ -129,6 +136,8 @@ def train(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
     )
+
+    trainer.add_callback(TrainCallback())
 
     trainer.train()
     model.save_pretrained(output_dir)

@@ -115,11 +115,10 @@ class GPTQProcessor(LoopProcessor):
 
     def process(self, module: NamedModule):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
-        gptq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        g = gptq[module.name]
+        g = self.tasks[module.name]
         # TODO FIX ME, quantize does NOT need to pass any args! Check HF compat!
         wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize()
         ## Assign the quantized weight to the weight
@@ -175,7 +174,7 @@ class GPTQProcessor(LoopProcessor):
                 "w": w,  # bf16/fp16, non-quantized native weight
             })
 
-        gptq[module.name].free()
+        self.tasks[module.name].free()
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({

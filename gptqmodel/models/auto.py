@@ -310,8 +310,8 @@ class GPTQModel:
             cls,
             model_or_id_or_path: str=None,
             tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
-            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
-            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]] = EVAL.LM_EVAL,
+            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLUPRO, List[EVAL.MMLUPRO]] = None, # set to None to fix mutable warning
+            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLUPRO]] = EVAL.LM_EVAL,
             batch_size: Union[int, str] = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
@@ -319,6 +319,7 @@ class GPTQModel:
             backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
+            ntrain: int = 1,  # only for framework=EVAL.MMLUPRO
             **args
     ):
         from peft import PeftModel
@@ -327,6 +328,8 @@ class GPTQModel:
         if tasks is None:
             if framework == EVAL.LM_EVAL:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
+            if framework == EVAL.MMLUPRO:
+                tasks = [EVAL.MMLUPRO.MATH]
             else:
                 tasks = [EVAL.EVALPLUS.HUMAN]
 
@@ -459,8 +462,26 @@ class GPTQModel:
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
             return results
+        elif framework == EVAL.MMLUPRO:
+            for task in tasks:
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
+            from ..utils.mmlupro import mmlupro
+            selected_subjects = ",".join(tasks)
+            results = mmlupro(model,
+                              tokenizer,
+                              save_dir=output_path,
+                              seed=random_seed,
+                              selected_subjects=selected_subjects,
+                              ntrain=ntrain,
+                              batch_size=batch_size)
+
+            print('--------MMLUPro Eval Result---------')
+            print(results)
+            print('--------MMLUPro Result End---------')
+            return results
         else:
-            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
+            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
 
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
