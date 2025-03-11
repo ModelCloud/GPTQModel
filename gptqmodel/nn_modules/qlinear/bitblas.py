@@ -207,6 +207,12 @@ class BitBLASQuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "zeros") and self.zeros is not None:
+            buf.append(self.zeros)
+        return buf
+
     def _configure_bitblas_matmul(
         self, enable_tuning: bool, fast_decoding: bool, bias: bool, propagate_b, layout, bits: int
     ):

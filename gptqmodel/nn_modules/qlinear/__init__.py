@@ -181,7 +181,7 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
-    def list_buffers(self):
+    def list_buffers(self) -> List:
         buf = []
         if hasattr(self, "qweight") and self.qweight is not None:
             buf.append(self.qweight)
@@ -213,7 +213,7 @@ class BaseQuantLinear(nn.Module):
         if self.adapter is not None:
             self.adapter.post_init(
                 weight_key=self.name,
-                device=self.B.device if self.QUANT_TYPE == "qqq" else self.qweight.device,
+                device=next(iter(self.list_buffers())).device,
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
 

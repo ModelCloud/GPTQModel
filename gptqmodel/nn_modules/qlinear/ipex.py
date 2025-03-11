@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 
@@ -157,6 +157,12 @@ class IPEXQuantLinear(TorchQuantLinear):
             dtype=QuantDtype.INT4)
 
         super().post_init()
+
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "ipex_linear") and self.ipex_linear is not None:
+            buf.append(self.ipex_linear)
+        return buf
 
     def forward(self, x: torch.Tensor):
         if self.training:
