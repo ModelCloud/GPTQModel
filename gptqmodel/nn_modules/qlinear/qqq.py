@@ -217,9 +217,9 @@ class QQQQuantLinear(BaseQuantLinear):
         if qqq_import_exception is not None:
             return False, qqq_import_exception
 
-        in_features = args["in_features"]
-        out_features = args["out_features"]
-        if not any(
+        in_features = args.get("in_features")
+        out_features = args.get("out_features")
+        if in_features and out_features and not any(
                 [
                     in_features % thread_k == 0 and out_features % thread_n == 0
                     for thread_k, thread_n in cls.IN_OUTPUT_FEATURES_DIVISIBLE_BY
