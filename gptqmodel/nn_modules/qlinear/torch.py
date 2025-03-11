@@ -109,6 +109,39 @@ class TorchQuantLinear(PackableQuantLinear):
 
         super().optimize()
 
+    def train(self, mode: bool = True):
+        old_train = self.training
+        if mode == old_train:
+            return self
+
+        from ...utils.model import convert_gptq_v1_to_v2_format_module
+
+        # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
+        # If the kernel inherits Torch kernel only for training and can do its own inference in v1 (IPEX, Marlin) then
+        # we can support training for all these v1 kernels by enabling this flag. We need to switch qzero states
+        # by overriding module train() and swapping qzero back between v1 and v2 (Torch kernel requires v2)
+        if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
+            # training starts
+            if mode:
+                # one time clone v1 qzeros and save both v1 and v2 qzeros in memory
+                if self.qzero_format() == 1:
+                    if not hasattr(self, "qzeros_data_v1"):
+                        self.qzeros_data_v1 = self.qzeros.data.clone()
+                        convert_gptq_v1_to_v2_format_module(self, bits=self.bits, pack_dtype=self.pack_dtype)
+                        self.qzeros_data_v2 = self.qzeros.data
+                    else:
+                        self.qzeros.data = self.qzeros_data_v2
+                        self.qzero_format(format=2)
+
+            # training switching to inference/eval
+            else:
+                if hasattr(self, "qzeros_data_v1"):
+                    # switch qzero back to v1 for inference/eval
+                    self.qzeros.data = self.qzeros_data_v1
+                    self.qzero_format(format=1)
+
+        return super().train(mode=mode)
+
     def forward(self, x: torch.Tensor):
         # if x.size(-1) != self.padded_infeatures:
         #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))

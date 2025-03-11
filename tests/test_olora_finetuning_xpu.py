@@ -62,7 +62,7 @@ def train(
 ):
     model_kwargs = {"torch_dtype": torch_dtype, "device_map": DEVICE}
     if quantize:
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, true_sequential=False, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'], backend="triton")
+        model_kwargs["quantization_config"] = GPTQConfig(bits=4, desc_act=True, true_sequential=True, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'], backend="auto_trainable")
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
     assert model.device.type == DEVICE.type
