@@ -109,10 +109,10 @@ class TorchQuantLinear(PackableQuantLinear):
 
         super().optimize()
 
-    def train(self, mode=True):
+    def train(self, mode: bool = True):
         old_train = self.training
         if mode == old_train:
-            return
+            return self
 
         from ...utils.model import convert_gptq_v1_to_v2_format_module
 
@@ -140,7 +140,7 @@ class TorchQuantLinear(PackableQuantLinear):
                     self.qzeros.data = self.qzeros_data_v1
                     self.qzero_format(format=1)
 
-        super().train(mode=mode)
+        return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
         # if x.size(-1) != self.padded_infeatures:
