@@ -71,7 +71,7 @@ class TestQ4Marlin(ModelTest):
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        self.assertInference(model=model_q, tokenizer=tokenizer)
+        self.assertInference(model=model_q, tokenizer=tokenizer, keywords=["french king", "paris", "named after the river", "roman emperor"])
 
     def test_bias(self):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
