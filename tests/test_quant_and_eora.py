@@ -51,7 +51,7 @@ class Test(ModelTest):
 
     @parameterized.expand(
         [
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
             (QUANT_METHOD.QQQ, FORMAT.QQQ),
         ]
     )
