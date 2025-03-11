@@ -61,8 +61,8 @@ class TestBits(unittest.TestCase):
     CUDA_QLINEAR_QUANTIZED_MODEL_ARC_CHALLENGE_EXPECTS = {
         2: {'acc,none': 0.2150170648464164, 'acc_norm,none': 0.2696245733788396},
         3: {'acc,none': 0.2175767918088737, 'acc_norm,none': 0.26621160409556316},
-        4: {'acc,none': 0.18515358361774745, 'acc_norm,none': 0.22525597269624573},
-        8: {'acc,none': 0.3037542662116041, 'acc_norm,none': 0.3319112627986348},
+        4: {'acc,none': 0.2363, 'acc_norm,none': 0.2517},
+        8: {'acc,none': 0.3020, 'acc_norm,none': 0.3319112627986348},
     }
 
     def calculatorPer(self, filter, value, base_value):
@@ -86,8 +86,8 @@ class TestBits(unittest.TestCase):
         # cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])
 
         # TODO Only CUDA Quant Linear is tested for now
-        cls.pack_backends = [BACKEND.TORCH]
-        cls.backends = [BACKEND.EXLLAMA_EORA]
+        cls.pack_backends = [BACKEND.TRITON]
+        cls.backends = [BACKEND.MARLIN]
 
     def test_bits(self):
         # quantize
@@ -101,20 +101,21 @@ class TestBits(unittest.TestCase):
             supports_bits = self.QLINEAR_DICT[quant_backend].SUPPORTS_BITS
             for bits in supports_bits:
                 print(f"-----------------------quant backend: {quant_backend}-- bits: {bits} ---------------------")
-                quantize_config = QuantizeConfig(bits=bits, group_size=128, sym=True, desc_act=False)
+                quantize_config = QuantizeConfig(bits=bits, group_size=128, sym=True, desc_act=True)
                 print(f"bits: {bits}, quant_backend: {quant_backend} start quant")
-                try:
-                    self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
-                except Exception:
-                    error_log=f"bits:  {bits}, quant_backend: {quant_backend} An error occurred"
-                    print(error_log)
-                    errors.append(error_log)
+                #try:
+                self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
+                # except Exception as e:
+                #     raise e
+                #     # error_log=f"bits:  {bits}, quant_backend: {quant_backend} An error occurred"
+                    # print(error_log)
+                    # errors.append(error_log)
+                    #
+                    # traceback.print_exc()
+                    #
+                    # continue
 
-                    traceback.print_exc()
-
-                    continue
-
-        self.assertTrue(len(errors) == 0, '\n'.join(errors))
+        # self.assertTrue(len(errors) == 0, '\n'.join(errors))
 
     def quant_and_eval(self, calibration_dataset, model_id, quant_backend, quantize_config, tokenizer):
         model = GPTQModel.load(
@@ -152,8 +153,7 @@ class TestBits(unittest.TestCase):
             tasks=[TASK_NAME],
             apply_chat_template=False,
             trust_remote_code=False,
-            batch_size=32,
-            gen_kwargs="temperature=0.0,top_k=50",
+            batch_size=4,
             random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
