@@ -25,6 +25,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 
 exllama_import_exception = None
 try:
@@ -32,8 +33,7 @@ try:
 except ImportError as e:
     exllama_import_exception = e
 
-logger = getLogger(__name__)
-
+log = setup_logger()
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 NON_TENSOR = torch.empty((1, 1), device="meta")
@@ -42,9 +42,6 @@ NON_TENSOR = torch.empty((1, 1), device="meta")
 def ext_make_q4(qweight, qzeros, scales, g_idx, device):
     """Construct Q4Matrix, return handle"""
     return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NON_TENSOR, device)
-
-
-
 
 class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
@@ -130,6 +127,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
         #     if self.bias is not None:
         #         self.bias.resize_(self.out_features)
 
+        # ext_make_q4 only accept float16 scales
+        self.scales = self.scales.to(dtype=torch.float16)
 
         self.width = self.qweight.shape[1]
 
@@ -175,9 +174,9 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
         x_dtype = x.dtype
         if x_dtype != torch.float16:
-            logger.warn.once(
-                f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
-            )
+            #log.warn.once(
+            #    f"Exllama kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+            #)
 
             x = x.half()
 
