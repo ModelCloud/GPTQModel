@@ -57,7 +57,7 @@ class TestQ4Marlin(ModelTest):
     )
     def test_generation(self, model_id):
         try:
-            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN, torch_dtype=torch.bfloat16)
         except ValueError as e:
             raise e
 
@@ -77,7 +77,7 @@ class TestQ4Marlin(ModelTest):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "/monster/data/model/starcoderbase-1b-GPTQ"
         try:
-            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
+            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN, torch_dtype=torch.bfloat16)
         except ValueError as e:
             raise e
 
@@ -93,4 +93,4 @@ class TestQ4Marlin(ModelTest):
         model_id = "/monster/data/model/starcoderbase-1b"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        self.assertInference(model=model_q, tokenizer=tokenizer)
+        self.assertInference(model=model_q, tokenizer=tokenizer, keywords=["french king", "paris"])
