@@ -37,6 +37,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_SYM: List[bool] = None
     SUPPORTS_SHARDS: bool = None
     SUPPORTS_TRAINING: bool = None
+    SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None
@@ -106,6 +107,9 @@ class BaseQuantLinear(nn.Module):
         if err:
             raise err
 
+        # store qzero format
+        self._qzeros_format = 1 # only valid values are 1 and 2 for GPTQ v1 GPTQ v2
+
         # most kernels share same buffers so they can share same register buffer code
         if register_buffers:
             # some kernels auto-pads in/out features
@@ -174,6 +178,19 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
+
+    def qzero_format(self, format: int = None) -> int:
+        # get
+        if not format:
+            return self._qzeros_format
+
+        # set
+        if format not in [1, 2]:
+            raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
+
+        self._qzeros_format = format
+        return self._qzeros_format
+
     # override me, to perform post-weight load to device init
     def post_init(self):
         if self.adapter is not None:
@@ -212,7 +229,7 @@ class BaseQuantLinear(nn.Module):
         """
         base_supports_variables = [
             (name, value) for name, value in BaseQuantLinear.__dict__.items()
-            if name.startswith("SUPPORTS") and not callable(value)
+            if name.startswith("SUPPORTS") and not callable(value) and value is None
         ]
         child_supports_variables = [
             (name, value) for name, value in cls.__dict__.items()

@@ -360,6 +360,90 @@ def hf_convert_gptq_v1_to_v2_format(
     else:
         return model, False
 
+def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
+    assert isinstance(module, BaseQuantLinear)
+
+    log.info("Format: Converting GPTQ v1 to v2")
+
+    # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
+    # additions here do not overflow.
+    # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
+    # overflow ~<=13% based on testing
+    if bits == 2:
+        if pack_dtype == torch.int64:
+            module.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
+        elif pack_dtype == torch.int32:
+            module.qzeros.data += 0b01010101010101010101010101010101
+        elif pack_dtype == torch.int16:
+            module.qzeros.data += 0b0101010101010101
+        elif pack_dtype == torch.int8:
+            module.qzeros.data += 0b01010101
+    elif bits == 3:
+        # range 0 offset
+        if pack_dtype == torch.int64:
+            offset = 0b0010010010010010010010010010010000100100100100100100100100100100
+        elif pack_dtype == torch.int32:
+            offset = 0b00100100100100100100100100100100
+        elif pack_dtype == torch.int16:
+            offset = 0b0010010010010010
+        elif pack_dtype == torch.int8:
+            offset = 0b00100100
+
+        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+
+        # range 1 offset
+        if pack_dtype == torch.int64:
+            offset = 0b1001001001001001001001001001001010010010010010010010010010010010
+        elif pack_dtype == torch.int32:
+            offset = 0b10010010010010010010010010010010
+        elif pack_dtype == torch.int16:
+            offset = 0b1001001001001001
+        elif pack_dtype == torch.int8:
+            offset = 0b10010010
+
+        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+
+        # range 2 offset
+        if pack_dtype == torch.int64:
+            offset = 0b0100100100100100100100100100100101001001001001001001001001001001
+        elif pack_dtype == torch.int32:
+            offset = 0b01001001001001001001001001001001
+        elif pack_dtype == torch.int16:
+            offset = 0b0100100100100100
+        elif pack_dtype == torch.int8:
+            offset = 0b01001001
+
+        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+    elif bits == 4:
+        if pack_dtype == torch.int64:
+            module.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
+        elif pack_dtype == torch.int32:
+            module.qzeros.data += 0b00010001000100010001000100010001
+        elif pack_dtype == torch.int16:
+            module.qzeros.data += 0b0001000100010001
+        elif pack_dtype == torch.int8:
+            module.qzeros.data += 0b00010001
+    elif bits == 8:
+        if pack_dtype == torch.int64:
+            module.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
+        elif pack_dtype == torch.int32:
+            module.qzeros.data += 0b00000001000000010000000100000001
+        elif pack_dtype == torch.int16:
+            module.qzeros.data += 0b0000000100000001
+        elif pack_dtype == torch.int8:
+            module.qzeros.data += 0b00000001
+    else:
+        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+
+    # change format id
+    module.qzero_format(format=2)
+
 # Optionally convert weight from gptq_v1 to v2 format if Kernel is compatible with v2
 def convert_gptq_v1_to_v2_format(
     model,
@@ -382,77 +466,7 @@ def convert_gptq_v1_to_v2_format(
             # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
             # overflow ~<=13% based on testing
             if isinstance(submodule, qlinear_kernel):
-                if cfg.bits == 2:
-                    if cfg.pack_dtype == torch.int64:
-                        submodule.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
-                    elif cfg.pack_dtype == torch.int32:
-                        submodule.qzeros.data += 0b01010101010101010101010101010101
-                    elif cfg.pack_dtype == torch.int16:
-                        submodule.qzeros.data += 0b0101010101010101
-                    elif cfg.pack_dtype == torch.int8:
-                        submodule.qzeros.data += 0b01010101
-                elif cfg.bits == 3:
-                    # range 0 offset
-                    if cfg.pack_dtype == torch.int64:
-                        offset = 0b0010010010010010010010010010010000100100100100100100100100100100
-                    elif cfg.pack_dtype == torch.int32:
-                        offset = 0b00100100100100100100100100100100
-                    elif cfg.pack_dtype == torch.int16:
-                        offset = 0b0010010010010010
-                    elif cfg.pack_dtype == torch.int8:
-                        offset = 0b00100100
-
-                    submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] += (
-                        offset
-                    )
-
-                    # range 1 offset
-                    if cfg.pack_dtype == torch.int64:
-                        offset = 0b1001001001001001001001001001001010010010010010010010010010010010
-                    elif cfg.pack_dtype == torch.int32:
-                        offset = 0b10010010010010010010010010010010
-                    elif cfg.pack_dtype == torch.int16:
-                        offset = 0b1001001001001001
-                    elif cfg.pack_dtype == torch.int8:
-                        offset = 0b10010010
-
-                    submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] += (
-                        offset
-                    )
-
-                    # range 2 offset
-                    if cfg.pack_dtype == torch.int64:
-                        offset = 0b0100100100100100100100100100100101001001001001001001001001001001
-                    elif cfg.pack_dtype == torch.int32:
-                        offset = 0b01001001001001001001001001001001
-                    elif cfg.pack_dtype == torch.int16:
-                        offset = 0b0100100100100100
-                    elif cfg.pack_dtype == torch.int8:
-                        offset = 0b01001001
-
-                    submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] += (
-                        offset
-                    )
-                elif cfg.bits == 4:
-                    if cfg.pack_dtype == torch.int64:
-                        submodule.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
-                    elif cfg.pack_dtype == torch.int32:
-                        submodule.qzeros.data += 0b00010001000100010001000100010001
-                    elif cfg.pack_dtype == torch.int16:
-                        submodule.qzeros.data += 0b0001000100010001
-                    elif cfg.pack_dtype == torch.int8:
-                        submodule.qzeros.data += 0b00010001
-                elif cfg.bits == 8:
-                    if cfg.pack_dtype == torch.int64:
-                        submodule.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
-                    elif cfg.pack_dtype == torch.int32:
-                        submodule.qzeros.data += 0b00000001000000010000000100000001
-                    elif cfg.pack_dtype == torch.int16:
-                        submodule.qzeros.data += 0b0000000100000001
-                    elif cfg.pack_dtype == torch.int8:
-                        submodule.qzeros.data += 0b00000001
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+                convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
 
         log.info(f"Format: Conversion complete: {time.time() - t}s")
 
@@ -475,6 +489,35 @@ def hf_convert_gptq_v2_to_v1_format(
     else:
         return model, False
 
+def convert_gptq_v2_to_v1_format_module(
+    module: BaseQuantLinear,
+    quantize_config: QuantizeConfig,
+):
+    assert isinstance(module, BaseQuantLinear)
+
+    log.info("Format: Converting GPTQ v2 to v1")
+
+    if quantize_config.bits == 2:
+        module.qzeros.data -= 0b01010101010101010101010101010101
+    elif quantize_config.bits == 3:
+        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
+            0b00100100100100100100100100100100
+        )
+        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
+            0b10010010010010010010010010010010
+        )
+        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
+            0b01001001001001001001001001001001
+        )
+    elif quantize_config.bits == 4:
+        module.qzeros.data -= 0b00010001000100010001000100010001
+    elif quantize_config.bits == 8:
+        module.qzeros.data -= 0b00000001000000010000000100000001
+    else:
+        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+
+    module.qzero_format(format=1)
+
 # Optionally convert weight from gptq_v2 to v1 export format if Kernel is compatible with v2
 def convert_gptq_v2_to_v1_format(
     model,
@@ -491,24 +534,7 @@ def convert_gptq_v2_to_v1_format(
         for _, submodule in model.named_modules():
             # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
             if isinstance(submodule, qlinear_kernel):
-                if quantize_config.bits == 2:
-                    submodule.qzeros.data -= 0b01010101010101010101010101010101
-                elif quantize_config.bits == 3:
-                    submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b00100100100100100100100100100100
-                    )
-                    submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b10010010010010010010010010010010
-                    )
-                    submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b01001001001001001001001001001001
-                    )
-                elif quantize_config.bits == 4:
-                    submodule.qzeros.data -= 0b00010001000100010001000100010001
-                elif quantize_config.bits == 8:
-                    submodule.qzeros.data -= 0b00000001000000010000000100000001
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+                convert_gptq_v2_to_v1_format_module(module=submodule, cfg=cfg)
 
     return model
 

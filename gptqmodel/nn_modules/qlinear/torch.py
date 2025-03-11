@@ -109,6 +109,35 @@ class TorchQuantLinear(PackableQuantLinear):
 
         super().optimize()
 
+    def train(self, mode=True):
+        old_train = self.training
+        if mode == old_train:
+            return
+
+        from ...utils.model import convert_gptq_v1_to_v2_format_module
+
+        if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
+            # training starts
+            if mode:
+                # one time clone v1 zero and save to
+                if self.qzero_format() == 1:
+                    if not hasattr(self, "qzeros_data_v1"):
+                        self.qzeros_data_v1 = self.qzeros.data.clone()
+                        convert_gptq_v1_to_v2_format_module(self, bits=self.bits, pack_dtype=self.pack_dtype)
+                        self.qzeros_data_v2 = self.qzeros.data
+                    else:
+                        self.qzeros.data = self.qzeros_data_v2
+                        self.qzero_format(format=2)
+
+            # training switching to inference/eval
+            else:
+                if hasattr(self, "qzeros_data_v1"):
+                    # switch qzero back to v1 for inference/eval
+                    self.qzeros.data = self.qzeros_data_v1
+                    self.qzero_format(format=1)
+
+        super().train(mode=mode)
+
     def forward(self, x: torch.Tensor):
         # if x.size(-1) != self.padded_infeatures:
         #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
