@@ -181,6 +181,20 @@ class BaseQuantLinear(nn.Module):
             #     torch.zeros((128, out_features), dtype=torch.float16), # <-- EoRA lora_A shape needs to be calculated using pass in_features/out_features or other eora_test math
             # )
 
+    def list_buffers(self):
+        buf = []
+        if hasattr(self, "qweight") and self.qweight is not None:
+            buf.append(self.qweight)
+        if hasattr(self, "qzeros") and self.qzeros is not None:
+            buf.append(self.qzeros)
+        if hasattr(self, "scales") and self.scales is not None:
+            buf.append(self.scales)
+        if hasattr(self, "g_idx") and self.g_idx is not None:
+            buf.append(self.g_idx)
+        if hasattr(self, "bias") and self.bias is not None:
+            buf.append(self.bias)
+
+        return buf
 
     def qzero_format(self, format: int = None) -> int:
         # get
@@ -413,6 +427,12 @@ class PackableQuantLinear(BaseQuantLinear):
         #
         self.wf_unsqueeze_zero = wf.unsqueeze(0).to(device=self.g_idx.device)
         self.wf_unsqueeze_neg_one = wf.unsqueeze(-1).to(device=self.g_idx.device)
+
+    def list_buffers(self):
+        return super().list_buffers() + [
+            self.wf_unsqueeze_zero,
+            self.wf_unsqueeze_neg_one,
+        ]
 
     def dequantize_weight(self, num_itr: int = 1):
         if self.bits in [2, 4, 8]:

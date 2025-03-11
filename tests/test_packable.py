@@ -5,6 +5,7 @@ from typing import Dict
 import torch
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
@@ -17,6 +18,7 @@ from safetensors.torch import load_file
 
 class TestPackable(unittest.TestCase):
     QLINEAR_DICT = {
+        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
@@ -42,6 +44,7 @@ class TestPackable(unittest.TestCase):
 
     @parameterized.expand(
         [
+            (BACKEND.EXLLAMA_EORA, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.EXLLAMA_V1, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
