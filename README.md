@@ -15,7 +15,7 @@
 </p>
   
 ## News
-* 03/07/2025 2.1.0-dev: ✨ Add `QQQ` quantization and inference support. New AMD `Instella` model support. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes. 
+* 03/11/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! New AMD `Instella` model support. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes. 
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
 `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress.
@@ -30,6 +30,10 @@ Fix ROCm version auto detection in `setup` install.
 New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 
 New `GPTQModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
 Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
+
+<details>
+    
+<summary>Archived News</summary>
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
 * 01/19/2025 [1.7.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.2): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
@@ -38,9 +42,6 @@ Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 01/06/2025 [1.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.0): ⚡25% faster quantization. 35% reduction in vram usage vs v1.5. 👀 AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
 
-<details>
-    
-<summary>Archived News</summary>
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
 * 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage.
 * 12/15/2024 [1.4.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.2): MacOS `gpu` (Metal) and `cpu` (M+) support added/validated for inference and quantization. Cohere 2 model support added. 
@@ -87,9 +88,21 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## What is GPTQModel?
 
-GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, higher quality quants.
+GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with a clean/user-friendly api, up-to-date model support, faster inference, higher quality quants, improved hardware support, expanded feature set, and much more.
 
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
+
+GPTQModel not only supports GPTQ but also QQQ with more quantization methods support planned. 
+
+## Quantization Support
+
+| Quantization              |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
+|-------------------|---|---|---|---|---|
+| GPTQ          | ✅ | ✅ | ✅ | ✅ | ✅ | 
+| QQQ          | ✅ | x | ✅ | ✅ | x | 
+
+* GPTQ: GPTQModel, HF Transformers, vLLM, SGLang
+* QQQ: GPTQodel, vLLM, SGLang
 
 ## Features
 * ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
