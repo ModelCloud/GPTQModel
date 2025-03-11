@@ -88,16 +88,21 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## What is GPTQModel?
 
-GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with a clean/use-friendly api, up-to-date model support, faster inference, higher quality quants, impproved hardware support, expanded feature set, and much more.
+GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with a clean/user-friendly api, up-to-date model support, faster inference, higher quality quants, improved hardware support, expanded feature set, and much more.
 
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
 GPTQModel not only supports GPTQ but also QQQ with more quantization methods support planned. 
 
-## Supported Quantization Methods
+## Quantization Support
 
-* GPTQ
-* QQQ
+| Quantization              |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
+|-------------------|---|---|---|---|---|
+| GPTQ          | ✅ | ✅ | ✅ | ✅ | ✅ | 
+| QQQ          | ✅ | x | ✅ | ✅ | x | 
+
+* GPTQ: GPTQModel, HF Transformers, vLLM, SGLang
+* QQQ: GPTQodel, vLLM, SGLang
 
 ## Features
 * ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
