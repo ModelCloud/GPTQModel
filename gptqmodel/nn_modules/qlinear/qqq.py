@@ -247,7 +247,8 @@ class QQQQuantLinear(BaseQuantLinear):
     def post_init(self):
         super().post_init()
 
-        self.s_channel = self.s_channel.to(torch.float32)
+        self.s_channel = self.s_channel.to(dtype=torch.float32)
+        self.s_group = self.s_group.to(dtype=torch.float16)
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -273,7 +274,7 @@ class QQQQuantLinear(BaseQuantLinear):
         if self.group_size != self.in_features:
             assert s_extra is not None, "s_extra is needed"
         if linear.weight.dtype != torch.float16:
-            log.warn(
+            log.warn.once(
                 f"""The dtype of weights is {linear.weight.dtype}, while our w4a8 GEMM's output is torch.float16.
                 If you can ensure your GEMM results don't overflow torch.float16, it will still function correctly.
                 Otherwise, it will yield incorrect results."""
@@ -359,30 +360,37 @@ class QQQQuantLinear(BaseQuantLinear):
         if A.shape[0] == 0:
             return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
 
+        A_dtype = A.dtype
+        # qqq is float16 kernel only
+        if A.dtype != torch.float16:
+            A = A.to(dtype=torch.float16)
+
         out_shape = A.shape[:-1] + (self.out_features,)
-        A = A.reshape(-1, A.shape[-1]).to(dtype=torch.float16)
+        A = A.reshape(-1, A.shape[-1]) # .to(dtype=torch.float16)
         quant_A, s1 = self.dynamic_quant(A)
         D = torch.empty(A.shape[0], self.out_features, dtype=A.dtype, device=A.device)
         mul(
-            quant_A,
-            self.B,
-            self.reduce_buffer,
-            D,
-            s1,
-            self.s_channel,
-            self.s_group,
+            quant_A, # A
+            self.B, # B
+            self.reduce_buffer, # C
+            D, # D
+            s1, # s1
+            self.s_channel, # s2
+            self.s_group, # s3
             self.workspace,
             max_par=self.max_par,
         )
+
+        # TODO: check if we should reshape at end
         D = D.reshape(out_shape)
 
         if self.bias is not None:
-            D = D + self.bias
+            D.add_(self.bias)
 
         if self.adapter:
             D = self.adapter.apply(x=A, out=D)
 
-        return D
+        return D.to(dtype=A_dtype)
 
 
 __all__ = ["QQQQuantLinear"]

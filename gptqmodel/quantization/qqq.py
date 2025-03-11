@@ -1,8 +1,8 @@
 from copy import deepcopy
 
 import torch
-from gptqmodel.quantization import GPTQ, Quantizer
-from gptqmodel.quantization.quantizer import QQQQuantizer
+from ..quantization import GPTQ, Quantizer
+from ..quantization.quantizer import QQQQuantizer
 
 
 class QQQ(GPTQ):
