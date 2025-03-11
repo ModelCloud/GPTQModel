@@ -136,12 +136,12 @@ class Test(ModelTest):
                 table_data = [[key, value] for key, value in config_dict.items()]
                 print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
-                print('--------Eval GPTQ Result---------')
+                print(f'--------Eval {quant_method} Result---------')
                 print(make_table(base_bench))
                 if "groups" in base_bench:
                     print(make_table(base_bench, "groups"))
 
-                print('--------Eval GPTQ + EoRA Result---------')
+                print(f'--------Eval {quant_method} + EoRA Result---------')
                 print(make_table(eora_bench))
                 if "groups" in eora_bench:
                     print(make_table(eora_bench, "groups"))

@@ -16,7 +16,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 
@@ -216,6 +216,12 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
 
         super().post_init()
+
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "q_tensors") and self.q_tensors is not None:
+            buf.append(self.q_tensors)
+        return buf
 
     def forward(self, x: torch.Tensor, force_cuda=False):
         # TODO FIXME: parent should never call us if there is no data to process

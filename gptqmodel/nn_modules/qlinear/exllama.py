@@ -17,7 +17,7 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllama
 
 from logging import getLogger
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 
@@ -143,6 +143,12 @@ class ExllamaQuantLinear(BaseQuantLinear):
         )
 
         super().post_init()
+
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "q4") and self.q4 is not None:
+            buf.append(self.q4)
+        return buf
 
     def ext_q4_matmul(self, x, q4, q4_width):
         """Matrix multiplication, returns x @ q4"""

@@ -17,7 +17,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 import torch
@@ -248,6 +248,20 @@ class QQQQuantLinear(BaseQuantLinear):
         super().post_init()
 
         self.s_channel = self.s_channel.to(torch.float32)
+
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "B") and self.B is not None:
+            buf.append(self.B)
+        if hasattr(self, "s_channel") and self.s_channel is not None:
+            buf.append(self.s_channel)
+        if hasattr(self, "s_group") and self.s_group is not None:
+            buf.append(self.s_group)
+        if hasattr(self, "workspace") and self.workspace is not None:
+            buf.append(self.workspace)
+        if hasattr(self, "reduce_buffer") and self.reduce_buffer is not None:
+            buf.append(self.reduce_buffer)
+        return buf
 
     #def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None):
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):

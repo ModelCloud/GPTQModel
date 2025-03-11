@@ -400,6 +400,16 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         super().post_init()
 
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "workspace") and self.workspace is not None:
+            buf.append(self.workspace)
+        if hasattr(self, "g_idx_sort_indices") and self.g_idx_sort_indices is not None:
+            buf.append(self.g_idx_sort_indices)
+        if hasattr(self, "zp") and self.zp is not None:
+            buf.append(self.zp)
+        return buf
+
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
