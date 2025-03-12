@@ -50,7 +50,7 @@ from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear, HAS_IPEX
+from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from .backend import BACKEND

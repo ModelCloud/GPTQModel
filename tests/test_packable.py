@@ -3,8 +3,6 @@ import unittest
 from typing import Dict
 
 import torch
-from logbar import LogBar
-
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
@@ -15,6 +13,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format, find_modules
+from logbar import LogBar
 from parameterized import parameterized
 from safetensors.torch import load_file
 

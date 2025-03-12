@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.nn.parameter import Parameter
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM

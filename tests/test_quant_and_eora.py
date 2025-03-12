@@ -16,9 +16,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.quantization import FORMAT, QUANT_METHOD
 from parameterized import parameterized
-
-from gptqmodel.quantization import QUANT_METHOD, FORMAT
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
