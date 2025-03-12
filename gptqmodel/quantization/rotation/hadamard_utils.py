@@ -1,7 +1,6 @@
-import torch
 import math
-import fast_hadamard_transform
 
+import torch
 
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
@@ -94,8 +93,17 @@ def random_hadamard_matrix(size, device):
     Q = torch.diag(Q)
     return matmul_hadU(Q).to(device)
 
+# TODO make this a util
+def import_fast_hadamard_transform():
+    try:
+        import fast_hadamard_transform
+    except ImportError as e:
+        log.error("Package: Please install missing `fast_hadamard_transform` module via: `pip install git+https://github.com/Dao-AILab/fast-hadamard-transform.git`")
+        raise e
 
 def matmul_hadU_cuda(X, hadK, K):
+    import_fast_hadamard_transform()
+
     n = X.shape[-1]
     if K == 1:
         return fast_hadamard_transform.hadamard_transform(
@@ -116,6 +124,8 @@ def matmul_hadU_cuda(X, hadK, K):
 
 
 def apply_exact_had_to_linear(module, had_dim=-1, output=False):
+    import_fast_hadamard_transform()
+
     assert isinstance(module, torch.nn.Linear)
     in_features, out_features = module.in_features, module.out_features
 
@@ -185,7 +195,7 @@ def is_pow2(n):
     return (n & (n - 1) == 0) and (n > 0)
 
 
-# hadamard matrices for had12, had36.pal2, had52,will, 
+# hadamard matrices for had12, had36.pal2, had52,will,
 # # had60.pal, had108.pal, had140.pal, had156.will, had172.will:
 # http://www.neilsloane.com/hadamard/index.html
 def get_had12():
