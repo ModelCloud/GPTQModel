@@ -662,15 +662,6 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
             return False
     return True
 
-
-def check_and_get_model_type(model_dir, trust_remote_code=False):
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
-    if config.model_type not in SUPPORTED_MODELS:
-        raise TypeError(f"{config.model_type} isn't supported yet.")
-    model_type = config.model_type
-    return model_type
-
-
 def simple_dispatch_model(model, device_map):
 
     if "" in device_map:
