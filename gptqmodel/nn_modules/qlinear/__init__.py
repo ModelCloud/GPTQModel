@@ -407,8 +407,6 @@ class BaseQuantLinear(nn.Module):
 
 class PackableQuantLinear(BaseQuantLinear):
     def post_init(self, **kwargs):
-        super().post_init(**kwargs)
-
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
                 device=self.g_idx.device)
@@ -427,6 +425,8 @@ class PackableQuantLinear(BaseQuantLinear):
         #
         self.wf_unsqueeze_zero = wf.unsqueeze(0).to(device=self.g_idx.device)
         self.wf_unsqueeze_neg_one = wf.unsqueeze(-1).to(device=self.g_idx.device)
+
+        super().post_init(**kwargs)
 
     def list_buffers(self):
         return super().list_buffers() + [
