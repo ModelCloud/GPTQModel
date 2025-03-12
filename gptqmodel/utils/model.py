@@ -453,6 +453,8 @@ def convert_gptq_v1_to_v2_format(
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
     if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
+        log.info(
+            f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression

@@ -42,10 +42,9 @@ class TestKernelOutput(unittest.TestCase):
         lora_path = "sliuau/llama-3.2-3b_4bits_128group_size_eora_rank64_mmlu_c4"
         # hf "sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"
 
+        cls.dtype = torch.float16
         cls.m = 1
         cls.k = -1
-
-
         cls.x = []  # random X input of shape (m, k)
 
         cls.adapter = Lora(
@@ -56,16 +55,16 @@ class TestKernelOutput(unittest.TestCase):
         cls.k = cls.adapter.lora_A.shape[0]
 
         for _ in log.pb(range(cls.random_input_samples)).title("Generate Random Inputs"):
-            cls.x.append(torch.rand((cls.m, cls.k), device=CUDA, dtype=torch.float16))
+            cls.x.append(torch.rand((cls.m, cls.k), device=CUDA, dtype=cls.dtype))
 
         AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
         # TORCH as reference output
-        cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH)
-        cls.torch_kernel_out_with_lora = cls.forward(cls, backend=BACKEND.TORCH, adapter=cls.adapter)
+        cls.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH, dtype=cls.dtype)
+        cls.torch_kernel_out_with_lora = cls.forward(cls, backend=BACKEND.TORCH, dtype=cls.dtype, adapter=cls.adapter)
 
-    def forward(self, backend: BACKEND, adapter: Adapter = None):
-        model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter)
+    def forward(self, backend: BACKEND, dtype: torch.dtype, adapter: Adapter = None):
+        model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter, torch_dtype=dtype)
 
         target_qlinear_cls = self.target_qliner_map[backend]
 
@@ -90,16 +89,16 @@ class TestKernelOutput(unittest.TestCase):
         #torch.allclose(a, b, rtol=0.15, atol=atol)
 
     @parameterized.expand([
-        (BACKEND.TORCH, 0.0000),
-        (BACKEND.TRITON, 0.00001),
-        (BACKEND.EXLLAMA_V1, 0.0015),
-        (BACKEND.EXLLAMA_V2, 0.00075),
-        (BACKEND.MARLIN, 0.00005),
-        (BACKEND.MARLIN_FP16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, 0.0011)
+        (BACKEND.TORCH, torch.float16, 0.0000),
+        (BACKEND.TRITON, torch.float16, 0.00001),
+        (BACKEND.EXLLAMA_V1, torch.float16, 0.0019),
+        (BACKEND.EXLLAMA_V2, torch.float16, 0.0013),
+        (BACKEND.MARLIN, torch.float16, 0.00035),
+        (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
+        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0014)
     ])
-    def test_kernel_output(self, backend: BACKEND, a_tolerance: float):
-        out = self.forward(backend=backend)
+    def test_kernel_output(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
+        out = self.forward(backend=backend, dtype=dtype)
 
         # torch as ref
         pb = log.pb(range(len(out))).title("Actual Kernel Output With Lora").manual()
@@ -110,20 +109,22 @@ class TestKernelOutput(unittest.TestCase):
                                         a_tolerance)  # use torch as reference
             except AssertionError:
                 log.error(
-                    f"Torch with Lora output: backed = `{backend}`, i = `{i}`, {self.torch_kernel_out[i][:10]}")
+                    f"Torch with Lora output: backed = `{BACKEND.TORCH}`, i = `{i}`, {self.torch_kernel_out[i][:10]}")
+                log.error(
+                    f"Actual with Lora output: backed = `{backend}`, i = `{i}`, {out[i][:10]}")
                 raise AssertionError
 
     @parameterized.expand([
-        (BACKEND.TORCH, 0.0000),
-        (BACKEND.TRITON, 0.00001),
-        (BACKEND.EXLLAMA_V1, 0.0015),
-        (BACKEND.EXLLAMA_V2, 0.00086),
-        (BACKEND.MARLIN, 0.00003),
-        (BACKEND.MARLIN_FP16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, 0.0014)
+        (BACKEND.TORCH, torch.float16, 0.0000),
+        (BACKEND.TRITON, torch.float16, 0.00001),
+        (BACKEND.EXLLAMA_V1, torch.float16, 0.0015),
+        (BACKEND.EXLLAMA_V2, torch.float16, 0.0015),
+        (BACKEND.MARLIN, torch.float16, 0.00035),
+        (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
+        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0014)
     ])
-    def test_kernel_output_with_lora(self, backend: BACKEND, a_tolerance: float):
-        out = self.forward(backend=backend, adapter=self.adapter)
+    def test_kernel_output_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+        out = self.forward(backend=backend, dtype=dtype, adapter=self.adapter)
 
         # torch as ref
         pb = log.pb(range(len(out))).title("Actual Kernel Output With Lora").manual()

@@ -35,12 +35,12 @@ except ImportError as e:
 log = setup_logger()
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-NON_TENSOR = torch.empty((1, 1), device="meta")
+NONE_TENSOR = torch.empty((1, 1), device="meta")
 
 
 def ext_make_q4(qweight, qzeros, scales, g_idx, device):
     """Construct Q4Matrix, return handle"""
-    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NON_TENSOR, device)
+    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NONE_TENSOR, device)
 
 class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
@@ -184,11 +184,5 @@ class ExllamaQuantLinear(BaseQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
         out = self.ext_q4_matmul(x, self.q4, self.width)
-
-        if self.bias is not None:
-            out.add_(self.bias)
-
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
 
         return out.to(x_dtype)
