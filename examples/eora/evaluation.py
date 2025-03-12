@@ -101,7 +101,7 @@ if __name__ == '__main__':
         )
 
     if args.eora_save_path:
-        eora_bench = bench(path=args.quantized_model, backend=BACKEND.EXLLAMA_EORA, adapter=eora, task=args.eval_task)  # inference using eora (lora)
+        eora_bench = bench(path=args.quantized_model, backend=BACKEND.TORCH, adapter=eora, task=args.eval_task)  # inference using eora (lora)
         print('--------Eval EoRA Result---------')
         print(make_table(eora_bench))
         if "groups" in eora_bench:

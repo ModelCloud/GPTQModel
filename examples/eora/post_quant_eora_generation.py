@@ -34,7 +34,7 @@ if __name__ == '__main__':
         help='Full-preicision model to load; pass `facebook/opt-X`.'
     )
     parser.add_argument(
-        'dataset', type=str, choices=['c4','arc','mmlu', 'arc_c4', 'mmlu_c4'],
+        'dataset', type=str, choices=['c4','arc','mmlu'],
         help='Where to extract calibration data from.'
     )
     parser.add_argument(
@@ -62,10 +62,6 @@ if __name__ == '__main__':
         calibration_dataset = construct_ARC()
     elif args.dataset == "mmlu":
         calibration_dataset = construct_mmlu()
-    elif args.dataset == "arc_c4":
-        calibration_dataset = construct_ARC_c4()
-    elif args.dataset == "mmlu_c4":
-        calibration_dataset = construct_mmlu_c4()
     else:
         raise NotImplementedError
 

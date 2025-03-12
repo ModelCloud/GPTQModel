@@ -131,56 +131,94 @@
 #     --eora_rank 64
 
 
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
-    c4 \
-    --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank128_c4 \
-    --eora_rank 128
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank128_c4 \
+#     --eora_rank 128
 
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
-    c4 \
-    --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank64_c4 \
-    --eora_rank 64
-
-
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
-    c4 \
-    --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size_eora_rank128_c4 \
-    --eora_rank 128
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank64_c4 \
+#     --eora_rank 64
 
 
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
-    c4 \
-    --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size_eora_rank64_c4 \
-    --eora_rank 64
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank128_c4 \
+#     --eora_rank 128|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank128_c4.txt
 
 
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank128_c4 \
-    --eora_rank 128|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank128_c4.txt
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank64_c4 \
+#     --eora_rank 64|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank64_c4.txt
 
 
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank32_c4 \
+#     --eora_rank 32
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank32_c4 \
+#     --eora_rank 32|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank32_c4.txt
+
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size_eora_rank32_c4 \
+#     --eora_rank 32
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size_eora_rank32_c4 \
+#     --eora_rank 32|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/4_bits_rank32_c4.txt
+
+
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     mmlu \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size_eora_rank32_mmlu_c4 \
+#     --eora_rank 32
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size_eora_rank32_mmlu_c4 \
+#     --eora_rank 32 \
+#     --eval_task mmlu|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/rank32_mmlu_c4.txt
+
+
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank128_c4 \
+#     --eora_rank 128
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank64_c4 \
+#     --eora_rank 64
+
+# CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/post_quant_eora_generation.py meta-llama/Llama-3.2-3B \
+#     c4 \
+#     --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+#     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank32_c4 \
+#     --eora_rank 32
+
+
+
+CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank32_c4 \
+    --eora_rank 32|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank32_c4.txt
+
+CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
     --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank64_c4 \
     --eora_rank 64|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank64_c4.txt
 
-
-
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size_eora_rank128_c4 \
-    --eora_rank 128|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/2_bits_rank128_c4.txt
-
-
-CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_4bits_128group_size \
-    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size_eora_rank64_c4 \
-    --eora_rank 64|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/2_bits_rank64_c4.txt
-
-
-
-python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/quantized_weight/Llama-3.2-3B_3bits.txt
-
-
-python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_2bits_128group_size|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/quantized_weight/Llama-3.2-3B_2bits.txt
+CUDA_VISIBLE_DEVICE=0 python /mnt/home/shihyangl/GPTQModel/examples/eora/evaluation.py --quantized_model /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size \
+    --eora_save_path /mnt/home/shihyangl/gptqmodel_saved_model/Llama-3.2-3B_3bits_128group_size_eora_rank128_c4 \
+    --eora_rank 128|tee -a /mnt/home/shihyangl/gptqmodel_saved_model/eval_results/llama3.2_3b/3_bits_rank128_c4.txt

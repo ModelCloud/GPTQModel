@@ -14,29 +14,11 @@ def construct_c4():
     calibration_dataset = load_dataset(
       "allenai/c4",
       data_files="en/c4-train.00001-of-01024.json.gz",
-      split="train"
+      split="train", download_mode="force_redownload"
     ).select(range(1024))["text"]
     return calibration_dataset
 
 def construct_ARC():
-    nsamples = 1024
-    arc_easy_calibration_dataset = load_dataset('ai2_arc', 'ARC-Easy', split='train').select(range(nsamples))
-    arc_challenge_calibration_dataset = load_dataset('ai2_arc', 'ARC-Challenge', split='train').select(range(nsamples))
-    dataset = []
-
-    for example in arc_easy_calibration_dataset:
-        answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
-        question = example['question']
-        dataset.append(question_answering_format(question=question,answer=answer))
-
-    for example in arc_challenge_calibration_dataset:
-        answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
-        question = example['question']
-        dataset.append(question_answering_format(question=question,answer=answer))
-
-    return dataset
-
-def construct_ARC_c4():
     nsamples = 1024
     arc_easy_calibration_dataset = load_dataset('ai2_arc', 'ARC-Easy', split='train').select(range(nsamples))
     arc_challenge_calibration_dataset = load_dataset('ai2_arc', 'ARC-Challenge', split='train').select(range(nsamples))
@@ -62,19 +44,6 @@ def construct_ARC_c4():
     return dataset + c4_dataset
 
 def construct_mmlu():
-
-    mmlu_calibration_dataset = load_dataset('cais/mmlu', 'all', split='validation')
-    dataset = []
-    for example in mmlu_calibration_dataset:
-        question = example['question']
-        choices = example['choices']
-        answer = ['A','B','C','D'][example['answer']]
-        dataset.append(multiple_choices_question_answering_format(question, choices, answer))
-
-    return dataset
-
-
-def construct_mmlu_c4():
 
     mmlu_calibration_dataset = load_dataset('cais/mmlu', 'all', split='validation')
     dataset = []
