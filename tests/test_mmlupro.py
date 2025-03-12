@@ -14,9 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import unittest
 import tempfile
+import unittest
 
 from gptqmodel import GPTQModel
 from gptqmodel.utils.eval import EVAL
@@ -33,4 +32,4 @@ class TestMMLUPRO(unittest.TestCase):
 
     def test_mmlupro(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            results = GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLUPRO, tasks=EVAL.MMLUPRO.MATH, output_path=tmp_dir, batch_size=10, ntrain=5)
+            GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLUPRO, tasks=EVAL.MMLUPRO.MATH, output_path=tmp_dir, batch_size=10, ntrain=5)

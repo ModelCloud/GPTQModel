@@ -32,7 +32,6 @@ from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity, safetensor  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestDynamic(ModelTest):

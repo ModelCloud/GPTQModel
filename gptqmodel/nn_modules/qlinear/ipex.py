@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -22,7 +22,6 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import torch_compile
 from .torch import TorchQuantLinear
 
 log = setup_logger()

@@ -17,7 +17,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -220,10 +220,8 @@ class QQQQuantLinear(BaseQuantLinear):
         in_features = args.get("in_features")
         out_features = args.get("out_features")
         if in_features and out_features and not any(
-                [
-                    in_features % thread_k == 0 and out_features % thread_n == 0
+                in_features % thread_k == 0 and out_features % thread_n == 0
                     for thread_k, thread_n in cls.IN_OUTPUT_FEATURES_DIVISIBLE_BY
-                ]
         ):
             raise ValueError(f"{cls} not supported `infeatures`: {in_features} and `outfeatures`: {out_features}.")
 

@@ -2,14 +2,15 @@ import csv
 import json
 import os
 import random
-import time
 import re
-import sys
-from datasets import load_dataset
+import time
+
 import torch
-from transformers import PreTrainedModel, PreTrainedTokenizerBase
-from ..utils.logger import setup_logger
+from datasets import load_dataset
 from torch.utils.data import DataLoader
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
+
+from ..utils.logger import setup_logger
 
 choices = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 max_model_length = 4096

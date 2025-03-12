@@ -16,8 +16,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllama
 
-from logging import getLogger
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import torch
 
