@@ -15,7 +15,7 @@
 </p>
   
 ## News
-* 03/11/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! New AMD `Instella` model support. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
+* 03/11/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! New AMD `Instella` model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
 Fixed `Peft` `bfloat16` training. Model loader auto-dtype logic will now auto select `bfloat16` if it is specified in model config. 
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
