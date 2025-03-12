@@ -16,7 +16,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -206,6 +206,9 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         #     if self.bias is not None:
         #         self.bias.resize_(self.out_features)
 
+        # ext_make_q_matrix only accepts float16
+        self.scales = self.scales.to(dtype=torch.float16)
+
         self.q_tensors = {
             "qweight": self.qweight,
             "qzeros": self.qzeros,
@@ -217,6 +220,12 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
         super().post_init()
 
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "q_tensors") and self.q_tensors is not None:
+            buf.append(self.q_tensors)
+        return buf
+
     def forward(self, x: torch.Tensor, force_cuda=False):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
@@ -225,11 +234,11 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
         x_dtype = x.dtype
         if x_dtype != torch.float16:
-            log.warn.once(
-                f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
-            )
+            # log.warn.once(
+            #     f"Exllama v2 kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
+            # )
 
-            x = x.half()
+            x = x.to(dtype=torch.float16)
 
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well

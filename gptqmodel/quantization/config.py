@@ -71,12 +71,14 @@ class FORMAT:
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     IPEX = "ipex"
+    QQQ = "qqq"
 
 
 # quant methods
 class QUANT_METHOD:
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
+    QQQ = "qqq"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -92,7 +94,10 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
-    }
+    },
+    QUANT_METHOD.QQQ: {
+        FORMAT.QQQ,
+    },
 }
 
 # inference only methods should go here
@@ -165,7 +170,7 @@ class QuantizeConfig():
 
     lm_head: bool = field(default=False)
 
-    quant_method: str = field(default=QUANT_METHOD.GPTQ)
+    quant_method: QUANT_METHOD = field(default=QUANT_METHOD.GPTQ)
 
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
@@ -193,6 +198,8 @@ class QuantizeConfig():
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
+    rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
+
     is_marlin_format: bool = False
 
     def __post_init__(self):
@@ -217,6 +224,11 @@ class QuantizeConfig():
         valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
         if valid_formats is None:
             raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
+
+        # TODO FIXME qqq compat which didn't have checkpoint_format before merging to gptqmodel
+        if self.quant_method == QUANT_METHOD.QQQ and self.format != FORMAT.QQQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
+            self.format = FORMAT.QQQ
 
         if self.format not in valid_formats:
             raise ValueError(
@@ -379,7 +391,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND}:
+                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ}:
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
@@ -450,11 +462,6 @@ class QuantizeConfig():
             # dynamic adapter config is only used in the quantize phase and is deleted when saving.
             for _, v in dynamic.items():
                 v.pop("adapter", None)
-
-            # clear empty dynamic value
-            keys_to_delete = [key for key, value in dynamic.items() if not value]
-            for key in keys_to_delete:
-                del dynamic[key]
 
         # simplify: clean keys where the value is None or empty [list, dict]
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}

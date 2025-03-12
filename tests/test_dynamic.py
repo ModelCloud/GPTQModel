@@ -32,7 +32,6 @@ from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import Perplexity, safetensor  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestDynamic(ModelTest):
@@ -59,12 +58,6 @@ class TestDynamic(ModelTest):
     @classmethod
     def setUpClass(cls):
         cls.tmp_quant_path = tempfile.TemporaryDirectory()
-        cls.tokenizer = AutoTokenizer.from_pretrained(cls.NATIVE_MODEL_ID, use_fast=True)
-
-        if not cls.tokenizer.pad_token_id:
-            cls.tokenizer.pad_token_id = cls.tokenizer.eos_token_id
-
-        cls.calibration = cls.load_dataset(cls.tokenizer, rows=32)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         dynamic = {
@@ -89,7 +82,11 @@ class TestDynamic(ModelTest):
             cls.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        model.quantize(cls.calibration, batch_size=4)
+
+        cls.tokenizer = model.tokenizer
+        cls.calibration = cls.load_dataset(cls.tokenizer, rows=128)
+
+        model.quantize(cls.calibration, batch_size=2)
 
         print(f"Model: {model.model}")
 
@@ -110,9 +107,9 @@ class TestDynamic(ModelTest):
     @parameterized.expand(
         [
             # exllama v1/v2 only supports 4bit so does not support dynamic bits control
-            (BACKEND.TORCH, TorchQuantLinear, 15.793),
-            (BACKEND.TRITON, TritonV2QuantLinear, 15.793),
-            (BACKEND.MARLIN, MarlinQuantLinear, 15.829),
+            (BACKEND.TORCH, TorchQuantLinear, 15.643),
+            (BACKEND.TRITON, TritonV2QuantLinear, 15.643),
+            (BACKEND.MARLIN, MarlinQuantLinear, 15.644),
         ]
     )
     def test_dynamic_bits(self, backend, backendQLinear, expected_ppl):
@@ -141,7 +138,7 @@ class TestDynamic(ModelTest):
             self.NATIVE_MODEL_ID,
             quantize_config=QuantizeConfig(dynamic=dynamic),
         )
-        model.quantize(self.calibration, batch_size=4)
+        model.quantize(self.calibration, batch_size=2)
 
         for name, submodule in model.named_modules():
             if name == 'model.model.layers.0.self_attn.q_proj' and isinstance(submodule, BaseQuantLinear):  # module 0 was skipped

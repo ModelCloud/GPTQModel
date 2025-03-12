@@ -32,7 +32,6 @@ if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
 else:
     from huggingface_hub import snapshot_download
 
-from huggingface_hub import snapshot_download
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
@@ -51,7 +50,7 @@ from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_devi
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
                            make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
-from ._const import DEVICE, SUPPORTED_MODELS, normalize_device
+from ._const import DEVICE, normalize_device
 
 log = setup_logger()
 
@@ -179,9 +178,6 @@ def ModelLoader(cls):
         model_init_kwargs["torch_dtype"] = torch_dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
 
-        if config.model_type not in SUPPORTED_MODELS:
-            raise TypeError(f"{config.model_type} isn't supported yet.")
-
         model = cls.loader.from_pretrained(model_local_path, **model_init_kwargs)
 
         model_config = model.config.to_dict()
@@ -289,9 +285,6 @@ def ModelLoader(cls):
         if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             torch_dtype = auto_dtype(config=config, device=device, quant_inference=True)
-
-        if config.model_type not in SUPPORTED_MODELS:
-            raise TypeError(f"{config.model_type} isn't supported yet.")
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 

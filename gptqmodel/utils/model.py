@@ -36,22 +36,23 @@ import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
-                             EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
+                             EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear
+from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_JSON, dynamic_get
+from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -360,6 +361,90 @@ def hf_convert_gptq_v1_to_v2_format(
     else:
         return model, False
 
+def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
+    assert isinstance(module, BaseQuantLinear)
+
+    log.info("Format: Converting GPTQ v1 to v2")
+
+    # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
+    # additions here do not overflow.
+    # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
+    # overflow ~<=13% based on testing
+    if bits == 2:
+        if pack_dtype == torch.int64:
+            module.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
+        elif pack_dtype == torch.int32:
+            module.qzeros.data += 0b01010101010101010101010101010101
+        elif pack_dtype == torch.int16:
+            module.qzeros.data += 0b0101010101010101
+        elif pack_dtype == torch.int8:
+            module.qzeros.data += 0b01010101
+    elif bits == 3:
+        # range 0 offset
+        if pack_dtype == torch.int64:
+            offset = 0b0010010010010010010010010010010000100100100100100100100100100100
+        elif pack_dtype == torch.int32:
+            offset = 0b00100100100100100100100100100100
+        elif pack_dtype == torch.int16:
+            offset = 0b0010010010010010
+        elif pack_dtype == torch.int8:
+            offset = 0b00100100
+
+        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+
+        # range 1 offset
+        if pack_dtype == torch.int64:
+            offset = 0b1001001001001001001001001001001010010010010010010010010010010010
+        elif pack_dtype == torch.int32:
+            offset = 0b10010010010010010010010010010010
+        elif pack_dtype == torch.int16:
+            offset = 0b1001001001001001
+        elif pack_dtype == torch.int8:
+            offset = 0b10010010
+
+        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+
+        # range 2 offset
+        if pack_dtype == torch.int64:
+            offset = 0b0100100100100100100100100100100101001001001001001001001001001001
+        elif pack_dtype == torch.int32:
+            offset = 0b01001001001001001001001001001001
+        elif pack_dtype == torch.int16:
+            offset = 0b0100100100100100
+        elif pack_dtype == torch.int8:
+            offset = 0b01001001
+
+        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+    elif bits == 4:
+        if pack_dtype == torch.int64:
+            module.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
+        elif pack_dtype == torch.int32:
+            module.qzeros.data += 0b00010001000100010001000100010001
+        elif pack_dtype == torch.int16:
+            module.qzeros.data += 0b0001000100010001
+        elif pack_dtype == torch.int8:
+            module.qzeros.data += 0b00010001
+    elif bits == 8:
+        if pack_dtype == torch.int64:
+            module.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
+        elif pack_dtype == torch.int32:
+            module.qzeros.data += 0b00000001000000010000000100000001
+        elif pack_dtype == torch.int16:
+            module.qzeros.data += 0b0000000100000001
+        elif pack_dtype == torch.int8:
+            module.qzeros.data += 0b00000001
+    else:
+        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+
+    # change format id
+    module.qzero_format(format=2)
+
 # Optionally convert weight from gptq_v1 to v2 format if Kernel is compatible with v2
 def convert_gptq_v1_to_v2_format(
     model,
@@ -367,7 +452,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -382,77 +467,7 @@ def convert_gptq_v1_to_v2_format(
             # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
             # overflow ~<=13% based on testing
             if isinstance(submodule, qlinear_kernel):
-                if cfg.bits == 2:
-                    if cfg.pack_dtype == torch.int64:
-                        submodule.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
-                    elif cfg.pack_dtype == torch.int32:
-                        submodule.qzeros.data += 0b01010101010101010101010101010101
-                    elif cfg.pack_dtype == torch.int16:
-                        submodule.qzeros.data += 0b0101010101010101
-                    elif cfg.pack_dtype == torch.int8:
-                        submodule.qzeros.data += 0b01010101
-                elif cfg.bits == 3:
-                    # range 0 offset
-                    if cfg.pack_dtype == torch.int64:
-                        offset = 0b0010010010010010010010010010010000100100100100100100100100100100
-                    elif cfg.pack_dtype == torch.int32:
-                        offset = 0b00100100100100100100100100100100
-                    elif cfg.pack_dtype == torch.int16:
-                        offset = 0b0010010010010010
-                    elif cfg.pack_dtype == torch.int8:
-                        offset = 0b00100100
-
-                    submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] += (
-                        offset
-                    )
-
-                    # range 1 offset
-                    if cfg.pack_dtype == torch.int64:
-                        offset = 0b1001001001001001001001001001001010010010010010010010010010010010
-                    elif cfg.pack_dtype == torch.int32:
-                        offset = 0b10010010010010010010010010010010
-                    elif cfg.pack_dtype == torch.int16:
-                        offset = 0b1001001001001001
-                    elif cfg.pack_dtype == torch.int8:
-                        offset = 0b10010010
-
-                    submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] += (
-                        offset
-                    )
-
-                    # range 2 offset
-                    if cfg.pack_dtype == torch.int64:
-                        offset = 0b0100100100100100100100100100100101001001001001001001001001001001
-                    elif cfg.pack_dtype == torch.int32:
-                        offset = 0b01001001001001001001001001001001
-                    elif cfg.pack_dtype == torch.int16:
-                        offset = 0b0100100100100100
-                    elif cfg.pack_dtype == torch.int8:
-                        offset = 0b01001001
-
-                    submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] += (
-                        offset
-                    )
-                elif cfg.bits == 4:
-                    if cfg.pack_dtype == torch.int64:
-                        submodule.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
-                    elif cfg.pack_dtype == torch.int32:
-                        submodule.qzeros.data += 0b00010001000100010001000100010001
-                    elif cfg.pack_dtype == torch.int16:
-                        submodule.qzeros.data += 0b0001000100010001
-                    elif cfg.pack_dtype == torch.int8:
-                        submodule.qzeros.data += 0b00010001
-                elif cfg.bits == 8:
-                    if cfg.pack_dtype == torch.int64:
-                        submodule.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
-                    elif cfg.pack_dtype == torch.int32:
-                        submodule.qzeros.data += 0b00000001000000010000000100000001
-                    elif cfg.pack_dtype == torch.int16:
-                        submodule.qzeros.data += 0b0000000100000001
-                    elif cfg.pack_dtype == torch.int8:
-                        submodule.qzeros.data += 0b00000001
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+                convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
 
         log.info(f"Format: Conversion complete: {time.time() - t}s")
 
@@ -475,6 +490,35 @@ def hf_convert_gptq_v2_to_v1_format(
     else:
         return model, False
 
+def convert_gptq_v2_to_v1_format_module(
+    module: BaseQuantLinear,
+    quantize_config: QuantizeConfig,
+):
+    assert isinstance(module, BaseQuantLinear)
+
+    log.info("Format: Converting GPTQ v2 to v1")
+
+    if quantize_config.bits == 2:
+        module.qzeros.data -= 0b01010101010101010101010101010101
+    elif quantize_config.bits == 3:
+        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
+            0b00100100100100100100100100100100
+        )
+        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
+            0b10010010010010010010010010010010
+        )
+        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
+            0b01001001001001001001001001001001
+        )
+    elif quantize_config.bits == 4:
+        module.qzeros.data -= 0b00010001000100010001000100010001
+    elif quantize_config.bits == 8:
+        module.qzeros.data -= 0b00000001000000010000000100000001
+    else:
+        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+
+    module.qzero_format(format=1)
+
 # Optionally convert weight from gptq_v2 to v1 export format if Kernel is compatible with v2
 def convert_gptq_v2_to_v1_format(
     model,
@@ -483,7 +527,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -491,33 +535,16 @@ def convert_gptq_v2_to_v1_format(
         for _, submodule in model.named_modules():
             # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
             if isinstance(submodule, qlinear_kernel):
-                if quantize_config.bits == 2:
-                    submodule.qzeros.data -= 0b01010101010101010101010101010101
-                elif quantize_config.bits == 3:
-                    submodule.qzeros.data[:, range(0, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b00100100100100100100100100100100
-                    )
-                    submodule.qzeros.data[:, range(1, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b10010010010010010010010010010010
-                    )
-                    submodule.qzeros.data[:, range(2, submodule.qzeros.data.shape[1], 3)] -= (
-                        0b01001001001001001001001001001001
-                    )
-                elif quantize_config.bits == 4:
-                    submodule.qzeros.data -= 0b00010001000100010001000100010001
-                elif quantize_config.bits == 8:
-                    submodule.qzeros.data -= 0b00000001000000010000000100000001
-                else:
-                    raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+                convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
 
     return model
 
 
-def pack_module(name, qModules, quant_result, layers):
+def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers, quant_linear_cls):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         r = quant_result[name]
-        scale, zero, g_idx = r.get("scale"), r.get("zero"), r.get("g_idx") # TODO FIX ME: use const, not string for field names
+        scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
         layer_device = qModules[name].device
         qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
@@ -526,7 +553,11 @@ def pack_module(name, qModules, quant_result, layers):
             zero.to(CPU),
             g_idx.to(CPU) if g_idx is not None else None,
         )
-        qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
+        if quant_linear_cls.QUANT_TYPE == "qqq":
+            scale_extra = r["scale_extra"].to(CPU)
+            qModules[name].pack(linear=layers[name], scales=scale, s_extra=scale_extra)
+        else:
+            qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
         qModules[name].to(layer_device)
 
 
@@ -537,6 +568,7 @@ def pack_model(
     group_size,
     backend: BACKEND,
     format: str | FORMAT,
+    quant_method: str | QUANT_METHOD,
     lm_head_name: str,
     desc_act=False,
     sym: bool = True,
@@ -548,6 +580,7 @@ def pack_model(
         bits=bits,
         group_size=group_size,
         format=format,
+        quant_method=quant_method,
         desc_act=desc_act,
         sym=sym,
         dynamic=dynamic,
@@ -587,7 +620,8 @@ def pack_model(
                 # TODO FIX, thread pool executor does not advance iterator
                 pb.next()
                 pb.title(f"Packing {name}").draw()
-                pack_module(name, qModules, quant_result, modules)
+                pack_module(name=name, qModules=qModules, quant_result=quant_result, layers=modules,
+                            quant_linear_cls=quant_linear_cls)
 
             for _ in executor.map(wrapper, names):
                 pass
@@ -626,15 +660,6 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
             log.info(f"Hash verification failed for {shard_file}")
             return False
     return True
-
-
-def check_and_get_model_type(model_dir, trust_remote_code=False):
-    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
-    if config.model_type not in SUPPORTED_MODELS:
-        raise TypeError(f"{config.model_type} isn't supported yet.")
-    model_type = config.model_type
-    return model_type
-
 
 def simple_dispatch_model(model, device_map):
 
@@ -858,28 +883,36 @@ def auto_dtype(config: PretrainedConfig,
 
     assert isinstance(device, DEVICE)
 
-    # for inference, DynamicCuda, Exllama, Triton, and Marlin are all fp16 kernels
-    if quant_inference and device != DEVICE.CPU:
-        return torch.float16
-
     # TODO: both MPS and XPU are locked to float16
     # XPU stack is missing bfloat16 (hardware supports it)
     # MPS stack has bfloat16 bugs in pytorch
     if device in [DEVICE.MPS, DEVICE.XPU]:
+        log.info("Loader: Auto dtype (MPS or XPU): `torch.float16`")
         return torch.float16
+
+    # IPEX for CPU is optimized for bfloat16
+    if device in [DEVICE.CPU] and HAS_IPEX:
+        log.info("Loader: Auto dtype (CPU + IPEX): `torch.bfloat16`")
+        return torch.bfloat16
 
     # get dtype from config
     dtype = getattr(config, "torch_dtype")
     if dtype and not isinstance(dtype, torch.dtype):
         raise ValueError(f"torch_dtype in config must be a torch.dtype, but got {dtype}")
 
-    if dtype == torch.float32:
+    if dtype in [torch.float32, torch.float64]:
+        log.info("Loader: Auto dtype (float32 down-cast): `torch.bfloat16`")
         return torch.bfloat16
     elif dtype == torch.float16:
+        log.info("Loader: Auto dtype (native float16): `torch.float16`")
         return torch.float16
+    elif dtype == torch.bfloat16:
+        log.info("Loader: Auto dtype (native bfloat16): `torch.bfloat16`")
+        return torch.bfloat16
     else:
         # TODO: extract weights from model file to check their original type, instead of forcing bfloat16
         # up/down-cast everything else to bfloat16 if not already in bfloat16
+        log.info(f"Loader: Auto dtype (native = `{dtype}`): `torch.bfloat16`")
         return torch.bfloat16
 
 

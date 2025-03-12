@@ -4,24 +4,29 @@ from typing import Dict
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format, find_modules
+from logbar import LogBar
 from parameterized import parameterized
 from safetensors.torch import load_file
 
+log = LogBar.shared()
 
 class TestPackable(unittest.TestCase):
     QLINEAR_DICT = {
+        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
-        # BACKEND.BITBLAS: BitBLASQuantLinear,
+        BACKEND.BITBLAS: BitBLASQuantLinear,
         BACKEND.IPEX: IPEXQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
         BACKEND.MARLIN_FP16: MarlinQuantLinear,
@@ -42,10 +47,12 @@ class TestPackable(unittest.TestCase):
 
     @parameterized.expand(
         [
+            (BACKEND.EXLLAMA_EORA, {"qweight": False, "qzeros": True, "scales": True, "g_idx": False}),
             (BACKEND.EXLLAMA_V1, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.IPEX, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
             (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
@@ -61,7 +68,10 @@ class TestPackable(unittest.TestCase):
 
         def check(stat, key, expect_tensor):
             r = torch.equal(stat[key], expect_tensor)
+
             if equal[key]:
+                if not r:
+                    log.error(f"Expected `{key}` to be `{expect_tensor[:10]}`, but got `{stat[key][:10]}`")
                 assert r
             else:
                 assert not r

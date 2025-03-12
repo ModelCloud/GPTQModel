@@ -21,6 +21,7 @@ from typing import Dict, List
 
 from device_smi import Device
 from gptqmodel.models._const import CUDA_0
+from logbar import LogBar
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -50,6 +51,7 @@ from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
 
+log = LogBar.shared()
 
 class ModelTest(unittest.TestCase):
     TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
@@ -323,12 +325,14 @@ class ModelTest(unittest.TestCase):
 
     def calculatorPer(self, filter, value):
         if "norm" in filter:
-            diff_pct = (value / self.NATIVE_ARC_CHALLENGE_ACC_NORM) * 100
-            print(f"{filter}: {value} diff {diff_pct:.2f}%")
+            expected = self.NATIVE_ARC_CHALLENGE_ACC_NORM
         else:
-            diff_pct = (value / self.NATIVE_ARC_CHALLENGE_ACC) * 100
-            print(f"{filter}: {value} diff {diff_pct:.2f}%")
-        return diff_pct
+            expected = self.NATIVE_ARC_CHALLENGE_ACC
+
+        diff_pct = (value / expected) * 100
+        log.info(f"{filter}: `{value}` vs `{expected}` diff {diff_pct:.2f}%")
+
+        return diff_pct, expected
 
     def quant_lm_eval(self):
         self.model = None
@@ -350,10 +354,10 @@ class ModelTest(unittest.TestCase):
 
     def check_results(self, task_results):
         for filter, value in task_results.items():
-            diff_pct = self.calculatorPer(filter=filter, value=value)
+            diff_pct, expected = self.calculatorPer(filter=filter, value=value)
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: {value} diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: `{value}` vs expected `{expected}`, diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
 
     def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
         final_log = quant_log[-1]
@@ -377,4 +381,4 @@ class ModelTest(unittest.TestCase):
                 shutil.rmtree(item_path)
 
     def get_batch_size(self):
-        return 32 if Device(CUDA_0).memory_total / 1024 / 1024 / 1024 > 24 else 2
+        return 8 if Device(CUDA_0).memory_total / 1024 / 1024 / 1024 > 24 else 2

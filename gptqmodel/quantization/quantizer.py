@@ -26,11 +26,15 @@ log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
 
-def quantize(x, scale, zero, maxq):
+def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
-    return scale * (q - zero)
+    if requires_groupwise_processing:
+        q = torch.clamp(torch.round(x / scale), -maxq, maxq)
+        return scale * q
+    else:
+        q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+        return scale * (q - zero)
 
 
 class Quantizer(nn.Module):
@@ -43,6 +47,9 @@ class Quantizer(nn.Module):
         self.register_buffer("zero", torch.zeros(shape))
 
         self.name=name
+
+    def requires_groupwise_processing(self) -> bool:
+        return False
 
     # FIXME, optimum shouldn't call this directly, it should call hf_configure
     def configure(
@@ -58,7 +65,11 @@ class Quantizer(nn.Module):
             self.qcfg.bits = bits
             self.qcfg.sym = sym
 
-        self.maxq = torch.tensor(2**self.qcfg.bits - 1)
+        if self.requires_groupwise_processing():
+            self.maxq = torch.tensor(2 ** (self.qcfg.bits - 1) - 1)
+        else:
+            self.maxq = torch.tensor(2 ** self.qcfg.bits - 1)
+
         self.perchannel = perchannel
         self.grid = grid
         self.maxshrink = maxshrink
@@ -101,11 +112,15 @@ class Quantizer(nn.Module):
             self.scale = xmax
             self.zero = xmin
         else:
-            self.scale = (xmax - xmin) / self.maxq
-            if self.qcfg.sym:
-                self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+            if self.requires_groupwise_processing():
+                self.scale = xmax / self.maxq
+                self.zero = torch.zeros_like(self.scale)
             else:
-                self.zero = torch.round(-xmin / self.scale)
+                self.scale = (xmax - xmin) / self.maxq
+                if self.qcfg.sym:
+                    self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+                else:
+                    self.zero = torch.round(-xmin / self.scale)
 
         if self.qcfg.mse > 0.0:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
@@ -113,9 +128,13 @@ class Quantizer(nn.Module):
                 p = 1 - i / self.grid
                 xmin1 = p * xmin
                 xmax1 = p * xmax
-                scale1 = (xmax1 - xmin1) / self.maxq
+                scale1 = (
+                    xmax1 / self.maxq
+                    if self.requires_groupwise_processing()
+                    else (xmax1 - xmin1) / self.maxq
+                )
                 zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
-                q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
+                q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.requires_groupwise_processing())
                 q -= x
                 q.abs_()
                 q.pow_(self.qcfg.mse)
@@ -149,7 +168,7 @@ class Quantizer(nn.Module):
             self.zero = self.zero.unsqueeze(0)
 
     def quantize(self, x):
-        return quantize(x, self.scale, self.zero, self.maxq)
+        return quantize(x, self.scale, self.zero, self.maxq, self.requires_groupwise_processing())
 
     # def enabled(self):
     #     return self.maxq > 0
@@ -157,5 +176,8 @@ class Quantizer(nn.Module):
     # def ready(self):
     # return torch.all(self.scale != 0)
 
+class QQQQuantizer(Quantizer):
+    def requires_groupwise_processing(self) -> bool:
+        return self.qcfg.group_size == -1 and self.qcfg.sym
 
 __all__ = ["Quantizer"]

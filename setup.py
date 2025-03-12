@@ -75,7 +75,7 @@ common_setup_kwargs = {
     "name": "gptqmodel",
     "author": "ModelCloud",
     "author_email": "qubitium@modelcloud.ai",
-    "description": "A LLM quantization package with user-friendly apis. Based on GPTQ algorithm.",
+    "description": "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang.",
     "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
     "long_description_content_type": "text/markdown",
     "url": "https://github.com/ModelCloud/GPTQModel",
@@ -189,7 +189,6 @@ if BUILD_CUDA_EXT:
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            "-diag-suppress=179,39", # 186
         ],
     }
 
@@ -211,6 +210,7 @@ if BUILD_CUDA_EXT:
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "--use_fast_math",
+            "-diag-suppress=179,39",  # 186
         ]
 
     extensions = []
@@ -222,16 +222,25 @@ if BUILD_CUDA_EXT:
         if not ROCM_VERSION:
             if HAS_CUDA_V8:
                 extensions += [
-                cpp_ext.CUDAExtension(
-                    "gptqmodel_marlin_kernels",
-                    [
-                        "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                        "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                        "gptqmodel_ext/marlin/marlin_repack.cu",
-                    ],
-                    extra_link_args=extra_link_args,
-                    extra_compile_args=extra_compile_args,
-                )
+                    cpp_ext.CUDAExtension(
+                        "gptqmodel_marlin_kernels",
+                        [
+                            "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                            "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                            "gptqmodel_ext/marlin/marlin_repack.cu",
+                        ],
+                        extra_link_args=extra_link_args,
+                        extra_compile_args=extra_compile_args,
+                    ),
+                    cpp_ext.CUDAExtension(
+                        "gptqmodel_qqq_kernels",
+                        [
+                            "gptqmodel_ext/qqq/qqq.cpp",
+                            "gptqmodel_ext/qqq/qqq_gemm.cu"
+                        ],
+                        extra_link_args=extra_link_args,
+                        extra_compile_args=extra_compile_args,
+                    ),
                 ]
 
             extensions += [

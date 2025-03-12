@@ -15,19 +15,32 @@
 
 import os
 
+from logbar import LogBar
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
-from typing import List, Optional  # noqa: E402
+from typing import List  # noqa: E402
 
 import torch  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+from gptqmodel import BACKEND  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig, set_seed  # noqa: E402
+from tokenicer import Tokenicer  # noqa: E402
+from transformers import (AutoModelForCausalLM, GPTQConfig, TrainerCallback,  # noqa: E402
+                          TrainerControl, TrainerState, TrainingArguments)
 
 DEVICE = torch.device("cuda:0")
+
+log = LogBar.shared()
+
+class TrainCallback(TrainerCallback):
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.log_history and 'loss' in state.log_history[-1]:
+            log.info(f"Step {state.global_step}, loss: {state.log_history[-1]['loss']}")
+            assert state.log_history[-1]['loss'] <= 5
 
 def train(
         base_model: str = "path/to/model",
@@ -39,27 +52,29 @@ def train(
         cutoff_len: int = 256,
         val_set_size: int = 16,
         quantize: bool = False,
-        eval_step: int = 100,
-        save_step: int = 100,
+        eval_step: int = 10,
+        save_step: int = 10000,
         device_map: str = "auto",
         lora_r: int = 32,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
         lora_target_modules: List[str] = None,
-        torch_dtype: str = "float16",
+        torch_dtype: torch.dtype = torch.bfloat16,
         init_lora_weights="olora",
 ):
-    model_kwargs = {"torch_dtype": getattr(torch, torch_dtype), "device_map": DEVICE}
+    model_kwargs = {"torch_dtype": torch_dtype, "device_map": DEVICE}
     if quantize:
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, true_sequential=False, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'], backend="auto_trainable")
+        model_kwargs["quantization_config"] = GPTQConfig(
+            bits=4,
+            desc_act=True,
+            true_sequential=True,
+            dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'],
+            backend=BACKEND.AUTO_TRAINABLE)
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
     assert model.device.type == DEVICE.type
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
-    # For some tokenizer with no pad token like llama
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = Tokenicer.load(base_model)
 
     def tokenize(prompt, add_eos_token=True):
         result = tokenizer(
@@ -114,7 +129,7 @@ def train(
             warmup_steps=100,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
-            logging_steps=100,
+            logging_steps=1,
             optim="adamw_torch",
             evaluation_strategy="steps",
             save_strategy="steps",
@@ -130,6 +145,8 @@ def train(
         ),
     )
 
+    trainer.add_callback(TrainCallback())
+
     trainer.train()
     model.save_pretrained(output_dir)
 
@@ -141,13 +158,12 @@ def generate_prompt(example):
                 ### Response:
                 {example["output"]}"""
 
-
 class Test(unittest.TestCase):
 
     def test_peft(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             train(
-                base_model="/monster/data/model/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4", #"/monster/data/model/opt-125m",
+                base_model= "/monster/data/model/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4", # "/monster/data/model/Llama-3.1-8B-Instruct", #  #"/monster/data/model/opt-125m",
                 data_path="/monster/data/model/dataset/yahma-alpaca-cleaned",
                 output_dir=tmp_dir,
                 batch_size=16,
@@ -156,13 +172,13 @@ class Test(unittest.TestCase):
                 cutoff_len=256,
                 val_set_size=16,
                 quantize=True,
-                eval_step=100,
-                save_step=100,
+                eval_step=10,
+                save_step=10000,
                 device_map="cuda",
                 lora_r=32,
                 lora_alpha=16,
                 lora_dropout=0.05,
                 lora_target_modules=None,
-                torch_dtype="float16",
+                torch_dtype=torch.bfloat16,
                 init_lora_weights="olora",
             )

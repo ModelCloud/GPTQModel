@@ -1,5 +1,5 @@
 <p align=center>
-<img src='https://github.com/user-attachments/assets/f7eb3c0b-d04d-4515-b3f0-2191c1374e92'></img>
+<img src='https://github.com/user-attachments/assets/e6f12127-39f2-4f39-abfc-3a052f037a46'></img>
 <h1 align="center">GPTQModel</h1>
 </p>
 <p align="center">Production ready LLM model compression/quantization toolkit with accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang.</p>
@@ -15,7 +15,13 @@
 </p>
   
 ## News
-* 03/07/2025 2.1.0-dev: New AMD `Instella` model support. ROCm auto `setup.py` compat fixes. `Optimum` and `Peft` compat fixes. 
+* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
+New Google `Gemma 3` zero-day model support.
+New AMD `Instella` zero-day model model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
+Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
+Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
+`ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
+Fixed `Peft` `bfloat16` training. Model loader auto-dtype logic will now auto select `bfloat16` if it is specified in model config. 
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
 `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress.
@@ -30,6 +36,10 @@ Fix ROCm version auto detection in `setup` install.
 New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 
 New `GPTQModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
 Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
+
+<details>
+    
+<summary>Archived News</summary>
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
 * 01/19/2025 [1.7.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.2): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
@@ -38,9 +48,6 @@ Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 01/06/2025 [1.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.6.0): ⚡25% faster quantization. 35% reduction in vram usage vs v1.5. 👀 AMD ROCm (6.2+) support added and validated for 7900XT+ GPU. Auto-tokenizer loader via `load()` api. For most models you no longer need to manually init a tokenizer for both inference and quantization.
 * 01/01/2025 [1.5.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.1): 🎉 2025! Added `QuantizeConfig.device` to clearly define which device is used for quantization: default = `auto`. Non-quantized models are always loaded on cpu by-default and each layer is moved to `QuantizeConfig.device` during quantization to minimize vram usage. Compatibility fixes for `attn_implementation_autoset` in latest transformers. 
 
-<details>
-    
-<summary>Archived News</summary>
 * 12/23/2024 [1.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.5.0): Multi-modal (image-to-text) optimized quantization support has been added for Qwen 2-VL and Ovis 1.6-VL. Previous image-to-text model quantizations did not use image calibration data, resulting in less than optimal post-quantization results. Version 1.5.0 is the first release to provide a stable path for multi-modal quantization: only text layers are quantized.
 * 12/19/2024 [1.4.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.5): Windows 11 support added/validated. Ovis VL model support with image dataset calibration. Fixed `dynamic` loading. Reduced quantization vram usage.
 * 12/15/2024 [1.4.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.4.2): MacOS `gpu` (Metal) and `cpu` (M+) support added/validated for inference and quantization. Cohere 2 model support added. 
@@ -87,12 +94,21 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## What is GPTQModel?
 
-GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with cleaner api, up-to-date model support, faster inference, higher quality quants.
+GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with a clean/user-friendly api, up-to-date model support, faster inference, higher quality quants, improved hardware support, expanded feature set, and much more.
 
 Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
+GPTQModel not only supports GPTQ but also QQQ with more quantization methods support planned. 
+
+## Quantization Support
+
+| Quantization              |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
+|-------------------|---|---|---|---|---|
+| GPTQ          | ✅ | ✅ | ✅ | ✅ | ✅ | 
+| QQQ          | ✅ | x | ✅ | ✅ | x | 
+
 ## Features
-* ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
+* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
 * 🚀 Extensive model support for: `Ovis VL`, `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
@@ -111,18 +127,18 @@ Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-p
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |           |   |                |   |            |   |           |   |
-|-------------------|---|-----------|---|----------------|---|------------|---|-----------|---|
-| Baichuan          | ✅ | Falcon    | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
-| Bloom             | ✅ | Gemma 2   | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
-| ChatGLM           | ✅ | GPTBigCod | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6   | ✅ | XVERSE    | ✅ |
-| CodeGen           | ✅ | GPTNeoX   | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
-| Cohere 1-2        | ✅ | GPT-2     | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
-| DBRX Converted    | ✅ | GPT-J     | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
-| Deci              | ✅ | Granite   | ✅ | Mixtral        | ✅ | Qwen2 VL   | ✅ |           |   |
-| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE  | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
-| DeepSeek-V2-Lite  | ✅ | Hymba     | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
-| EXAONE 3.0        | ✅ | Instella  | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
+| Model             |   |             |   |                |   |            |   |           |   |
+|-------------------|---|-------------|---|----------------|---|------------|---|-----------|---|
+| Baichuan          | ✅ | Falcon      | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
+| Bloom             | ✅ | Gemma 1/2/3 | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
+| ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6   | ✅ | XVERSE    | ✅ |
+| CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
+| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2 VL   | ✅ |           |   |
+| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
+| DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
+| EXAONE 3.0        | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
 
 ## Platform and HW Support 
 
@@ -317,7 +333,8 @@ dynamic = {
 
 ## Citation
 
-```
+```bibtex
+# GPTQModel
 @misc{gptqmodel,
     author = {ModelCloud.ai and qubitium@modelcloud.ai},
     title = {GPTQModel},
@@ -328,6 +345,7 @@ dynamic = {
     note = {Contact: qubitium@modelcloud.ai}
 }
 
+# GPTQ
 @article{frantar-gptq,
   title={{GPTQ}: Accurate Post-training Compression for Generative Pretrained Transformers}, 
   author={Elias Frantar and Saleh Ashkboos and Torsten Hoefler and Dan Alistarh},
@@ -335,10 +353,19 @@ dynamic = {
   journal={arXiv preprint arXiv:2210.17323}
 }
 
+# GPTQ Marlin Kernel
 @article{frantar2024marlin,
   title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
   author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
   journal={arXiv preprint arXiv:2408.11743},
   year={2024}
+}
+
+# QQQ 
+@article{zhang2024qqq,
+      title={QQQ: Quality Quattuor-Bit Quantization for Large Language Models}, 
+      author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
+      journal={arXiv preprint arXiv:2406.09904},
+      year={2024}
 }
 ```

@@ -57,7 +57,7 @@ from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
-from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
+from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
@@ -74,6 +74,7 @@ from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
+from .definitions.gemma3 import Gemma3GPTQ  # noqa: E402
 from .definitions.glm import GLM  # noqa: E402
 from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
@@ -149,6 +150,7 @@ MODEL_MAP = {
     "longllama": LongLlamaGPTQ,
     "gemma": GemmaGPTQ,
     "gemma2": Gemma2GPTQ,
+    "gemma3_text": Gemma3GPTQ,
     "phi": PhiGPTQ,
     "phi3": Phi3GPTQ,
     "phimoe": PhiMoEGPTQForCausalLM,
@@ -173,7 +175,15 @@ MODEL_MAP = {
     "instella": InstellaGPTQ,
 }
 
+SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
+
+def check_and_get_model_type(model_dir, trust_remote_code=False):
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    if config.model_type not in SUPPORTED_MODELS:
+        raise TypeError(f"{config.model_type} isn't supported yet.")
+    model_type = config.model_type
+    return model_type
 
 class GPTQModel:
     def __init__(self):
@@ -260,7 +270,7 @@ class GPTQModel:
 
         if quantize_config and quantize_config.dynamic:
             log.warn(
-                "GPTQModel's per-module `dynamic` quantization feature is currently not upstreamed to hf/vllm/sglang. If you're using vllm, you need to install this PR: https://github.com/vllm-project/vllm/pull/7086")
+                "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vlLL and SGLang but not yet available in hf transformers.")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
@@ -310,8 +320,8 @@ class GPTQModel:
             cls,
             model_or_id_or_path: str=None,
             tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
-            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS]] = None, # set to None to fix mutable warning
-            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]] = EVAL.LM_EVAL,
+            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLUPRO, List[EVAL.MMLUPRO]] = None, # set to None to fix mutable warning
+            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLUPRO]] = EVAL.LM_EVAL,
             batch_size: Union[int, str] = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
@@ -319,6 +329,7 @@ class GPTQModel:
             backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
             random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
             model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
+            ntrain: int = 1,  # only for framework=EVAL.MMLUPRO
             **args
     ):
         from peft import PeftModel
@@ -327,6 +338,8 @@ class GPTQModel:
         if tasks is None:
             if framework == EVAL.LM_EVAL:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
+            if framework == EVAL.MMLUPRO:
+                tasks = [EVAL.MMLUPRO.MATH]
             else:
                 tasks = [EVAL.EVALPLUS.HUMAN]
 
@@ -459,8 +472,26 @@ class GPTQModel:
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
             return results
+        elif framework == EVAL.MMLUPRO:
+            for task in tasks:
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
+            from ..utils.mmlupro import mmlupro
+            selected_subjects = ",".join(tasks)
+            results = mmlupro(model,
+                              tokenizer,
+                              save_dir=output_path,
+                              seed=random_seed,
+                              selected_subjects=selected_subjects,
+                              ntrain=ntrain,
+                              batch_size=batch_size)
+
+            print('--------MMLUPro Eval Result---------')
+            print(results)
+            print('--------MMLUPro Result End---------')
+            return results
         else:
-            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS")
+            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
 
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):

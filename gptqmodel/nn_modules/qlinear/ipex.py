@@ -14,16 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
-from .torch import TorchQuantLinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import torch_compile
+from .torch import TorchQuantLinear
 
 log = setup_logger()
 
@@ -92,7 +91,10 @@ class IPEXQuantLinear(TorchQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
+
     SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING_USE_TORCH_KERNEL = True
+
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
@@ -154,6 +156,12 @@ class IPEXQuantLinear(TorchQuantLinear):
             dtype=QuantDtype.INT4)
 
         super().post_init()
+
+    def list_buffers(self) -> List:
+        buf = super().list_buffers()
+        if hasattr(self, "ipex_linear") and self.ipex_linear is not None:
+            buf.append(self.ipex_linear)
+        return buf
 
     def forward(self, x: torch.Tensor):
         if self.training:

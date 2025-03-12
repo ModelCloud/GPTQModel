@@ -14,4 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "2.1.0"
+from model_test import ModelTest
+
+
+class TestGemma(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/gemma-3-1b-it" # "google/gemma-3-1b-it"
+    NATIVE_ARC_CHALLENGE_ACC = 0.3404
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3541
+
+    def test_gemma(self):
+        self.quant_lm_eval()
+
+

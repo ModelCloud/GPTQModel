@@ -45,7 +45,7 @@ class AdapterCache():
 class Adapter():
     def __init__(self, rank: int = None, path: str = None):
         self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
-        self.path = path.lower().strip() if isinstance(path, str) else path
+        self.path = path.strip() if isinstance(path, str) else path
 
     def validate_path(self, local=False):
         if not self.path or not isinstance(self.path, str):
@@ -108,6 +108,12 @@ class Lora(Adapter):
     def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         # original code
         # out = out + ((x @ self.lora_A) @ self.lora_B)
+
+        # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
+        if x.dtype != self.lora_A.dtype:
+            log.info(f"Adapter: Lora A/B dtype changed to match input dtype: `{x.dtype}`")
+            self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
+            self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
         # fix batch for lora
         # Some kernels do not reshape x, such as marlin / exllama / exllamav2.

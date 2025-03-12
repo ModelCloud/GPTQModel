@@ -16,6 +16,9 @@
 # -- do not touch
 import os
 
+from gptqmodel.quantization import FORMAT, QUANT_METHOD
+from parameterized import parameterized
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -45,7 +48,13 @@ class Test(ModelTest):
     def setUpClass(cls):
         pass
 
-    def test_quant_and_eora(self):
+    @parameterized.expand(
+        [
+            (QUANT_METHOD.GPTQ, FORMAT.GPTQ),
+            (QUANT_METHOD.QQQ, FORMAT.QQQ),
+        ]
+    )
+    def test_quant_and_eora(self, quant_method: QUANT_METHOD, format: FORMAT):
         bits = 4
         group_size = 128
         desc_act = True
@@ -91,6 +100,8 @@ class Test(ModelTest):
                 group_size=group_size,
                 desc_act=desc_act,  # bitblas only supports DESC_ACT=False
                 adapter=eora,
+                format=format,
+                quant_method=quant_method,
             )
 
             model = GPTQModel.load(
@@ -124,12 +135,12 @@ class Test(ModelTest):
                 table_data = [[key, value] for key, value in config_dict.items()]
                 print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
-                print('--------Eval GPTQ Result---------')
+                print(f'--------Eval {quant_method} Result---------')
                 print(make_table(base_bench))
                 if "groups" in base_bench:
                     print(make_table(base_bench, "groups"))
 
-                print('--------Eval GPTQ + EoRA Result---------')
+                print(f'--------Eval {quant_method} + EoRA Result---------')
                 print(make_table(eora_bench))
                 if "groups" in eora_bench:
                     print(make_table(eora_bench, "groups"))

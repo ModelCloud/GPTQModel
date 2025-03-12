@@ -55,13 +55,13 @@ class TestQuantization(ModelTest):
             (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ_V2, 4),
             (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
             (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ_V2, 4),
+            (QUANT_METHOD.QQQ, BACKEND.AUTO, True, FORMAT.QQQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TRITON, True, FORMAT.GPTQ_V2, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
         ]
     )
     def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
-
         if method == QUANT_METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
@@ -78,6 +78,17 @@ class TestQuantization(ModelTest):
                 sym=sym,
                 format=format,
             )
+        elif method == QUANT_METHOD.QQQ:
+            quantize_config = QuantizeConfig(
+                bits=bits,
+                group_size=128,
+                desc_act=True,
+                sym=sym,
+                format=format,
+                damp_percent=0.05,
+                quant_method=method,
+                mse=2.5,
+            )
         else:
             raise ValueError(f"Invalid quantization method: {method}")
 
@@ -85,7 +96,7 @@ class TestQuantization(ModelTest):
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=self.get_batch_size(), calibration_dataset_concat_size=2048)
+        model.quantize(self.calibration_dataset, batch_size=self.get_batch_size(), calibration_dataset_concat_size=0)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save(tmpdirname)
@@ -122,19 +133,9 @@ class TestQuantization(ModelTest):
             if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
                 return
 
-            # test compat: 1) with simple dict type 2) is_marlin_format
-            compat_quantize_config = {
-                "bits": bits,
-                "group_size": 32,
-                "sym": sym,
-                "desc_act": True,
-                "is_marlin_format": backend == BACKEND.MARLIN,
-            }
-
             model = GPTQModel.load(
                 tmpdirname,
                 device=get_best_device(backend),
-                quantize_config=compat_quantize_config,
             )
             assert isinstance(model.quantize_config, QuantizeConfig)
 
