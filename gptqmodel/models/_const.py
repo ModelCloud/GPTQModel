@@ -153,7 +153,7 @@ SUPPORTED_MODELS = [
     "phimoe",
     "gemma",
     "gemma2",
-    "gemma3",
+    "gemma3_text",
     "starcoder2",
     "cohere",
     "cohere2",
