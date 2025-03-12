@@ -45,8 +45,7 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
-                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model,
-                           )
+                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
