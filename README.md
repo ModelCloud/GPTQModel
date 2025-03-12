@@ -15,7 +15,9 @@
 </p>
   
 ## News
-* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! New AMD `Instella` model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
+* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! 
+New AMD `Instella` model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
+Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
 Fixed `Peft` `bfloat16` training. Model loader auto-dtype logic will now auto select `bfloat16` if it is specified in model config. 
@@ -105,7 +107,7 @@ GPTQModel not only supports GPTQ but also QQQ with more quantization methods sup
 | QQQ          | ✅ | x | ✅ | ✅ | x | 
 
 ## Features
-* ✨ Native integration with HF [Transformers (main)](https://github.com/huggingface/transformers), [Optimum (main)](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
+* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
 * 🚀 Extensive model support for: `Ovis VL`, `Llama 1-3.3`, `Qwen2-VL`, `Olmo2`, `Hymba`, `GLM`, `IBM Granite`, `Llama 3.2 Vision`, `MiniCPM3`, `GRIN-Moe`, `Phi 1-4`, `EXAONE 3.0`, `InternLM 2.5`, `Gemma 2`, `DeepSeek-V2`, `DeepSeek-V2-Lite`, `ChatGLM`, `MiniCPM`, `Qwen2MoE`, `DBRX`.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
