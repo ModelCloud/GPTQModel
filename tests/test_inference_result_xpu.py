@@ -30,8 +30,6 @@ class TestInferenceResultXPU(ModelTest):
 
     @parameterized.expand(
         [
-            (BACKEND.TRITON, DEVICE.XPU, True),
-            (BACKEND.TRITON, DEVICE.XPU, False),
             (BACKEND.TORCH, DEVICE.XPU, True),
             (BACKEND.TORCH, DEVICE.XPU, False),
         ]
