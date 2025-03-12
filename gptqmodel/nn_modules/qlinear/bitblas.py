@@ -132,6 +132,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         layout: str = "nt",
         **kwargs,
     ):
+        kwargs.pop("backend", None)
         super().__init__(
             bits=bits,
             group_size=group_size,
