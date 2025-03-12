@@ -39,19 +39,18 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
-from  ..models.auto import SUPPORTED_MODELS
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear, HAS_IPEX
+from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from .backend import BACKEND

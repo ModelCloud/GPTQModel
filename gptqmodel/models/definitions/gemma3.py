@@ -14,9 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ...utils import BACKEND
-from ...utils.logger import setup_logger
 from ..base import BaseGPTQModel
+
 
 class Gemma3GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]

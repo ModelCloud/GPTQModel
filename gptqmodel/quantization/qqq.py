@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 import torch
+
 from ..quantization import GPTQ, Quantizer
 from ..quantization.quantizer import QQQQuantizer
 

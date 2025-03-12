@@ -28,7 +28,8 @@ import torch  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
-from transformers import AutoModelForCausalLM, GPTQConfig, TrainerCallback,TrainingArguments,TrainerState,TrainerControl  # noqa: E402
+from transformers import (AutoModelForCausalLM, GPTQConfig, TrainerCallback,  # noqa: E402
+                          TrainerControl, TrainerState, TrainingArguments)
 
 DEVICE = torch.device("cuda:0")
 

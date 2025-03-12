@@ -20,9 +20,8 @@ import sys
 from typing import Dict, List
 
 from device_smi import Device
-from logbar import LogBar
-
 from gptqmodel.models._const import CUDA_0
+from logbar import LogBar
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"

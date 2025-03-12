@@ -23,7 +23,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 import logging  # noqa: E402
 import tempfile  # noqa: E402
-import traceback  # noqa: E402
 import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
@@ -96,7 +95,6 @@ class TestBits(unittest.TestCase):
         dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         calibration_dataset = [tokenizer(example) for example in dataset]
 
-        errors = []
         for quant_backend in self.pack_backends:
             supports_bits = self.QLINEAR_DICT[quant_backend].SUPPORTS_BITS
             for bits in supports_bits:
