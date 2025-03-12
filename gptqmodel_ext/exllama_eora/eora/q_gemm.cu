@@ -194,6 +194,296 @@ typedef void (*fp_gemm_half_q_half_gptq_kernel_eora)(const half*, const uint32_t
                                                 const half*, const half*, const int);
 
 template <bool first_block, int m_count>
+__global__ void gemm_half_q_half_gptq_2bit_kernel_eora(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_m, const int size_n, const int size_k, const int groups,
+    const int* __restrict__ b_q_perm,
+    const half* __restrict__ Ax, const half* __restrict__ eora_b, int size_r) {
+  MatrixView_half a_(a, size_m, size_k);
+  MatrixView_half_rw c_(c, size_m, size_n);
+  MatrixView_q2_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
+
+  MatrixView_half Ax_(Ax, size_m, size_r);
+  MatrixView_half eora_b_(eora_b, size_r, size_n);
+
+  double block_r_size = BLOCK_KN_SIZE * size_r / double(size_k);
+
+  int t = threadIdx.x;
+
+  // Block
+  int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
+  int offset_m = blockIdx.y * m_count;
+  int offset_k = blockIdx.z * BLOCK_KN_SIZE;
+  int offset_r = int(rint(blockIdx.z * block_r_size));
+
+  int end_n = min(offset_n + BLOCK_KN_SIZE * 4, size_n);
+  int end_m = min(offset_m + m_count, size_m);
+  int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
+  int end_r = min(int(rint((blockIdx.z + 1) * block_r_size)), size_r);
+
+  int n = offset_n + t * 4;
+
+  // Preload block_a
+  __shared__ half block_a[m_count][BLOCK_KN_SIZE];
+
+  if (offset_k + t < end_k) {
+    for (int m = 0; m < m_count; ++m) {
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
+
+      half a0;
+      if (b_q_perm)
+        a0 = a_ptr[b_q_perm[offset_k + t]];
+      else
+        a0 = a_ptr[offset_k + t];
+      block_a_ptr[t] = a0;
+    }
+  }
+
+  // Zero output
+  if (n >= size_n) return;
+
+  if (blockIdx.z == 0) {
+    for (int m = 0; m < m_count; m++)
+      *((uint64_t*)c_.item_ptr(offset_m + m, n)) = 0;
+  }
+
+  __syncthreads();
+
+  // Find initial group
+  int groupsize = size_k / groups;
+  int group = offset_k / groupsize;
+  int nextgroup = offset_k + groupsize;
+
+  // a, b offset
+  int qk = offset_k / (32 / 2);
+
+  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+  const half* a_ptr = &block_a[0][0];
+  int a_stride = BLOCK_KN_SIZE;
+
+  // Initial group
+  int zeros[4];
+  half scales[4];
+  b_gptq_qzeros_.item4(zeros, group, n);
+  b_gptq_scales_.item4(scales, group, n);
+  // Column result
+  half block_c[m_count][4] = {};
+
+  // Dequantize and multiply
+  int k = offset_k;
+  while (k < end_k) {
+    if (k == nextgroup) {
+      group++;
+      nextgroup += groupsize;
+      b_gptq_qzeros_.item4(zeros, group, n);
+      b_gptq_scales_.item4(scales, group, n);
+    }
+
+#pragma unroll
+    for (int j = 0; j < 1; j++) {
+      const int4* b_ptr4 = (int4*)b_ptr;
+      int4 load_int4 = *b_ptr4;
+
+      half2 dq[4][8];
+      dequant_2bit_16(load_int4.x, dq[0], size_n, zeros[0] + 1);
+      dequant_2bit_16(load_int4.y, dq[1], size_n, zeros[1] + 1);
+      dequant_2bit_16(load_int4.z, dq[2], size_n, zeros[2] + 1);
+      dequant_2bit_16(load_int4.w, dq[3], size_n, zeros[3] + 1);
+
+#pragma unroll
+      for (int m = 0; m < m_count; m++) {
+        block_c[m][0] =
+            dot22_16_h(dq[0], a_ptr + m * a_stride, block_c[m][0], scales[0]);
+        block_c[m][1] =
+            dot22_16_h(dq[1], a_ptr + m * a_stride, block_c[m][1], scales[1]);
+        block_c[m][2] =
+            dot22_16_h(dq[2], a_ptr + m * a_stride, block_c[m][2], scales[2]);
+        block_c[m][3] =
+            dot22_16_h(dq[3], a_ptr + m * a_stride, block_c[m][3], scales[3]);
+      }
+
+      b_ptr += size_n;
+      a_ptr += 16;
+    }
+
+    k += 16;
+  }
+
+  for (int r = offset_r; r < end_r; r++) {
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+#pragma unroll
+      for (int m = 0; m < m_count; m++) {
+        auto a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
+        auto a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
+        half product = __float2half(a1 * a2);
+        block_c[m][j] = __hadd(block_c[m][j], product);
+      }
+    }
+  }
+
+  for (int m = 0; m < m_count; m++) {
+    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+    half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+    half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+    atomicAdd(out, result01);
+    atomicAdd(out + 1, result23);
+  }
+}
+
+template <bool first_block, int m_count>
+__global__ void gemm_half_q_half_gptq_3bit_kernel_eora(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_m, const int size_n, const int size_k, const int groups,
+    const int* __restrict__ b_q_perm,
+    const half* __restrict__ Ax, const half* __restrict__ eora_b, int size_r) {  MatrixView_half a_(a, size_m, size_k);
+  MatrixView_half_rw c_(c, size_m, size_n);
+  MatrixView_q3_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
+
+  MatrixView_half Ax_(Ax, size_m, size_r);
+  MatrixView_half eora_b_(eora_b, size_r, size_n);
+
+  double block_r_size = BLOCK_KN_SIZE * size_r / double(size_k);
+
+  int t = threadIdx.x;
+
+  // Block
+  int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
+  int offset_m = blockIdx.y * m_count;
+  int offset_k = blockIdx.z * BLOCK_KN_SIZE;
+  int offset_r = int(rint(blockIdx.z * block_r_size));
+
+  int end_n = min(offset_n + BLOCK_KN_SIZE * 4, size_n);
+  int end_m = min(offset_m + m_count, size_m);
+  int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
+  int end_r = min(int(rint((blockIdx.z + 1) * block_r_size)), size_r);
+
+  int n = offset_n + t * 4;
+
+  // Preload block_a
+  __shared__ half block_a[m_count][BLOCK_KN_SIZE];
+
+  if (offset_k + t < end_k) {
+    for (int m = 0; m < m_count; ++m) {
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
+
+      half a0;
+      if (b_q_perm)
+        a0 = a_ptr[b_q_perm[offset_k + t]];
+      else
+        a0 = a_ptr[offset_k + t];
+      block_a_ptr[t] = a0;
+    }
+  }
+
+  // Zero output
+  if (n >= size_n) return;
+
+  if (blockIdx.z == 0) {
+    for (int m = 0; m < m_count; m++)
+      *((uint64_t*)c_.item_ptr(offset_m + m, n)) = 0;
+  }
+
+  __syncthreads();
+
+  // Find initial group
+  int groupsize = size_k / groups;
+  int group = offset_k / groupsize;
+  int nextgroup = offset_k + groupsize;
+
+  // a, b offset
+  int qk = offset_k / 32 * 3;
+
+  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+  const half* a_ptr = &block_a[0][0];
+  int a_stride = BLOCK_KN_SIZE;
+
+  // Initial group
+  int zeros[4];
+  half scales[4];
+  b_gptq_qzeros_.item4(zeros, group, n);
+  b_gptq_scales_.item4(scales, group, n);
+  // Column result
+  half block_c[m_count][4] = {};
+
+  // Dequantize and multiply
+  int k = offset_k;
+  while (k < end_k) {
+    if (k == nextgroup) {
+      group++;
+      nextgroup += groupsize;
+      b_gptq_qzeros_.item4(zeros, group, n);
+      b_gptq_scales_.item4(scales, group, n);
+    }
+
+#pragma unroll
+    for (int j = 0; j < 1; j++) {
+      int4 load_int4[3];
+      load_int4[0] = *((int4*)b_ptr);
+      b_ptr += size_n;
+      load_int4[1] = *((int4*)b_ptr);
+      b_ptr += size_n;
+      load_int4[2] = *((int4*)b_ptr);
+      b_ptr += size_n;
+
+      half2 dq[4][16];
+      dequant_3bit_32(load_int4[0].x, load_int4[1].x, load_int4[2].x, dq[0],
+                      size_n, zeros[0] + 1);
+      dequant_3bit_32(load_int4[0].y, load_int4[1].y, load_int4[2].y, dq[1],
+                      size_n, zeros[1] + 1);
+      dequant_3bit_32(load_int4[0].z, load_int4[1].z, load_int4[2].z, dq[2],
+                      size_n, zeros[2] + 1);
+      dequant_3bit_32(load_int4[0].w, load_int4[1].w, load_int4[2].w, dq[3],
+                      size_n, zeros[3] + 1);
+
+#pragma unroll
+      for (int m = 0; m < m_count; m++) {
+        block_c[m][0] =
+            dot22_32_h(dq[0], a_ptr + m * a_stride, block_c[m][0], scales[0]);
+        block_c[m][1] =
+            dot22_32_h(dq[1], a_ptr + m * a_stride, block_c[m][1], scales[1]);
+        block_c[m][2] =
+            dot22_32_h(dq[2], a_ptr + m * a_stride, block_c[m][2], scales[2]);
+        block_c[m][3] =
+            dot22_32_h(dq[3], a_ptr + m * a_stride, block_c[m][3], scales[3]);
+      }
+      a_ptr += 32;
+    }
+
+    k += 32;
+  }
+
+  for (int r = offset_r; r < end_r; r++) {
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+#pragma unroll
+      for (int m = 0; m < m_count; m++) {
+        auto a1 = __half2float(*(Ax_.item_ptr(offset_m + m, r)));
+        auto a2 = __half2float(*(eora_b_.item_ptr(r, n + j)));
+        half product = __float2half(a1 * a2);
+        block_c[m][j] = __hadd(block_c[m][j], product);
+      }
+    }
+  }
+
+  for (int m = 0; m < m_count; m++) {
+    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+    half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+    half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+    atomicAdd(out, result01);
+    atomicAdd(out + 1, result23);
+  }
+}
+
+template <bool first_block, int m_count>
 __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
         const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
         const uint32_t* __restrict__ b_gptq_qzeros,
@@ -352,7 +642,6 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel_eora(
         atomicAdd(out + 1, result23);
     }
 }
-
 
 template <bool first_block, int m_count>
 __global__ void gemm_half_q_half_gptq_2bit_kernel(
@@ -906,6 +1195,8 @@ fp_gemm_half_q_half_gptq_kernel_eora pick_gemm_half_q_half_gptq_kernel_eora(
         bool first_block, const int m_count, const int bit) {
 #define SELECT_KERNEL_EORA(M_COUNT)                                             \
     if (m_count == M_COUNT) {                                                \
+    if (bit == 2) return gemm_half_q_half_gptq_2bit_kernel_eora<true, M_COUNT>; \
+    if (bit == 3) return gemm_half_q_half_gptq_3bit_kernel_eora<true, M_COUNT>; \
     if (bit == 4) return gemm_half_q_half_gptq_4bit_kernel_eora<true, M_COUNT>; \
 }
 #if BLOCK_M_SIZE_MAX >= 1
@@ -1757,6 +2048,7 @@ void gemm_half_q_half_cuda(cublasHandle_t cublas_handle, const half* a,
     // we disabled them for now.
     use_reconstruct = (bit < 4 || size_m > MAX_ALT_GEMM_ROWS);
   }
+  use_reconstruct = false; // TODO: mkhadkevich temporarily disable reconstruct mode
   if (use_reconstruct) {
     // Reconstruct FP16 matrix, then cuBLAS
     if (use_exllama) {
@@ -2099,7 +2391,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
   return c;
 }
 
-torch::Tensor gptq_gemm_lora(torch::Tensor a, torch::Tensor b_q_weight,
+torch::Tensor gptq_gemm_eora(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
                         bool use_exllama, int64_t bit,
@@ -2109,7 +2401,8 @@ torch::Tensor gptq_gemm_lora(torch::Tensor a, torch::Tensor b_q_weight,
     at::Tensor c = torch::empty({a.size(0), b_q_weight.size(1)}, options);
     at::Tensor temp_dq = torch::empty(
             {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
-
+    eora_ax = eora_ax.contiguous();
+    eora_b = eora_b.contiguous();
     gptq::gemm_half_q_half_cuda_eora(
             at::cuda::getCurrentCUDABlasHandle(), (const half*)a.data_ptr(),
             (const uint32_t*)b_q_weight.data_ptr(),

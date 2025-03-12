@@ -4,7 +4,7 @@ import math
 import gptqmodel_exllama_eora
 import torch
 # from eora_test import fused_concurrent, fused_sequential, cublas_reference, gptq_gemm_eora, gptq_gemm
-from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_lora
+from gptqmodel_exllama_eora import gptq_gemm, gptq_gemm_eora
 from gptqmodel_exllama_kernels import make_q4, q4_matmul
 from safetensors import safe_open
 
@@ -255,7 +255,7 @@ def test_eora_kernel():
 
     gptq_pytorch_out = gptq_gemm(reshaped_x, weight, zeros, scales, idx, use_exllama, bit) + (ax @ eora_b)
 
-    gptq_eora_fused_out = gptq_gemm_lora(reshaped_x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
+    gptq_eora_fused_out = gptq_gemm_eora(reshaped_x, weight, zeros, scales, idx, use_exllama, bit, ax, eora_b)
     torch.set_printoptions(precision=6)
     # print("gptq exllama kernel out: ")
     # print(exllama_out[0][:10])

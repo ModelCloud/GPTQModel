@@ -45,8 +45,8 @@ def gptq_gemm(x, qweight, qzeros, scales, g_idx, bit):
     return gptqmodel_exllama_eora.gptq_gemm(x, qweight, qzeros, scales, g_idx, True, bit)
 
 
-def gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, bit, A, B):
-    return gptqmodel_exllama_eora.gptq_gemm_lora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
+def gptq_gemm_eora(x, qweight, qzeros, scales, g_idx, bit, A, B):
+    return gptqmodel_exllama_eora.gptq_gemm_eora(x, qweight, qzeros, scales, g_idx, True, bit, A, B)
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
@@ -54,7 +54,7 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 
 
 class ExllamaEoraQuantLinear(BaseQuantLinear):
-    SUPPORTS_BITS = [4, 8] # fused eora only validated for 4 bits
+    SUPPORTS_BITS = [2,3,4] # fused eora only validated for 4 bits
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True] # TODO: validate False
@@ -170,7 +170,6 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         # log.info(f"out_features: {self.out_features}")
         # log.info(f"x.shape[:-1]: {x.shape[:-1]}")
         # log.info(f"self.qweight.shape[-1],: {self.qweight.shape[-1],}")
-
         out_shape = x.shape[:-1] + (self.out_features,)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
@@ -182,7 +181,21 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         # if x.size(-1) != self.in_features:
         #     x = F.pad(x, self.in_features_padding_shape)
 
+
+        #if self.adapter:
+        #    # only 2 to 4 bits have been validated for fused operation
+        #    if self.bits in [2, 3, 4]:
+        #        # working on numerical precision use standard lora inference as for now
+        #        # output = gptq_gemm_eora(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits, reshaped_x @ self.adapter.lora_A, self.adapter.lora_B) # fused
+        #        output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
+        #    else:
+        #        output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits).add_((reshaped_x @ self.adapter.lora_A) @ self.adapter.lora_B) # normal
+        #else:
+        #    output = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
+
+
         out = gptq_gemm(reshaped_x, self.qweight, self.qzeros, self.scales, self.g_idx, self.bits)
+
 
         if self.bias is not None:
             out.add_(self.bias)

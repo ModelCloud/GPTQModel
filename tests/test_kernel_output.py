@@ -19,8 +19,8 @@ log = LogBar.shared()
 CUDA = torch.device("cuda:0")
 
 class TestKernelOutput(unittest.TestCase):
-    model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
-
+    # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
+    model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
     target_qliner_map = {
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
@@ -38,7 +38,8 @@ class TestKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
+        # lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
+        lora_path = "sliuau/llama-3.2-3b_4bits_128group_size_eora_rank64_mmlu_c4"
         # hf "sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"
 
         cls.m = 1
@@ -48,7 +49,7 @@ class TestKernelOutput(unittest.TestCase):
         cls.x = []  # random X input of shape (m, k)
 
         cls.adapter = Lora(
-            rank=128,
+            rank=64,
             path=lora_path)
 
         cls.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
