@@ -406,18 +406,21 @@ class BaseGPTQModel(nn.Module):
 
             # rotate model
             if self.quantize_config.rotation:
-                model_type = check_and_get_model_type(self.model.config)
-
-                if model_type not in ["llama", "qwen2"]:
-                    raise ValueError(f"rotation only supports model_type: llama/qwen2, "
-                                     f"current model_type is {model_type}")
-
-                self.model = fuse_layer_norms(model=self.model, layers_node=self.layers_node,
+                from gptqmodel.models.definitions.llama import LlamaGPTQ
+                from gptqmodel.models.definitions.qwen2 import Qwen2GPTQ
+                if not isinstance(self, (LlamaGPTQ, Qwen2GPTQ)):
+                    raise ValueError(f"rotation only supports: llama/qwen2 model, "
+                                     f"current model is {self.__class__.__name__}")
+                module_name_args = {
+                    "layers_node": self.layers_node,
+                    "lm_head_name": self.lm_head
+                }
+                self.model = fuse_layer_norms(model=self.model,
                                               pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
-                                              lm_head_name=self.lm_head)
+                                              **module_name_args)
 
-                self.model, _ = rotate_model(model=self.model, model_type=model_type, rotate_mode=self.quantize_config.rotate_mode,
-                                             device=self.quantize_config.device)
+                self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
+                                             device=self.quantize_config.device, **module_name_args)
                 if auto_gc:
                     torch_empty_cache()
 

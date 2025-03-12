@@ -198,8 +198,7 @@ class QuantizeConfig():
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
-    rotation: bool = field(default=False)
-    rotate_mode: str = field(default="hadamard", metadata={"choices": ["hadamard", "random"]})
+    rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
     is_marlin_format: bool = False
 
