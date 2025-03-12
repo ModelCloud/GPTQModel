@@ -16,7 +16,6 @@
 import os
 
 from logbar import LogBar
-from tokenicer import Tokenicer
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
@@ -27,7 +26,9 @@ from typing import List  # noqa: E402
 import torch  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+from gptqmodel import BACKEND  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
+from tokenicer import Tokenicer  # noqa: E402
 from transformers import (AutoModelForCausalLM, GPTQConfig, TrainerCallback,  # noqa: E402
                           TrainerControl, TrainerState, TrainingArguments)
 
@@ -63,7 +64,12 @@ def train(
 ):
     model_kwargs = {"torch_dtype": torch_dtype, "device_map": DEVICE}
     if quantize:
-        model_kwargs["quantization_config"] = GPTQConfig(bits=4, desc_act=True, true_sequential=True, dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'], backend="auto_trainable")
+        model_kwargs["quantization_config"] = GPTQConfig(
+            bits=4,
+            desc_act=True,
+            true_sequential=True,
+            dataset=['/monster/data/model/dataset/c4-train.00000-of-01024.json.gz'],
+            backend=BACKEND.AUTO_TRAINABLE)
 
     model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
     assert model.device.type == DEVICE.type
