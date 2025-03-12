@@ -242,16 +242,17 @@ class MarlinQuantLinear(BaseQuantLinear):
             scales_and_zp_size = self.in_features // self.group_size
 
         # Quantized weights
-        qweight = Parameter(
+        self.register_buffer(
+            "qweight",
             torch.empty(
                 self.in_features // self.pack_factor,
                 self.out_features,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
         )
+
         set_weight_attrs(
-            qweight,
+            self.qweight,
             {
                 "input_dim": 0,
                 "output_dim": 1,
@@ -261,16 +262,17 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         # Activation order
-        g_idx = Parameter(
+        self.register_buffer(
+            "g_idx",
             torch.empty(
                 self.in_features,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
         )
+
         # Ignore warning from fused linear layers such as QKVParallelLinear.
         set_weight_attrs(
-            g_idx,
+            self.g_idx,
             {
                 "input_dim": 0,
                 "ignore_warning": True
@@ -278,16 +280,17 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         # Scales
-        scales = Parameter(
+        self.register_buffer(
+            "scales",
             torch.empty(
                 scales_and_zp_size,
                 self.out_features,
                 dtype=torch.float16,
             ),
-            requires_grad=False,
         )
+
         set_weight_attrs(
-            scales,
+            self.scales,
             {
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
@@ -295,16 +298,17 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         # Quantized zero-points
-        qzeros = Parameter(
+        self.register_buffer(
+            "qzeros",
             torch.empty(
                 scales_and_zp_size,
                 self.out_features // self.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
         )
+
         set_weight_attrs(
-            qzeros,
+            self.qzeros,
             {
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
@@ -312,11 +316,6 @@ class MarlinQuantLinear(BaseQuantLinear):
                 "pack_factor": self.pack_factor,
             },
         )
-
-        self.register_parameter("qweight", qweight)
-        self.register_parameter("g_idx", g_idx)
-        self.register_parameter("scales", scales)
-        self.register_parameter("qzeros", qzeros)
 
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 
@@ -415,6 +414,10 @@ class MarlinQuantLinear(BaseQuantLinear):
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
         if x.shape[0] == 0:
             return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+
+        # make sure scales is synced with x/input
+        if x.dtype != self.scales.dtype:
+            self.scales = self.scales.to(dtype=x.dtype)
 
         out = apply_gptq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
