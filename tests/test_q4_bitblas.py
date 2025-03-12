@@ -62,10 +62,8 @@ class TestQ4BitBLAS(unittest.TestCase):
     def test_bias(self):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
         model_id = "/monster/data/model/starcoderbase-1b-GPTQ"
-        try:
-            model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.BITBLAS)
-        except ValueError as e:
-            raise e
+
+        model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.BITBLAS)
 
         for _, param in model_q.named_parameters():
             self.assertNotEqual(param.device, torch.device("meta"))

@@ -141,7 +141,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=BACKEND.BITBLAS,
+            backend=kwargs.pop("backend", BACKEND.BITBLAS),
             adapter=adapter,
             register_buffers=False,
             **kwargs)

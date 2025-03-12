@@ -48,8 +48,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
     BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
     # BACKEND.CUDA: DynamicCudaQuantLinear,
-    BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
     BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
+    BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
     BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
 
     BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
@@ -170,14 +170,6 @@ def select_quant_linear(
         device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
 
     backend = BACKEND.AUTO if backend is None else backend
-
-    # Bitblas needs conversion, not direct quant linear load, return generic Torch linear
-    if backend == BACKEND.BITBLAS and format != FORMAT.BITBLAS:
-        log.info(f"{'Packing' if pack else ''} Kernel: selected: `{TorchQuantLinear.__name__}`")
-        if multi_select:
-            return [IPEXQuantLinear]
-        else:
-            return IPEXQuantLinear
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
 

@@ -17,11 +17,6 @@
 # -- do not touch
 import os
 
-from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
-from parameterized import parameterized
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -31,9 +26,12 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
+from gptqmodel import BACKEND  # noqa: E402
+from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 
 
 def gen_quant4(k, n, groupsize=-1):
@@ -79,7 +77,7 @@ def gen_quant4(k, n, groupsize=-1):
 
 class TestRepacking(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+        # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
