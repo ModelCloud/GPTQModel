@@ -21,7 +21,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 from typing import Optional  # noqa: E402
 
-from eora_calibration_data_construction import *
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
@@ -65,11 +64,6 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora], task):
 
     return bench_result
 
-
-
-
-
-
 if __name__ == '__main__':
     import argparse
 
@@ -88,8 +82,6 @@ if __name__ == '__main__':
     parser.add_argument(
         '--eval_task', type=str, default='all', choices=['mmlu','arc','all']
     )
-
-
 
     args = parser.parse_args()
 
