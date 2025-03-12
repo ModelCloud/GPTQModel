@@ -175,6 +175,7 @@ MODEL_MAP = {
     "instella": InstellaGPTQ,
 }
 
+SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
 class GPTQModel:

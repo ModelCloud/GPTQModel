@@ -45,8 +45,9 @@ from transformers.utils.hub import cached_file
 
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
+from  ..models.auto import SUPPORTED_MODELS
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
-                             EXPERT_INDEX_PLACEHOLDER, SUPPORTED_MODELS, SUPPORTS_MODULE_TYPES)
+                             EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
