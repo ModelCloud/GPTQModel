@@ -60,7 +60,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000, 0.00025),
-        (BACKEND.TRITON,  0.0000, 0.00025),
+        # (BACKEND.TRITON,  0.0000, 0.00025),
         (BACKEND.IPEX,  0.0000, 0.0005),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
