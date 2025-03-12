@@ -20,7 +20,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 
-from eora_calibration_data_construction import *
+from eora_calibration_data_construction import construct_ARC, construct_c4, construct_mmlu
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 

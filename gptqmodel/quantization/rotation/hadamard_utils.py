@@ -98,7 +98,7 @@ def random_hadamard_matrix(size, device):
 # TODO make this a util
 def import_fast_hadamard_transform():
     try:
-        import fast_hadamard_transform
+        import fast_hadamard_transform  # noqa: F401
     except ImportError as e:
         log.error("Package: Please install missing `fast_hadamard_transform` module via: `pip install -U git+https://github.com/Dao-AILab/fast-hadamard-transform.git --no-build-isolation -v`")
         raise e
@@ -108,13 +108,13 @@ def matmul_hadU_cuda(X, hadK, K):
 
     n = X.shape[-1]
     if K == 1:
-        return fast_hadamard_transform.hadamard_transform(
+        return fast_hadamard_transform.hadamard_transform( # noqa: F821
             X.contiguous(), 1.0 / torch.tensor(n).sqrt()
         )
     # if transpose:
     #     hadK = hadK.T.contiguous()
     input = X.view(-1, K, n // K)
-    input = fast_hadamard_transform.hadamard_transform(
+    input = fast_hadamard_transform.hadamard_transform( # noqa: F821
         input.contiguous(), 1.0 / torch.tensor(n).sqrt()
     )
     input = hadK.to(input.device).to(input.dtype) @ input
@@ -165,7 +165,7 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
             W_ = W_.t()
             transposed_shape = W_.shape
             W_ = (
-                fast_hadamard_transform.hadamard_transform(
+                fast_hadamard_transform.hadamard_transform( # noqa: F821
                     W_.reshape(-1, transposed_shape[-1] // had_dim, had_dim),
                     scale=1 / math.sqrt(had_dim),
                 )
@@ -175,7 +175,7 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
             )
             if module.bias is not None:
                 b_ = (
-                    fast_hadamard_transform.hadamard_transform(
+                    fast_hadamard_transform.hadamard_transform( # noqa: F821
                         b_.reshape(-1, b_.shape[-1] // had_dim, had_dim),
                         scale=1 / math.sqrt(had_dim),
                     )
@@ -184,7 +184,7 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
                 )
 
         else:
-            W_ = fast_hadamard_transform.hadamard_transform(
+            W_ = fast_hadamard_transform.hadamard_transform( # noqa: F821
                 W_.reshape(-1, init_shape[1] // had_dim, had_dim),
                 scale=1 / math.sqrt(had_dim),
             ).reshape(init_shape)
