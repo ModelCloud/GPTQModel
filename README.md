@@ -15,8 +15,9 @@
 </p>
   
 ## News
-* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! 
-New AMD `Instella` model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
+* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
+New Google `Gemma 3` zero-day model support.
+New AMD `Instella` zero-day model model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
 Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
@@ -126,18 +127,18 @@ GPTQModel not only supports GPTQ but also QQQ with more quantization methods sup
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |           |   |                |   |            |   |           |   |
-|-------------------|---|-----------|---|----------------|---|------------|---|-----------|---|
-| Baichuan          | ✅ | Falcon    | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
-| Bloom             | ✅ | Gemma 2   | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
-| ChatGLM           | ✅ | GPTBigCod | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6   | ✅ | XVERSE    | ✅ |
-| CodeGen           | ✅ | GPTNeoX   | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
-| Cohere 1-2        | ✅ | GPT-2     | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
-| DBRX Converted    | ✅ | GPT-J     | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
-| Deci              | ✅ | Granite   | ✅ | Mixtral        | ✅ | Qwen2 VL   | ✅ |           |   |
-| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE  | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
-| DeepSeek-V2-Lite  | ✅ | Hymba     | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
-| EXAONE 3.0        | ✅ | Instella  | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
+| Model             |   |             |   |                |   |            |   |           |   |
+|-------------------|---|-------------|---|----------------|---|------------|---|-----------|---|
+| Baichuan          | ✅ | Falcon      | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
+| Bloom             | ✅ | Gemma 1/2/3 | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
+| ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6   | ✅ | XVERSE    | ✅ |
+| CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
+| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2 VL   | ✅ |           |   |
+| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
+| DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
+| EXAONE 3.0        | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
 
 ## Platform and HW Support 
 

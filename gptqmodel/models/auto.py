@@ -57,7 +57,7 @@ from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
-from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
+from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
@@ -74,6 +74,7 @@ from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
+from .definitions.gemma3 import Gemma3GPTQ  # noqa: E402
 from .definitions.glm import GLM  # noqa: E402
 from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
@@ -149,6 +150,7 @@ MODEL_MAP = {
     "longllama": LongLlamaGPTQ,
     "gemma": GemmaGPTQ,
     "gemma2": Gemma2GPTQ,
+    "gemma3_text": Gemma3GPTQ,
     "phi": PhiGPTQ,
     "phi3": Phi3GPTQ,
     "phimoe": PhiMoEGPTQForCausalLM,
@@ -173,7 +175,15 @@ MODEL_MAP = {
     "instella": InstellaGPTQ,
 }
 
+SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
+
+def check_and_get_model_type(model_dir, trust_remote_code=False):
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    if config.model_type not in SUPPORTED_MODELS:
+        raise TypeError(f"{config.model_type} isn't supported yet.")
+    model_type = config.model_type
+    return model_type
 
 class GPTQModel:
     def __init__(self):
