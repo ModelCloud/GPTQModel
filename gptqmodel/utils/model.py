@@ -364,7 +364,7 @@ def hf_convert_gptq_v1_to_v2_format(
 def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
     assert isinstance(module, BaseQuantLinear)
 
-    log.info("Format: Converting GPTQ v1 to v2")
+    log.info.once("Format: Converting GPTQ v1 to v2")
 
     # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
     # additions here do not overflow.
@@ -496,7 +496,7 @@ def convert_gptq_v2_to_v1_format_module(
 ):
     assert isinstance(module, BaseQuantLinear)
 
-    log.info("Format: Converting GPTQ v2 to v1")
+    log.info.once("Format: Converting GPTQ v2 to v1")
 
     if quantize_config.bits == 2:
         module.qzeros.data -= 0b01010101010101010101010101010101
