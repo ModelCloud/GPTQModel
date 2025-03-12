@@ -57,7 +57,7 @@ from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
 from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
-from ..utils.model import check_and_get_model_type, find_modules  # noqa: E402
+from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
