@@ -95,9 +95,9 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 
 ## What is GPTQModel?
 
-GPTQModel originated as major refractor of AutoGPTQ but is now a full-stand-in replacement with a clean/user-friendly api, up-to-date model support, faster inference, higher quality quants, improved hardware support, expanded feature set, and much more.
+GPTQModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
-Public tests/papers and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
+Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
 GPTQModel not only supports GPTQ but also QQQ with more quantization methods support planned. 
 
