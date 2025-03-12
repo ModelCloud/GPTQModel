@@ -22,9 +22,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 # from models.model_test import ModelTest  # noqa: E402
 from eora_calibration_data_construction import construct_c4, construct_mmlu
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
-from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora
+from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 ## meta-llama/Llama-3.2-1B
 ## meta-llama/Llama-3.2-3B
