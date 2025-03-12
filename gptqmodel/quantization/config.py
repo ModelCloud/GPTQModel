@@ -461,11 +461,6 @@ class QuantizeConfig():
             for _, v in dynamic.items():
                 v.pop("adapter", None)
 
-            # clear empty dynamic value
-            keys_to_delete = [key for key, value in dynamic.items() if not value]
-            for key in keys_to_delete:
-                del dynamic[key]
-
         # simplify: clean keys where the value is None or empty [list, dict]
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
 
