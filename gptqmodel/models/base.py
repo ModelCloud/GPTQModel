@@ -37,6 +37,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
+from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
@@ -44,7 +45,8 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
-                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
+                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model,
+                           check_and_get_model_type)
 from ..utils.torch import torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -401,6 +403,24 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = QQQProcessor(**args)
+
+            # rotate model
+            if self.quantize_config.rotation:
+                model_type = check_and_get_model_type(self.model.config)
+
+                if model_type not in ["llama", "qwen2"]:
+                    raise ValueError(f"rotation only supports model_type: llama/qwen2, "
+                                     f"current model_type is {model_type}")
+
+                self.model = fuse_layer_norms(model=self.model, layers_node=self.layers_node,
+                                              pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
+                                              lm_head_name=self.lm_head)
+
+                self.model, _ = rotate_model(model=self.model, model_type=model_type, rotate_mode=self.quantize_config.rotate_mode,
+                                             device=self.quantize_config.device)
+                if auto_gc:
+                    torch_empty_cache()
+
         else:
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = GPTQProcessor(**args)
