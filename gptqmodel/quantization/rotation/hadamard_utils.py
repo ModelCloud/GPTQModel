@@ -1,9 +1,11 @@
 import math
 
 import torch
+from gptqmodel.utils.logger import setup_logger
 
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
+log = setup_logger()
 
 def get_hadK(n, transpose=False):
     hadK, K = None, None
@@ -98,7 +100,7 @@ def import_fast_hadamard_transform():
     try:
         import fast_hadamard_transform
     except ImportError as e:
-        log.error("Package: Please install missing `fast_hadamard_transform` module via: `pip install git+https://github.com/Dao-AILab/fast-hadamard-transform.git`")
+        log.error("Package: Please install missing `fast_hadamard_transform` module via: `pip install -U git+https://github.com/Dao-AILab/fast-hadamard-transform.git --no-build-isolation -v`")
         raise e
 
 def matmul_hadU_cuda(X, hadK, K):
