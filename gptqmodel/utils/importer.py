@@ -174,10 +174,11 @@ def select_quant_linear(
     # Bitblas needs conversion, not direct quant linear load, return generic Torch linear
     if backend == BACKEND.BITBLAS and format != FORMAT.BITBLAS:
         log.info(f"{'Packing' if pack else ''} Kernel: selected: `{TorchQuantLinear.__name__}`")
+        linear = IPEXQuantLinear if device in [DEVICE.CPU, DEVICE.XPU] else TorchQuantLinear
         if multi_select:
-            return [IPEXQuantLinear]
+            return [linear]
         else:
-            return IPEXQuantLinear
+            return linear
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
 
