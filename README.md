@@ -15,8 +15,9 @@
 </p>
   
 ## News
-* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support! 
-New AMD `Instella` model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
+* 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
+New Google `Gemma 3` zero-day model support.
+New AMD `Instella` zero-day model model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
 Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
