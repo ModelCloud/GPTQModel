@@ -147,12 +147,12 @@ GPTQModel is validated for Linux, MacOS, and Windows 11:
 
 | Platform        | Device        |     |  Optimized Arch              | Kernels                                                     |
 |-----------------|---------------| --- | -------------- |-------------------------------------------------------------| 
-| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exallma V1, Triton, DyanamicCuda, Torch |
-| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | IPEX, Torch, Triton                                               |
-| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, DyanamicCuda, Torch                 |
+| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exallma V1, Triton, Torch |
+| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | IPEX, Torch                                               |
+| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, Torch                 |
 | 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | IPEX, Torch                                                 |
 | 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch, MLX via conversion                                   |
-| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | DynamicCuda, Torch                                          |
+| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | Torch                                          |
 
 
 ## Install
