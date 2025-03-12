@@ -255,31 +255,31 @@ if BUILD_CUDA_EXT:
                 )
             ]
 
-            extensions += [
-                cpp_ext.CUDAExtension(
-                    "gptqmodel_exllama_kernels",
-                    [
-                        "gptqmodel_ext/exllama/exllama_ext.cpp",
-                        "gptqmodel_ext/exllama/cuda_buffers.cu",
-                        "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                        "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                        "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-                    ],
-                    extra_link_args=extra_link_args,
-                    extra_compile_args=extra_compile_args,
-                ),
-                # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-                cpp_ext.CUDAExtension(
-                    "gptqmodel_exllamav2_kernels",
-                    [
-                        "gptqmodel_ext/exllamav2/ext.cpp",
-                        "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
-                        "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
-                    ],
-                    extra_link_args=extra_link_args,
-                    extra_compile_args=extra_compile_args,
-                )
-            ]
+        extensions += [
+            cpp_ext.CUDAExtension(
+                "gptqmodel_exllama_kernels",
+                [
+                    "gptqmodel_ext/exllama/exllama_ext.cpp",
+                    "gptqmodel_ext/exllama/cuda_buffers.cu",
+                    "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                    "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                    "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
+                ],
+                extra_link_args=extra_link_args,
+                extra_compile_args=extra_compile_args,
+            ),
+            # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
+            cpp_ext.CUDAExtension(
+                "gptqmodel_exllamav2_kernels",
+                [
+                    "gptqmodel_ext/exllamav2/ext.cpp",
+                    "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                    "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
+                ],
+                extra_link_args=extra_link_args,
+                extra_compile_args=extra_compile_args,
+            )
+        ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
