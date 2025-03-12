@@ -111,7 +111,7 @@ class Lora(Adapter):
 
         # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
         if x.dtype != self.lora_A.dtype:
-            log.info(f"Adapter: Lora A/B dtype changed to match input dtype: `{x.dtype}`")
+            log.info.once(f"Adapter: Lora A/B auto changed from `{self.lora_A.dtype}` to `{x.dtype}` to match forward input dtype.")
             self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
@@ -202,11 +202,12 @@ class Lora(Adapter):
 
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
-        if lora_A.dtype != torch.float16 or lora_A.dtype != torch.float16:
-            log.warn(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = `torch.float16`: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
+        if lora_A.dtype not in [torch.float16, torch.bfloat16]:
+            log.warn(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = [torch.float16, torch.bfloat16]: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
 
-        self.lora_A = lora_A.to(device=device, dtype=torch.float16)
-        self.lora_B = lora_B.to(device=device, dtype=torch.float16)
+        # TODO: if a/b are float32, we will convert to model dtype in first forward pass
+        self.lora_A = lora_A.to(device=device)
+        self.lora_B = lora_B.to(device=device)
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
