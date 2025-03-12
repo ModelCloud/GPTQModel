@@ -28,6 +28,7 @@ from .deepseek_v3 import DeepSeekV3GPTQ
 from .exaone import ExaoneGPTQ
 from .gemma import GemmaGPTQ
 from .gemma2 import Gemma2GPTQ
+from .gemma3 import Gemma3GPTQ
 from .glm import GLM
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
