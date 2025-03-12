@@ -202,12 +202,13 @@ class Lora(Adapter):
 
         # print(f"Adapter: {self.name()}, loaded lora_A shape: {lora_A.shape}")
         # print(f"Adapter: {self.name()}, loaded lora_B shape: {lora_B.shape}")
-        if lora_A.dtype not in [torch.float16, torch.bfloat16]:
-            log.warn(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = [torch.float16, torch.bfloat16]: actual = `[{lora_A.dtype}, {lora_A.dtype}]`.")
+        if lora_A.dtype not in [torch.float16, torch.bfloat16] or lora_B.dtype not in [torch.float16, torch.bfloat16]:
+            log.warn.once(f"Adapter: `lora_A` and `lora_B` tensors should be of dtype = [torch.float16, torch.bfloat16]: actual = `[{lora_A.dtype}, {lora_B.dtype}]`.")
 
         # TODO: if a/b are float32, we will convert to model dtype in first forward pass
-        self.lora_A = lora_A.to(device=device)
-        self.lora_B = lora_B.to(device=device)
+        # safe to downcast from float64
+        self.lora_A = lora_A.to(device=device, dtype=torch.float32 if lora_A.dtype == torch.float64 else lora_A.dtype)
+        self.lora_B = lora_B.to(device=device, dtype=torch.float32 if lora_B.dtype == torch.float64 else lora_B.dtype)
 
         #print(f"Adapter: lora_A {lora_A.shape}: `{lora_B}`")
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
