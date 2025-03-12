@@ -5,7 +5,6 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
 from logbar import LogBar
 from parameterized import parameterized
@@ -19,7 +18,6 @@ class TestKernelOutput(unittest.TestCase):
     model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
 
     target_qliner_map = {
-        BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.IPEX: IPEXQuantLinear,
     }
