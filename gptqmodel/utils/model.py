@@ -904,6 +904,12 @@ def auto_dtype(config: PretrainedConfig,
         log.info("Loader: Auto dtype (CPU + IPEX): `torch.bfloat16`")
         return torch.bfloat16
 
+    # for inference, always use FP16 for max accuracy
+    # check test_kernel_outputs for validation between fp16 and b16 in terms of kernel accuracy
+    if quant_inference:
+        log.info("Loader: Auto dtype: `torch.float16` due to inference mode. If you wish to use `bfloat16`, please pass in `torch_dtype` arg to `loader()`.")
+        return torch.float16
+
     # get dtype from config
     dtype = getattr(config, "torch_dtype")
     if dtype and not isinstance(dtype, torch.dtype):

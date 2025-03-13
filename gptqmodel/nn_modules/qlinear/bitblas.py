@@ -100,6 +100,8 @@ class BitBLASQuantLinear(BaseQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
+    SUPPORTS_DTYPES = [torch.float16]
+
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     zeros_mode = "quantized"  # "original" or "rescale" or "quantized"
     TORCH_DTYPE = torch.float16

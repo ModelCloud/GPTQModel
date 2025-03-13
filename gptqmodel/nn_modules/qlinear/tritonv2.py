@@ -61,6 +61,9 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
     SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "tritonv2"
 

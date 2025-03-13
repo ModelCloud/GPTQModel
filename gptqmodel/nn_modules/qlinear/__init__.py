@@ -50,6 +50,8 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_DEVICES: List[DEVICE] = None
     SUPPORTS_PLATFORM: List[PLATFORM] = None
 
+    SUPPORTS_DTYPES: List[t.dtype] = None
+
     def __init__(self,
                  bits: int,
                  group_size: int,
