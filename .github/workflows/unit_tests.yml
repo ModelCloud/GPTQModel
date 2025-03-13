@@ -391,6 +391,7 @@ jobs:
         run: |
           uv pip install tokenicer==0.0.4 -U
           uv pip install logbar==0.0.3 -U
+          uv pip install -r requirements.txt
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           echo "===== install dist/whl ====="
@@ -616,6 +617,7 @@ jobs:
             uv pip install transformers==4.48.3
             uv pip install numpy==1.26.3
           fi
+          uv pip install -r requirements.txt
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
