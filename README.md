@@ -17,6 +17,7 @@
 ## Latest News
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
+New Alibaba `Ovis 2` VL model support. 
 New AMD `Instella` zero-day model model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
 Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
@@ -103,10 +104,23 @@ GPTQModel not only supports GPTQ but also QQQ with more quantization methods sup
 
 ## Quantization Support
 
+GPTQModel is an expandable/modular design supporting multiple quantization methods.
+
 | Quantization              |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
 |-------------------|---|---|---|---|---|
 | GPTQ          | ✅ | ✅ | ✅ | ✅ | ✅ | 
-| QQQ          | ✅ | x | ✅ | ✅ | x | 
+| QQQ + Rotation         | ✅ | x | ✅ | ✅ | x | 
+
+## Multi-Modal
+
+Native support support some of the most popular multi-modal models:
+
+| Multi-Modal              |   | 
+|-------------------|---|
+| Qwen2 VL          | ✅ | 
+| Ovis 1.6 + 2          | ✅ | 
+
+
 
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
@@ -132,7 +146,7 @@ GPTQModel not only supports GPTQ but also QQQ with more quantization methods sup
 |-------------------|---|-------------|---|----------------|---|------------|---|-----------|---|
 | Baichuan          | ✅ | Falcon      | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
 | Bloom             | ✅ | Gemma 1/2/3 | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
-| ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6   | ✅ | XVERSE    | ✅ |
+| ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2 | ✅ | XVERSE    | ✅ |
 | CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
 | Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
 | DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
