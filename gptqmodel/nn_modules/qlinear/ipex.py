@@ -103,6 +103,9 @@ class IPEXQuantLinear(TorchQuantLinear):
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "ipex"
 

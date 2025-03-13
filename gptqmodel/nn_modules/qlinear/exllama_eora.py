@@ -68,6 +68,9 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16]
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama_v2v"
 
@@ -155,6 +158,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
 
     def forward(self, x):
         x_dtype = x.dtype
+        assert x_dtype in self.SUPPORTS_DTYPES, f"Exllama EoRA kernel is only validated for `{self.SUPPORTS_DTYPES}` dtype."
         # if x_dtype != torch.float16:
         #     # log.warn.once(
         #     #     f"Exllama EoRA kernel requires a float16 input activation, while {x.dtype} was passed. Casting to float16.\nMake sure you loaded your model with torch_dtype=torch.float16, that the model definition does not inadvertently cast to float32, or disable AMP Autocast that may produce float32 intermediate activations in the model."
