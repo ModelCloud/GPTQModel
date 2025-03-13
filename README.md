@@ -284,7 +284,7 @@ result = model.tokenizer.decode(tokens)
 
 print(f"Result: {result}")
 # For more detail of EoRA please see GPTQModel/examples/eora
-# After EoRa generation, please use the bemchmark in later part of the doc evaluate EoRA effectiveness
+# Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
