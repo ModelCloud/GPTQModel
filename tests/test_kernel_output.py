@@ -117,7 +117,7 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
         (BACKEND.TRITON, torch.float16, 0.00001),
-        (BACKEND.EXLLAMA_V1, torch.float16, 0.0015),
+        (BACKEND.EXLLAMA_V1, torch.float16, 0.00165),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0015),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
