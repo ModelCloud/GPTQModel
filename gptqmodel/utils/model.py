@@ -263,8 +263,8 @@ def create_quant_layer(
         if name not in quant_result:
             continue
 
-        # submodule may be another QuantLinear, because some submodules may be skipped due to matching
-        # in_features/out_features, etc.
+        # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
+        # mismatch and other reasons.
         # In this case, need to call list_buffer() to get the device.
         if not isinstance(submodule, BaseQuantLinear):
             ori_layer_device = next(submodule.parameters()).device
