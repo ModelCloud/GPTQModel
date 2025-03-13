@@ -111,10 +111,7 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if is_ovis:
-                    self.gptq_model.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
-                else:
-                    self.gptq_model.model(**example)
+                self.gptq_model.model(**example)
             except ValueError:
                 pass
         self.gptq_model.pre_quantize_generate_hook_end()

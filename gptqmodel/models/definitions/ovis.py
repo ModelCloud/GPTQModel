@@ -32,7 +32,7 @@ class OvisGPTQ(BaseGPTQModel):
     pre_lm_head_norm_module = "llm.model.norm"
 
     layers_node = "llm.model.layers"
-    layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer"]
+    layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer", "Qwen2DecoderLayer"]
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],
@@ -63,11 +63,16 @@ class OvisGPTQ(BaseGPTQModel):
         self.model.vte = move_to(self.model.vte, device=CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
-        text_max_length = 832
-        conversations = copy.deepcopy(sample["conversations"])
-        images = [fetch_image(sample)]
+        text_max_length = 2048
         max_partition = 9
+        conversations = copy.deepcopy(sample["conversations"])
 
+        if 'image' not in sample:
+            images = []
+        else:
+            image_paths = sample['image'] if isinstance(sample['image'], list) else [sample['image']]
+            images = [fetch_image({'image': path}) for path in image_paths]
+        
         prompt, input_ids, pixel_values, labels = self.model.preprocess_inputs(
             conversations,
             images,
