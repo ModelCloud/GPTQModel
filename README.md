@@ -250,34 +250,41 @@ model.save(quant_path)
 model = GPTQModel.load(quant_path)
 result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
+```
 
+### Quantization + EoRA Accuracy Recovery 
 
-# GPTQModel now support EoRA, a method that can further imporve the accuracy of the quantized model
-apply_eora = True
-if apply_eora:
-  eora = Lora(
-      # for eora generation, path is adapter save path; for load, it is loading path
-      path=f"{quant_path}/eora_rank32", 
-      rank=32,
-  )
+GPTQModel now support EoRA, a LoRA method that can further imporve the accuracy of the quantized model
+```py
+# higher rank improves accuracy at the cost of vram usage
+# suggestion: test rank 64 and 32 before 128 or 256 as latter may overfit while increasing memory usage
+eora = Lora(
+  # for eora generation, path is adapter save path; for load, it is loading path
+  path=f"{quant_path}/eora_rank32", 
+  rank=32,
+)
 
-  GPTQModel.adapter.generate(
-      adapter=eora,
-      model_id_or_path=model_id,
-      quantized_model_id_or_path=quant_path,
-      calibration_dataset=calibration_dataset,
-      calibration_dataset_concat_size=0,
-      auto_gc=False)
+# provide a previously gptq quantized model path
+GPTQModel.adapter.generate(
+  adapter=eora,
+  model_id_or_path=model_id,
+  quantized_model_id_or_path=quant_path,
+  calibration_dataset=calibration_dataset,
+  calibration_dataset_concat_size=0,
+  auto_gc=False)
 
-  # post-eora inference
-  model = GPTQModel.load(
-      model_id_or_path=quant_path,
-      adapter=eora
-  )
-  tokens = model.generate("Capital of France is")[0]
-  result = model.tokenizer.decode(tokens)
-  print(f"Result: {result}")
-  # For more detail of EoRA please see GPTQModel/examples/eora
+# post-eora inference
+model = GPTQModel.load(
+  model_id_or_path=quant_path,
+  adapter=eora
+)
+
+tokens = model.generate("Capital of France is")[0]
+result = model.tokenizer.decode(tokens)
+
+print(f"Result: {result}")
+# For more detail of EoRA please see GPTQModel/examples/eora
+# After EoRa generation, please use the bemchmark in later part of the doc evaluate EoRA effectiveness
 ```
 
 For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
