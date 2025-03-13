@@ -241,22 +241,31 @@ if BUILD_CUDA_EXT:
                         extra_link_args=extra_link_args,
                         extra_compile_args=extra_compile_args,
                     ),
+                    cpp_ext.CUDAExtension(
+                        'gptqmodel_exllama_eora',
+                        [
+                            "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                            "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                        ],
+                        extra_link_args=extra_link_args,
+                        extra_compile_args=extra_compile_args,
+                    ),
+                    # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
+                    cpp_ext.CUDAExtension(
+                        "gptqmodel_exllamav2_kernels",
+                        [
+                            "gptqmodel_ext/exllamav2/ext.cpp",
+                            "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                            "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
+                        ],
+                        extra_link_args=extra_link_args,
+                        extra_compile_args=extra_compile_args,
+                    )
                 ]
 
-            extensions += [
-                cpp_ext.CUDAExtension(
-                    'gptqmodel_exllama_eora',
-                    [
-                        "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                        "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                    ],
-                    extra_link_args=extra_link_args,
-                    extra_compile_args=extra_compile_args,
-                )
-            ]
-
-        #  both cuda and rocm compatible
+        # both cuda and rocm compatible
         extensions += [
+
             cpp_ext.CUDAExtension(
                 "gptqmodel_exllama_kernels",
                 [
@@ -269,17 +278,6 @@ if BUILD_CUDA_EXT:
                 extra_link_args=extra_link_args,
                 extra_compile_args=extra_compile_args,
             ),
-            # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-            cpp_ext.CUDAExtension(
-                "gptqmodel_exllamav2_kernels",
-                [
-                    "gptqmodel_ext/exllamav2/ext.cpp",
-                    "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
-                    "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            )
         ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
