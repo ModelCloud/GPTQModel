@@ -24,7 +24,7 @@ class TestKernelOutput(unittest.TestCase):
     m = 1
     k = 2048
     torch_dtype = torch.float16
-    r_tolerance = 0.7
+    r_tolerance = 0.0
     a_tolerance = 0.005
 
     @classmethod
@@ -76,6 +76,7 @@ class TestKernelOutputBFloat16(TestKernelOutput):
 @unittest.skipUnless(hasattr(torch, "xpu") and torch.xpu.is_available(), reason="Test requires XPU")
 class TestKernelOutputXPU(TestKernelOutput):
     device_map = "xpu:0"
+    a_tolerance = 0.0005
 
 
 class TestKernelOutputXPUBFloat16(TestKernelOutputXPU):
