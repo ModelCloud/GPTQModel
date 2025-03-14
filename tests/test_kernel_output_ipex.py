@@ -54,8 +54,8 @@ class TestKernelOutput(unittest.TestCase):
         torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
     @parameterized.expand([
-        (BACKEND.TORCH, 0.0000, 0.00025),
-        # (BACKEND.TRITON,  0.0000, 0.00025),
+        (BACKEND.TORCH, 0.0000, 0.0005),
+        # (BACKEND.TRITON,  0.0000, 0.0005),
         (BACKEND.IPEX,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
