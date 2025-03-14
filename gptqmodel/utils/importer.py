@@ -96,7 +96,7 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
     return normalized_device
 
 
-def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> DEVICE:
+def auto_select_device(device: Optional[DEVICE] = None, backend: Optional[BACKEND] = None) -> DEVICE:
     assert device is None or isinstance(device, DEVICE)
     assert backend is None or isinstance(backend, BACKEND)
 

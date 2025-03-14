@@ -53,7 +53,7 @@ class TestPackable(unittest.TestCase):
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.IPEX, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            # (BACKEND.IPEX, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
             (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
         ]

@@ -489,7 +489,70 @@ class PackableQuantLinear(BaseQuantLinear):
 
         return weights
 
+    def faster_pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None):
+        from ...utils.importer import auto_select_device
+
+        scales_t = scales.t().contiguous()
+        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+        if linear.bias is not None:
+            self.bias = linear.bias.clone().half()
+        self.scales = scales_t.clone().half()
+
+        # use best device in system
+        auto_device = auto_select_device()
+
+        W = linear.weight.data.to(device=auto_device).clone()
+        if isinstance(linear, nn.Conv2d):
+            W = W.flatten(1)
+        if isinstance(linear, transformers.pytorch_utils.Conv1D):
+            W = W.t()
+
+        repeat_scales = scales.to(device=auto_device).repeat_interleave(self.group_size, 1)
+        if isinstance(zeros, t.Tensor):
+            repeat_zeros = zeros.to(device=auto_device).repeat_interleave(self.group_size, 1)
+        else:
+            repeat_zeros = zeros
+
+        int_weight = t.round(W.to(device=auto_device) / repeat_scales + repeat_zeros).to(t.int32)
+        del repeat_scales
+
+        int_weight = int_weight.reshape(-1, int_weight.shape[1] // self.pack_dtype_bits * self.bits, self.pack_factor)
+        order_map = t.arange(0, self.pack_factor, device=auto_device) * self.bits
+        int_weight = int_weight << order_map
+        int_weight = t.sum(int_weight, dim=-1)
+
+        int_weight = int_weight.t().contiguous().to(t.int32)
+        self.qweight = int_weight.to("cpu")
+
+        if isinstance(zeros, t.Tensor):
+            zeros = zeros.t().contiguous()
+            # zeros -= 1
+            zeros = zeros.numpy().astype(self.pack_np_math_dtype)
+            qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
+            i = 0
+            col = 0
+            while col < qzeros.shape[1]:
+                for j in range(i, i + self.pack_factor):
+                    qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
+                i += self.pack_factor
+                col += 1
+
+            qzeros = qzeros.astype(self.pack_np_dtype)
+            self.qzeros = t.from_numpy(qzeros)
+        else:
+            # zeros -= 1
+            shape = scales_t.shape
+            value = 0
+            for j in range(0, self.pack_factor):
+                value |= zeros << (self.bits * j)
+            qzeros = np.ones((shape[0], shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype) * value
+            qzeros = qzeros.astype(self.pack_np_dtype)
+            self.qzeros = t.from_numpy(qzeros)
+
     def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
+        if self.bits in [2, 4, 8]:
+            return self.faster_pack(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
+
         W = linear.weight.data.clone()
         if isinstance(linear, nn.Conv2d):
             W = W.flatten(1)
