@@ -78,5 +78,5 @@ class TestKernelOutputXPU(TestKernelOutput):
     device_map = "xpu:0"
 
 
-class TestKernelOutputBFloat16(TestKernelOutputXPU):
+class TestKernelOutputXPUBFloat16(TestKernelOutputXPU):
     torch_dtype = torch.bfloat16
