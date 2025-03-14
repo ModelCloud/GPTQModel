@@ -22,7 +22,7 @@ New AMD `Instella` zero-day model model support. New `GSM8K Platinum` and `MMLU-
 Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
-Fixed `Peft` `bfloat16` training. Model loader auto-dtype logic will now auto select `bfloat16` if it is specified in model config. 
+Fixed `Peft` `bfloat16` training. 
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
 `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress.
