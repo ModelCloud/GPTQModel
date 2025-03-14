@@ -904,11 +904,14 @@ def auto_dtype(config: PretrainedConfig,
         log.info("Loader: Auto dtype (CPU + IPEX): `torch.bfloat16`")
         return torch.bfloat16
 
-    # for inference, always use FP16 for max accuracy
-    # check test_kernel_outputs for validation between fp16 and b16 in terms of kernel accuracy
-    if quant_inference:
-        log.info("Loader: Auto dtype: `torch.float16` due to inference mode. If you wish to use `bfloat16`, please pass in `torch_dtype` arg to `loader()`.")
-        return torch.float16
+    # Update: latest kernel accuracies have shown, with multiple ranges of shapes
+    # There are no accuracy issues with bf16 vs fp16. The only kernel with severe
+    # regression in bf16 is MARLIN_FP16 (reduce math in fp16) which is not auto-selectable
+    # # for inference, always use FP16 for max accuracy
+    # # check test_kernel_outputs for validation between fp16 and b16 in terms of kernel accuracy
+    # if quant_inference:
+    #     log.info("Loader: Auto dtype: `torch.float16` due to inference mode. If you wish to use `bfloat16`, please pass in `torch_dtype` arg to `loader()`.")
+    #     return torch.float16
 
     # get dtype from config
     dtype = getattr(config, "torch_dtype")
