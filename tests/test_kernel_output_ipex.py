@@ -73,7 +73,7 @@ class TestKernelOutputBFloat16(TestKernelOutput):
     torch_dtype = torch.bfloat16
 
 
-@unittest.skipUnless(hasattr(torch, "xpu") and torch.xpu.is_available, reason="Test requires XPU")
+@unittest.skipUnless(hasattr(torch, "xpu") and torch.xpu.is_available(), reason="Test requires XPU")
 class TestKernelOutputXPU(TestKernelOutput):
     device_map = "xpu:0"
 
