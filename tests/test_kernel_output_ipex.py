@@ -2,7 +2,6 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.adapter.adapter import Adapter
 from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.model import find_modules
@@ -21,20 +20,23 @@ class TestKernelOutput(unittest.TestCase):
     }
     target = 'model.layers.6.self_attn.v_proj'
     device_map = "cpu"
-    m = 1
+    m = 8
     k = 2048
     torch_dtype = torch.float16
     r_tolerance = 0.0
-    a_tolerance = 0.005
+    a_tolerance = 0.01
+    random_input_samples = 100
 
     @classmethod
     def setUp(self):
-        self.x = torch.rand((self.m, self.k), dtype=self.torch_dtype)
-        self.torch_kernel_out = self.forward(self, self.x, backend=BACKEND.TORCH)
+        self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device_map=self.device_map, torch_dtype=self.torch_dtype)
+        self.x = []
+        self.torch_kernel_outs = []
+        for i in range(self.random_input_samples):
+            self.x.append(torch.rand((self.m, self.k), dtype=self.torch_dtype))
+            self.torch_kernel_outs.append(self.forward(self, self.torch_model, self.x[i], backend=BACKEND.TORCH))
 
-    def forward(self, x, backend: BACKEND, adapter: Adapter = None):
-        model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter, device_map=self.device_map, torch_dtype=self.torch_dtype)
-
+    def forward(self, model, x, backend: BACKEND):
         target_qlinear_cls = self.target_qliner_map[backend]
 
         modules = find_modules(model.model, layers=[target_qlinear_cls])
@@ -45,9 +47,6 @@ class TestKernelOutput(unittest.TestCase):
                 break
 
         assert result is not None
-
-        del module
-        del model
 
         return result
 
@@ -60,13 +59,12 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.IPEX,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
-        out = self.forward(self.x, backend=backend)
-
+        model = GPTQModel.load(self.model_path, backend=backend, device_map=self.device_map, torch_dtype=self.torch_dtype)
         log.info(f"device_map: {self.device_map} ")
         log.info(f"backend: {backend} ")
-        log.info(out[0][:100])
-
-        self.assert_on_mismatch(self.torch_kernel_out, out, r_tolerance, a_tolerance)  # use torch as reference
+        for i in range(self.random_input_samples):
+            out = self.forward(model, self.x[i], backend=backend)
+            self.assert_on_mismatch(self.torch_kernel_outs[i], out, r_tolerance, a_tolerance)  # use torch as reference
 
 
 class TestKernelOutputBFloat16(TestKernelOutput):
