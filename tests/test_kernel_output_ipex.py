@@ -25,7 +25,7 @@ class TestKernelOutput(unittest.TestCase):
     torch_dtype = torch.float16
     r_tolerance = 0.0
     a_tolerance = 0.01
-    input_samples_each_size = 20
+    input_samples_each_size = 20 # final size == input_samples_each_size * len(m)
 
     @classmethod
     def setUp(self):

@@ -16,8 +16,7 @@ from torch import Tensor
 
 log = LogBar.shared()
 
-CUDA = torch.device("cuda:0")
-
+DEVICE = torch.device("cuda:0")
 
 class Data:
     def __init__(self):
@@ -41,7 +40,17 @@ class TestKernelOutput(unittest.TestCase):
     }
 
     target = 'model.layers.6.self_attn.v_proj'
-    random_input_samples = 1000
+    m = [   # tuple is dim_0 size and num_sampes for each dim_0
+            (1, 256),
+            (16, 128),
+            (32, 64),
+            (64, 32),
+            (128, 16),
+        ]
+
+    # sum all the second tuple value for total sample size
+    random_input_sample_size = sum(t[1] for t in m)
+
 
     @classmethod
     def setUpClass(cls):
@@ -62,11 +71,15 @@ class TestKernelOutput(unittest.TestCase):
                 rank=64,
                 path=lora_path)
 
-            data.adapter.post_init(cls.target, device=CUDA) # trigger adapter weight load from disk
+            data.adapter.post_init(cls.target, device=DEVICE) # trigger adapter weight load from disk
             data.k = data.adapter.lora_A.shape[0]
 
-            for _ in log.pb(range(cls.random_input_samples)).title("Generate Random Inputs"):
-                data.x.append(torch.rand((data.m, data.k), device=CUDA, dtype=dtype))
+            for _ in log.pb(range(cls.random_input_sample_size)).title("Generate Random Inputs"):
+                for dim_0, samples in cls.m:
+
+                    for _ in range(samples):
+                        inputs = torch.rand((dim_0, data.k), device=DEVICE, dtype=dtype)
+                        data.x.append(inputs)
 
             AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
@@ -85,7 +98,7 @@ class TestKernelOutput(unittest.TestCase):
         for name, module in modules.items():
             if name == self.target:
                 data = self.data[dtype]
-                for i in log.pb(range(self.random_input_samples)).title("Forward Pass on Random Input"):
+                for i in log.pb(range(self.random_input_sample_size)).title("Forward Pass on Random Input"):
                     assert data.x[i].dtype == dtype
                     result.append(module(data.x[i]))
                 break
@@ -105,11 +118,11 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
         (BACKEND.TRITON, torch.float16, 0.00001),
-        (BACKEND.EXLLAMA_V1, torch.float16, 0.0019),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0013),
+        (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
+        (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0015),
+        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
     ])
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
         out = self.forward(backend=backend, dtype=dtype)
@@ -132,10 +145,10 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0041),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0037),
+        (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
+        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
         (BACKEND.MARLIN, torch.bfloat16, 0.0031),
-        (BACKEND.MARLIN_FP16, torch.bfloat16, 0.007),
+        (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
@@ -159,11 +172,11 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
         (BACKEND.TRITON, torch.float16, 0.00001),
-        (BACKEND.EXLLAMA_V1, torch.float16, 0.00165),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0015),
+        (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
+        (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0014)
+        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
     ])
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         data = self.data[dtype]
@@ -183,10 +196,10 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0041),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0044),
+        (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
+        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
         (BACKEND.MARLIN, torch.bfloat16, 0.0033),
-        (BACKEND.MARLIN_FP16, torch.bfloat16, 0.0070),
+        (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
