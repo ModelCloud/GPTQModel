@@ -212,6 +212,34 @@ if BUILD_CUDA_EXT:
             "--use_fast_math",
             "-diag-suppress=179,39",  # 186
         ]
+    else:
+        # TODO: waiting for this PR in pytorch to merge for full fix
+        # https://github.com/pytorch/pytorch/pull/149245#issuecomment-2730196756
+        # Simple hipify, replace the first occurrence of CUDA with HIP
+        # in flags starting with "-" and containing "CUDA", but exclude -I flags
+        def _hipify_compile_flags(extension):
+            if isinstance(extension.extra_compile_args, dict) and 'nvcc' in extension.extra_compile_args:
+                modified_flags = []
+                for flag in extension.extra_compile_args['nvcc']:
+                    if flag.startswith("-") and "CUDA" in flag and not flag.startswith("-I"):
+                        # check/split flag into flag and value
+                        parts = flag.split("=", 1)
+                        if len(parts) == 2:
+                            flag_part, value_part = parts
+                            # replace fist instance of "CUDA" with "HIP" only in the flag and not flag value
+                            modified_flag_part = flag_part.replace("CUDA", "HIP", 1)
+                            modified_flag = f"{modified_flag_part}={value_part}"
+                        else:
+                            # replace fist instance of "CUDA" with "HIP" in flag
+                            modified_flag = flag.replace("CUDA", "HIP", 1)
+                        modified_flags.append(modified_flag)
+                        print(f'Modified flag: {flag} -> {modified_flag}', file=sys.stderr)
+                    else:
+                        modified_flags.append(flag)
+                extension.extra_compile_args['nvcc'] = modified_flags
+
+        # convert nvcc flags to hip flags
+        _hipify_compile_flags(extensions)
 
     extensions = []
 
