@@ -65,6 +65,10 @@ class LoopProcessor:
         self.durations = []
         self.module_names = []
 
+        # Initialize a dictionary to track maximum column widths
+        self.stat_max_widths = {}
+        self.stat_call_count = 0
+
         if self.logger_board == "clearml":
             try:
                 from clearml import Task
@@ -125,6 +129,31 @@ class LoopProcessor:
             self.num_batches = len(calibration_dataset)
 
         self.calibration_dataset = calibration_dataset
+
+    def log_new_row(self, stat):
+        self.stat_call_count += 1
+
+        # Update max_widths with the new row's column widths
+        for key, value in stat.items():
+            current_width = max(len(str(key)), len(str(value))) + 4 # 4 is for padding
+            if key not in self.stat_max_widths or current_width > self.stat_max_widths[key]:
+                self.stat_max_widths[key] = current_width
+
+        if self.stat_call_count % 20 == 1:
+            # Format the header row
+            header_row = "| " + " | ".join(
+                str(key).ljust(self.stat_max_widths[key]) for key in self.stat_max_widths.keys()) + " |"
+
+            if self.stat_call_count == 1:
+                log.info(len(header_row) * "-")
+            log.info(header_row)
+            log.info(len(header_row) * "-")
+
+        formatted_row = "| " + " | ".join(
+            str(stat.get(key, "")).ljust(self.stat_max_widths[key]) for key in self.stat_max_widths.keys()) + " |"
+
+        log.info(formatted_row)
+        log.info(len(formatted_row) * "-")
 
     def result_save(self, key: str, value: Any):
         assert self.result_get(key) is None, f"key: {key} already exists in `self.result`"

@@ -159,7 +159,11 @@ class GPTQProcessor(LoopProcessor):
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
         self.log.append(stat)
-        log.info(stat)
+
+        # Log the new row
+        self.log_new_row(stat)
+
+        #log.info(stat)
 
         self.result_save(module.full_name, {
             "scale": move_to(scale, device=CPU, stream=self.stream),
