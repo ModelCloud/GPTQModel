@@ -182,7 +182,8 @@ class EoraProcessor(LoopProcessor):
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
         self.log.append(stat)
-        log.info(stat)
+        # log.info(stat)
+        self.log_new_row(stat)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         self.result_save(module.full_name, {
