@@ -189,7 +189,7 @@ class ModuleLooper():
                                                   num_experts=num_experts)
 
         layer_count = len(layers)
-        quant_modules_pb = (log.pb(range(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count))
+        quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
                             .manual()
                             .set(left_steps_offset=1))
 

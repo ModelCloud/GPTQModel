@@ -850,7 +850,7 @@ class BaseGPTQModel(nn.Module):
         quantizers = {}
 
         layer_count = len(layers)
-        quant_modules_pb = log.pb(range(layer_count + 1 if self.quantize_config.lm_head else layer_count)).manual()
+        quant_modules_pb = log.pb(layer_count + 1 if self.quantize_config.lm_head else layer_count).manual()
         gpu_memorys = []
         cpu_memorys = []
         durations = []
