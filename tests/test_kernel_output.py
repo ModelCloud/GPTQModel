@@ -74,7 +74,7 @@ class TestKernelOutput(unittest.TestCase):
             data.adapter.post_init(cls.target, device=DEVICE) # trigger adapter weight load from disk
             data.k = data.adapter.lora_A.shape[0]
 
-            for _ in log.pb(range(cls.random_input_sample_size)).title("Generate Random Inputs"):
+            for _ in log.pb(cls.random_input_sample_size).title("Generate Random Inputs"):
                 for dim_0, samples in cls.m:
 
                     for _ in range(samples):
@@ -98,7 +98,7 @@ class TestKernelOutput(unittest.TestCase):
         for name, module in modules.items():
             if name == self.target:
                 data = self.data[dtype]
-                for i in log.pb(range(self.random_input_sample_size)).title("Forward Pass on Random Input"):
+                for i in log.pb(self.random_input_sample_size).title("Forward Pass on Random Input"):
                     assert data.x[i].dtype == dtype
                     result.append(module(data.x[i]))
                 break
@@ -128,7 +128,7 @@ class TestKernelOutput(unittest.TestCase):
         out = self.forward(backend=backend, dtype=dtype)
 
         # torch as ref
-        pb = log.pb(range(len(out))).title(f"Actual Kernel Output With Lora {dtype}").manual()
+        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
         for i in pb:
             data = self.data[dtype]
             pb.subtitle(f"backed = `{backend}`").draw()
@@ -155,7 +155,7 @@ class TestKernelOutput(unittest.TestCase):
         out = self.forward(backend=backend, dtype=dtype)
 
         # torch as ref
-        pb = log.pb(range(len(out))).title(f"Actual Kernel Output With Lora {dtype}").manual()
+        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
         for i in pb:
             data = self.data[dtype]
             pb.subtitle(f"backed = `{backend}`").draw()
@@ -183,7 +183,7 @@ class TestKernelOutput(unittest.TestCase):
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
 
         # torch as ref
-        pb = log.pb(range(len(out))).title(f"Actual Kernel Output With Lora {dtype}").manual()
+        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
         for i in pb:
             pb.subtitle(f"backed = `{backend}`").draw()
             try:
@@ -207,7 +207,7 @@ class TestKernelOutput(unittest.TestCase):
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
 
         # torch as ref
-        pb = log.pb(range(len(out))).title(f"Actual Kernel Output With Lora {dtype}").manual()
+        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
         for i in pb:
             pb.subtitle(f"backed = `{backend}`").draw()
             try:
