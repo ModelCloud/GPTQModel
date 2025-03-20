@@ -224,7 +224,7 @@ class ModuleLooper():
             modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
             for p_index, processor in enumerate(self.processors):
-                processor.stat_call_count = 0 # reset
+                processor.log_call_count = 0 # reset
                 processor.collect_memory_info(layer_index)
 
                 layer_inputs = processor.inputs_cache.layer_inputs

@@ -13,10 +13,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import copy
+import json
+import os
+import queue
+import threading
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
+from random_word import RandomWords
 from torch import Tensor
 from torch.nn import Module
 
@@ -57,22 +63,25 @@ class LoopProcessor:
         self.fwd_time = None
         self.layer_count = None
 
-        # logging
-        self.log = []
-        self.logger_board = logger_board
+
         self.gpu_memorys = []
         self.cpu_memorys = []
         self.durations = []
         self.module_names = []
 
-        # Initialize a dictionary to track maximum column widths
-        self.stat_max_widths = {}
-        self.stat_call_count = 0
+        # logging
+        self.log = []
+        self.logger_board = logger_board
+        self.log_max_widths = {} # track maximum column widths
+        self.log_call_count = 0
+        current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
+        self.log_tmp_log_file_name = f"{self.name()}_log_{RandomWords().get_random_word()}_time_{current_time}.log"
+        self.log_worker_queue = queue.Queue()
+        self.log_worker: threading.Thread = None
 
         if self.logger_board == "clearml":
             try:
                 from clearml import Task
-                from random_word import RandomWords
 
                 from ..utils.plotly import create_plotly
             except ImportError as _:
@@ -130,30 +139,54 @@ class LoopProcessor:
 
         self.calibration_dataset = calibration_dataset
 
+    def log_save_async(self, stat):
+        # start log worker async writer
+        if self.log_worker is None:
+            log.info(f"Process: progress logs for `{self.name()}` will be streamed to file: `{self.log_tmp_log_file_name}`")
+            def _thread_log_worker():
+                while True:
+                    data = self.log_worker_queue.get()
+                    # false is special data packet to queue to stop worker
+                    if data == False:
+                        return
+                    with open(self.log_tmp_log_file_name, 'a') as f:  # append
+                        json.dump(data, f, indent=4)
+                        f.write("\n")
+
+                    self.log_worker_queue.task_done()
+
+            self.log_worker = threading.Thread(target=_thread_log_worker, daemon=True)
+            self.log_worker.start()
+
+        self.log_worker_queue.put(stat)
+
     def log_new_row(self, stat):
-        self.stat_call_count += 1
+        self.log_call_count += 1
+        self.log_save_async(stat) # write to temp log file
 
         # Update max_widths with the new row's column widths
         for key, value in stat.items():
             current_width = max(len(str(key)), len(str(value))) + 4 # 4 is for padding
-            if key not in self.stat_max_widths or current_width > self.stat_max_widths[key]:
-                self.stat_max_widths[key] = current_width
+            if key not in self.log_max_widths or current_width > self.log_max_widths[key]:
+                self.log_max_widths[key] = current_width
 
-        if self.stat_call_count % 20 == 1:
+        if self.log_call_count % 20 == 1:
             # Format the header row
             header_row = "| " + " | ".join(
-                str(key).ljust(self.stat_max_widths[key]) for key in self.stat_max_widths.keys()) + " |"
+                str(key).ljust(self.log_max_widths[key]) for key in self.log_max_widths.keys()) + " |"
 
-            if self.stat_call_count == 1:
+            if self.log_call_count == 1:
                 log.info(len(header_row) * "-")
             log.info(header_row)
             log.info(len(header_row) * "-")
 
         formatted_row = "| " + " | ".join(
-            str(stat.get(key, "")).ljust(self.stat_max_widths[key]) for key in self.stat_max_widths.keys()) + " |"
+            str(stat.get(key, "")).ljust(self.log_max_widths[key]) for key in self.log_max_widths.keys()) + " |"
 
         log.info(formatted_row)
         log.info(len(formatted_row) * "-")
+
+
 
     def result_save(self, key: str, value: Any):
         assert self.result_get(key) is None, f"key: {key} already exists in `self.result`"
@@ -231,6 +264,13 @@ class LoopProcessor:
     def finalize(self, model: BaseGPTQModel, **kwargs):
         del self.inputs_cache
         del self._results
+
+        if self.log_worker is not None:
+            self.log_worker_queue.put(False)
+            # TODO make this file delete based on user toggle
+            # cleanup temp log file
+            # if os.path.exists(self.log_tmp_log_file_name):
+            #     os.remove(file_path)
 
     def release_calibration_dataset(self):
         del self.calibration_dataset
