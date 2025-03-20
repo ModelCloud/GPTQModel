@@ -142,6 +142,7 @@ class LoopProcessor:
     def log_save_async(self, stat):
         # start log worker async writer
         if self.log_worker is None:
+            log.info(f"Process: progress logs for `{self.name()}` will be streamed to file: `{self.log_tmp_log_file_name}`")
             def _thread_log_worker():
                 while True:
                     data = self.log_worker_queue.get()
