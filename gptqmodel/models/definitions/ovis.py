@@ -72,7 +72,7 @@ class OvisGPTQ(BaseGPTQModel):
         else:
             image_paths = sample['image'] if isinstance(sample['image'], list) else [sample['image']]
             images = [fetch_image({'image': path}) for path in image_paths]
-        
+
         prompt, input_ids, pixel_values, labels = self.model.preprocess_inputs(
             conversations,
             images,
