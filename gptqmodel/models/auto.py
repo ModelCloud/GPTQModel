@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 
+import threadpoolctl
+
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -580,39 +582,52 @@ class GPTQModel:
             buffered_fwd: bool = False,
             # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
             auto_gc: bool = True,
+            # pass-through vars for load()
+            trust_remote_code: bool = False,
+            torch_dtype: Optional[Union[str, torch.dtype]] = None,
         ):
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
 
             adapter.validate_path(local=True)
 
-            quantized_model = GPTQModel.load(
-                model_id_or_path=quantized_model_id_or_path,
-                backend=BACKEND.TORCH,
-                device=CPU,
-            )
+            with threadpoolctl.threadpool_limits(limits=1):
+                log.info("Model: Quant Model Loading...")
+                quantized_model = GPTQModel.load(
+                    model_id_or_path=quantized_model_id_or_path,
+                    backend=BACKEND.TORCH,
+                    device=CPU,
+                    trust_remote_code=trust_remote_code,
+                    torch_dtype=torch_dtype,
+                )
 
-            qcfg = quantized_model.quantize_config
-            qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
-            # for name, module in qModules.items():
-            #     quantized_weights[name] = module.dequantize_weight()
-            del quantized_model
-            torch_empty_cache()
+                qcfg = quantized_model.quantize_config
+                qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
+                # for name, module in qModules.items():
+                #     quantized_weights[name] = module.dequantize_weight()
+                del quantized_model
+                torch_empty_cache()
 
-            model = GPTQModel.load(
-                model_id_or_path=model_id_or_path,
-                quantize_config=qcfg,
-                backend=BACKEND.TORCH)
+                log.info("Model: Native Model Loading...")
+                model = GPTQModel.load(
+                    model_id_or_path=model_id_or_path,
+                    quantize_config=qcfg,
+                    backend=BACKEND.TORCH,
+                    trust_remote_code=trust_remote_code,
+                    torch_dtype=torch_dtype,
+                    device=CPU,
+                )
 
-            model._eora_generate(
-                adapter=adapter,
-                quantized_modules=qModules,
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
-                batch_size=batch_size,
-                calibration_enable_gpu_cache=calibration_enable_gpu_cache,
-                tokenizer=tokenizer,
-                logger_board=logger_board,
-                buffered_fwd=buffered_fwd,
-                auto_gc=auto_gc)
+                log.info("Model: Adapter generation started")
+                model._eora_generate(
+                    adapter=adapter,
+                    quantized_modules=qModules,
+                    calibration_dataset=calibration_dataset,
+                    calibration_dataset_concat_size=calibration_dataset_concat_size,
+                    batch_size=batch_size,
+                    calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+                    tokenizer=tokenizer,
+                    logger_board=logger_board,
+                    buffered_fwd=buffered_fwd,
+                    auto_gc=auto_gc)
             return
