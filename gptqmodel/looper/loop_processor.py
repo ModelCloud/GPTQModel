@@ -160,6 +160,18 @@ class LoopProcessor:
 
         self.log_worker_queue.put(stat)
 
+    def loss_color(self, loss_value):
+        if loss_value <= 0.1:
+            return "\033[92m"  # Green
+        elif loss_value <= 1:
+            return "\033[96m" # Cyan
+        elif loss_value <= 5:
+            return "\033[93m"  # Yellow
+        elif loss_value <= 20:
+            return "\033[33m"  # Orange
+        else:
+            return "\033[91m"  # Red
+
     def log_new_row(self, stat):
         self.log_call_count += 1
         self.log_save_async(stat) # write to temp log file
@@ -180,8 +192,18 @@ class LoopProcessor:
             log.info(header_row)
             log.info(len(header_row) * "-")
 
-        formatted_row = "| " + " | ".join(
-            str(stat.get(key, "")).ljust(self.log_max_widths[key]) for key in self.log_max_widths.keys()) + " |"
+        formatted_row = "| "
+        for key in self.log_max_widths.keys():
+            value = stat.get(key, "")
+            if key == "loss":
+                color_code = self.loss_color(float(value))
+                formatted_value = f"{color_code}{value}\033[0m"
+            else:
+                formatted_value = str(value)
+            formatted_row += formatted_value.ljust(self.log_max_widths[key]) + " | "
+
+        # formatted_row = "| " + " | ".join(
+        #     str(stat.get(key, "")).ljust(self.log_max_widths[key]) for key in self.log_max_widths.keys()) + " |"
 
         log.info(formatted_row)
         log.info(len(formatted_row) * "-")
