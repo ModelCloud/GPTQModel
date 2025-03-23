@@ -130,12 +130,12 @@ class EoraProcessor(LoopProcessor):
         wq: torch.Tensor = module.state["wq"]
 
         # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
-        if w.dtype != torch.float16:
+        if w.dtype != torch.float32:
             w_wq_delta = w.to(dtype=torch.float32) - wq # wq is float16
         else:
             w_wq_delta = w - wq
 
-        assert w_wq_delta.dtype == torch.float32
+        assert w_wq_delta.dtype == torch.float32, f"w_wq_delta dtype: {w_wq_delta.dtype}"
 
         # print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
         del w

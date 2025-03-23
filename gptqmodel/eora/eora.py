@@ -45,7 +45,9 @@ def eora_compute_lora(
         w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
         module: NamedModule,
         eigen_scaling_diag_matrix: torch.dtype,
-        rank: int) -> Tuple[Tensor, Tensor]:
+        rank: int,
+        dtype: torch.dtype = torch.float16,
+) -> Tuple[Tensor, Tensor]:
 
     assert w_wq_delta.dtype == torch.float32
 
@@ -87,8 +89,8 @@ def eora_compute_lora(
     truc_sigma = torch.diag(truc_s)
 
     sqrtS = torch.sqrt(truc_sigma)
-    B = torch.matmul(truc_u, sqrtS).to(dtype=torch.float16)
-    A = torch.matmul(sqrtS, truc_v).to(dtype=torch.float16)
+    B = torch.matmul(truc_u, sqrtS).to(dtype=dtype) # default to float16, check if we should save to float32
+    A = torch.matmul(sqrtS, truc_v).to(dtype=dtype) # default to float16, check if we should save to float32
 
 
     del L, Q, U, S, V,

@@ -20,7 +20,6 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_compile
 
 log = setup_logger()
 
@@ -43,7 +42,8 @@ class DequantizeProcessor(LoopProcessor):
 
         # TODO fix num_itr param..need to calculate this before dequant
         m = self.quantized_modules.pop(module.full_name)
-        m.dequantize_weight = torch_compile(m.dequantize_weight)
+        m.optimize()
+        log.info(f"Dequantize: `{m.name}`")
         wq = m.dequantize_weight().T.to(device=device)
 
         module.state.update({
