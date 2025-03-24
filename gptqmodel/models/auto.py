@@ -105,10 +105,10 @@ from .definitions.phi import PhiGPTQ  # noqa: E402
 from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
-from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
-from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
+from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
+from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
 from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402

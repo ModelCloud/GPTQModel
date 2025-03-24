@@ -29,7 +29,7 @@ import transformers
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -43,9 +43,9 @@ class GPTQ:
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
         if isinstance(module, NamedModule):
             self.module = module.module
-            name = module.name
+            self.name = module.name
         else:
-            name = HF_OPTIMUM
+            self.name = HF_OPTIMUM
             self.module = module
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
@@ -56,7 +56,7 @@ class GPTQ:
         # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
 
-        self.quantizer = self.create_quantizer(name=name)
+        self.quantizer = self.create_quantizer(name=self.name)
 
         # fwd input buffer
         self.fwd_inputs_buffered = False
@@ -101,7 +101,7 @@ class GPTQ:
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-        tmp = inp.shape[0]
+        batch_size = inp.shape[0]
 
         if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
@@ -120,15 +120,33 @@ class GPTQ:
             inp = inp.flatten(1)
 
         if not hasattr(self, "H"):
-            self.H = torch.zeros((self.columns, self.columns), device=self.device)
+            try:
+                self.H = torch.zeros((self.columns, self.columns), device=self.device)
+            except torch.OutOfMemoryError:
+                log.info("Memory: OOM H allocate bypass")
+                torch_empty_cache()
+                self.H = torch.zeros((self.columns, self.columns), device=self.device)
         else:
-            self.H *= self.nsamples / (self.nsamples + tmp)
+            self.H *= self.nsamples / (self.nsamples + batch_size)
 
-        self.nsamples += tmp
+        self.nsamples += batch_size
         # inp = inp.float()
+
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
-        self.H += inp.matmul(inp.t())
+        #self.H += self.chunked_matmul_t_and_t_transposed(inp, chunk_size=1024)
+
+        try:
+            self.H += inp.matmul(inp.t())
+        except torch.OutOfMemoryError:
+            log.info("Memory: OOM cpu bypass for process batch matmul")
+            torch_empty_cache()
+
+            device = self.H.device
+            self.H, inp = self.H.to(device=CPU), inp.to(device=CPU)
+            self.H += inp.matmul(inp.t())
+            self.H = self.H.to(device=device) # move back
+
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -157,7 +175,7 @@ class GPTQ:
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
         self.qcfg.static_groups = static_groups
-        (Q, scale, zero, g_idx, duration, avg_loss, damp_percent) = self.quantize(blocksize=blocksize)
+        (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
         self.module.weight.data = Q
         return scale, zero, g_idx, duration, avg_loss, damp_percent
 
@@ -166,6 +184,7 @@ class GPTQ:
         self,
         blocksize=128,
     ):
+        # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
         # process buffered inputs
@@ -301,7 +320,7 @@ class GPTQ:
 
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
-            raise ValueError("Quantization: Failed due to `NaN` loss")
+            raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
@@ -346,7 +365,7 @@ class GPTQ:
 
         duration = time.time() - start
 
-        return Q, scale, zero, g_idx, duration, avg_loss, damp_percent
+        return Q, scale, zero, g_idx, duration, avg_loss, damp_percent, self.nsamples
 
     def free(self):
         # if os.environ.get("DEBUG"):

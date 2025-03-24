@@ -23,8 +23,8 @@ from torch.nn import Module
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
+from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
+                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU
@@ -120,7 +120,7 @@ class GPTQProcessor(LoopProcessor):
         ## Need to return the quantized_weight for offloading
         g = self.tasks[module.name]
         # TODO FIX ME, quantize does NOT need to pass any args! Check HF compat!
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent = g.quantize()
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -150,6 +150,7 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
             QUANT_LOG_LOSS: f"{avg_loss:.8f}",
+            QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
