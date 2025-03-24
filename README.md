@@ -15,7 +15,7 @@
 </p>
   
 ## Latest News
-* 03/13/2025 2.1.1-dev: Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm.
+* 03/24/2025 2.1.1-dev: New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm.
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
 New Alibaba `Ovis 2` VL model support. 
