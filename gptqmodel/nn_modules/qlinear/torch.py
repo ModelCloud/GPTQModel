@@ -151,10 +151,10 @@ class TorchQuantLinear(PackableQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        out = self._forward(x, x.dtype, out_shape)
+        out = self._forward(x, out_shape)
         return out
 
-    def _forward(self, x, x_dtype, out_shape):
+    def _forward(self, x, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         # make sure dequant dtype matches input x
         weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
@@ -167,7 +167,7 @@ class TorchQuantLinear(PackableQuantLinear):
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
-        return out.to(x_dtype)
+        return out
 
     # clear gptq only weights: useful in de-quantization
     def _empty_gptq_only_weights(self):

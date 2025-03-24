@@ -55,6 +55,7 @@ PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
 PROCESS_LOG_MODULE = "module"
 QUANT_LOG_LOSS = "loss"
+QUANT_LOG_NSAMPLES = "samples"
 QUANT_LOG_DAMP = "damp"
 PROCESS_LOG_TIME = "time"
 PROCESS_LOG_FWD_TIME = "fwd_time"
@@ -134,7 +135,7 @@ def ModelWriter(cls):
         if self.quant_log:
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
-                w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
+                w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
                 w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
                               entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 

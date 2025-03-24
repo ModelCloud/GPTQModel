@@ -58,6 +58,8 @@ from .qwen import QwenGPTQ
 from .qwen2 import Qwen2GPTQ
 from .qwen2_moe import Qwen2MoeGPTQ
 from .qwen2_vl import Qwen2VLGPTQ
+from .qwen3 import Qwen3GPTQ
+from .qwen3_moe import Qwen3MoeGPTQ
 from .rw import RWGPTQ
 from .stablelmepoch import StableLMEpochGPTQ
 from .starcoder2 import Starcoder2GPTQ

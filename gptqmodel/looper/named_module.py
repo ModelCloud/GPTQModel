@@ -26,6 +26,7 @@ class NamedModule(torch.nn.Module):
         super().__init__()
 
         self.module = module # wrapped module
+        self.module_dtype = next(module.parameters()).dtype
         self.name = name # module name
         self.full_name = full_name # module full name (path) within model
         self.layer_index = layer_index # layerid in a repeating layer, if in outside layer, this info may be fake

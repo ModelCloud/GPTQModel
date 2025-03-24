@@ -855,6 +855,7 @@ class BaseGPTQModel(nn.Module):
         cpu_memorys = []
         durations = []
         avg_losses = []
+        nsamples = []
         module_names = []
         shared_kv_cache_dict = {}
 
@@ -1014,7 +1015,7 @@ class BaseGPTQModel(nn.Module):
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
                     ## Need to return the quantized_weight for offloading
-                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent = gptq[name].quantize()
+                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = gptq[name].quantize()
 
                     ## Assign the quantized weight to the weight
                     gptq[name].module.weight.data = quantized_weight.to(device=gptq[name].device)
@@ -1038,9 +1039,10 @@ class BaseGPTQModel(nn.Module):
                         )
                     durations.append(duration)
                     avg_losses.append(avg_loss)
+                    nsamples.append(nsamples)
                     module_names.append(f"layer-{module_index}-{name}")
 
-                    stat = {PROCESS_LOG_LAYER: module_index, PROCESS_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+                    stat = {PROCESS_LOG_LAYER: module_index, PROCESS_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}", QUANT_LOG_NSAMPLES: f"{nsamples}",
                             QUANT_LOG_DAMP: f"{damp_percent:.5f}", PROCESS_LOG_TIME: f"{duration:.3f}", PROCESS_LOG_FWD_TIME: f"{fwd_time:.3f}"}
                     if self.quantize_config.dynamic is not None:
                         stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
