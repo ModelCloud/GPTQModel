@@ -119,7 +119,7 @@ class EoraProcessor(LoopProcessor):
     def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)
 
-        self.pb.title(f"EoRA gen: {module.name} in layer").draw()
+        self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()
 
         start = time.time()
 
@@ -140,12 +140,14 @@ class EoraProcessor(LoopProcessor):
         # print(f"types: w_q_delta = `{w_wq_delta.dtype}`,  device = `{w_wq_delta.device}`")
         del w
 
+        # log.info(f"EoRA: module native dtype = `{module_native_dtype}")
         A, B = self.eora_compute_lora(
             device=w_device,
             w_wq_delta=w_wq_delta,
             module=module,
             eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
-            rank=module.adapter_cfg.rank
+            rank=module.adapter_cfg.rank,
+            dtype=module.module_dtype,
         )
 
         # wq with A/B applied

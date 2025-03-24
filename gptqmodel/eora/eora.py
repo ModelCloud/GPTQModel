@@ -46,7 +46,7 @@ def eora_compute_lora(
         module: NamedModule,
         eigen_scaling_diag_matrix: torch.dtype,
         rank: int,
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype = torch.bfloat16,
 ) -> Tuple[Tensor, Tensor]:
 
     assert w_wq_delta.dtype == torch.float32
