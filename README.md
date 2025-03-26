@@ -1,5 +1,7 @@
 <p align=center>
-<img src='https://github.com/user-attachments/assets/e6f12127-39f2-4f39-abfc-3a052f037a46'></img>
+<div align=center>
+<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=75%>
+</div>
 <h1 align="center">GPTQModel</h1>
 </p>
 <p align="center">Production ready LLM model compression/quantization toolkit with accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang.</p>
@@ -98,10 +100,6 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 </details>
 
 ## What is GPTQModel?
-<div align=center>
-<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=50%>
-</div>
-
 GPTQModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
 Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
