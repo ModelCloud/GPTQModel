@@ -13,7 +13,7 @@
         <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_5000+_models_available-8A2BE2">
     </a>
 </p>
-  
+
 ## Latest News
 * 03/24/2025 2.1.1-dev: New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm.
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
@@ -35,6 +35,8 @@ Fix ROCm version auto detection in `setup` install.
   Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 
 <details>
+
+
     
 <summary>Archived News</summary>
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
@@ -96,6 +98,9 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 </details>
 
 ## What is GPTQModel?
+
+![image](https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2)
+
 
 GPTQModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
