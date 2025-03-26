@@ -98,9 +98,9 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 </details>
 
 ## What is GPTQModel?
-
-![image](https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2)
-
+<div align=center>
+<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=50%>
+</div>
 
 GPTQModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
