@@ -276,7 +276,7 @@ class GPTQModel:
 
         if quantize_config and quantize_config.dynamic:
             log.warn(
-                "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vlLL and SGLang but not yet available in hf transformers.")
+                "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
         model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
