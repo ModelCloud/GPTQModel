@@ -445,17 +445,17 @@ class ModuleLooper():
                 if p_index == len(self.processors) - 1:
                     del module
 
-                # release all modules memory
-                del modules
-                del self.gptq_model.model
-                torch_empty_cache()
+                    # release all modules memory
+                    del modules
+                    del self.gptq_model.model
+                    torch_empty_cache()
 
-                log.info("Reload model...")
-                self.gptq_model.model = self.gptq_model.model_init_func()
-                layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
-                # replace linear with hooked linear
-                replace_linear_with_hooked_linear(self.gptq_model.model)
-                log.info("Reload model finish")
+                    log.info("Reload model...")
+                    self.gptq_model.model = self.gptq_model.model_init_func()
+                    layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
+                    # replace linear with hooked linear
+                    replace_linear_with_hooked_linear(self.gptq_model.model)
+                    log.info("Reload model finish")
 
                 if auto_gc:
                     torch_empty_cache()
