@@ -177,6 +177,7 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
+    prefix: str = "",
 ) -> Type[BaseQuantLinear]:
 
     bits = qcfg.bits
@@ -227,6 +228,7 @@ def make_quant(
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
                 backend=backend,
+                prefix=prefix,
                 adapter=qcfg.adapter,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
@@ -254,11 +256,14 @@ def create_quant_layer(
         lm_head_name: str,
         pack_dtype: torch.dtype,
         backend: BACKEND,
+        prefix: str,
         adapter: Optional[Adapter] = None,
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
         return linear_cls
     for name, submodule in module.named_modules():
+        full_name = prefix + name
+
         # skip non-quantized modules
         if name not in quant_result:
             continue
@@ -301,7 +306,7 @@ def create_quant_layer(
 
         # dynamic bits, group_size, sym, pack_dtype for each layer/module
         if dynamic is not None:
-            overrides = dynamic_get(dynamic=dynamic, module_name=name)
+            overrides = dynamic_get(dynamic=dynamic, module_name=full_name)
             # negative module match, skip this module
             if overrides == False:  # noqa: E712
                 continue
@@ -341,7 +346,7 @@ def create_quant_layer(
             pack_dtype=tmp_pack_dtype,
             bias=bias,
             #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
-            name=name,
+            name=full_name,
             lm_head_name=lm_head_name,
             backend=backend,
             adapter=adapter,
@@ -584,6 +589,7 @@ def pack_model(
     dynamic=None,
     parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
+    prefix: str = "",
 ):
     qcfg = QuantizeConfig(
         bits=bits,
@@ -610,6 +616,7 @@ def pack_model(
         backend=backend,
         lm_head_name=lm_head_name,
         pack=True,
+        prefix=prefix,
     )
 
     qModules = find_modules(model, [quant_linear_cls])

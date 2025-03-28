@@ -26,12 +26,16 @@ from random_word import RandomWords
 from torch import Tensor
 from torch.nn import Module
 
+from .. import BACKEND
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
-from ..quantization.config import QuantizeConfig
+from ..models.writer import save_module
+from ..quantization.config import QuantizeConfig, FORMAT
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.logger import setup_logger
+from ..utils.model import pack_model, convert_gptq_v2_to_v1_format
+from ..utils.torch import torch_sync
 
 log = setup_logger()
 
@@ -310,3 +314,57 @@ class LoopProcessor:
     @classmethod
     def name(cls) -> str:
         pass
+
+    def pack_layer(self, model: BaseGPTQModel, module: Module, **kwargs):
+        layer_index: int = kwargs.pop("layer_index")
+        file_index: int = kwargs.pop("file_index")
+        file_max: int = kwargs.pop("file_max")
+        weight_map = kwargs.pop("weight_map")
+        metadata = kwargs.pop("metadata")
+        backend: BACKEND = kwargs.pop("backend")
+
+        # block for streams
+        if self.stream:
+            torch_sync()
+
+        model.qlinear_kernel = pack_model(
+            model=module,
+            quant_result=self.results(),
+            bits=self.qcfg.bits,
+            group_size=self.qcfg.group_size,
+            backend=backend,
+            desc_act=self.qcfg.desc_act,
+            format=self.qcfg.format,
+            quant_method=self.qcfg.quant_method,
+            lm_head_name=model.lm_head,
+            dynamic=self.qcfg.dynamic,
+            parallel_packing=self.qcfg.parallel_packing,
+            pack_dtype=self.qcfg.pack_dtype,
+            prefix=f"{model.layers_node}.{layer_index}."
+        )
+
+        self.results().clear()
+
+        if model.quantize_config.format == FORMAT.GPTQ:
+            module = convert_gptq_v2_to_v1_format(module,
+                                                  quantize_config=model.quantize_config,
+                                                  qlinear_kernel=model.qlinear_kernel)
+
+        layer_dict = module.state_dict()
+        layer_dict = {f"{model.layers_node}.{layer_index}.{k}": v for k, v in layer_dict.items()}
+        safetensors_filename = save_module(layer_dict, model.temp_dir, file_index,
+                                           file_max)
+
+        for key, v in layer_dict.items():
+            key = model.layers_node + "." + str(layer_index) + "." + key
+            weight_map[key] = safetensors_filename
+
+        metadata["total_size"] += sum(weight.numel() * weight.element_size() for _, weight in layer_dict.items())
+
+        index_file_path = os.path.join(model.temp_dir, "model.safetensors.index.json")
+        index_data = {
+            "metadata": metadata,
+            "weight_map": weight_map
+        }
+        with open(index_file_path, 'w') as f:
+            json.dump(index_data, f, indent=4)

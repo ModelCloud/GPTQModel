@@ -439,7 +439,7 @@ class ModuleLooper():
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
 
-                processor.module_finalize(self.gptq_model, module, layer_index, file_index, file_max, weight_map, metadata, **kwargs)
+                processor.module_finalize(self.gptq_model, module, layer_index=layer_index, file_index=file_index, file_max=file_max, weight_map=weight_map, metadata=metadata, **kwargs)
                 file_index += 1
 
                 if p_index == len(self.processors) - 1:

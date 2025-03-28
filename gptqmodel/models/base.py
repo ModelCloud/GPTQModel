@@ -431,6 +431,7 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = QQQProcessor(**args)
+            backend = BACKEND.QQQ
 
             # rotate model
             if self.quantize_config.rotation:

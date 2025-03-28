@@ -25,7 +25,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS)
+                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU
 from ..quantization.qqq import QQQ
@@ -116,12 +116,12 @@ class QQQProcessor(LoopProcessor):
 
     def process(self, module: NamedModule):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
-        gptq = self.tasks
+        qqq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        g = gptq[module.name]
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra = g.quantize()
+        g = qqq[module.name]
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, nsamples = g.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -151,6 +151,7 @@ class QQQProcessor(LoopProcessor):
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
             QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+            QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
@@ -162,7 +163,7 @@ class QQQProcessor(LoopProcessor):
         self.log.append(stat)
         log.info(stat)
 
-        self.result_save(module.full_name, {
+        self.result_save(module.name, {
             "scale": move_to(scale, device=CPU, stream=self.stream),
             "zero": move_to(zero, device=CPU, stream=self.stream),
             "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
@@ -177,7 +178,7 @@ class QQQProcessor(LoopProcessor):
                 "w": w,  # bf16/fp16, non-quantized native weight
             })
 
-        gptq[module.name].free()
+        qqq[module.name].free()
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
@@ -193,26 +194,10 @@ class QQQProcessor(LoopProcessor):
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
+    def module_finalize(self, model: BaseGPTQModel, module: Module, **kwargs):
+        self.pack_layer(model, module, **kwargs)
+
     def finalize(self, model: BaseGPTQModel, **kwargs):
-        # block for streams
-        if self.stream:
-            torch_sync()
-
-        model.qlinear_kernel = pack_model(
-            model=model.model,
-            quant_result=self.results(),
-            bits=self.qcfg.bits,
-            group_size=self.qcfg.group_size,
-            backend=BACKEND.QQQ,
-            desc_act=self.qcfg.desc_act,
-            format=self.qcfg.format,
-            quant_method=self.qcfg.quant_method,
-            lm_head_name=model.lm_head,
-            dynamic=self.qcfg.dynamic,
-            parallel_packing=self.qcfg.parallel_packing,
-            pack_dtype=self.qcfg.pack_dtype,
-        )
-
         # set quantized state
         model.quantized = True
 
