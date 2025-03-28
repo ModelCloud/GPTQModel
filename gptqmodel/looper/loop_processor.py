@@ -282,7 +282,7 @@ class LoopProcessor:
 
     # Called after module quantization is completed
     def module_finalize(self, model: BaseGPTQModel, module: Module, **kwargs):
-        pass
+        return False
 
     # last step, after all loop processor is called
     # submodule_finalize is called in reverse after all next sequential processes are called
@@ -327,6 +327,13 @@ class LoopProcessor:
         if self.stream:
             torch_sync()
 
+        prefix = f"{model.layers_node}.{layer_index}."
+        layer_quant_result = {}
+        for k, v in self.results():
+            if k.startswith(prefix):
+                # Remove prefix, because module can only get submodule name, such as [self.attn_proj,...]
+                layer_quant_result[k.removeprefix(prefix)] = v
+
         model.qlinear_kernel = pack_model(
             model=module,
             quant_result=self.results(),
@@ -340,10 +347,8 @@ class LoopProcessor:
             dynamic=self.qcfg.dynamic,
             parallel_packing=self.qcfg.parallel_packing,
             pack_dtype=self.qcfg.pack_dtype,
-            prefix=f"{model.layers_node}.{layer_index}."
+            prefix=prefix
         )
-
-        self.results().clear()
 
         if model.quantize_config.format == FORMAT.GPTQ:
             module = convert_gptq_v2_to_v1_format(module,

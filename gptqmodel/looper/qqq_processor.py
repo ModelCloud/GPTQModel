@@ -163,7 +163,7 @@ class QQQProcessor(LoopProcessor):
         self.log.append(stat)
         log.info(stat)
 
-        self.result_save(module.name, {
+        self.result_save(module.full_name, {
             "scale": move_to(scale, device=CPU, stream=self.stream),
             "zero": move_to(zero, device=CPU, stream=self.stream),
             "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
@@ -196,6 +196,7 @@ class QQQProcessor(LoopProcessor):
 
     def module_finalize(self, model: BaseGPTQModel, module: Module, **kwargs):
         self.pack_layer(model, module, **kwargs)
+        return True
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         # set quantized state

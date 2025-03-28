@@ -189,7 +189,6 @@ class ModuleLooper():
             layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
 
-        #
         weight_map = {}
         metadata = {
             "total_size": 0
@@ -439,8 +438,9 @@ class ModuleLooper():
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
 
-                processor.module_finalize(self.gptq_model, module, layer_index=layer_index, file_index=file_index, file_max=file_max, weight_map=weight_map, metadata=metadata, **kwargs)
-                file_index += 1
+                    packed = processor.module_finalize(self.gptq_model, module, layer_index=layer_index, file_index=file_index, file_max=file_max, weight_map=weight_map, metadata=metadata, **kwargs)
+                    if packed:
+                        file_index += 1
 
                 if p_index == len(self.processors) - 1:
                     del module
