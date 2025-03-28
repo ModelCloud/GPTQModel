@@ -69,12 +69,8 @@ def eora_compute_lora(
 
     sqrtEigenvalues = torch.sqrt(L)
     scaling_diag_matrix = Q @ torch.diag(sqrtEigenvalues)
-    
-    try:
-        scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
-    except Exception:
-        scaling_diag_matrix += 1e-6 * torch.eye(scaling_diag_matrix.shape[0]).to(device)
-        scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix)
+
+    scaling_matrix_inv = torch.diag(1/sqrtEigenvalues) @ Q.T
 
     scaling_diag_matrix = scaling_diag_matrix.to(dtype=torch.float32)
     scaling_matrix_inv = scaling_matrix_inv.to(dtype=torch.float32)
