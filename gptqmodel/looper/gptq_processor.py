@@ -29,10 +29,10 @@ from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, save_module)
 from ..quantization import GPTQ
-from ..quantization.config import QUANT_METHOD, QuantizeConfig, FORMAT
+from ..quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model, convert_gptq_v2_to_v1_format
+from ..utils.model import convert_gptq_v2_to_v1_format, move_to, pack_model
 from ..utils.torch import torch_sync
 
 log = setup_logger()

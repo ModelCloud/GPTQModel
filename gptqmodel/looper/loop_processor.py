@@ -31,10 +31,10 @@ from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import save_module
-from ..quantization.config import QuantizeConfig, FORMAT
+from ..quantization.config import FORMAT, QuantizeConfig
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.logger import setup_logger
-from ..utils.model import pack_model, convert_gptq_v2_to_v1_format
+from ..utils.model import convert_gptq_v2_to_v1_format, pack_model
 from ..utils.torch import torch_sync
 
 log = setup_logger()

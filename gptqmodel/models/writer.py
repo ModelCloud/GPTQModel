@@ -20,17 +20,12 @@ import copy
 import csv
 import json
 import os
-import re
 import shutil
-from os.path import isfile, join
 from typing import Dict, Optional, Union
 
 import torch
 import transformers
-from huggingface_hub import split_torch_state_dict_into_shards
-from huggingface_hub.constants import SAFETENSORS_WEIGHTS_FILE_PATTERN
 from safetensors.torch import save_file
-from safetensors.torch import save_file as safe_save
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
@@ -43,12 +38,11 @@ from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_
                                    META_FIELD_URI, META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules,
-                           get_model_files_size, get_moe_layer_modules, get_state_dict_for_save,
+from ..utils.model import (copy_py_files, find_modules, get_model_files_size, get_moe_layer_modules,
                            load_checkpoint_in_model_then_tie_weights, make_quant)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
+from ._const import DEFAULT_MAX_SHARD_SIZE
 
 log = setup_logger()
 

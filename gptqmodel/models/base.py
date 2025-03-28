@@ -24,7 +24,7 @@ import shutil
 import signal
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch._dynamo
