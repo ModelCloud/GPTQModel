@@ -336,7 +336,7 @@ class LoopProcessor:
 
         model.qlinear_kernel = pack_model(
             model=module,
-            quant_result=self.results(),
+            quant_result=layer_quant_result,
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
             backend=backend,
