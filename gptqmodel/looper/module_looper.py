@@ -27,6 +27,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
+from ..models.writer import save_module
 from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
 from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
@@ -187,6 +188,33 @@ class ModuleLooper():
             num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
+
+        #
+        weight_map = {}
+        metadata = {
+            "total_size": 0
+        }
+        layer_count = len(layers)
+
+        model_state_dict = self.gptq_model.model.state_dict()
+        # TODO LM_HEAD
+        unquantized_weights = []
+        for key, weight in model_state_dict.items():
+            if not key.startswith(self.gptq_model.layers_node):
+                unquantized_weights.append({key: weight})
+                metadata["total_size"] += weight.numel() * weight.element_size()
+
+        file_index = 1
+        file_max = layer_count + len(unquantized_weights)
+        for weight_dict in unquantized_weights:
+            safetensors_filename = save_module(weight_dict, self.gptq_model.temp_dir, file_index,
+                                               file_max)
+            for key, _ in weight_dict.items():
+                weight_map[key] = safetensors_filename
+            file_index += 1
+        # release unquantized_weights memory
+        del unquantized_weights
+        del model_state_dict
 
         layer_count = len(layers)
         quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
@@ -411,7 +439,23 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
+
+                processor.module_finalize(self.gptq_model, module, layer_index, file_index, file_max, weight_map, metadata, **kwargs)
+
+                if p_index == len(self.processors) - 1:
                     del module
+
+                # release all modules memory
+                del modules
+                del self.gptq_model.model
+                torch_empty_cache()
+
+                log.info("Reload model...")
+                self.gptq_model.model = self.gptq_model.model_init_func()
+                layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
+                # replace linear with hooked linear
+                replace_linear_with_hooked_linear(self.gptq_model.model)
+                log.info("Reload model finish")
 
                 if auto_gc:
                     torch_empty_cache()

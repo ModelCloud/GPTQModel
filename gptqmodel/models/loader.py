@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
@@ -178,7 +179,8 @@ def ModelLoader(cls):
         model_init_kwargs["torch_dtype"] = torch_dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
 
-        model = cls.loader.from_pretrained(model_local_path, **model_init_kwargs)
+        model_init_func = partial(cls.loader.from_pretrained, model_local_path, **model_init_kwargs)
+        model = model_init_func()
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -201,6 +203,7 @@ def ModelLoader(cls):
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
+            model_init_func=model_init_func,
         )
 
     cls.from_pretrained = from_pretrained

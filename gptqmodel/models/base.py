@@ -16,11 +16,15 @@
 
 from __future__ import annotations
 
+import atexit
 import copy
 import json
 import os
+import shutil
+import signal
+import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
 
 import torch
 import torch._dynamo
@@ -129,14 +133,16 @@ class BaseGPTQModel(nn.Module):
         quantized: bool,
         quantize_config: QuantizeConfig,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        qlinear_kernel: nn.Module = None,
+        qlinear_kernel: Type[BaseQuantLinear] = None,
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
         model_local_path: str = None,
+        model_init_func: Optional[Callable[..., PreTrainedModel]] = None,
     ):
         super().__init__()
 
         self.model = model
+        self.model_init_func = model_init_func
 
         self.compiled = False # set to True while compile() is triggered successfully
         self.quantized = quantized
@@ -173,6 +179,10 @@ class BaseGPTQModel(nn.Module):
         if self.require_monkeypatch:
             self.monkey_patch()
 
+        self.temp_dir = tempfile.mkdtemp()
+        atexit.register(self._cleanup_temp_dir)
+        self._register_signals()
+
         # hack: circular import
         from ..adapter.adapter import Lora
 
@@ -188,6 +198,25 @@ class BaseGPTQModel(nn.Module):
 
         # print kernel info:
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
+
+    def _register_signals(self):
+        def handle_signals(signum, frame):
+            self._cleanup_temp_dir()
+            exit(1)
+
+        signals = [signal.SIGINT, signal.SIGTERM]
+        for sig in signals:
+            try:
+                signal.signal(sig, handle_signals)
+            except (ValueError, AttributeError) as e:
+                log.error(f"Failed to register signal handler: {e}")
+        pass
+
+    def _cleanup_temp_dir(self):
+        try:
+            shutil.rmtree(self.temp_dir)
+        except Exception as e:
+            log.error(f"Failed to cleanup temp dir: {self.temp_dir}, error: {e}")
 
     def prepare_dataset(
         self,
@@ -1202,6 +1231,7 @@ class BaseGPTQModel(nn.Module):
             #untie_weights(self.model)
 
             self.save_quantized(
+                temp_dir=self.temp_dir,
                 save_dir=save_dir,
                 safetensors_metadata=safetensors_metadata,
                 max_shard_size=max_shard_size,

@@ -15,6 +15,9 @@
 # limitations under the License.
 
 import copy
+import json
+import os
+import re
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -24,12 +27,12 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, save_module)
 from ..quantization import GPTQ
-from ..quantization.config import QUANT_METHOD, QuantizeConfig
+from ..quantization.config import QUANT_METHOD, QuantizeConfig, FORMAT
 from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
+from ..utils.model import move_to, pack_model, convert_gptq_v2_to_v1_format
 from ..utils.torch import torch_sync
 
 log = setup_logger()
@@ -195,15 +198,15 @@ class GPTQProcessor(LoopProcessor):
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
-    def finalize(self, model: BaseGPTQModel, **kwargs):
-        # block for streams
-        if self.stream:
-            torch_sync()
-
+    def module_finalize(self, model: BaseGPTQModel, module: Module, index: int, file_index: int, file_max: int, weight_map, metadata, **kwargs):
         backend = kwargs.pop("backend")
+        quant_result = self.results()
+        # Delete layer_node and index, because module can only get submodule name, such as [self.attn_proj,...]
+        quant_result = {re.sub(rf"^{re.escape(model.layers_node)}\.\d+\.", '', n): quant_result[n] for n in quant_result}
+
         model.qlinear_kernel = pack_model(
-            model=model.model,
-            quant_result=self.results(),
+            model=module,
+            quant_result=quant_result,
             bits=self.qcfg.bits,
             group_size=self.qcfg.group_size,
             backend=backend,
@@ -215,6 +218,36 @@ class GPTQProcessor(LoopProcessor):
             parallel_packing=self.qcfg.parallel_packing,
             pack_dtype=self.qcfg.pack_dtype,
         )
+
+        if model.quantize_config.format == FORMAT.GPTQ:
+            module = convert_gptq_v2_to_v1_format(module,
+                                                     quantize_config=model.quantize_config,
+                                                     qlinear_kernel=model.qlinear_kernel)
+
+        layer_dict = module.state_dict()
+        layer_dict = {f"{model.layers_node}.{index}.{k}": v for k, v in layer_dict.items()}
+        safetensors_filename = save_module(layer_dict, model.temp_dir, file_index,
+                                           file_max)
+        file_index += 1
+
+        for key, v in layer_dict.items():
+            key = model.layers_node + "." + str(index) + "." + key
+            weight_map[key] = safetensors_filename
+
+        metadata["total_size"] += sum(weight.numel() * weight.element_size() for _, weight in layer_dict.items())
+
+        index_file_path = os.path.join(model.temp_dir, "model.safetensors.index.json")
+        index_data = {
+            "metadata": metadata,
+            "weight_map": weight_map
+        }
+        with open(index_file_path, 'w') as f:
+            json.dump(index_data, f, indent=4)
+
+    def finalize(self, model: BaseGPTQModel, **kwargs):
+        # block for streams
+        if self.stream:
+            torch_sync()
 
         # set quantized state
         model.quantized = True

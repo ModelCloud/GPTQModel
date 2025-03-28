@@ -21,6 +21,7 @@ import csv
 import json
 import os
 import re
+import shutil
 from os.path import isfile, join
 from typing import Dict, Optional, Union
 
@@ -123,6 +124,7 @@ def ModelWriter(cls):
 
     def save_quantized(
             self,
+            temp_dir: str,
             save_dir: str,
             safetensors_metadata: Optional[Dict[str, str]] = None,
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
@@ -141,6 +143,12 @@ def ModelWriter(cls):
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
+
+        quantized_size_mb = get_model_files_size(temp_dir)
+        quantized_size_gb = quantized_size_mb / 1024
+
+        #copy safetensors files to save_dir
+        copy_directory(temp_dir, save_dir)
 
         quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
         if meta_quantizer:
@@ -197,19 +205,8 @@ def ModelWriter(cls):
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        if not self.load_quantized_model:
-            model = self.model
-            # # internal is always gptq v2 but allow users to pass gptq (v1) via config
-            if quantize_config.format == FORMAT.GPTQ:
-                # Model qzeros may be edited in place.
-                model = convert_gptq_v2_to_v1_format(
-                    model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
-                )
-        else:
-            model = self.get_model_with_quantize(
-                qcfg=quantize_config,
-                model_id_or_path=self.model_local_path,
-            )
+        # TODO save load_quantized_model==True
+        # TODO don't supports max_shard_size
 
         # --- start config save block ---
         # Save quantized config
@@ -248,138 +245,17 @@ def ModelWriter(cls):
             self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
-        model.to(CPU)
-        state_dict = get_state_dict_for_save(model)
-
-        model_base_name = "model"
-
-        state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
-        model_save_name = model_base_name + ".safetensors"
-
-        if not self.qlinear_kernel.SUPPORTS_SHARDS and max_shard_size is not None:
-            log.warn("Sharding is not supported for this quant. Disabling sharding.")
-            max_shard_size = None
-
-        if max_shard_size is None:
-            if safetensors_metadata is None:
-                safetensors_metadata = {}
-            elif not isinstance(safetensors_metadata, dict):
-                raise TypeError("safetensors_metadata must be a dictionary.")
-            else:
-                log.debug(f"Received safetensors_metadata: {safetensors_metadata}")
-                new_safetensors_metadata = {}
-                converted_keys = False
-                for key, value in safetensors_metadata.items():
-                    if not isinstance(key, str) or not isinstance(value, str):
-                        converted_keys = True
-                        try:
-                            new_key = str(key)
-                            new_value = str(value)
-                        except Exception as e:
-                            raise TypeError(
-                                f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}"
-                            )
-                        if new_key in new_safetensors_metadata:
-                            log.warn(
-                                f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting."
-                            )
-                        new_safetensors_metadata[new_key] = new_value
-                safetensors_metadata = new_safetensors_metadata
-                if converted_keys:
-                    log.debug(
-                        f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}"
-                    )
-
-            # Format is required to enable Accelerate to load the metadata
-            # otherwise it raises an OSError
-            safetensors_metadata["format"] = "pt"
-            safe_save(state_dict, join(save_dir, model_save_name), safetensors_metadata)
-            total_size_mb = os.path.getsize(join(save_dir, model_save_name)) / (1024 * 1024)
-        else:
-            file_name_pattern = SAFETENSORS_WEIGHTS_FILE_PATTERN
-
-            # Shard checkpoint
-            state_dict_split= split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size, filename_pattern=file_name_pattern)
-
-            # Clean the folder from a previous save
-            for filename in os.listdir(save_dir):
-                full_filename = join(save_dir, filename)
-
-                # make sure that file to be deleted matches format of sharded file, e.g. pytorch_model-00001-of-00005
-                filename_no_suffix = filename.replace(".bin", "").replace(".safetensors", "")
-                reg = re.compile(r"(.*?)-\d{5}-of-\d{5}")
-
-                if (
-                        filename.startswith(model_base_name)
-                        and isfile(full_filename)
-                        and filename not in state_dict_split.filename_to_tensors.keys()
-                        and reg.fullmatch(filename_no_suffix) is not None
-                ):
-                    os.remove(full_filename)
-
-            total_size_mb = 0
-            # Save the model
-            for filename, tensors in state_dict_split.filename_to_tensors.items():
-                shard = {tensor: state_dict[tensor] for tensor in tensors}
-                if safetensors_metadata is None:
-                    safetensors_metadata = {}
-                elif not isinstance(safetensors_metadata, dict):
-                    raise TypeError("safetensors_metadata must be a dictionary.")
-                else:
-                    log.debug(f"Received safetensors_metadata: {safetensors_metadata}")
-                    new_safetensors_metadata = {}
-                    converted_keys = False
-                    for key, value in safetensors_metadata.items():
-                        if not isinstance(key, str) or not isinstance(value, str):
-                            converted_keys = True
-                            try:
-                                new_key = str(key)
-                                new_value = str(value)
-                            except Exception as e:
-                                raise TypeError(
-                                    f"safetensors_metadata: both keys and values must be strings and an error occured when trying to convert them: {e}")
-                            if new_key in new_safetensors_metadata:
-                                log.warn(
-                                    f"After converting safetensors_metadata keys to strings, the key '{new_key}' is duplicated. Ensure that all your metadata keys are strings to avoid overwriting.")
-                            new_safetensors_metadata[new_key] = new_value
-                    safetensors_metadata = new_safetensors_metadata
-                    if converted_keys:
-                        log.debug(
-                            f"One or more safetensors_metadata keys or values had to be converted to str(). Final safetensors_metadata: {safetensors_metadata}")
-
-                # Format is required to enable Accelerate to load the metadata
-                # otherwise it raises an OSError
-                safetensors_metadata["format"] = "pt"
-
-                safe_save(shard, join(save_dir, filename), safetensors_metadata)
-                shard_size_mb = os.path.getsize(join(save_dir, filename)) / (1024 * 1024)
-                total_size_mb += shard_size_mb
-
-            if state_dict_split.is_sharded:
-                index = {
-                    "metadata": state_dict_split.metadata,
-                    "weight_map": state_dict_split.tensor_to_filename,
-                }
-
-                index_save_name = model_save_name + ".index.json"
-                index_save_path = join(save_dir, index_save_name)
-                # Save the index as well
-                with open(index_save_path, "w", encoding="utf-8") as f:
-                    content = json.dumps(index, indent=2, sort_keys=True) + "\n"
-                    f.write(content)
-
         # save lora
         if self.quantize_config.adapter:
             _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
-            total_size_gb = total_size_mb / 1024
-            size_diff_mb = pre_quantized_size_mb - total_size_mb
+            size_diff_mb = pre_quantized_size_mb - quantized_size_mb
             size_diff_gb = size_diff_mb / 1024
             percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
             log.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
-            log.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+            log.info(f"Quantized model size: {quantized_size_mb:.2f}MB, {quantized_size_gb:.2f}GB")
             log.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
@@ -468,3 +344,19 @@ def ModelWriter(cls):
     cls.get_model_with_quantize = get_model_with_quantize
 
     return cls
+
+def copy_directory(source_dir, target_dir):
+    try:
+        if not os.path.exists(source_dir):
+            raise FileNotFoundError(f"Source directory {source_dir} does not exist.")
+
+        shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+    except Exception as e:
+        raise e
+
+def save_module(state_dict, output_dir, file_index, file_max):
+    safetensors_filename = f"model-{file_index:05d}-of-{file_max:05d}.safetensors"
+    safetensors_file_path = os.path.join(output_dir, safetensors_filename)
+    save_file(state_dict, filename=safetensors_file_path, metadata={"format": "pt"})
+
+    return safetensors_filename

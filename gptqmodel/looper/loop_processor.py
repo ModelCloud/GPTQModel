@@ -276,6 +276,10 @@ class LoopProcessor:
     def process(self, module: NamedModule):
         pass
 
+    # Called after module quantization is completed
+    def module_finalize(self, model: BaseGPTQModel, module: Module, **kwargs):
+        pass
+
     # last step, after all loop processor is called
     # submodule_finalize is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
