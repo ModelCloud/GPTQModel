@@ -329,7 +329,7 @@ class LoopProcessor:
 
         prefix = f"{model.layers_node}.{layer_index}."
         layer_quant_result = {}
-        for k, v in self.results():
+        for k, v in self.results().items():
             if k.startswith(prefix):
                 # Remove prefix, because module can only get submodule name, such as [self.attn_proj,...]
                 layer_quant_result[k.removeprefix(prefix)] = v
