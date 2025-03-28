@@ -621,7 +621,9 @@ def pack_model(
 
     qModules = find_modules(model, [quant_linear_cls])
 
-    assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
+    # If packing a layer module, using dynamic config you can skip quantization of this module entirely.
+    if not isinstance(model, nn.Module):
+        assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
 
     names = list(qModules.keys())
 
