@@ -197,10 +197,9 @@ class ModuleLooper():
         layer_count = len(layers)
 
         model_state_dict = self.gptq_model.model.state_dict()
-        # TODO LM_HEAD
         unquantized_weights = []
         for key, weight in model_state_dict.items():
-            if not key.startswith(self.gptq_model.layers_node):
+            if not key.startswith(self.gptq_model.layers_node) or (self.gptq_model.quantize_config.lm_head and key == self.gptq_model.lm_head):
                 unquantized_weights.append({key: weight})
                 metadata["total_size"] += weight.numel() * weight.element_size()
 
@@ -441,6 +440,7 @@ class ModuleLooper():
                             reverse_p.submodule_finalize(processed_subset[name])
 
                 processor.module_finalize(self.gptq_model, module, layer_index, file_index, file_max, weight_map, metadata, **kwargs)
+                file_index += 1
 
                 if p_index == len(self.processors) - 1:
                     del module

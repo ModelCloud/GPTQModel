@@ -147,9 +147,6 @@ def ModelWriter(cls):
         quantized_size_mb = get_model_files_size(temp_dir)
         quantized_size_gb = quantized_size_mb / 1024
 
-        #copy safetensors files to save_dir
-        copy_directory(temp_dir, save_dir)
-
         quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
         if meta_quantizer:
             if len(meta_quantizer.split(":")) == 2:
@@ -244,6 +241,9 @@ def ModelWriter(cls):
         if hasattr(self,"processor") and isinstance(self.processor, ProcessorMixin):
             self.processor.save_pretrained(save_dir)
         # --- end config save block ---
+
+        # copy safetensors files to save_dir
+        copy_directory(temp_dir, save_dir)
 
         # save lora
         if self.quantize_config.adapter:

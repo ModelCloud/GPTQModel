@@ -228,7 +228,6 @@ class GPTQProcessor(LoopProcessor):
         layer_dict = {f"{model.layers_node}.{index}.{k}": v for k, v in layer_dict.items()}
         safetensors_filename = save_module(layer_dict, model.temp_dir, file_index,
                                            file_max)
-        file_index += 1
 
         for key, v in layer_dict.items():
             key = model.layers_node + "." + str(index) + "." + key
