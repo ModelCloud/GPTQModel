@@ -5,3 +5,4 @@ global-include gptqmodel_ext/**/*.cu
 global-include gptqmodel_ext/**/*.py
 include requirements.txt
 prune tests/
+prune format/
