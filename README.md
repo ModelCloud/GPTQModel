@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 03/24/2025 2.1.1-dev: New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm.
+* 03/24/2025 2.1.1-dev: New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
 New Alibaba `Ovis 2` VL model support. 
@@ -153,8 +153,8 @@ Native support support some of the most popular multi-modal models:
 | ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2 | ✅ | XVERSE    | ✅ |
 | CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
 | Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
-| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2 MoE  | ✅ |           |   |
-| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2 VL   | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2/3 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2/2.5 VL   | ✅ |           |   |
 | DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
 | DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
 | EXAONE 3.0        | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
