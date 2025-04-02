@@ -446,7 +446,7 @@ def ModelLoader(cls):
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                if not name.startswith(cls.layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
                         not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only
