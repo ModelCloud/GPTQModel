@@ -14,12 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os.path
-import shutil
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer, ProcessorMixin
+from transformers import AutoModelForVision2Seq, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
