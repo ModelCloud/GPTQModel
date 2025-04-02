@@ -20,6 +20,7 @@ import math
 import os
 import sys
 import time
+from threading import Lock
 from typing import Optional
 
 import torch
@@ -31,7 +32,6 @@ from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_empty_cache, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
-from threading import Lock
 
 log = setup_logger()
 
