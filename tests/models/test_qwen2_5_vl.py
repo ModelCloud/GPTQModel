@@ -19,7 +19,7 @@ from model_test import ModelTest
 
 
 class TestQwen2_VL(ModelTest):
-    NATIVE_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
+    NATIVE_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     NATIVE_ARC_CHALLENGE_ACC = 0.2329
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2765

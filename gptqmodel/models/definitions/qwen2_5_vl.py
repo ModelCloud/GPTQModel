@@ -13,8 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from .base_qwen2_vl import BaseQwen2VLGPTQ
 
 
-class Qwen2VLGPTQ(BaseQwen2VLGPTQ):
+class Qwen2_5_VLGPTQ(BaseQwen2VLGPTQ):
     layer_type = "Qwen2VLDecoderLayer"
