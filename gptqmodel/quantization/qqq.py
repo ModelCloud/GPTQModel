@@ -15,7 +15,7 @@ class QQQ(GPTQ):
         self,
         blocksize=128,
     ):
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent = super().quantize(blocksize=blocksize)
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = super().quantize(blocksize=blocksize)
 
         # post int8 quant
         scale_extra = None
@@ -32,4 +32,4 @@ class QQQ(GPTQ):
             )
             quantizer_extra.find_params(self.module.weight.data.clone(), weight=True)
             scale_extra = quantizer_extra.scale
-        return wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra
+        return wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, nsamples
