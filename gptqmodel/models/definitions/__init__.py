@@ -56,6 +56,7 @@ from .phi import PhiGPTQ
 from .phi3 import Phi3GPTQ
 from .qwen import QwenGPTQ
 from .qwen2 import Qwen2GPTQ
+from .qwen2_5_vl import Qwen2_5_VLGPTQ
 from .qwen2_moe import Qwen2MoeGPTQ
 from .qwen2_vl import Qwen2VLGPTQ
 from .qwen3 import Qwen3GPTQ

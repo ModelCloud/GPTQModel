@@ -105,6 +105,7 @@ from .definitions.phi import PhiGPTQ  # noqa: E402
 from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
+from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
@@ -165,6 +166,7 @@ MODEL_MAP = {
     "qwen2_moe": Qwen2MoeGPTQ,
     "qwen3_moe": Qwen3MoeGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
+    "qwen2_5_vl": Qwen2_5_VLGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,

@@ -357,17 +357,17 @@ class BaseQuantLinear(nn.Module):
         if in_features is not None:
             validate = all(in_features % in_fea == 0 for in_fea in cls.SUPPORTS_IN_FEATURES_DIVISIBLE_BY)
             if not validate:
-                err = f"{cls}: `in_features` must be divisible by {cls.SUPPORTS_IN_FEATURES_DIVISIBLE_BY}."
+                err = f"{cls}: `in_features`: {in_features} must be divisible by {cls.SUPPORTS_IN_FEATURES_DIVISIBLE_BY}."
                 return False, NotImplementedError(err)
 
             validate = in_features % group_size == 0 or cls.SUPPORTS_AUTO_PADDING
             if not validate:
-                err = f"{cls}: `in_features` must be divisible by `group_size: {group_size}`."
+                err = f"{cls}: `in_features`: {in_features} must be divisible by `group_size: {group_size}`."
                 return False, NotImplementedError(err)
         if out_features is not None:
             validate = all(out_features % out_fea == 0 for out_fea in cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY)
             if not validate:
-                err = f"{cls}: `out_features` must be divisible by {cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY}."
+                err = f"{cls}: `out_features`: {out_features} must be divisible by {cls.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY}."
                 return False, NotImplementedError(err)
         return True, None
 
