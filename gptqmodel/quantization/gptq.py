@@ -304,7 +304,7 @@ class GPTQ:
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.module_copy is None:
-            log.info("copy W to cuda_1")
+            # log.info("copy W to cuda_1")
             W = self._clone_module(device=CUDA_1)
         else:
             W = self.module_copy
@@ -427,7 +427,7 @@ class GPTQ:
             #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
             #     logger.debug(torch.sum(Losses))
 
-        torch_sync(self.device)
+        torch_sync()
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
 
@@ -464,7 +464,7 @@ class GPTQ:
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=self.device)
+        Q = Q.to(device=CUDA_1)
 
         # if os.environ.get("DEBUG"):
         #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))

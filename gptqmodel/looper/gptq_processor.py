@@ -24,13 +24,13 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES,PROCESS_MAX_MEMORY)
 from ..quantization import GPTQ
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
-from ..quantization.gptq import CPU
+from ..quantization.gptq import CPU, CUDA_0, CUDA_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_sync
+from ..utils.torch import torch_sync, torch_empty_cache
 
 log = setup_logger()
 
@@ -113,7 +113,9 @@ class GPTQProcessor(LoopProcessor):
             g.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, auto_gc: bool = True):
+        # Reset peak memory stats
+        #torch.cuda.reset_peak_memory_stats()
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
@@ -145,6 +147,19 @@ class GPTQProcessor(LoopProcessor):
         self.avg_losses.append(avg_loss)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
+        stats_0 = torch.cuda.memory_stats(CUDA_0)
+        active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
+        peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
+
+        if torch.cuda.device_count() > 1:
+            stats_1 = torch.cuda.memory_stats(CUDA_1)
+            active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
+            peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
+
+            max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
+        else:
+            max_memory = f"{active_0:.2f}MB"
+
         stat = {
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
@@ -154,6 +169,7 @@ class GPTQProcessor(LoopProcessor):
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+            PROCESS_MAX_MEMORY: max_memory,
         }
 
         if self.qcfg.dynamic is not None:
@@ -181,13 +197,23 @@ class GPTQProcessor(LoopProcessor):
 
         self.tasks[module.name].free()
 
-        # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        module.state.update({
-            "wq": wq, # fp16, quantized weight but not int4 (packed qweight)
-        })
+
 
         # prepare for module.forward post generate
+        # module.weight.data = torch.empty(1,1) # hack to remove weight.data
+        # if auto_gc:
+        #     torch_empty_cache()
+        wq = wq.to(device=CUDA_0)
+
+        # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+        module.state.update({
+            "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+        })
+
         module.weight.data = wq
+
+        if auto_gc:
+            torch_empty_cache()
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
