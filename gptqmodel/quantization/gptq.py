@@ -39,6 +39,8 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 CPU = torch.device("cpu")
+CUDA_0 = torch.device("cuda:0")
+CUDA_1 = torch.device("cuda:1") if torch.cuda.device_count() > 1 else CUDA_0
 
 lock = Lock() # guard against => RuntimeError: lazy wrapper should be called at most once
 
@@ -53,9 +55,16 @@ class GPTQ:
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
-        self.module_copy = self._clone_module()
 
-        self.rows, self.columns = self.module_copy.shape[0], self.module_copy.shape[1]
+        self.module_copy = None
+        if isinstance(self.module, (nn.Conv2d,  transformers.pytorch_utils.Conv1D)):
+            self.module_copy = self._clone_module(device=CUDA_1)
+            shape = self.module_copy.shape
+        else:
+            shape = self.module.weight.data.shape
+
+        self.rows, self.columns = shape[0], shape[1]
+
         # self.H = torch.zeros((self.columns, self.columns), device=self.device)
         self.nsamples = 0
 
@@ -77,8 +86,11 @@ class GPTQ:
         else:
             return (0, 0)
 
-    def _clone_module(self):
-        clone = self.module.weight.data.clone()
+    def _clone_module(self, copy=True, device: torch.device = None):
+        if not device:
+            device = self.module.weight.data.device
+
+        clone = self.module.weight.data.to(copy=copy, device=device)
 
         if isinstance(self.module, nn.Conv2d):
             clone = clone.flatten(1)
@@ -97,7 +109,7 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp):
-        inp = inp.to(device=self.device)
+        inp = inp.to(device=CUDA_1)
         # if os.environ.get("DEBUG"):
         #     self.inp1 = inp
         #     self.out1 = out
@@ -124,11 +136,11 @@ class GPTQ:
 
         if not hasattr(self, "H"):
             try:
-                self.H = torch.zeros((self.columns, self.columns), device=self.device)
+                self.H = torch.zeros((self.columns, self.columns), device=CUDA_1)
             except torch.OutOfMemoryError:
                 log.info("Memory: OOM H allocate bypass")
                 torch_empty_cache()
-                self.H = torch.zeros((self.columns, self.columns), device=self.device)
+                self.H = torch.zeros((self.columns, self.columns), device=CUDA_1)
         else:
             self.H *= self.nsamples / (self.nsamples + batch_size)
 
@@ -139,17 +151,7 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         #self.H += self.chunked_matmul_t_and_t_transposed(inp, chunk_size=1024)
 
-        try:
-            self.H += inp.matmul(inp.t())
-        except torch.OutOfMemoryError:
-            log.info("Memory: OOM cpu bypass for process batch matmul")
-            torch_empty_cache()
-
-            device = self.H.device
-            self.H, inp = self.H.to(device=CPU), inp.to(device=CPU)
-            self.H += inp.matmul(inp.t())
-            self.H = self.H.to(device=device) # move back
-
+        self.H += inp.matmul(inp.t())
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -283,6 +285,7 @@ class GPTQ:
         self,
         blocksize=128,
     ):
+        #self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
@@ -301,7 +304,8 @@ class GPTQ:
             raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.module_copy is None:
-            W = self._clone_module()
+            log.info("copy W to cuda_1")
+            W = self._clone_module(device=CUDA_1)
         else:
             W = self.module_copy
             self.module_copy = None
@@ -344,7 +348,7 @@ class GPTQ:
         while 1 > damp_percent > 0:
             try:
                 damp = damp_percent * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=self.device)
+                diag = torch.arange(self.columns, device=CUDA_1)
                 H[diag, diag] += damp
 
                 with lock:
