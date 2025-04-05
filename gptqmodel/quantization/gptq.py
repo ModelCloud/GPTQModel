@@ -242,7 +242,7 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         #self.H += self.chunked_matmul_t_and_t_transposed(inp, chunk_size=1024)
 
-        self.H.add_(inp.matmul(inp.t()))
+        self.H += inp.matmul(inp.t())
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -345,7 +345,7 @@ class GPTQ:
             try:
                 damp = damp_percent * torch.mean(torch.diag(H))
                 diag = torch.arange(self.columns, device=CUDA_1)
-                H[diag, diag].add_(damp)
+                H[diag, diag] += damp
 
                 with lock:
                     # print(f"H SHAPE: {H.shape}")
