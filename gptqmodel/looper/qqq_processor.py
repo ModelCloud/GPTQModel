@@ -24,8 +24,8 @@ from .. import BACKEND
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
+                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU
 from ..quantization.qqq import QQQ
@@ -115,6 +115,10 @@ class QQQProcessor(LoopProcessor):
         return tmp
 
     def process(self, module: NamedModule):
+        # need to sync stream copies
+        if torch.cuda.device_count() > 1:
+            torch.cuda.synchronize()
+
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
         gptq = self.tasks
 

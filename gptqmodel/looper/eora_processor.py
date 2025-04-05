@@ -26,8 +26,8 @@ from ..eora.eora import eora_compute_lora, eora_process_input
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER,
-                             PROCESS_LOG_MODULE, PROCESS_LOG_NAME, PROCESS_LOG_TIME)
+from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
+                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_MAX_MEMORY)
 from ..quantization.config import QuantizeConfig
 from ..quantization.gptq import CPU
 from ..utils.logger import setup_logger
@@ -116,7 +116,7 @@ class EoraProcessor(LoopProcessor):
             )
         return tmp
 
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, auto_gc: bool = True):
         assert isinstance(module.adapter_cfg, Lora)
 
         self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()
@@ -172,12 +172,26 @@ class EoraProcessor(LoopProcessor):
         self.durations.append(duration)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
+        stats_0 = torch.cuda.memory_stats(CUDA_0)
+        active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
+        peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
+
+        if torch.cuda.device_count() > 1:
+            stats_1 = torch.cuda.memory_stats(CUDA_1)
+            active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
+            peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
+
+            max_memory = f"{peak_active_0:.2f}MB, {peak_active_1:.2f}MB"
+        else:
+            max_memory = f"{peak_active_0:.2f}MB"
+
         stat = {
             PROCESS_LOG_NAME: self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
             PROCESS_LOG_TIME: f"{duration:.3f}",
-            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}"
+            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+            PROCESS_MAX_MEMORY: max_memory,
         }
 
         if self.qcfg.dynamic is not None:

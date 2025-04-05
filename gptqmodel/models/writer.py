@@ -59,6 +59,7 @@ QUANT_LOG_NSAMPLES = "samples"
 QUANT_LOG_DAMP = "damp"
 PROCESS_LOG_TIME = "time"
 PROCESS_LOG_FWD_TIME = "fwd_time"
+PROCESS_MAX_MEMORY = "max_vram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
 
