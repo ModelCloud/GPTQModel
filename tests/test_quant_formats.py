@@ -98,7 +98,12 @@ class TestQuantization(ModelTest):
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=self.get_batch_size(), calibration_dataset_concat_size=0)
+        model.quantize(
+            calibration_dataset=self.calibration_dataset,
+            batch_size=self.get_batch_size(),
+            calibration_dataset_concat_size=0,
+            auto_gc=False,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model.save(tmpdirname)
