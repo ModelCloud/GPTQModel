@@ -356,7 +356,9 @@ class GPTQ:
                     H = torch.linalg.cholesky(H)
 
                     try:
-                        H = self.block_cholesky_inverse(H, block_size=self.columns)
+                        # TODO FIX: need to test block on multiple shapes
+                        # H = self.block_cholesky_inverse(H, block_size=self.columns)
+                        H = torch.cholesky_inverse(H)
                     except torch.OutOfMemoryError:
                         # half the block size will use ~18% less memory but at higher accuracy loss: 1^-2 vs 1^-8
                         # worth the tradeoff since it's either oom or slightly higher accuracy loss
