@@ -34,20 +34,18 @@ Fixed `generation_config.json` save and load. Fixed Transformers v4.49.0 compat.
 Fixed Qwen 2.5 MoE regressions. 
 Added CI tests to track regression in kernel inference quality and sweep all bits/group_sizes. Delegate loggin/progressbar to [LogBar](https://github.com/modelcloud/logbar) pkg.
 Fix ROCm version auto detection in `setup` install.
-* 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
-  Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 
 <details>
 
-
-    
 <summary>Archived News</summary>
+
+* 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
+  Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
 `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. 
 New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 
 New `GPTQModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
 Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
-
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
 * 01/19/2025 [1.7.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.2): Effective BPW (bits per weight) will now be logged during `load()`. Reduce loading time on Intel Arc A770/B580 `XPU` by 3.3x. Reduce memory usage in MLX conversion and fix Marlin kernel auto-select not checking CUDA compute version. 
