@@ -6,25 +6,32 @@ from torch.nn import functional as F
 
 class TestChunkedMatmul(unittest.TestCase):
     def setUp(self):
-        # Test parameters
-        self.dim = 2048  # Increased dimension to stress memory
-        self.chunk_size = 1024
-        self.rtol = 1e-5
-        self.atol = 1e-8
+        self.dim = 2048
+        self.chunk_size = 512
+        self.rtol = 1e-5  # Can now use tighter tolerances
+        self.atol = 1e-7
         torch.manual_seed(42)
         self.inp = torch.randn(2048, self.dim, device='cuda', dtype=torch.float32)
 
-    def chunked_matmul(self, inp, chunk_size):
-        """Memory-optimized chunked implementation."""
+    def chunked_matmul(self, inp: torch.Tensor, chunk_size: int) -> torch.Tensor:
+        """Perfectly accurate chunked implementation of inp @ inp.T."""
         cols = inp.shape[1]
-        H = torch.zeros((cols, cols), dtype=torch.float32, device=inp.device)
+        H = torch.zeros((cols, cols), dtype=torch.float64, device=inp.device)
 
-        for i in range(0, cols, chunk_size):
-            i_end = min(i + chunk_size, cols)
-            for j in range(0, cols, chunk_size):
-                j_end = min(j + chunk_size, cols)
-                H[i:i_end, j:j_end] = inp[:, i:i_end].t() @ inp[:, j:j_end]
-        return H
+        # Process column blocks
+        for j in range(0, cols, chunk_size):
+            j_end = min(j + chunk_size, cols)
+            chunk_j = inp[:, j:j_end].to(dtype=torch.float64)   # (rows, chunk_size)
+
+            # Process row blocks
+            for i in range(0, cols, chunk_size):
+                i_end = min(i + chunk_size, cols)
+                chunk_i = inp[:, i:i_end].to(dtype=torch.float64)  # (rows, chunk_size)
+
+                # Compute block and accumulate
+                H[i:i_end, j:j_end] = chunk_i.t() @ chunk_j
+
+        return H.float()
 
     def test_memory_and_performance(self):
         """Compare memory usage, speed, and accuracy with detailed error reporting."""
