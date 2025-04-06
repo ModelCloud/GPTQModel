@@ -30,10 +30,6 @@ class Llama4GPTQ(BaseGPTQModel):
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],
 
-
-        ["feed_forward.experts.gate_up_proj"],
-        ["feed_forward.experts.down_proj"],
-
-        ["feed_forward.shared_expert.down_proj"],
+        ["feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj"],
         ["feed_forward.shared_expert.down_proj"],
     ]
