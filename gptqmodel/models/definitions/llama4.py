@@ -14,10 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
 from transformers import AutoModelForImageTextToText
 
+from ..base import BaseGPTQModel
+
+
 class Llama4GPTQ(BaseGPTQModel):
+    # some bug in the attention_mask of transformers.modeling_llama4,
+    # so batch quantization for Llama4 is temporarily not supported.
+    support_batch_quantize = False
     loader = AutoModelForImageTextToText
 
     base_modules = ["language_model.model.embed_tokens", "language_model.model.norm"]

@@ -40,6 +40,7 @@ class ModuleLooper():
     def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
+        self.support_batch_quantize = model.support_batch_quantize
 
     def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache):
         layer_inputs = []
@@ -292,7 +293,8 @@ class ModuleLooper():
                         mask = attention_masks[j]
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
+
                         layer_position_ids = (
                             None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         )
@@ -371,7 +373,7 @@ class ModuleLooper():
                         mask = attention_masks[j]
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
                         layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids

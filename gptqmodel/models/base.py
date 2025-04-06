@@ -28,6 +28,7 @@ import torch.nn as nn
 from packaging import version
 from packaging.version import Version
 from tokenicer import Tokenicer
+from torch import LongTensor
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
@@ -122,6 +123,8 @@ class BaseGPTQModel(nn.Module):
     quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
 
     server = None
+
+    support_batch_quantize = True
 
     def __init__(
         self,
@@ -306,11 +309,18 @@ class BaseGPTQModel(nn.Module):
 
             new_calibration_dataset = concatenated_data
 
-        new_calibration_dataset_batched = [
-            collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-            for start in range(0, len(new_calibration_dataset), batch_size)
-        ]
-
+        if self.support_batch_quantize:
+            new_calibration_dataset_batched = [
+                collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
+                for start in range(0, len(new_calibration_dataset), batch_size)
+            ]
+        else:
+            new_calibration_dataset_batched = [
+                {
+                    "input_ids": torch.cat([LongTensor(block["input_ids"]) for block in new_calibration_dataset[start: start + batch_size]], dim=0).long(),
+                }
+                for start in range(0, len(new_calibration_dataset), batch_size)
+            ]
 
         return new_calibration_dataset_batched
 
