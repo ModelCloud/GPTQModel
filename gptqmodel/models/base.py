@@ -316,10 +316,8 @@ class BaseGPTQModel(nn.Module):
             ]
         else:
             new_calibration_dataset_batched = [
-                {
-                    "input_ids": torch.cat([LongTensor(block["input_ids"]) for block in new_calibration_dataset[start: start + batch_size]], dim=0).long(),
-                }
-                for start in range(0, len(new_calibration_dataset), batch_size)
+                {"input_ids": LongTensor(block["input_ids"]).unsqueeze(0)}
+                for block in new_calibration_dataset
             ]
 
         return new_calibration_dataset_batched
@@ -357,6 +355,10 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
+
+        if self.support_batch_quantize is False:
+            batch_size = 1
+            log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
