@@ -316,7 +316,7 @@ class BaseGPTQModel(nn.Module):
             ]
         else:
             new_calibration_dataset_batched = [
-                {"input_ids": torch.cat(LongTensor(block["input_ids"]), dim=0).long(),}
+                {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
                 for block in new_calibration_dataset
             ]
 
