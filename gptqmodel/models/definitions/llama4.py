@@ -15,9 +15,11 @@
 # limitations under the License.
 
 from ..base import BaseGPTQModel
-
+from transformers import AutoModelForImageTextToText
 
 class Llama4GPTQ(BaseGPTQModel):
+    loader = AutoModelForImageTextToText
+
     base_modules = ["language_model.model.embed_tokens", "language_model.model.norm"]
     pre_lm_head_norm_module = "language_model.model.norm"
 
