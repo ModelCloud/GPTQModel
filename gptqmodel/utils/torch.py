@@ -116,7 +116,7 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
         if HAS_MPS:
             torch.mps.empty_cache()
         if HAS_MLX:
-            mlx.core.metal.clear_cache()
+            mlx.core.clear_cache()
         return
 
     # if device passed, only execute for device backend
@@ -129,4 +129,4 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
 
         # mlx is detached from pytorch
         if HAS_MLX:
-            mlx.core.metal.clear_cache()
+            mlx.core.clear_cache()
