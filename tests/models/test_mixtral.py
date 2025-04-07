@@ -23,7 +23,7 @@ class TestMixtral(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5247
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
 
     def test_mixtral(self):
         self.quant_lm_eval()

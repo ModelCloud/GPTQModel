@@ -64,7 +64,8 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
-    BATCH_SIZE = "auto"
+    EVAL_BATCH_SIZE = "auto"
+    QUANT_BATCH_SIZE = 2
     LOAD_BACKEND = BACKEND.AUTO
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
@@ -161,7 +162,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = 4, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
             bits=self.QUANTIZE_CONFIG_BITS,
             group_size=128,
@@ -284,7 +285,7 @@ class ModelTest(unittest.TestCase):
                     tasks=[self.TASK_NAME],
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
-                    batch_size=self.BATCH_SIZE,
+                    batch_size=self.EVAL_BATCH_SIZE,
                     gen_kwargs="temperature=0.0,top_k=50",
                     random_seed=RAND_SEED,
                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
@@ -305,23 +306,23 @@ class ModelTest(unittest.TestCase):
                 return task_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):
-                old_batch = self.BATCH_SIZE
-                if self.BATCH_SIZE == "auto":
-                    self.BATCH_SIZE = "8"
+                old_batch = self.EVAL_BATCH_SIZE
+                if self.EVAL_BATCH_SIZE == "auto":
+                    self.EVAL_BATCH_SIZE = "8"
                 else:
-                    self.BATCH_SIZE = f"{int(int(self.BATCH_SIZE) / 2)}"
+                    self.EVAL_BATCH_SIZE = f"{int(int(self.EVAL_BATCH_SIZE) / 2)}"
                     self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
 
-                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
+                print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
-                if int(self.BATCH_SIZE) > 0:
+                if int(self.EVAL_BATCH_SIZE) > 0:
                     self.lm_eval(model=model,
                                  apply_chat_template=apply_chat_template,
                                  trust_remote_code=trust_remote_code,
                                  delete_quantized_model=delete_quantized_model)
-                    print(f"set batch size to {self.BATCH_SIZE}, passed")
+                    print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
                 else:
-                    print(f"set batch size to {self.BATCH_SIZE}, failed")
+                    print(f"set batch size to {self.EVAL_BATCH_SIZE}, failed")
                     raise e
             else:
                 raise e
@@ -341,11 +342,11 @@ class ModelTest(unittest.TestCase):
         self.model = None
         if self.LOAD_QUANTIZED_MODEL:
             try:
-                self.model, _ = self.quantModel(self.SAVE_QUANTIZED_MODEL, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+                self.model, _ = self.quantModel(self.SAVE_QUANTIZED_MODEL, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
             except BaseException as e:
                 print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong {e}\n use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
         if not self.model:
-            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 

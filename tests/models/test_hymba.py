@@ -27,7 +27,7 @@ class TestHymba(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     # Hymba currently only supports a batch size of 1.
     # See https://huggingface.co/nvidia/Hymba-1.5B-Instruct
-    BATCH_SIZE = 1
+    EVAL_BATCH_SIZE = 1
 
     # Hymba currently tests that DESC_ACT=False to get better results.
     # If DESC_ACT=False, the output will be terrible.

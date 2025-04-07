@@ -20,6 +20,7 @@ import os
 
 import threadpoolctl
 
+from .definitions.dream import DreamGPTQ
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -73,6 +74,7 @@ from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
+from .definitions.dream import DreamGPTQ   # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
@@ -123,6 +125,7 @@ random.seed(787)
 numpy.random.seed(787)
 
 MODEL_MAP = {
+    "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
@@ -188,7 +191,7 @@ SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
-    if config.model_type not in SUPPORTED_MODELS:
+    if config.model_type.lower() not in SUPPORTED_MODELS:
         raise TypeError(f"{config.model_type} isn't supported yet.")
     model_type = config.model_type
     return model_type
@@ -280,7 +283,7 @@ class GPTQModel:
             log.warn(
                 "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
-        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
+        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code).lower()
         return MODEL_MAP[model_type].from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
