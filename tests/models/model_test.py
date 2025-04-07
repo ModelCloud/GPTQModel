@@ -174,9 +174,10 @@ class ModelTest(unittest.TestCase):
         if self.DISABLE_FLASH_ATTN:
             has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
             if has_attn_implementation:
-                args["attn_implementation"] = None
+                args["attn_implementation"] = "eager"
             args["use_flash_attention_2"] = False
 
+        log.info(f"args: {args}")
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
@@ -204,7 +205,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=1)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 

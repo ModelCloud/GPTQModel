@@ -106,9 +106,12 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     if is_local:
         return pretrained_model_id_or_path
     else:
-        # hf_transfer does not accept max_memory arg
-        kwargs.pop('max_memory', None)
-        return snapshot_download(pretrained_model_id_or_path, **kwargs)
+        # Clone kwargs before modifying
+        download_kwargs = kwargs.copy()
+        download_kwargs.pop("max_memory", None)
+        download_kwargs.pop("attn_implementation", None)
+        download_kwargs.pop("use_flash_attention_2", None)
+        return snapshot_download(pretrained_model_id_or_path, **download_kwargs)
 
 
 def ModelLoader(cls):
@@ -159,6 +162,12 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
+        atten_impl = model_init_kwargs.get("attn_implementation", None)
+
+        if atten_impl is not None and atten_impl != "auto":
+            log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
+            config._attn_implementation = atten_impl
+
         # normalize and auto select quantization device is not passed
         if quantize_config.device is None:
             quantize_config.device = auto_select_device(None, None)
@@ -178,7 +187,7 @@ def ModelLoader(cls):
         model_init_kwargs["torch_dtype"] = torch_dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
 
-        model = cls.loader.from_pretrained(model_local_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
