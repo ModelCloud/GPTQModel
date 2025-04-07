@@ -194,7 +194,7 @@ def check_and_get_model_type(model_dir, trust_remote_code=False):
     if config.model_type.lower() not in SUPPORTED_MODELS:
         raise TypeError(f"{config.model_type} isn't supported yet.")
     model_type = config.model_type
-    return model_type
+    return model_type.lower()
 
 class GPTQModel:
     def __init__(self):
@@ -283,7 +283,7 @@ class GPTQModel:
             log.warn(
                 "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
-        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code).lower()
+        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
         return MODEL_MAP[model_type].from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
