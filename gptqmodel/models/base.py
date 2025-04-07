@@ -111,6 +111,9 @@ class BaseGPTQModel(nn.Module):
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
 
+    # some models have broken attention mask codes so we need to only use batch 1 with no masks
+    max_batch_size = None
+
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}
@@ -339,6 +342,10 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
+
+        if self.max_batch_size is not None:
+            log.warn(f"Quantize: batch_size overriden by model class definition to `{self.max_batch_size}`")
+            batch_size = self.max_batch_size
 
         if backend == BACKEND.IPEX:
             self.quantize_config.format = FORMAT.IPEX
@@ -658,18 +665,22 @@ class BaseGPTQModel(nn.Module):
                     input_ids = input_ids[:seqlen]
                     input_ids_new.append(input_ids)
 
-                    attention_mask = attention_mask[:seqlen]
-                    attention_mask_new.append(attention_mask)
+                    if batch_size > 1:
+                        attention_mask = attention_mask[:seqlen]
+                        attention_mask_new.append(attention_mask)
 
                 if len(input_ids_new) == 0:
                     return None
 
                 input_ids_new = [F.pad(t, (0, seqlen - t.size(0))) for t in input_ids_new]
-                attention_mask_new = [F.pad(t, (0, seqlen - t.size(0))) for t in attention_mask_new]
+
+                if batch_size > 1:
+                    attention_mask_new = [F.pad(t, (0, seqlen - t.size(0))) for t in attention_mask_new]
+                    attention_mask_new = torch.vstack(attention_mask_new)
 
                 input_ids_new = torch.vstack(input_ids_new)
-                attention_mask_new = torch.vstack(attention_mask_new)
-                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
+
+                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new if batch_size > 1 else None}
                 return res
 
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)

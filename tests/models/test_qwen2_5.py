@@ -24,7 +24,7 @@ class TestQwen2_5(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
 
     def test_qwen2_5(self):
         self.quant_lm_eval()

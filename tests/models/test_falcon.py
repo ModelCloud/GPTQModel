@@ -26,7 +26,7 @@ class TestFalcon(ModelTest):
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = torch.float16
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.52
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
     USE_VLLM = False
 
     def test_falcon(self):

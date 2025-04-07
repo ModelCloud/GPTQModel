@@ -25,7 +25,7 @@ class TestQwen2_VL(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2765
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
 
     def test_qwen2_vl(self):
         model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
