@@ -21,8 +21,10 @@ import os
 import sys
 import threading
 import time
+from enum import Enum
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import transformers
@@ -32,6 +34,7 @@ from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
+from torch.nn.modules.conv import _ConvNd
 
 log = setup_logger()
 
@@ -44,8 +47,29 @@ CUDA_1 = torch.device("cuda:1") if torch.cuda.device_count() > 1 else CUDA_0
 
 lock = threading.Lock()
 
+
+class QuantizationOrder(str, Enum):
+    DEFAULT = "default"
+    ACTIVATION = "activation"
+
+def get_number_of_rows_and_cols(layer):
+    return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+
+
 class GPTQ:
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+        self.num_tied_handles = 0
+        if qcfg.tied_gptq_handle is not None:
+            qcfg.tied_gptq_handle.num_tied_handles += 1
+
+        # Flags indicating issues
+        self.issue_zero_samples = False
+        self.issue_nan_hessian = False
+        self.issue_non_invertible = False
+
+        self.W = module.weight
+        self.rows, self.columns = get_number_of_rows_and_cols(module)
+
         if isinstance(module, NamedModule):
             self.module = module.module
             self.name = module.name
@@ -53,19 +77,14 @@ class GPTQ:
             self.name = HF_OPTIMUM
             self.module = module
 
+        self._validate_module(self.module)
+
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         self.device = self.module.weight.device
 
         self.module_copy = None
-        if isinstance(self.module, (nn.Conv2d,  transformers.pytorch_utils.Conv1D)):
-            self.module_copy = self._clone_module(device=CUDA_1)
-            shape = self.module_copy.shape
-        else:
-            shape = self.module.weight.data.shape
 
-        self.rows, self.columns = shape[0], shape[1]
-
-        # self.H = torch.zeros((self.columns, self.columns), device=self.device)
+        self.H = None
         self.nsamples = 0
 
         self.quantizer = self.create_quantizer(name=self.name)
@@ -76,6 +95,14 @@ class GPTQ:
 
         # fwd counter
         self.fwd_counter = 0
+
+    @staticmethod
+    def _validate_module(module):
+        assert isinstance(module, (nn.Linear, _ConvNd)), f"We supports only linear and convolutional layers. actual = `{module}`"
+
+    def has_hessian_issues(self) -> bool:
+        return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
+
 
     def create_quantizer(self, name: str) -> Quantizer:
         return Quantizer(qcfg=self.qcfg, name=name)
@@ -208,41 +235,33 @@ class GPTQ:
     def process_batch(self, inp):
         inp = inp.to(device=CUDA_1, dtype=torch.float32)
 
-        if len(inp.shape) == 2:
-            inp = inp.unsqueeze(0)
-        batch_size = inp.shape[0]
-
-        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
-            if len(inp.shape) == 3:
-                inp = inp.reshape((-1, inp.shape[-1]))
-            inp = inp.t()
-
-        if isinstance(self.module, nn.Conv2d):
+        # input reshaping
+        if isinstance(self.module, nn.Linear):
+            inp = inp.reshape(-1, inp.shape[-1])
+        else:
             unfold = nn.Unfold(
                 self.module.kernel_size,
                 dilation=self.module.dilation,
                 padding=self.module.padding,
                 stride=self.module.stride,
             )
+            # output size (batch_size, channels * \prod kernel_size, num_patches)
             inp = unfold(inp)
-            inp = inp.permute([1, 0, 2])
-            inp = inp.flatten(1)
+            inp = inp.transpose(1, 2).flatten(0, 1)
 
-        if not hasattr(self, "H"):
+        batch_token_size = inp.shape[0]
+
+        if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                         dtype=torch.float32,
                         device=CUDA_1)
-        else:
-            self.H *= self.nsamples / (self.nsamples + batch_size)
 
-        self.nsamples += batch_size
-        # inp = inp.float()
+        beta = self.nsamples / (self.nsamples + batch_token_size)
+        alpha = 2.0 / (self.nsamples + batch_token_size)
+        self.H.addmm_(inp.T, inp, beta=beta, alpha=alpha)
 
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
-        #self.H += self.chunked_matmul_t_and_t_transposed(inp, chunk_size=1024)
-
-        self.H += inp.matmul(inp.t())
+        # update number of collected samples
+        self.nsamples += batch_token_size
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
