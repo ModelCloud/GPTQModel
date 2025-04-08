@@ -39,6 +39,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
+from torch.nn.modules.conv import _ConvNd
 from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
