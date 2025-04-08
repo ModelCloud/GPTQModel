@@ -39,6 +39,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
+from torch.nn.modules.conv import _ConvNd
 from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
@@ -282,10 +283,10 @@ def create_quant_layer(
         elif isinstance(submodule, nn.Linear):
             in_features = submodule.in_features
             out_features = submodule.out_features
-        elif isinstance(submodule, nn.Conv2d):
+        elif isinstance(submodule, _ConvNd):
             in_features = submodule.in_channels
             out_features = submodule.out_channels
-        elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
+        elif isinstance(submodule, transformers.Conv1D):
             in_features = submodule.weight.shape[0]
             out_features = submodule.weight.shape[1]
         elif isinstance(submodule, BaseQuantLinear):
