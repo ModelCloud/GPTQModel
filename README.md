@@ -157,7 +157,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
 | DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
 | Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
-| EXAONE 3.0        | ✅ |             |   |                |   |            |   |           |   |
+| EXAONE 3.0        | ✅ |             |   |  Nemotron Ultra              | ✅  |            |   |           |   |
 
 ## Platform and HW Support 
 
