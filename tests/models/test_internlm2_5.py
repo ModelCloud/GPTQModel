@@ -23,7 +23,7 @@ class TestInternlm2_5(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3575
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
     USE_VLLM = False
 
 

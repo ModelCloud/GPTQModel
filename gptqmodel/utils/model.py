@@ -567,7 +567,11 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
             qModules[name].pack(linear=layers[name], scales=scale, s_extra=scale_extra)
         else:
             qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
-        qModules[name].to(layer_device)
+
+        # TODO: why move it back to gpu?
+        # start = time.time()
+        # qModules[name].to(layer_device)
+        # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
 
 
 def pack_model(

@@ -23,7 +23,7 @@ class TestStablelm(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2577
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     TRUST_REMOTE_CODE = True
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
 
     def test_stablelm(self):
         self.quant_lm_eval()
