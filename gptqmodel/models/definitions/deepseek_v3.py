@@ -49,7 +49,7 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
         # DeepSeek-V3 uses 256 experts
         # for quantization on A100, don't merge gate_proj and up_proj
         # if you have enough vram to process 256 * 2 module inputs, then you can merge gate_proj and up_proj
-        # into single stage with make the quantization process faster
+        # into single stage which will make the quantization process faster
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
