@@ -26,8 +26,10 @@ class Phi4MMGPTQ(BaseGPTQModel):
 
     # text modules only
     layer_modules = [
-        ["self_attn.qkv_proj.base_layer", "self_attn.o_proj.base_layer"],
-        ["mlp.gate_up_proj.base_layer", "mlp.down_proj.base_layer"],
+        ["self_attn.qkv_proj.base_layer"],
+        ["self_attn.o_proj.base_layer"],
+        ["mlp.gate_up_proj.base_layer"],
+        ["mlp.down_proj.base_layer"],
     ]
 
 __all__ = ["Phi4MMGPTQ"]
