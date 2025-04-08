@@ -112,7 +112,7 @@ class BaseGPTQModel(nn.Module):
     require_monkeypatch = False
 
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
-    max_batch_size = None
+    support_batch_quantize = True
 
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
@@ -309,11 +309,16 @@ class BaseGPTQModel(nn.Module):
 
             new_calibration_dataset = concatenated_data
 
-        new_calibration_dataset_batched = [
-            collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-            for start in range(0, len(new_calibration_dataset), batch_size)
-        ]
-
+        if self.support_batch_quantize:
+            new_calibration_dataset_batched = [
+                collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
+                for start in range(0, len(new_calibration_dataset), batch_size)
+            ]
+        else:
+            new_calibration_dataset_batched = [
+                {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
+                for block in new_calibration_dataset
+            ]
 
         return new_calibration_dataset_batched
 
@@ -343,9 +348,9 @@ class BaseGPTQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
 
-        if self.max_batch_size is not None:
-            log.warn(f"Quantize: batch_size overriden by model class definition to `{self.max_batch_size}`")
-            batch_size = self.max_batch_size
+        if not self.support_batch_quantize:
+            log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
+            batch_size = 1 # but actually disabled
 
         if backend == BACKEND.IPEX:
             self.quantize_config.format = FORMAT.IPEX
