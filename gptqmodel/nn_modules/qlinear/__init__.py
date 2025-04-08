@@ -22,6 +22,7 @@ import numpy as np
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
+from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
@@ -491,7 +492,7 @@ class PackableQuantLinear(BaseQuantLinear):
 
     def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         W = linear.weight.data.clone()
-        if isinstance(linear, nn.Conv2d):
+        if isinstance(linear, _ConvNd):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             W = W.T
