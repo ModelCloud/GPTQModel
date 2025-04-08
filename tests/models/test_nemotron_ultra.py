@@ -14,21 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from model_test import ModelTest
 
 
-class DeciLMGPTQ(BaseGPTQModel):
-    require_trust_remote_code = True
-    layer_modules_strict = False # nemotron ultra skips modules
+class TestNemotronUltra(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Llama-3_1-Nemotron-Ultra-253B-v1"
+    NATIVE_ARC_CHALLENGE_ACC = 0.3567
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+    APPLY_CHAT_TEMPLATE = True
+    TRUST_REMOTE_CODE = True
 
-    base_modules = ["model.embed_tokens", "model.norm"]
-    pre_lm_head_norm_module = "model.norm"
-
-    layers_node = "model.layers"
-    layer_type = "DeciLMDecoderLayer"
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
+    def test_nemotron_ultra(self):
+        self.quant_lm_eval()

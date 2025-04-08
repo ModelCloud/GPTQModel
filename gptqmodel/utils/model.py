@@ -89,8 +89,13 @@ def recurse_setattr(module, name, value):
 def get_device(obj: torch.Tensor | nn.Module):
     if isinstance(obj, torch.Tensor):
         return obj.device
-    return next(obj.parameters()).device
 
+    params = list(obj.parameters())  # Convert generator to list
+    if len(params) > 0:
+        return params[0].device
+    else:
+        log.warn(f"Quantize: Unable to determine device of `{obj}`. default to `cpu`")
+        return torch.device('cpu')  # or raise an exception
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
@@ -554,7 +559,7 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
     with tctl.threadpool_limits(limits=1):
         r = quant_result[name]
         scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
-        layer_device = qModules[name].device
+        # layer_device = qModules[name].device
         qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
             layers[name].to(CPU),
@@ -572,7 +577,6 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
         # start = time.time()
         # qModules[name].to(layer_device)
         # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
-
 
 def pack_model(
     model,
