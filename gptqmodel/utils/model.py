@@ -282,10 +282,10 @@ def create_quant_layer(
         elif isinstance(submodule, nn.Linear):
             in_features = submodule.in_features
             out_features = submodule.out_features
-        elif isinstance(submodule, nn.Conv2d):
+        elif isinstance(submodule, _ConvNd):
             in_features = submodule.in_channels
             out_features = submodule.out_channels
-        elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
+        elif isinstance(submodule, transformers.Conv1D):
             in_features = submodule.weight.shape[0]
             out_features = submodule.weight.shape[1]
         elif isinstance(submodule, BaseQuantLinear):

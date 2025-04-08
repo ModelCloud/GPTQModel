@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
+from transformers import Conv1D
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
@@ -58,14 +59,14 @@ def get_number_of_rows_and_cols(layer):
 
 class GPTQ:
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
-        self.num_tied_handles = 0
-        if qcfg.tied_gptq_handle is not None:
-            qcfg.tied_gptq_handle.num_tied_handles += 1
+        # self.num_tied_handles = 0
+        # if qcfg.tied_gptq_handle is not None:
+        #     qcfg.tied_gptq_handle.num_tied_handles += 1
 
         # Flags indicating issues
-        self.issue_zero_samples = False
-        self.issue_nan_hessian = False
-        self.issue_non_invertible = False
+        # self.issue_zero_samples = False
+        # self.issue_nan_hessian = False
+        # self.issue_non_invertible = False
 
         self.W = module.weight
         self.rows, self.columns = get_number_of_rows_and_cols(module)
@@ -98,11 +99,10 @@ class GPTQ:
 
     @staticmethod
     def _validate_module(module):
-        assert isinstance(module, (nn.Linear, _ConvNd)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        assert isinstance(module, (nn.Linear, _ConvNd, Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
-    def has_hessian_issues(self) -> bool:
-        return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
-
+    # def has_hessian_issues(self) -> bool:
+    #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
 
     def create_quantizer(self, name: str) -> Quantizer:
         return Quantizer(qcfg=self.qcfg, name=name)
@@ -119,7 +119,7 @@ class GPTQ:
 
         clone = self.module.weight.data.to(copy=copy, device=device)
 
-        if isinstance(self.module, nn.Conv2d):
+        if isinstance(self.module, _ConvNd):
             clone = clone.flatten(1)
 
         if isinstance(self.module, transformers.pytorch_utils.Conv1D):
