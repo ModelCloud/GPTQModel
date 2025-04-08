@@ -89,8 +89,13 @@ def recurse_setattr(module, name, value):
 def get_device(obj: torch.Tensor | nn.Module):
     if isinstance(obj, torch.Tensor):
         return obj.device
-    return next(obj.parameters()).device
 
+    params = list(obj.parameters())  # Convert generator to list
+    if len(params) > 0:
+        return params[0].device
+    else:
+        log.warn(f"Quantize: Unable to determine device of `{obj}`. default to `cpu`")
+        return torch.device('cpu')  # or raise an exception
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
