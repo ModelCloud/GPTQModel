@@ -38,7 +38,8 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
     layer_modules_strict = False
 
     layer_modules = [
-        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
+        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
 
         ["mlp.gate_proj", "mlp.up_proj"],
@@ -47,6 +48,8 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
         # included in layer 3-61, uses dynamic_expert_index
         # DeepSeek-V3 uses 256 experts
         # for quantization on A100, don't merge gate_proj and up_proj
+        # if you have enough vram to process 256 * 2 module inputs, then you can merge gate_proj and up_proj
+        # into single stage with make the quantization process faster
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
