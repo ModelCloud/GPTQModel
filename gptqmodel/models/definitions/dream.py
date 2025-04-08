@@ -20,7 +20,8 @@ from ..base import BaseGPTQModel
 
 class DreamGPTQ(BaseGPTQModel):
     loader = AutoModel
-    max_batch_size = 1
+    # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
+    support_batch_quantize = False
 
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
