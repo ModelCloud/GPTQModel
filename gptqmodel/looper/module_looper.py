@@ -22,8 +22,10 @@ import torch
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
+from ..looper.gptqv2_processor import GPTQv2Processor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
+from ..looper.native_processor import NativeProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
@@ -221,7 +223,6 @@ class ModuleLooper():
 
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
-            modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
             for p_index, processor in enumerate(self.processors):
                 processor.log_call_count = 0 # reset
@@ -233,6 +234,12 @@ class ModuleLooper():
                 attention_masks = processor.inputs_cache.attention_masks
 
                 processed_subset = {}
+
+                modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+                if isinstance(processor, NativeProcessor):
+                    # for NativeProcessor we process one time forward on all subsets
+                    modules = [sum(modules, [])]
+
                 for index, names in enumerate(modules):
                     subset = {}
                     for n in names:
@@ -242,7 +249,6 @@ class ModuleLooper():
                         # ref: deepseek v2/v3/r1
                         elif self.gptq_model.layer_modules_strict:
                             raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
-
 
                     skipped_modules = []
 
@@ -284,6 +290,7 @@ class ModuleLooper():
 
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
                     fwd_start = time.time()
+                    layer_outputs = []
                     for j in range(processor.num_batches):
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
@@ -315,8 +322,22 @@ class ModuleLooper():
                             module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                   **additional_layer_inputs)
 
+                        if isinstance(processor, NativeProcessor):
+                            # For Native processor, we can update processor input here
+                            layer_output = move_to(
+                                module(*layer_input)[0] if is_lm_head_module else
+                                module(*layer_input, **additional_layer_inputs)[0],
+                                device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                            )
+                            layer_outputs.append([layer_output])
+
                         del layer_input
                         del additional_layer_inputs
+
+                    if isinstance(processor, NativeProcessor):
+                        processor.clear_cache_data()
+                        processor.receive_layer_inputs(layer_outputs)
+                        del layer_outputs
 
                     fwd_end = time.time()
                     fwd_time = fwd_end - fwd_start
@@ -347,13 +368,13 @@ class ModuleLooper():
                         processor.process(module=m, auto_gc=auto_gc)
                         processed_subset[name] = m
 
-                    if index == len(layer_modules) - 1:
+                    if index == len(modules) - 1:
                         if auto_gc:
                             torch_empty_cache()
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
-                layer_outputs = []
-                if not is_last_module:
+                if not is_last_module and not isinstance(processor, NativeProcessor):
+                    layer_outputs = []
                     for j in range(processor.num_batches):
                         # assert weight
                         # if isinstance(processor, EoraProcessor):
@@ -403,9 +424,10 @@ class ModuleLooper():
                     else:
                         self.gptq_model.post_quantize(module)
 
-                processor.clear_cache_data()
+                if not isinstance(processor, NativeProcessor):
+                    processor.clear_cache_data()
 
-                processor.receive_layer_inputs(layer_outputs)
+                    processor.receive_layer_inputs(layer_outputs)
 
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
@@ -442,7 +464,6 @@ class ModuleLooper():
             reverse_p.log_plotly()
 
             reverse_p.finalize(model=self.gptq_model, **kwargs)
-
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
