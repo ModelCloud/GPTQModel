@@ -22,7 +22,6 @@ import torch
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
-from ..looper.gptqv2_processor import GPTQv2Processor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.native_processor import NativeProcessor
@@ -158,7 +157,8 @@ class ModuleLooper():
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
-                if isinstance(processor, EoraProcessor):
+                if isinstance(processor, EoraProcessor) or\
+                        (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.use_v2):
                     prev_processor = self.processors[p_index - 1]
                     processor.set_calibration_dataset(prev_processor.calibration_dataset)
                     # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
@@ -319,23 +319,17 @@ class ModuleLooper():
                             if shared_kv_cache_dict.get(layer_index) is None:
                                 shared_kv_cache_dict[layer_index] = layer_output[-1]
                         else:
-                            module(*layer_input) if is_lm_head_module else module(*layer_input,
+                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                   **additional_layer_inputs)
 
                         if isinstance(processor, NativeProcessor):
                             # For Native processor, we can update processor input here
-                            layer_output = move_to(
-                                module(*layer_input)[0] if is_lm_head_module else
-                                module(*layer_input, **additional_layer_inputs)[0],
-                                device=cur_layer_device if calibration_enable_gpu_cache else CPU,
-                            )
-                            layer_outputs.append([layer_output])
+                            layer_outputs.append([layer_output[0]])
 
                         del layer_input
                         del additional_layer_inputs
 
                     if isinstance(processor, NativeProcessor):
-                        processor.clear_cache_data()
                         processor.receive_layer_inputs(layer_outputs)
                         del layer_outputs
 
@@ -426,7 +420,6 @@ class ModuleLooper():
 
                 if not isinstance(processor, NativeProcessor):
                     processor.clear_cache_data()
-
                     processor.receive_layer_inputs(layer_outputs)
 
                 # if last processor, we need to call finalize in reverse

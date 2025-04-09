@@ -202,6 +202,9 @@ class QuantizeConfig():
 
     is_marlin_format: bool = False
 
+    use_v2: bool = False
+    alpha: float = 0.25
+
     def __post_init__(self):
         fields_info = fields(self)
 

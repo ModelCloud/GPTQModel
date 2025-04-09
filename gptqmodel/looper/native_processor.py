@@ -46,7 +46,7 @@ class NativeProcessor(LoopProcessor):
                          logger_board=logger_board, require_fwd=require_fwd)
 
         self.retain_w = retain_w
-        self.avg_losses = []
+        self.fp_inp_caches = {}
 
     def log_plotly(self):
         task = self.logger_task
@@ -66,29 +66,24 @@ class NativeProcessor(LoopProcessor):
         raise NotImplementedError("NativeProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
-        module.state.update({
-            'fp_inp': []
-        })
+        self.fp_inp_caches[module.name] = []
 
     def is_skipped(self, module: NamedModule) -> bool:
-        # gptq has no dynamic method of full override (removal)
-        t = self.tasks.get(module.name, False)
-        if t == False:
-            return True
-        else:
-            return False
+        # TODO: Add skipping certain modules
+        return False
 
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             inp = inp[0].detach()
             # TODO: add CPU offloading for fp_inp for VRAM memory saving
-            module.state['fp_inp'] += [inp]
+            self.fp_inp_caches[name] += [inp.to(CUDA_1)]
 
         return tmp
 
     def process(self, module: NamedModule, auto_gc: bool = True):
-        pass
+        module.state["fp_inp"] = self.fp_inp_caches[module.name]
+        del self.fp_inp_caches[module.name]
 
     def submodule_finalize(self, module: NamedModule):
         module.state.pop("fp_inp", None)

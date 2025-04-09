@@ -25,7 +25,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTQ
+from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU, CUDA_0, CUDA_1
 from ..utils.logger import setup_logger
@@ -81,8 +81,12 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", qcfg_clone.desc_act)
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
+            qcfg_clone.use_v2 = self.qcfg.dynamic_get(module.full_name, "use_v2", qcfg_clone.use_v2)
 
-        tmp = GPTQ(module=module, qcfg=qcfg_clone)
+        if qcfg_clone.use_v2 is True:
+            tmp = GPTQv2(module=module, qcfg=qcfg_clone)
+        else:
+            tmp = GPTQ(module=module, qcfg=qcfg_clone)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
