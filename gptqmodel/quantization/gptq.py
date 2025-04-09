@@ -306,9 +306,8 @@ class GPTQ:
         damp = self.qcfg.damp_percent
         while 1 > damp > 0:
             try:
-                damp = damp * torch.mean(torch.diag(H))
                 diag = torch.arange(self.columns, device=CUDA_1)
-                H[diag, diag] += damp
+                H[diag, diag] += damp * torch.mean(torch.diag(H))
 
                 with lock:
                     # print(f"H SHAPE: {H.shape}")
