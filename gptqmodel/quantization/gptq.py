@@ -34,7 +34,7 @@ from transformers import Conv1D
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
+from ..utils.torch import torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -47,7 +47,6 @@ CUDA_0 = torch.device("cuda:0")
 CUDA_1 = torch.device("cuda:1") if torch.cuda.device_count() > 1 else CUDA_0
 
 lock = threading.Lock()
-
 
 class QuantizationOrder(str, Enum):
     DEFAULT = "default"
@@ -347,17 +346,22 @@ class GPTQ:
         self,
         blocksize=128,
     ):
+
         #self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        # process buffered inputs
-        for inp in self.fwd_inputs_buffered_data:
-            torch.cuda.synchronize()
-            self.process_batch(inp)
+        self.hessian_inverse = torch_compile(self.hessian_inverse)
 
-        # release buffer
-        del self.fwd_inputs_buffered_data
+        # process buffered inputs
+        if len(self.fwd_inputs_buffered_data) > 0:
+            torch.cuda.synchronize()
+
+            for inp in self.fwd_inputs_buffered_data:
+                self.process_batch(inp)
+
+            # release buffer
+            del self.fwd_inputs_buffered_data
 
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()
