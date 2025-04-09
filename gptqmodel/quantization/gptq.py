@@ -53,8 +53,17 @@ class QuantizationOrder(str, Enum):
     DEFAULT = "default"
     ACTIVATION = "activation"
 
-def get_number_of_rows_and_cols(layer):
-    return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+def get_number_of_rows_and_cols(layer: nn.Module):
+    # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+    if isinstance(layer, NamedModule):
+        layer = layer.module
+
+    if isinstance(layer, transformers.Conv1D):
+        # transformers.Conv1D: weight shape is (n_in, n_out)
+        return layer.weight.shape[1], layer.weight.shape[0]
+    else:
+        # weight shape is (n_out, n_in)
+        return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
 
 
 class GPTQ:
@@ -70,7 +79,6 @@ class GPTQ:
 
         self.W = module.weight
         self.rows, self.columns = get_number_of_rows_and_cols(module)
-
         if isinstance(module, NamedModule):
             self.module = module.module
             self.name = module.name
@@ -232,11 +240,11 @@ class GPTQ:
         else:
             self.process_batch(inp)
 
-    def process_batch(self, inp):
+    def process_batch(self, inp: torch.Tensor):
         inp = inp.to(device=CUDA_1, dtype=torch.float32)
 
         # input reshaping
-        if isinstance(self.module, nn.Linear):
+        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             inp = inp.reshape(-1, inp.shape[-1])
         else:
             unfold = nn.Unfold(
