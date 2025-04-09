@@ -36,7 +36,7 @@ class DequantizeProcessor(LoopProcessor):
         self.num_batches = 0
 
     # de-quantize weights
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, auto_gc: bool = True):
         device = module.weight.device
         w = module.weight.data
 
