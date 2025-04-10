@@ -30,7 +30,7 @@ from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync, HAS_XLA
 
 log = setup_logger()
 
@@ -214,7 +214,10 @@ class GPTQProcessor(LoopProcessor):
             "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
 
-        module.weight.data = wq
+        if HAS_XLA:
+            module.weight.data.copy_(wq)
+        else:
+            module.weight.data = wq
 
         if auto_gc:
             torch_empty_cache()
