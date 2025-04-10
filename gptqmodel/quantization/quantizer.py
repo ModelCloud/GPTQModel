@@ -30,11 +30,11 @@ def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
     if requires_groupwise_processing:
-        scale = torch.where(scale == 0, torch.tensor(1e-8, device=scale.device), scale)
+        scale = torch.where(scale == 0, torch.tensor(1e-8, device=scale.device), scale) # avoid division by zero
         q = torch.clamp(torch.round(x / scale), -maxq, maxq)
         return scale * q
     else:
-        scale = torch.where(scale == 0, torch.tensor(1e-8, device=scale.device), scale)
+        scale = torch.where(scale == 0, torch.tensor(1e-8, device=scale.device), scale) # avoid division by zero
         q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
         return scale * (q - zero)
 
