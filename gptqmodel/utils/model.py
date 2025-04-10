@@ -899,7 +899,8 @@ def auto_dtype(config: PretrainedConfig,
                device: DEVICE,
                quant_inference: bool = False) -> torch.dtype:
 
-    assert isinstance(device, DEVICE)
+    # TODO: XLA device is created externally by torch_xla, not torch
+    assert isinstance(device, (DEVICE, torch.device))
 
     # TODO: both MPS and XPU are locked to float16
     # XPU stack is missing bfloat16 (hardware supports it)

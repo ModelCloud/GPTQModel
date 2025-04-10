@@ -34,7 +34,7 @@ from transformers import Conv1D
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_compile, torch_sync
+from ..utils.torch import auto_select_torch_device, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -43,8 +43,8 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 CPU = torch.device("cpu")
-CUDA_0 = torch.device("cuda:0")
-CUDA_1 = torch.device("cuda:1") if torch.cuda.device_count() > 1 else CUDA_0
+DEVICE_0 = auto_select_torch_device(index=0)
+DEVICE_1 = auto_select_torch_device(index=1)
 
 lock = threading.Lock()
 
@@ -232,15 +232,15 @@ class GPTQ:
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
-            if CUDA_0.index != CUDA_1.index:
-                self.fwd_inputs_buffered_data.append(inp.to(device=CUDA_1, non_blocking=True))
+            if DEVICE_0.index != DEVICE_1.index:
+                self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
             else:
                 self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
         else:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        inp = inp.to(device=CUDA_1, dtype=torch.float32)
+        inp = inp.to(device=DEVICE_1, dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
@@ -260,8 +260,8 @@ class GPTQ:
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
-                        dtype=torch.float32,
-                        device=CUDA_1)
+                                 dtype=torch.float32,
+                                 device=DEVICE_1)
 
         beta = self.nsamples / (self.nsamples + batch_token_size)
         alpha = 2.0 / (self.nsamples + batch_token_size)
@@ -306,7 +306,7 @@ class GPTQ:
         damp = self.qcfg.damp_percent
         while 1 > damp > 0:
             try:
-                diag = torch.arange(self.columns, device=CUDA_1)
+                diag = torch.arange(self.columns, device=DEVICE_1)
                 H[diag, diag] += damp * torch.mean(torch.diag(H))
 
                 with lock:
@@ -371,7 +371,7 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=CUDA_1)
+            W = self._clone_module(device=DEVICE_1)
         else:
             W = self.module_copy
             self.module_copy = None
@@ -485,7 +485,7 @@ class GPTQ:
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=CUDA_1)
+        Q = Q.to(device=DEVICE_1)
 
         if scale == []:
             scale.append(self.quantizer.scale)

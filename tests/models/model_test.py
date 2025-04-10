@@ -48,7 +48,7 @@ from gptqmodel.quantization import FORMAT  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
-from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from gptqmodel.utils.torch import torch_empty_cache, auto_select_torch_device  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
@@ -142,7 +142,8 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
-        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        traindata = load_dataset("allenai/c4", data_files="en/c4-train.00000-of-01024.json.gz", split="train")
+
 
         if not tokenizer:
             return traindata.select(range(rows))
@@ -186,6 +187,7 @@ class ModelTest(unittest.TestCase):
             torch_dtype=torch_dtype,
             backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            #device_map={"": auto_select_torch_device},
             **args,
         )
 

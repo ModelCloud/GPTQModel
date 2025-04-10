@@ -24,6 +24,7 @@ from ..utils.logger import setup_logger
 
 HAS_CUDA = False
 HAS_XPU = False
+HAS_XLA = False
 HAS_MPS = False
 HAS_MLX = False
 
@@ -46,6 +47,13 @@ if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is
 
 if hasattr(torch, "mps") and hasattr(torch.mps, "is_available") and torch.mps.is_available():
     HAS_MPS = True
+
+try:
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+    HAS_XLA = True
+except Exception:
+    pass
 
 # mlx check
 try:
@@ -92,6 +100,9 @@ def torch_sync(device: torch.device = None):
             torch.cuda.synchronize()
         if HAS_XPU:
             torch.xpu.synchronize()
+        if HAS_XLA:
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
         if HAS_MPS:
             torch.mps.synchronize()
         return
@@ -130,3 +141,29 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
         # mlx is detached from pytorch
         if HAS_MLX:
             mlx.core.clear_cache()
+
+def auto_select_torch_device(index: int = 0):
+    assert index >= 0, f"device index should be a positive integer: actual = `{index}`"
+
+    if HAS_CUDA:
+        # defensive check
+        if index > 0 and torch.cuda.device_count() <= index :
+            index = 0
+        device = torch.device(f"cuda:{index}")
+    elif HAS_XPU:
+        # defensive check
+        if index > 0 and torch.xpu.device_count() <= index:
+            index = 0
+        device = torch.device(f"xpu:{index}")
+    elif HAS_XLA:
+        import torch_xla.core.xla_model as xm
+
+        # For TPUs, we don't need to specify an index like with CUDA
+        # The XLA runtime handles device assignment
+        device = xm.xla_device(devkind="tpu")
+    elif HAS_MPS:
+        device = torch.device("mps") # mps has no index
+    else:
+        device = torch.device("cpu") # cpu has no index
+
+    return device
