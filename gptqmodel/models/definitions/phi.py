@@ -21,7 +21,7 @@ class PhiGPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.final_layernorm"]
     pre_lm_head_norm_module = "model.final_layernorm"
 
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     layer_type = "PhiDecoderLayer"
     layer_modules = [
         ["self_attn.q_proj"],

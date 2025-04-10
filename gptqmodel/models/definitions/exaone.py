@@ -24,7 +24,7 @@ class ExaoneGPTQ(BaseGPTQModel):
     base_modules = ["transformer.ln_f", "transformer.wte"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = "transformer.h"
+    layers_node = ["transformer.h"]
     layer_type = "ExaoneBlock"
     layer_modules = [
         ["attn.attention.k_proj", "attn.attention.v_proj", "attn.attention.q_proj"],

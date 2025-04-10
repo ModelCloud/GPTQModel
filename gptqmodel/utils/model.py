@@ -141,9 +141,8 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
-    for layer in layers:
-        if isinstance(module, layer):
-            return {name: module}
+    if isinstance(module, tuple(layers)):
+       return {name: module}
 
     res = {}
     for name1, child in module.named_children():
@@ -151,10 +150,11 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     return res
 
 
-def get_module_by_name_prefix(model, module_name: str):
+def get_module_by_name_prefix(model, module_name: List[str]):
     for name, module in model.named_modules():
-        if name.startswith(module_name):
-            return module
+        for prefix in module_name:
+            if name.startswith(prefix):
+                return module, prefix
 
 
 def get_module_by_name_suffix(model, module_name: str):

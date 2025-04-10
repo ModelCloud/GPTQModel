@@ -27,7 +27,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
+from ..nn_modules.hooked_linear import replace_module_with_hooked_tree
 from ..quantization.gptq import CPU, CUDA_0, CUDA_1
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
@@ -86,7 +86,7 @@ class ModuleLooper():
         layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.base_modules:
-            module = get_module_by_name_prefix(self.gptq_model.model, module_name)
+            module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
 
             if module is None:
                 continue
@@ -119,7 +119,7 @@ class ModuleLooper():
         handle.remove()
         move_to(layers[0], device=CPU)
         for module_name in self.gptq_model.base_modules:
-            module = get_module_by_name_prefix(self.gptq_model.model, module_name)
+            module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
             if module is not None:
                 move_to(module, device=ori_outside_layer_module_devices[module_name])
         if auto_gc:
@@ -153,7 +153,7 @@ class ModuleLooper():
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
 
-        layers = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
+        layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
@@ -200,8 +200,11 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        # replace linear with hooked linear
-        replace_linear_with_hooked_linear(self.gptq_model.model)
+        # replace quantizable modules with hooked version
+        if self.gptq_model.layers_modules_tree:
+            replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree)
+        else:
+            replace_module_with_hooked_legacy(self.gptq_model.model)
 
         for layer_index in quant_modules_pb:
             is_lm_head_module = layer_index >= layer_count
@@ -248,7 +251,7 @@ class ModuleLooper():
                     skipped_modules = []
 
                     for name in subset:
-                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{self.gptq_model.layers_node}.{layer_index}.{name}"
+                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
 
                         # gptq task is created and stored inside processor
                         if not isinstance(subset[name], NamedModule):

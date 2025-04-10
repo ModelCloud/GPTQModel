@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 import transformers
 from torch import device
-from torch.nn.modules.conv import _ConvNd
 
 from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
@@ -34,7 +33,7 @@ XPU_0 = device("xpu:0")
 MPS = device("mps")
 ROCM = device("cuda:0")  # rocm maps to fake cuda
 
-SUPPORTS_MODULE_TYPES = [nn.Linear, _ConvNd, transformers.Conv1D]
+SUPPORTS_MODULE_TYPES = [nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D]
 
 DEFAULT_MAX_SHARD_SIZE = "4GB"
 
