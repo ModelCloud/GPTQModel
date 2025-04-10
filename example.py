@@ -23,8 +23,8 @@ from datasets import load_dataset
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-pretrained_model_id = "meta-llama/Meta-Llama-3-8B"
-quantized_model_id = "llama3-8B-w3g64v2"
+pretrained_model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+quantized_model_id = "llama3-1B-w4g128v1"
 
 
 def main():
@@ -34,12 +34,13 @@ def main():
         "allenai/c4",
         data_files="en/c4-train.00001-of-01024.json.gz",
         split="train"
-    ).select(range(1024))["text"]
+    ).select(range(256))["text"]
 
     quantize_config = QuantizeConfig(
-        bits=3,  # quantize model to 4-bit
-        group_size=64,  # it is recommended to set the value to 128
-        use_v2=True
+        bits=4,  # quantize model to 4-bit
+        group_size=128,  # it is recommended to set the value to 128
+        use_v2=False,
+        lm_head=True
     )
 
     # load un-quantized model, by default, the model will always be loaded into CPU memory
@@ -68,8 +69,8 @@ def main():
     model.save(quantized_model_id)
 
     # load quantized model to the first GPU
-    device = get_best_device()
-    model = GPTQModel.load(quantized_model_id, device=device)
+    # device = get_best_device()
+    # model = GPTQModel.load(quantized_model_id, device=device)
 
     # load quantized model to CPU with IPEX kernel linear.
     # model = GPTQModel.from_quantized(quantized_model_dir, device="cpu")
@@ -78,7 +79,7 @@ def main():
     # model = GPTQModel.from_quantized(repo_id, device="cuda:0",)
 
     # inference with model.generate
-    print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
+    # print(tokenizer.decode(model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0]))
 
 
 if __name__ == "__main__":
