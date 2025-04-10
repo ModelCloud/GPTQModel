@@ -31,9 +31,9 @@ class LlamaGPTQ(BaseGPTQModel):
 
     # Full tree of quantizable modules
     # `#` means match any number
-    # List[] for serial top/down nodes
-    # Dict{} for nested nodes
-    # Tuple() for target_nodes, final modules to quantize
+    # List[str] for serial linked nodes. List str are linear depth linked modules presented in a linear fashion with no divergence.
+    # Dict{str: List[str] | Dict[str]} for diverging nodes where a node splits into multiple paths/nodes.
+    # Tuple(str) for final targeted modules/nodes: there are only strings representing the final targeted modules
     layers_modules_tree = [
         "model",
         "layers",
