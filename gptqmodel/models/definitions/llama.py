@@ -30,9 +30,9 @@ class LlamaGPTQ(BaseGPTQModel):
     layer_type = "LlamaDecoderLayer"
 
     # Full tree of quantizable modules
-    # `#` means match any number
+    # `#` str will match any number: useful for layers and moe indexing.
     # List[str] for serial linked nodes. List str are linear depth linked modules presented in a linear fashion with no divergence.
-    # Dict{str: List[str] | Dict[str]} for diverging nodes where a node splits into multiple paths/nodes.
+    # Dict{str: List[str] | Dict | Tuple[str]} for diverging nodes where a node splits into multiple paths/nodes.
     # Tuple(str) for final targeted modules/nodes: there are only strings representing the final targeted modules
     layers_modules_tree = [
         "model",
