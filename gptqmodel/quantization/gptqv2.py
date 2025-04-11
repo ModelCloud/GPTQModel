@@ -28,7 +28,7 @@ import transformers
 
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_sync
-from .gptq import CPU, DEVICE_0, DEVICE_1, GPTQ, lock, log
+from .gptq import DEVICE_1, GPTQ, lock, log
 
 
 class GPTQv2(GPTQ):
@@ -38,17 +38,6 @@ class GPTQv2(GPTQ):
         super().__init__(module, qcfg)
         self.native_inps = module.state[NATIVE_INPUTS_STATE_KEY]
         module.state[NATIVE_INPUTS_STATE_KEY] = None
-
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
-        self.fwd_counter += 1
-
-        if self.fwd_inputs_buffered:
-            if DEVICE_0.index != DEVICE_1.index:
-                self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
-            else:
-                self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
-        else:
-            self.process_batch(inp)
 
     def process_batch(self, inp):
         inp = inp.to(device=DEVICE_1, dtype=torch.float32)
@@ -101,36 +90,7 @@ class GPTQv2(GPTQ):
         native_inp = math.sqrt(2 / self.nsamples) * native_inp
         self.dXXT += (native_inp-inp).matmul(inp.t())
 
-    # FIXME, optimum needs fasterquant, we need to remove it
-    def fasterquant(
-        self,
-        blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
-    ):
-        return self.hf_quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
 
-    # public api exposed to hf
-    def hf_quantize(
-        self,
-        blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
-    ):
-        self.qcfg.group_size = group_size
-        self.qcfg.damp_percent = percdamp
-        self.qcfg.damp_auto_increment = damp_auto_increment
-        self.qcfg.desc_act = actorder
-        self.qcfg.static_groups = static_groups
-        (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
-        self.module.weight.data = Q
-        return scale, zero, g_idx, duration, avg_loss, damp_percent
 
     @torch.inference_mode()
     def quantize(
@@ -341,16 +301,10 @@ class GPTQv2(GPTQ):
         return Q, scale, zero, g_idx, duration, avg_loss, damp_percent, self.nsamples
 
     def free(self):
-        if hasattr(self, "H"):
-            del self.H
+        super().free()
+
         if hasattr(self, 'dXXT'):
             del self.dXXT
-
-        del self.quantizer
-        del self.module_copy
-        del self.module
-
-        # torch_empty_cache(self.device)
 
 
 __all__ = ["GPTQv2"]

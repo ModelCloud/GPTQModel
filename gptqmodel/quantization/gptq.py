@@ -21,7 +21,6 @@ import os
 import sys
 import threading
 import time
-from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -47,10 +46,6 @@ DEVICE_0 = auto_select_torch_device(index=0)
 DEVICE_1 = auto_select_torch_device(index=1)
 
 lock = threading.Lock()
-
-class QuantizationOrder(str, Enum):
-    DEFAULT = "default"
-    ACTIVATION = "activation"
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
