@@ -336,6 +336,8 @@ class ModuleLooper():
                         del layer_input
                         del additional_layer_inputs
 
+                    # Native processor does not need to run a second forward pass, the output of the first pass is
+                    # directly saved and used as input for the next loop.
                     if isinstance(processor, NativeProcessor):
                         processor.receive_layer_inputs(layer_outputs)
                         del layer_outputs
@@ -374,6 +376,7 @@ class ModuleLooper():
                             torch_empty_cache()
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
+                # Native processor does not need second forward pass after layer quantization
                 if not is_last_module and not isinstance(processor, NativeProcessor):
                     layer_outputs = []
                     for j in range(processor.num_batches):
@@ -425,6 +428,8 @@ class ModuleLooper():
                     else:
                         self.gptq_model.post_quantize(module)
 
+                # This is second forward outputs captured for input of next loop
+                # Native processor does not need second forward and already captured output from first forward
                 if not isinstance(processor, NativeProcessor):
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
