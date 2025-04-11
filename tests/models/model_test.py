@@ -95,6 +95,8 @@ class ModelTest(unittest.TestCase):
 
     QUANTIZE_CONFIG_BITS = 4
 
+    USE_V2 = False
+
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
         if keywords is None:
@@ -168,6 +170,7 @@ class ModelTest(unittest.TestCase):
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
             sym=self.SYM,
+            use_v2=self.USE_V2
         )
         args = kwargs if kwargs else {}
 
