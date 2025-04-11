@@ -27,7 +27,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import replace_module_with_hooked_tree
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
 from ..quantization.gptq import CPU, CUDA_0, CUDA_1
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
@@ -202,7 +202,7 @@ class ModuleLooper():
 
         # replace quantizable modules with hooked version
         if self.gptq_model.layers_modules_tree:
-            replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree)
+            replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree, debug=False)
         else:
             replace_module_with_hooked_legacy(self.gptq_model.model)
 
