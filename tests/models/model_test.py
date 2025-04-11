@@ -66,7 +66,7 @@ class ModelTest(unittest.TestCase):
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"
-    QUANT_BATCH_SIZE = 2
+    QUANT_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.AUTO
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
@@ -171,14 +171,19 @@ class ModelTest(unittest.TestCase):
             desc_act=self.DESC_ACT,
             sym=self.SYM,
         )
+
+        log.info(f"Quant config: {quantize_config}")
+        log.info(f"Quant batch_size: {batch_size}")
+
         args = kwargs if kwargs else {}
 
         if self.DISABLE_FLASH_ATTN:
             has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
             if has_attn_implementation:
-                args["attn_implementation"] = None
+                args["attn_implementation"] = "eager"
             args["use_flash_attention_2"] = False
 
+        log.info(f"args: {args}")
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
@@ -384,6 +389,3 @@ class ModelTest(unittest.TestCase):
                 os.unlink(item_path)
             elif os.path.isdir(item_path):
                 shutil.rmtree(item_path)
-
-    def get_batch_size(self):
-        return 8 if Device(CUDA_0).memory_total / 1024 / 1024 / 1024 > 24 else 2

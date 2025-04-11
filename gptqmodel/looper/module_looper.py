@@ -278,7 +278,9 @@ class ModuleLooper():
                         continue
 
                     handle = []
+                    # log.info(f"Subset = {subset}")
                     for name in subset:
+                        # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = processor.preprocess_fwd_hook(name)
                         else:
@@ -290,6 +292,7 @@ class ModuleLooper():
                     fwd_start = time.time()
                     for j in range(processor.num_batches):
                         layer_input = []
+                        # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
                         for k, layer_inp in enumerate(layer_inputs[j]):
                             layer_input.append(move_to(layer_inp, device=cur_layer_device))
 

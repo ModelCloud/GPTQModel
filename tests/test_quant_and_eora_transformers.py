@@ -195,7 +195,6 @@ class Test(ModelTest):
             model_or_id_or_path=model,
             framework=EVAL.LM_EVAL,
             tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU],
-            batch_size=self.get_batch_size(),
         )
 
         del model
