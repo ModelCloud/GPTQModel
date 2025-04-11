@@ -29,8 +29,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path  # noqa: E402
 from typing import Dict, List  # noqa: E402
 
-from device_smi import Device  # noqa: E402
-from gptqmodel.models._const import CUDA_0  # noqa: E402
 from logbar import LogBar  # noqa: E402
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402

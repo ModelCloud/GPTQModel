@@ -240,8 +240,10 @@ class ModuleLooper():
                 processed_subset = {}
 
                 modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
-                if isinstance(processor, NativeProcessor):
-                    # for NativeProcessor we process one time forward on all subsets
+
+                # for NativeProcessor we process one time forward on all grouped module subsets
+                if processor.fwd_all_modules_in_single_pass:
+                    # merge all subsets into one
                     modules = [sum(modules, [])]
 
                 for index, names in enumerate(modules):
@@ -329,8 +331,9 @@ class ModuleLooper():
                             layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                   **additional_layer_inputs)
 
-                        if isinstance(processor, NativeProcessor):
-                            # For Native processor, we can update processor input here
+                        # For Native processor, we can update processor input here
+                        # if second forward is not required, this/first forward output is captured as input for next loop
+                        if not processor.fwd_after_process:
                             layer_outputs.append([layer_output[0]])
 
                         del layer_input
@@ -338,7 +341,7 @@ class ModuleLooper():
 
                     # Native processor does not need to run a second forward pass, the output of the first pass is
                     # directly saved and used as input for the next loop.
-                    if isinstance(processor, NativeProcessor):
+                    if not processor.fwd_after_process:
                         processor.receive_layer_inputs(layer_outputs)
                         del layer_outputs
 
@@ -377,7 +380,8 @@ class ModuleLooper():
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
                 # Native processor does not need second forward pass after layer quantization
-                if not is_last_module and not isinstance(processor, NativeProcessor):
+                # this is the second forward after process()
+                if not is_last_module and processor.fwd_after_process:
                     layer_outputs = []
                     for j in range(processor.num_batches):
                         # assert weight
@@ -430,7 +434,7 @@ class ModuleLooper():
 
                 # This is second forward outputs captured for input of next loop
                 # Native processor does not need second forward and already captured output from first forward
-                if not isinstance(processor, NativeProcessor):
+                if processor.fwd_after_process:
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
 

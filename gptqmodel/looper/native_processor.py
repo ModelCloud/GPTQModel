@@ -39,7 +39,8 @@ class NativeProcessor(LoopProcessor):
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
                          calibration_dataset_concat_size=calibration_dataset_concat_size,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
-                         logger_board=logger_board, require_fwd=require_fwd)
+                         logger_board=logger_board, require_fwd=require_fwd, fwd_after_process=False,
+                         fwd_all_modules_in_single_pass=True)
 
         self.retain_w = retain_w
         self.native_inp_caches = {}
