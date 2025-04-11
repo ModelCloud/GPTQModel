@@ -28,11 +28,11 @@ from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
-from ..quantization.gptq import CPU, CUDA_0, CUDA_1
+from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache
+from ..utils.torch import torch_empty_cache, HAS_XLA
 
 log = setup_logger()
 
@@ -82,8 +82,18 @@ class ModuleLooper():
 
             raise ValueError
 
+        def get_hw_device():
+            if HAS_XLA:
+                import torch_xla.core.xla_model as xm
+
+                # For TPUs, we don't need to specify an index like with CUDA
+                # The XLA runtime handles device assignment
+                return xm.xla_device(devkind="tpu")
+            else:
+                return self.gptq_model.quantize_config.device
+
         # move layer to target device
-        layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
+        layers[0] = layers[0].to(get_hw_device())
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.base_modules:
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
@@ -100,7 +110,7 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_start()
         for example in calibration_data:
             for k, v in example.items():
-                data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
+                data_device = get_hw_device() if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
                     for index in range(len(v)):
                         if len(v[index].shape) == 1:

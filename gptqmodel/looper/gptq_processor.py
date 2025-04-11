@@ -27,10 +27,10 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
-from ..quantization.gptq import CPU, CUDA_0, CUDA_1
+from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync, HAS_XLA
 
 log = setup_logger()
 
@@ -151,12 +151,12 @@ class GPTQProcessor(LoopProcessor):
         self.avg_losses.append(avg_loss)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stats_0 = torch.cuda.memory_stats(CUDA_0)
+        stats_0 = torch.cuda.memory_stats(DEVICE_0)
         active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
         peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         if torch.cuda.device_count() > 1:
-            stats_1 = torch.cuda.memory_stats(CUDA_1)
+            stats_1 = torch.cuda.memory_stats(DEVICE_1)
             active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
             peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
@@ -207,14 +207,17 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
         # if auto_gc:
         #     torch_empty_cache()
-        wq = wq.to(device=CUDA_0)
+        wq = wq.to(device=DEVICE_0)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
             "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
 
-        module.weight.data = wq
+        if HAS_XLA:
+            module.weight.data.copy_(wq)
+        else:
+            module.weight.data = wq
 
         if auto_gc:
             torch_empty_cache()

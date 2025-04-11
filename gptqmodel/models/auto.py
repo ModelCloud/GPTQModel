@@ -37,6 +37,11 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
 if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ:
     del os.environ['ROCR_VISIBLE_DEVICES']
 
+# Auto-FIX TPU requires special env var
+if not os.environ.get("PJRT_DEVICE", None):
+    os.environ["PJRT_DEVICE"] = 'TPU'
+    #os.environ["XLA_SYNC_WAIT"] = '1'
+
 import sys  # noqa: E402
 
 # TODO: waiting for pytorch implementgation of aten ops for MPS

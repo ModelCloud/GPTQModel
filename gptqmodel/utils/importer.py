@@ -36,7 +36,7 @@ from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
-from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from .torch import HAS_CUDA, HAS_MPS, HAS_XPU, HAS_XLA, auto_select_torch_device
 
 message_logged = False
 log = setup_logger()
@@ -95,7 +95,6 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
         normalized_device = DEVICE.ROCM
     return normalized_device
 
-
 def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> DEVICE:
     assert device is None or isinstance(device, DEVICE)
     assert backend is None or isinstance(backend, BACKEND)
@@ -107,6 +106,9 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
             device = DEVICE.CUDA
         elif HAS_XPU:
             device = DEVICE.XPU
+        elif HAS_XLA:
+            # TODO: xla device is not part of torch but external
+            device = auto_select_torch_device()
         elif HAS_MPS:
             device = DEVICE.MPS
         else:

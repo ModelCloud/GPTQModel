@@ -23,7 +23,7 @@ from torch import device
 
 from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
-from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU, HAS_XLA, auto_select_torch_device
 
 CPU = device("cpu")
 CUDA = device("cuda")
@@ -44,6 +44,7 @@ class DEVICE(str, Enum):
     XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
     MPS = "mps"  # MacOS GPU: Apple Silion/Metal)
     ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
+    XLA = "xla"  # Google TPU: v5+
 
     @classmethod
     # conversion method called for init when string is passed, i.e. Device("CUDA")
@@ -53,7 +54,10 @@ class DEVICE(str, Enum):
         return super()._missing_(value)
 
     def to_device_map(self):
-        return {"": DEVICE.CUDA if self == DEVICE.ROCM else self}
+        if self == DEVICE.XLA:
+            return {"": auto_select_torch_device()}
+        else:
+            return {"": DEVICE.CUDA if self == DEVICE.ROCM else self}
 
 
 class PLATFORM(str, Enum):
@@ -85,6 +89,8 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
             return DEVICE.CUDA
         elif HAS_XPU:
             return DEVICE.XPU
+        elif HAS_XLA:
+            return DEVICE.XLA
         elif HAS_MPS:
             return DEVICE.MPS
         else:
