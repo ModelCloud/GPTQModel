@@ -388,6 +388,3 @@ class ModelTest(unittest.TestCase):
                 os.unlink(item_path)
             elif os.path.isdir(item_path):
                 shutil.rmtree(item_path)
-
-    def get_eval_batch_size(self):
-        return 8 if Device(CUDA_0).memory_total / 1024 / 1024 / 1024 > 24 else 2
