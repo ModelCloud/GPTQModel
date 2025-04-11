@@ -27,8 +27,8 @@ import torch.nn as nn
 import transformers
 
 from ..quantization import QuantizeConfig
-from ..utils.torch import torch_sync
-from .gptq import DEVICE_1, GPTQ, lock, log
+from ..utils.torch import torch_compile, torch_sync
+from .gptq import DEVICE_1, GPTQ
 
 
 class GPTQv2(GPTQ):
@@ -50,7 +50,7 @@ class GPTQv2(GPTQ):
 
         batch_size = inp.shape[0]
 
-        if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
+        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
                 native_inp = native_inp.reshape((-1, inp.shape[-1]))
@@ -100,6 +100,8 @@ class GPTQv2(GPTQ):
         #self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
+
+        self.hessian_inverse = torch_compile(self.hessian_inverse)
 
         # process buffered inputs
         for inp in self.fwd_inputs_buffered_data:
@@ -160,41 +162,8 @@ class GPTQv2(GPTQ):
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        damp_percent = self.qcfg.damp_percent
-        while 1 > damp_percent > 0:
-            try:
-                damp = damp_percent * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=DEVICE_1)
-                H[diag, diag] += damp
-
-                with lock:
-                    # print(f"H SHAPE: {H.shape}")
-                    H = torch.linalg.cholesky(H)
-
-                    try:
-                        #H = self.block_cholesky_inverse(H, block_size=H.shape[0])
-                        H = torch.cholesky_inverse(H)
-                    except torch.OutOfMemoryError:
-                        # half the block size will use ~18% less memory but at higher accuracy loss: 1^-2 vs 1^-8
-                        # worth the tradeoff since it's either oom or slightly higher accuracy loss
-                        H = self.block_cholesky_inverse(H, block_size=self.columns//2)
-                        log.warn("Quantization: OOM bypassed via low memory math at a cost of lower accuracy: `cholesky_inverse`")
-
-                    H = torch.linalg.cholesky(H, upper=True)
-                    Hinv = H
-                break
-            except torch._C._LinAlgError as e:
-                if  self.qcfg.damp_auto_increment != 0:
-                    log.warn(f"Quantization: Current `damp_percent = {damp_percent:.5f}` is too low, auto-incrementing by `{ self.qcfg.damp_auto_increment:.5f}`")
-                    damp_percent +=  self.qcfg.damp_auto_increment
-                else:
-                    log.warn("Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
-                    raise e
-
+        Hinv, damp = self.hessian_inverse(H)
         P = self.qcfg.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
-
-        if not (0 < damp_percent < 1):
-            raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp_percent}")
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -240,13 +209,6 @@ class GPTQv2(GPTQ):
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
 
-            # if os.environ.get("DEBUG"):
-            #     self.layer.weight.data[:, :i2] = Q[:, :i2]
-            #     self.layer.weight.data[:, i2:] = W[:, i2:]
-            #
-            #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-            #     logger.debug(torch.sum(Losses))
-
         torch_sync()
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
@@ -271,23 +233,12 @@ class GPTQv2(GPTQ):
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
-        # if Q.shape != self.module.weight.shape:
-        #     self.module.weight.data = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
-        # else:
-        #     self.module.weight.data = Q.type_as(self.module.weight.data)
-        #
-        # # move back to self.dev
-        # self.module.weight.data = self.module.weight.data.to(device=self.device)
-
         if Q.shape != self.module.weight.shape:
             Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
         else:
             Q = Q.type_as(self.module.weight.data)
 
         Q = Q.to(device=DEVICE_1)
-
-        # if os.environ.get("DEBUG"):
-        #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -298,7 +249,7 @@ class GPTQv2(GPTQ):
 
         duration = time.time() - start
 
-        return Q, scale, zero, g_idx, duration, avg_loss, damp_percent, self.nsamples
+        return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def free(self):
         super().free()
