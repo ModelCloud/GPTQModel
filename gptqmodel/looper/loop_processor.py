@@ -51,6 +51,7 @@ class LoopProcessor:
         self.tokenizer = tokenizer
         self.qcfg = qcfg
 
+        # TODO FIX ME: dequantize processor sets this to False but it is nver acted on!
         # if processor require fwd generate and hooks, set this to true
         # looper should bypass generate + hooks if this is false
         self.require_fwd = require_fwd
