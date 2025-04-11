@@ -22,7 +22,7 @@ class Phi3GPTQ(BaseGPTQModel):
     pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
-    layer_type = "Phi3DecoderLayer"
+    layer_type = ["Phi3DecoderLayer"]
     layer_modules = [
         ["self_attn.qkv_proj"],
         ["self_attn.o_proj"],

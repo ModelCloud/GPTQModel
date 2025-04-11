@@ -30,7 +30,7 @@ class DreamGPTQ(BaseGPTQModel):
 
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     # Each repeating layer in `model.layers` is of type `LlamaDecoderLayer`
     layer_type = "DreamDecoderLayer"
     # Inside each `LlamaDecoderLayer` layer are many internal modules
