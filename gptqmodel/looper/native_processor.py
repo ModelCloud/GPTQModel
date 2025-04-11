@@ -30,6 +30,7 @@ log = setup_logger()
 
 NATIVE_INPUTS_STATE_KEY = "native_inp"
 
+# v2 requires that we also need to capture/store non-quantized inputs
 class NativeProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
@@ -41,7 +42,7 @@ class NativeProcessor(LoopProcessor):
                          logger_board=logger_board, require_fwd=require_fwd)
 
         self.retain_w = retain_w
-        self.fp_inp_caches = {}
+        self.native_inp_caches = {}
 
     def log_plotly(self):
         task = self.logger_task
@@ -61,7 +62,7 @@ class NativeProcessor(LoopProcessor):
         raise NotImplementedError("NativeProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
-        self.fp_inp_caches[module.name] = []
+        self.native_inp_caches[module.name] = []
 
     def is_skipped(self, module: NamedModule) -> bool:
         # TODO: Add skipping certain modules
@@ -72,19 +73,19 @@ class NativeProcessor(LoopProcessor):
             # gptq is mutable.
             inp = inp[0].detach()
             # TODO: add CPU offloading for fp_inp for VRAM memory saving
-            self.fp_inp_caches[name] += [inp.to(DEVICE_1)]
+            self.native_inp_caches[name] += [inp.to(DEVICE_1)]
 
         return tmp
 
     def process(self, module: NamedModule, auto_gc: bool = True):
-        module.state[NATIVE_INPUTS_STATE_KEY] = self.fp_inp_caches[module.name]
-        del self.fp_inp_caches[module.name]
+        module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches[module.name]
+        del self.native_inp_caches[module.name]
 
     def submodule_finalize(self, module: NamedModule):
         module.state.pop(NATIVE_INPUTS_STATE_KEY, None)
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
-        pass
+        del self.native_inp_caches
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         if self.calibration_dataset is None:
