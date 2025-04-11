@@ -554,8 +554,7 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
     with tctl.threadpool_limits(limits=1):
         r = quant_result[name]
         scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
-        qModules[name].device
-        qModules[name].to(CPU)
+        qModules[name] = qModules[name].to(CPU)
         layers[name], scale, zero, g_idx = (
             layers[name].to(CPU),
             scale.to(CPU),
