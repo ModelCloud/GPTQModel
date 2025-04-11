@@ -31,7 +31,7 @@ class OPTGPTQ(BaseGPTQModel):
     ]
     pre_lm_head_norm_module = "model.decoder.final_layer_norm"
 
-    layers_node = "model.decoder.layers"
+    layers_node = ["model.decoder.layers"]
     layer_type = "OPTDecoderLayer"
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
@@ -44,7 +44,7 @@ class OPTGPTQ(BaseGPTQModel):
         if self.config.do_layer_norm_before and not self.config._remove_final_layer_norm:
             inputs = super().lm_head_pre_quantize_generate_hook(inputs)
 
-        project_out = get_module_by_name_prefix(self.model, "model.decoder.project_out")
+        project_out, _ = get_module_by_name_prefix(self.model, ["model.decoder.project_out"])
         if project_out is not None:
             self.pre_quantize(project_out)
 

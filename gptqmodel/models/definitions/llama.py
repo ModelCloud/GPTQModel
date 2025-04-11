@@ -25,9 +25,25 @@ class LlamaGPTQ(BaseGPTQModel):
 
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     # Each repeating layer in `model.layers` is of type `LlamaDecoderLayer`
     layer_type = "LlamaDecoderLayer"
+
+    # Full tree of quantizable modules
+    # `#` str will match any number: useful for layers and moe indexing.
+    # List[str] for serial linked nodes. List str are linear depth linked modules presented in a linear fashion with no divergence.
+    # Dict{str: List[str] | Dict | Tuple[str]} for diverging nodes where a node splits into multiple paths/nodes.
+    # Tuple(str) for final targeted modules/nodes: there are only strings representing the final targeted modules
+    layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "mlp": ("up_proj", "gate_proj", "down_proj"),
+        }
+    ]
+
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections

@@ -21,7 +21,7 @@ class MPTGPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.norm_f"]
     pre_lm_head_norm_module = "transformer.norm_f"
 
-    layers_node = "transformer.blocks"
+    layers_node = ["transformer.blocks"]
     layer_type = "MPTBlock"
     layer_modules = [
         ["attn.Wqkv"],

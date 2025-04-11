@@ -24,7 +24,7 @@ class InternLM2GPTQ(BaseGPTQModel):
     base_modules = ["model.tok_embeddings", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     layer_type = "InternLM2DecoderLayer"
     layer_modules = [
         ["attention.wqkv", "attention.wo"],

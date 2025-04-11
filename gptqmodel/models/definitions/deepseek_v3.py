@@ -31,7 +31,7 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     layer_type = "DeepseekV3DecoderLayer"
 
     # DeepSeek V3 uses dynamic modules based on lora(rank):

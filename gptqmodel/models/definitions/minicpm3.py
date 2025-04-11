@@ -21,7 +21,7 @@ class MiniCPM3GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens",]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     layer_type = "MiniCPM3DecoderLayer"
     layer_modules = [
         ["self_attn.q_a_proj","self_attn.kv_a_proj_with_mqa"],

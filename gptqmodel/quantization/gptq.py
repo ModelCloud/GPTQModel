@@ -29,7 +29,6 @@ import torch
 import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
-from transformers import Conv1D
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
@@ -106,7 +105,7 @@ class GPTQ:
 
     @staticmethod
     def _validate_module(module):
-        assert isinstance(module, (nn.Linear, _ConvNd, Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
     # def has_hessian_issues(self) -> bool:
     #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
