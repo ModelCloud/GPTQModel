@@ -161,7 +161,7 @@ class GPTQv2(GPTQ):
         Q = torch.zeros_like(W)
 
         Hinv, damp = self.hessian_inverse(H)
-        P = self.qcfg.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
+        P = self.qcfg.v2_alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)

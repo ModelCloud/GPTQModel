@@ -25,7 +25,7 @@ class TestQwen2_5_GPTQv2(ModelTest):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
-    USE_V2 = True
+    V2 = True
 
     def test_qwen2_5(self):
         self.quant_lm_eval()

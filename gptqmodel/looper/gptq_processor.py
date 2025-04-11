@@ -81,9 +81,10 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", qcfg_clone.desc_act)
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-            qcfg_clone.use_v2 = self.qcfg.dynamic_get(module.full_name, "use_v2", qcfg_clone.use_v2)
+            qcfg_clone.v2 = self.qcfg.dynamic_get(module.full_name, "v2", qcfg_clone.v2)
+            qcfg_clone.v2_alpha = self.qcfg.dynamic_get(module.full_name, "v2_alpha", qcfg_clone.v2_alpha)
 
-        if qcfg_clone.use_v2 is True:
+        if qcfg_clone.v2 is True:
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)

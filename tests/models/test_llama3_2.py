@@ -23,7 +23,7 @@ class TestLlama3_2(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
     APPLY_CHAT_TEMPLATE = True
-    TRUST_REMOTE_CODE = True
+    V2 = True
 
     def test_llama3_2(self):
         self.quant_lm_eval()

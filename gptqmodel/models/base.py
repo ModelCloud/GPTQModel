@@ -440,7 +440,7 @@ class BaseGPTQModel(nn.Module):
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = [GPTQProcessor(**args)]
 
-        if self.quantize_config.use_v2 is True:
+        if self.quantize_config.v2 is True:
             from ..looper.native_processor import NativeProcessor
             quantize_processor.insert(0, NativeProcessor(**args))
 
