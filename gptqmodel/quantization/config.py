@@ -58,7 +58,11 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
 
+META_FIELD_V2_ENABLED = "v2"
+META_FIELD_V2_ALPHA = "v2_alpha"
+
 ADAPTER_FIELD = "adapter"
+
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
@@ -206,6 +210,9 @@ class QuantizeConfig():
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
     is_marlin_format: bool = False
+
+    v2: bool = False
+    v2_alpha: float = 0.25
 
     def __post_init__(self):
         fields_info = fields(self)

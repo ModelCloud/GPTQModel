@@ -29,8 +29,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path  # noqa: E402
 from typing import Dict, List  # noqa: E402
 
-from device_smi import Device  # noqa: E402
-from gptqmodel.models._const import CUDA_0  # noqa: E402
 from logbar import LogBar  # noqa: E402
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
@@ -96,6 +94,8 @@ class ModelTest(unittest.TestCase):
     EXPECT_LM_HEAD_LOSS = None
 
     QUANTIZE_CONFIG_BITS = 4
+
+    V2 = False
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -170,6 +170,7 @@ class ModelTest(unittest.TestCase):
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
             sym=self.SYM,
+            v2=self.V2
         )
 
         log.info(f"Quant config: {quantize_config}")
