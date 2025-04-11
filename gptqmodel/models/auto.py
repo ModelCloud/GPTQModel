@@ -103,8 +103,8 @@ from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
 from .definitions.opt import OPTGPTQ  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
 from .definitions.phi import PhiGPTQ  # noqa: E402
-from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM # noqa: E402
-from .definitions.phi4 import Phi4MMGPTQ # noqa: E402
+from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
+from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
 from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402

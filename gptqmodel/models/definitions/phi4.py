@@ -13,7 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .._const import EXPERT_INDEX_PLACEHOLDER
+
+
 from ..base import BaseGPTQModel
 
 
@@ -31,5 +32,20 @@ class Phi4MMGPTQ(BaseGPTQModel):
         ["mlp.gate_up_proj.base_layer"],
         ["mlp.down_proj.base_layer"],
     ]
+
+    require_monkeypatch = True
+
+    def monkey_patch(self):
+        original_forward = self.model.forward
+
+        # patch so input_mode is defult to 0 (InputMode.LANGUAGE) if not passed
+        # phi4mm default is None which causes quant error as it expects it to be always passed
+        def patched_forward(self, **kwargs):
+            if 'input_mode' not in kwargs:
+                kwargs['input_mode'] = 0
+            return original_forward(**kwargs)
+
+        # Bind the new method to the instance
+        self.model.forward = patched_forward.__get__(self.model, type(self.model))
 
 __all__ = ["Phi4MMGPTQ"]
