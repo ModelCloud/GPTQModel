@@ -121,7 +121,9 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
 
 class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
+    # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
