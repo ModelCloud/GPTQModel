@@ -36,16 +36,17 @@ class Phi4MMGPTQ(BaseGPTQModel):
     require_monkeypatch = True
 
     def monkey_patch(self):
-        original_forward = self.model.forward
+        if not self.quantized:
+            original_forward = self.model.forward
 
-        # patch so input_mode is defult to 0 (InputMode.LANGUAGE) if not passed
-        # phi4mm default is None which causes quant error as it expects it to be always passed
-        def patched_forward(self, **kwargs):
-            if 'input_mode' not in kwargs:
-                kwargs['input_mode'] = 0
-            return original_forward(**kwargs)
+            # patch so input_mode is defult to 0 (InputMode.LANGUAGE) if not passed
+            # phi4mm default is None which causes quant error as it expects it to be always passed
+            def patched_forward(self, **kwargs):
+                if 'input_mode' not in kwargs:
+                    kwargs['input_mode'] = 0
+                return original_forward(**kwargs)
 
-        # Bind the new method to the instance
-        self.model.forward = patched_forward.__get__(self.model, type(self.model))
+            # Bind the new method to the instance
+            self.model.forward = patched_forward.__get__(self.model, type(self.model))
 
 __all__ = ["Phi4MMGPTQ"]
