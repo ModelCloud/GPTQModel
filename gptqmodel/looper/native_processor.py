@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -23,17 +22,13 @@ from torch.nn import Module
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTQ
-from ..quantization.config import QUANT_METHOD, QuantizeConfig
-from ..quantization.gptq import CPU, CUDA_0, CUDA_1
+from ..quantization.config import QuantizeConfig
+from ..quantization.gptq import DEVICE_1
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync
 
 log = setup_logger()
 
+NATIVE_INPUTS_STATE_KEY = "native_inp"
 
 class NativeProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
@@ -77,16 +72,16 @@ class NativeProcessor(LoopProcessor):
             # gptq is mutable.
             inp = inp[0].detach()
             # TODO: add CPU offloading for fp_inp for VRAM memory saving
-            self.fp_inp_caches[name] += [inp.to(CUDA_1)]
+            self.fp_inp_caches[name] += [inp.to(DEVICE_1)]
 
         return tmp
 
     def process(self, module: NamedModule, auto_gc: bool = True):
-        module.state["fp_inp"] = self.fp_inp_caches[module.name]
+        module.state[NATIVE_INPUTS_STATE_KEY] = self.fp_inp_caches[module.name]
         del self.fp_inp_caches[module.name]
 
     def submodule_finalize(self, module: NamedModule):
-        module.state.pop("fp_inp", None)
+        module.state.pop(NATIVE_INPUTS_STATE_KEY, None)
 
     def finalize(self, model: BaseGPTQModel, **kwargs):
         pass

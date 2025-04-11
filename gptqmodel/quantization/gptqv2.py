@@ -28,44 +28,45 @@ import transformers
 
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_sync
-from .gptq import CPU, CUDA_0, CUDA_1, GPTQ, lock, log
+from .gptq import CPU, DEVICE_0, DEVICE_1, GPTQ, lock, log
 
 
 class GPTQv2(GPTQ):
-
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+        from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
+
         super().__init__(module, qcfg)
-        self.fp_inps = module.state['fp_inp']
-        module.state['fp_inp'] = None
+        self.native_inps = module.state[NATIVE_INPUTS_STATE_KEY]
+        module.state[NATIVE_INPUTS_STATE_KEY] = None
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
-            if CUDA_0.index != CUDA_1.index:
-                self.fwd_inputs_buffered_data.append(inp.to(device=CUDA_1, non_blocking=True))
+            if DEVICE_0.index != DEVICE_1.index:
+                self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
             else:
                 self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
         else:
             self.process_batch(inp)
 
     def process_batch(self, inp):
-        inp = inp.to(device=CUDA_1, dtype=torch.float32)
-        fp_inp = self.fp_inps[0].to(device=CUDA_1, dtype=torch.float32)
-        del self.fp_inps[0]
+        inp = inp.to(device=DEVICE_1, dtype=torch.float32)
+        native_inp = self.native_inps[0].to(device=DEVICE_1, dtype=torch.float32)
+        del self.native_inps[0]
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-            fp_inp = fp_inp.unsqueeze(0)
+            native_inp = native_inp.unsqueeze(0)
 
         batch_size = inp.shape[0]
 
         if isinstance(self.module, nn.Linear) or isinstance(self.module, transformers.Conv1D):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
-                fp_inp = fp_inp.reshape((-1, inp.shape[-1]))
+                native_inp = native_inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
-            fp_inp = fp_inp.t()
+            native_inp = native_inp.t()
 
         if isinstance(self.module, nn.Conv2d):
             unfold = nn.Unfold(
@@ -77,13 +78,13 @@ class GPTQv2(GPTQ):
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
-            fp_inp = unfold(fp_inp)
-            fp_inp = fp_inp.permute([1, 0, 2]).flatten(1)
+            native_inp = unfold(native_inp)
+            native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
         if not hasattr(self, "H"):
             self.H = torch.zeros((self.columns, self.columns),
-                        dtype=torch.float32,
-                        device=CUDA_1)
+                                 dtype=torch.float32,
+                                 device=DEVICE_1)
             self.dXXT = self.H.clone()
         else:
             self.H *= self.nsamples / (self.nsamples + batch_size)
@@ -97,8 +98,8 @@ class GPTQv2(GPTQ):
         #self.H += self.chunked_matmul_t_and_t_transposed(inp, chunk_size=1024)
 
         self.H += inp.matmul(inp.t())
-        fp_inp = math.sqrt(2 / self.nsamples) * fp_inp
-        self.dXXT += (fp_inp-inp).matmul(inp.t())
+        native_inp = math.sqrt(2 / self.nsamples) * native_inp
+        self.dXXT += (native_inp-inp).matmul(inp.t())
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -157,7 +158,7 @@ class GPTQv2(GPTQ):
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=CUDA_1)
+            W = self._clone_module(device=DEVICE_1)
         else:
             W = self.module_copy
             self.module_copy = None
@@ -203,7 +204,7 @@ class GPTQv2(GPTQ):
         while 1 > damp_percent > 0:
             try:
                 damp = damp_percent * torch.mean(torch.diag(H))
-                diag = torch.arange(self.columns, device=CUDA_1)
+                diag = torch.arange(self.columns, device=DEVICE_1)
                 H[diag, diag] += damp
 
                 with lock:
@@ -323,7 +324,7 @@ class GPTQv2(GPTQ):
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=CUDA_1)
+        Q = Q.to(device=DEVICE_1)
 
         # if os.environ.get("DEBUG"):
         #     logger.debug(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
@@ -340,16 +341,11 @@ class GPTQv2(GPTQ):
         return Q, scale, zero, g_idx, duration, avg_loss, damp_percent, self.nsamples
 
     def free(self):
-        # if os.environ.get("DEBUG"):
-        #     self.inp1 = None
-        #     self.out1 = None
-        #     del self.inp1
-        #     del self.out1
-
         if hasattr(self, "H"):
             del self.H
         if hasattr(self, 'dXXT'):
             del self.dXXT
+
         del self.quantizer
         del self.module_copy
         del self.module

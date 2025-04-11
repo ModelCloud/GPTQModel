@@ -29,7 +29,7 @@ from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
-from ..quantization.gptq import CPU, CUDA_0, CUDA_1
+from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
