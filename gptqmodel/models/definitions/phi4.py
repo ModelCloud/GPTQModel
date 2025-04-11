@@ -42,8 +42,8 @@ class Phi4MMGPTQ(BaseGPTQModel):
             # patch so input_mode is default to 0 (InputMode.LANGUAGE) if not passed
             # phi4mm default is None which causes quant error as it expects it to be always passed
             def patched_forward(self, **kwargs):
-                if 'input_mode' not in kwargs:
-                    kwargs['input_mode'] = 0
+                if "input_mode" not in kwargs:
+                    kwargs["input_mode"] = 0
                 return original_forward(**kwargs)
 
             # bind forward to instance
