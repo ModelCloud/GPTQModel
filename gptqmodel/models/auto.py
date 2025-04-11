@@ -150,6 +150,7 @@ MODEL_MAP = {
     "Yi": YiGPTQ,
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
+    "nemotron-nas": DeciLMGPTQ,
     "stablelm_epoch": StableLMEpochGPTQ,
     "stablelm": StableLMEpochGPTQ,
     "starcoder2": Starcoder2GPTQ,

@@ -27,7 +27,7 @@ class BloomGPTQ(BaseGPTQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
     # repeating layers
-    layers_node = "transformer.h"
+    layers_node = ["transformer.h"]
     layer_type = "BloomBlock"
     layer_modules = [
         ["self_attention.query_key_value"],

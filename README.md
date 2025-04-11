@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 04/5/2025 2.3.0-dev: New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. 
+* 04/8/2025 2.3.0-dev: New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
@@ -157,7 +157,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
 | DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
 | Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
-| EXAONE 3.0        | ✅ |             |   |                |   |            |   |           |   |
+| EXAONE 3.0        | ✅ |             |   |  Nemotron Ultra              | ✅  |            |   |           |   |
 
 ## Platform and HW Support 
 

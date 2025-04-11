@@ -26,7 +26,7 @@ class QwenGPTQ(BaseGPTQModel):
     ]
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = "transformer.h"
+    layers_node = ["transformer.h"]
     layer_type = "QWenBlock"
     layer_modules = [
         ["attn.c_attn"],

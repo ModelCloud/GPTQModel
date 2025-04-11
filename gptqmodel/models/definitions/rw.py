@@ -21,7 +21,7 @@ class RWGPTQ(BaseGPTQModel):
     base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = "transformer.h"
+    layers_node = ["transformer.h"]
     layer_type = "DecoderLayer"
     layer_modules = [
         ["self_attention.query_key_value"],

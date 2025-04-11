@@ -4,7 +4,7 @@ import torch
 from gptqmodel import BACKEND, GPTQModel
 
 
-class TestQwen15Moe(unittest.TestCase):
+class TestQwen2Moe(unittest.TestCase):
     def test_inference(self):
         model = GPTQModel.load("Qwen/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4",
                 device=torch.device("cuda:0"),

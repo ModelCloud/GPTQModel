@@ -17,11 +17,6 @@
 # -- do not touch
 import os
 import sys
-from typing import Dict, List
-
-from device_smi import Device
-from gptqmodel.models._const import CUDA_0
-from logbar import LogBar
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -30,7 +25,13 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # -- end do not touch
+
 from pathlib import Path  # noqa: E402
+from typing import Dict, List  # noqa: E402
+
+from device_smi import Device  # noqa: E402
+from gptqmodel.models._const import CUDA_0  # noqa: E402
+from logbar import LogBar  # noqa: E402
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402

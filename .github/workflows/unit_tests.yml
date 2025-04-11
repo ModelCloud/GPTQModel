@@ -407,6 +407,7 @@ jobs:
             echo "===== install auto_round ====="
             uv pip install auto_round -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           fi
+          uv pip uninstall torchao
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
@@ -618,6 +619,7 @@ jobs:
             uv pip install numpy==1.26.3
           fi
           uv pip install -r requirements.txt
+          uv pip uninstall torchao
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}

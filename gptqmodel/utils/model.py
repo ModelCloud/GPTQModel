@@ -39,6 +39,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
+from torch.nn.modules.conv import _ConvNd
 from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
@@ -89,8 +90,13 @@ def recurse_setattr(module, name, value):
 def get_device(obj: torch.Tensor | nn.Module):
     if isinstance(obj, torch.Tensor):
         return obj.device
-    return next(obj.parameters()).device
 
+    params = list(obj.parameters())  # Convert generator to list
+    if len(params) > 0:
+        return params[0].device
+    else:
+        log.warn(f"Quantize: Unable to determine device of `{obj}`. default to `cpu`")
+        return torch.device('cpu')  # or raise an exception
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
@@ -135,9 +141,8 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
-    for layer in layers:
-        if isinstance(module, layer):
-            return {name: module}
+    if isinstance(module, tuple(layers)):
+       return {name: module}
 
     res = {}
     for name1, child in module.named_children():
@@ -145,10 +150,11 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     return res
 
 
-def get_module_by_name_prefix(model, module_name: str):
+def get_module_by_name_prefix(model, module_name: List[str]):
     for name, module in model.named_modules():
-        if name.startswith(module_name):
-            return module
+        for prefix in module_name:
+            if name.startswith(prefix):
+                return module, prefix
 
 
 def get_module_by_name_suffix(model, module_name: str):
@@ -277,10 +283,10 @@ def create_quant_layer(
         elif isinstance(submodule, nn.Linear):
             in_features = submodule.in_features
             out_features = submodule.out_features
-        elif isinstance(submodule, nn.Conv2d):
+        elif isinstance(submodule, _ConvNd):
             in_features = submodule.in_channels
             out_features = submodule.out_channels
-        elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
+        elif isinstance(submodule, transformers.Conv1D):
             in_features = submodule.weight.shape[0]
             out_features = submodule.weight.shape[1]
         elif isinstance(submodule, BaseQuantLinear):
@@ -571,7 +577,6 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
         # start = time.time()
         # qModules[name].to(layer_device)
         # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
-
 
 def pack_model(
     model,
