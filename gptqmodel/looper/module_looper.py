@@ -24,8 +24,8 @@ from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
-from ..looper.native_processor import NativeProcessor
 from ..looper.named_module import NamedModule
+from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree

@@ -19,7 +19,6 @@
 import math
 import os
 import sys
-import threading
 import time
 from typing import Optional
 
@@ -27,12 +26,9 @@ import torch
 import torch.nn as nn
 import transformers
 
-from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
-from .quantizer import HF_OPTIMUM, Quantizer
-from .gptq import GPTQ, CUDA_0, CUDA_1, CPU, lock, log
+from .gptq import CPU, CUDA_0, CUDA_1, GPTQ, lock, log
 
 
 class GPTQv2(GPTQ):
