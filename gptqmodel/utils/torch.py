@@ -130,3 +130,23 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
         # mlx is detached from pytorch
         if HAS_MLX:
             mlx.core.clear_cache()
+
+def auto_select_torch_device(index: int = 0):
+    assert index >= 0, f"device index should be a positive integer: actual = `{index}`"
+
+    if HAS_CUDA:
+        # defensive check
+        if index > 0 and torch.cuda.device_count() <= index :
+            index = 0
+        device = torch.device(f"cuda:{index}")
+    elif HAS_XPU:
+        # defensive check
+        if index > 0 and torch.xpu.device_count() <= index:
+            index = 0
+        device = torch.device(f"xpu:{index}")
+    elif HAS_MPS:
+        device = torch.device("mps") # mps has no index
+    else:
+        device = torch.device("cpu") # cpu has no index
+
+    return device

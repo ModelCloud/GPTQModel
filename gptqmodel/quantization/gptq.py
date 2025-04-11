@@ -33,7 +33,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_compile, torch_sync
+from ..utils.torch import auto_select_torch_device, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -42,8 +42,8 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 CPU = torch.device("cpu")
-CUDA_0 = torch.device("cuda:0")
-CUDA_1 = torch.device("cuda:1") if torch.cuda.device_count() > 1 else CUDA_0
+CUDA_0 = auto_select_torch_device(index=0)
+CUDA_1 = auto_select_torch_device(index=1)
 
 lock = threading.Lock()
 
