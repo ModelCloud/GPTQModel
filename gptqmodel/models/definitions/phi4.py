@@ -39,14 +39,14 @@ class Phi4MMGPTQ(BaseGPTQModel):
         if not self.quantized:
             original_forward = self.model.forward
 
-            # patch so input_mode is defult to 0 (InputMode.LANGUAGE) if not passed
+            # patch so input_mode is default to 0 (InputMode.LANGUAGE) if not passed
             # phi4mm default is None which causes quant error as it expects it to be always passed
             def patched_forward(self, **kwargs):
                 if 'input_mode' not in kwargs:
                     kwargs['input_mode'] = 0
                 return original_forward(**kwargs)
 
-            # Bind the new method to the instance
+            # bind forward to instance
             self.model.forward = patched_forward.__get__(self.model, type(self.model))
 
 __all__ = ["Phi4MMGPTQ"]
