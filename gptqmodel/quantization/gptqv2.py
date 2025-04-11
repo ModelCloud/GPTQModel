@@ -70,7 +70,7 @@ class GPTQv2(GPTQ):
             native_inp = unfold(native_inp)
             native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
-        if not hasattr(self, "H"):
+        if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=DEVICE_1)
@@ -89,8 +89,6 @@ class GPTQv2(GPTQ):
         self.H += inp.matmul(inp.t())
         native_inp = math.sqrt(2 / self.nsamples) * native_inp
         self.dXXT += (native_inp-inp).matmul(inp.t())
-
-
 
     @torch.inference_mode()
     def quantize(
@@ -256,6 +254,5 @@ class GPTQv2(GPTQ):
 
         if hasattr(self, 'dXXT'):
             del self.dXXT
-
 
 __all__ = ["GPTQv2"]

@@ -502,5 +502,4 @@ class GPTQ:
 
         # torch_empty_cache(self.device)
 
-
 __all__ = ["GPTQ"]
