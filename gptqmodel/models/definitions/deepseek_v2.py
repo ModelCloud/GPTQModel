@@ -30,7 +30,7 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
+    layers_node = ["model.layers"]
     layer_type = "DeepseekV2DecoderLayer"
 
     # DeepSeek V2-Lite uses dynamic modules based on lora(rank):

@@ -24,7 +24,7 @@ class TestXVerse(ModelTest):
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
-    BATCH_SIZE = 6
+    EVAL_BATCH_SIZE = 6
     USE_VLLM = False
     DISABLE_FLASH_ATTN = True
 

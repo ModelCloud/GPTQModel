@@ -176,6 +176,11 @@ class QuantizeConfig():
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
 
+    # quantization_order: str = "activate",
+    # quantization_scale: str = "mse", # or absmax
+    # is_distributed: bool = False,
+    # tied_gptq_handle: Optional["GPTQ"] = None
+
     # mean square error calculation: may reduce error loss for some models
     mse: float = field(default=0.0)
 

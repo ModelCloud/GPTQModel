@@ -27,7 +27,7 @@ class ChatGLM(BaseGPTQModel):
     base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
     pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
 
-    layers_node = "transformer.encoder.layers"
+    layers_node = ["transformer.encoder.layers"]
     layer_type = "GLMBlock"
     layer_modules = [
         ["self_attention.query_key_value"],

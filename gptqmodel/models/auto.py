@@ -21,6 +21,7 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
+from .definitions.dream import DreamGPTQ
 
 log = setup_logger()
 
@@ -123,6 +124,7 @@ random.seed(787)
 numpy.random.seed(787)
 
 MODEL_MAP = {
+    "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
@@ -147,6 +149,7 @@ MODEL_MAP = {
     "Yi": YiGPTQ,
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
+    "nemotron-nas": DeciLMGPTQ,
     "stablelm_epoch": StableLMEpochGPTQ,
     "stablelm": StableLMEpochGPTQ,
     "starcoder2": Starcoder2GPTQ,
@@ -188,10 +191,10 @@ SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
-    if config.model_type not in SUPPORTED_MODELS:
+    if config.model_type.lower() not in SUPPORTED_MODELS:
         raise TypeError(f"{config.model_type} isn't supported yet.")
     model_type = config.model_type
-    return model_type
+    return model_type.lower()
 
 class GPTQModel:
     def __init__(self):

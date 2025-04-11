@@ -1,7 +1,7 @@
-import torch
 import time
 import unittest
-from torch.nn import functional as F
+
+import torch
 
 
 class TestChunkedMatmul(unittest.TestCase):
@@ -44,8 +44,8 @@ class TestChunkedMatmul(unittest.TestCase):
         start = time.time()
         native_H = self.inp.t() @ self.inp
         torch.cuda.synchronize()
-        native_time = time.time() - start
-        native_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)  # MB
+        time.time() - start
+        torch.cuda.max_memory_allocated() / (1024 ** 2)  # MB
 
         # --- Chunked Implementation ---
         torch.cuda.empty_cache()
@@ -55,8 +55,8 @@ class TestChunkedMatmul(unittest.TestCase):
         start = time.time()
         chunked_H = self.chunked_matmul(self.inp, self.chunk_size)
         torch.cuda.synchronize()
-        chunked_time = time.time() - start
-        chunked_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
+        time.time() - start
+        torch.cuda.max_memory_allocated() / (1024 ** 2)
 
         # --- Enhanced Validation ---
         max_abs_error = torch.max(torch.abs(chunked_H - native_H)).item()

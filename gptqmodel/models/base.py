@@ -32,7 +32,7 @@ from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
 from ..adapter.adapter import Adapter
-from ..nn_modules.hooked_linear import replace_linear_with_hooked_linear
+from ..nn_modules.hooked_linear import replace_module_with_hooked_tree
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
@@ -81,6 +81,8 @@ class BaseGPTQModel(nn.Module):
     layer_type: Union[List[str], str] = None
     # for each repeating layer there are multiple modules within each layer
     layer_modules: List[List[str]] = None
+    # a tree node of all the roots that contain quantizable modules
+    layers_modules_tree: List[str] = None
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -110,6 +112,9 @@ class BaseGPTQModel(nn.Module):
 
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
+
+    # some models have broken attention mask codes so we need to only use batch 1 with no masks
+    support_batch_quantize = True
 
     # allow models to define optional notes that output messages to users that want to use this model
     # list of supported keys: [ "notes" = print the notes value on model load ]
@@ -306,11 +311,16 @@ class BaseGPTQModel(nn.Module):
 
             new_calibration_dataset = concatenated_data
 
-        new_calibration_dataset_batched = [
-            collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-            for start in range(0, len(new_calibration_dataset), batch_size)
-        ]
-
+        if self.support_batch_quantize:
+            new_calibration_dataset_batched = [
+                collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
+                for start in range(0, len(new_calibration_dataset), batch_size)
+            ]
+        else:
+            new_calibration_dataset_batched = [
+                {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
+                for block in new_calibration_dataset
+            ]
 
         return new_calibration_dataset_batched
 
@@ -339,6 +349,10 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
+
+        if not self.support_batch_quantize:
+            log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
+            batch_size = 1 # but actually disabled
 
         if backend == BACKEND.IPEX:
             self.quantize_config.format = FORMAT.IPEX
@@ -659,18 +673,22 @@ class BaseGPTQModel(nn.Module):
                     input_ids = input_ids[:seqlen]
                     input_ids_new.append(input_ids)
 
-                    attention_mask = attention_mask[:seqlen]
-                    attention_mask_new.append(attention_mask)
+                    if batch_size > 1:
+                        attention_mask = attention_mask[:seqlen]
+                        attention_mask_new.append(attention_mask)
 
                 if len(input_ids_new) == 0:
                     return None
 
                 input_ids_new = [F.pad(t, (0, seqlen - t.size(0))) for t in input_ids_new]
-                attention_mask_new = [F.pad(t, (0, seqlen - t.size(0))) for t in attention_mask_new]
+
+                if batch_size > 1:
+                    attention_mask_new = [F.pad(t, (0, seqlen - t.size(0))) for t in attention_mask_new]
+                    attention_mask_new = torch.vstack(attention_mask_new)
 
                 input_ids_new = torch.vstack(input_ids_new)
-                attention_mask_new = torch.vstack(attention_mask_new)
-                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new}
+
+                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new if batch_size > 1 else None}
                 return res
 
             dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
@@ -861,7 +879,7 @@ class BaseGPTQModel(nn.Module):
         shared_kv_cache_dict = {}
 
         # replace linear with hooked linear
-        replace_linear_with_hooked_linear(self.model)
+        replace_module_with_hooked_tree(self.model)
 
         quantized_weights = {}
         for module_index in quant_modules_pb:
@@ -1298,7 +1316,7 @@ class BaseGPTQModel(nn.Module):
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
-            norm = get_module_by_name_prefix(self.model, self.pre_lm_head_norm_module)
+            norm, _ = get_module_by_name_prefix(self.model, [self.pre_lm_head_norm_module])
             self.pre_quantize(norm)
 
             for element in inputs:

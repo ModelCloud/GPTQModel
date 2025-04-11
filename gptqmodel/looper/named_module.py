@@ -19,6 +19,7 @@ from typing import Any, Dict
 import torch
 import transformers
 from torch import nn
+from torch.nn.modules.conv import _ConvNd
 
 
 class NamedModule(torch.nn.Module):
@@ -41,9 +42,15 @@ class NamedModule(torch.nn.Module):
         if isinstance(module, nn.Linear):
             in_features = module.in_features
             out_features = module.out_features
-        elif isinstance(module, nn.Conv2d):
+        elif isinstance(module, _ConvNd):
             in_features = module.in_channels
             out_features = module.out_channels
+        # elif isinstance(module, nn.Conv2d):
+        #     in_features = module.in_channels
+        #     out_features = module.out_channels
+        # elif isinstance(module, nn.Conv2d):
+        #     in_features = module.in_channels
+        #     out_features = module.out_channels
         elif isinstance(module, transformers.pytorch_utils.Conv1D):
             in_features = module.weight.shape[0]
             out_features = module.weight.shape[1]
