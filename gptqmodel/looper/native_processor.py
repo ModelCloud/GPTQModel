@@ -23,7 +23,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import DEVICE_1, CPU
+from ..quantization.gptq import CPU, DEVICE_1
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -86,7 +86,7 @@ class NativeProcessor(LoopProcessor):
             else:
                 v2_memory_device = DEVICE_1
 
-            self.native_inp_caches[name] += [inp.to(v2_memory_device)]
+            self.native_inp_caches[name] += [inp.to(device=v2_memory_device)]
             del inp, out
 
         return tmp
