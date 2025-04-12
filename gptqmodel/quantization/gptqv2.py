@@ -44,51 +44,84 @@ class GPTQv2(GPTQ):
         native_inp = self.native_inps[0].to(device=DEVICE_1, dtype=torch.float32)
         del self.native_inps[0]
 
-        if len(inp.shape) == 2:
-            inp = inp.unsqueeze(0)
-            native_inp = native_inp.unsqueeze(0)
-
-        batch_size = inp.shape[0]
-
+        # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            if len(inp.shape) == 3:
-                inp = inp.reshape((-1, inp.shape[-1]))
-                native_inp = native_inp.reshape((-1, inp.shape[-1]))
-            inp = inp.t()
-            native_inp = native_inp.t()
-
-        if isinstance(self.module, nn.Conv2d):
+            inp = inp.reshape(-1, inp.shape[-1])
+            native_inp = native_inp.reshape(-1, native_inp.shape[-1])
+        else:
             unfold = nn.Unfold(
                 self.module.kernel_size,
                 dilation=self.module.dilation,
                 padding=self.module.padding,
                 stride=self.module.stride,
             )
+            # output size (batch_size, channels * \prod kernel_size, num_patches)
             inp = unfold(inp)
-            inp = inp.permute([1, 0, 2])
-            inp = inp.flatten(1)
-            native_inp = unfold(native_inp)
-            native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+            inp = inp.transpose(1, 2).flatten(0, 1)
+            native_inp = unfold(native_inp).transpose(1, 2).flatten(0, 1)
+
+        batch_token_size = inp.shape[0]
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=DEVICE_1)
             self.dXXT = self.H.clone()
-        else:
-            self.H *= self.nsamples / (self.nsamples + batch_size)
-            self.dXXT *= self.nsamples / (self.nsamples + batch_size)
 
-        self.nsamples += batch_size
-        # inp = inp.float()
+        beta = self.nsamples / (self.nsamples + batch_token_size)
+        alpha = 2.0 / (self.nsamples + batch_token_size)
 
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
-        #self.H += self.chunked_matmul_t_and_t_transposed(inp, chunk_size=1024)
+        self.H.addmm_(inp.T, inp, beta=beta, alpha=alpha)
+        self.dXXT.addmm_((native_inp.T-inp.T), inp, beta=beta, alpha=alpha)
+        # update number of collected samples
+        self.nsamples += batch_token_size
 
-        self.H += inp.matmul(inp.t())
-        native_inp = math.sqrt(2 / self.nsamples) * native_inp
-        self.dXXT += (native_inp-inp).matmul(inp.t())
+    # def process_batch(self, inp):
+    #     inp = inp.to(device=DEVICE_1, dtype=torch.float32)
+    #     native_inp = self.native_inps[0].to(device=DEVICE_1, dtype=torch.float32)
+    #     del self.native_inps[0]
+    #
+    #     if len(inp.shape) == 2:
+    #         inp = inp.unsqueeze(0)
+    #         native_inp = native_inp.unsqueeze(0)
+    #
+    #     batch_size = inp.shape[0]
+    #
+    #     if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+    #         if len(inp.shape) == 3:
+    #             inp = inp.reshape((-1, inp.shape[-1]))
+    #             native_inp = native_inp.reshape((-1, inp.shape[-1]))
+    #         inp = inp.t()
+    #         native_inp = native_inp.t()
+    #
+    #     if isinstance(self.module, nn.Conv2d):
+    #         unfold = nn.Unfold(
+    #             self.module.kernel_size,
+    #             dilation=self.module.dilation,
+    #             padding=self.module.padding,
+    #             stride=self.module.stride,
+    #         )
+    #         inp = unfold(inp)
+    #         inp = inp.permute([1, 0, 2])
+    #         inp = inp.flatten(1)
+    #         native_inp = unfold(native_inp)
+    #         native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+    #
+    #     if self.H is None:
+    #         self.H = torch.zeros((self.columns, self.columns),
+    #                              dtype=torch.float32,
+    #                              device=DEVICE_1)
+    #         self.dXXT = self.H.clone()
+    #     else:
+    #         self.H *= self.nsamples / (self.nsamples + batch_size)
+    #         self.dXXT *= self.nsamples / (self.nsamples + batch_size)
+    #
+    #     self.nsamples += batch_size
+    #     inp = math.sqrt(2 / self.nsamples) * inp.float()
+    #
+    #     self.H += inp.matmul(inp.t())
+    #     native_inp = math.sqrt(2 / self.nsamples) * native_inp
+    #     self.dXXT += (native_inp-inp).matmul(inp.t())
 
     @torch.inference_mode()
     def quantize(
