@@ -235,11 +235,12 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        inp = inp.to(device=DEVICE_1, dtype=torch.float32)
+        reshaped_inp = inp.to(device=DEVICE_1)
+        del inp
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            inp = inp.reshape(-1, inp.shape[-1])
+            reshaped_inp = reshaped_inp.reshape(-1, reshaped_inp.shape[-1])
         else:
             unfold = nn.Unfold(
                 self.module.kernel_size,
@@ -248,10 +249,11 @@ class GPTQ:
                 stride=self.module.stride,
             )
             # output size (batch_size, channels * \prod kernel_size, num_patches)
-            inp = unfold(inp)
-            inp = inp.transpose(1, 2).flatten(0, 1)
+            reshaped_inp = unfold(reshaped_inp)
+            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        batch_token_size = inp.shape[0]
+        reshaped_inp = reshaped_inp.to(dtype=torch.float32)
+        batch_token_size = reshaped_inp.shape[0]
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
@@ -260,13 +262,13 @@ class GPTQ:
 
         beta = self.nsamples / (self.nsamples + batch_token_size)
         alpha = 2.0 / (self.nsamples + batch_token_size)
-        self.H.addmm_(inp.T, inp, beta=beta, alpha=alpha)
+        self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
 
         # update number of collected samples
         self.nsamples += batch_token_size
 
         # inp returned here is flattened/reshaped original inp
-        return batch_token_size, inp, alpha, beta
+        return batch_token_size, reshaped_inp, alpha, beta
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(

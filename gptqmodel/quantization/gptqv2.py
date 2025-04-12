@@ -44,8 +44,9 @@ class GPTQv2(GPTQ):
 
     def process_batch(self, inp):
         batch_token_size, reshaped_inp, alpha, beta = super().process_batch(inp)
+        del inp
 
-        native_inp = self.native_inps.pop(0).to(device=DEVICE_1, dtype=torch.float32)
+        native_inp = self.native_inps.pop(0).to(device=DEVICE_1)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
@@ -60,12 +61,15 @@ class GPTQv2(GPTQ):
             # output size (batch_size, channels * \prod kernel_size, num_patches)
             native_inp = unfold(native_inp).transpose(1, 2).flatten(0, 1)
 
+        native_inp = native_inp.to(dtype=torch.float32)
+
         if self.dXXT is None:
             self.dXXT = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=DEVICE_1)
 
         self.dXXT.addmm_((native_inp.T-reshaped_inp.T), reshaped_inp, beta=beta, alpha=alpha)
+        del native_inp, reshaped_inp
 
     # def process_batch(self, inp):
     #     inp = inp.to(device=DEVICE_1, dtype=torch.float32)
