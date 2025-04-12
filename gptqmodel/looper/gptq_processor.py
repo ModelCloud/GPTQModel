@@ -119,6 +119,7 @@ class GPTQProcessor(LoopProcessor):
             # gptq is mutable.
             g = self.tasks[name]  # noqa: F821
             g.add_batch(inp[0].data, out.data)  # noqa: F821
+            del inp, out
         return tmp
 
     def process(self, module: NamedModule, auto_gc: bool = True):

@@ -60,6 +60,7 @@ META_FIELD_MSE = "mse"
 
 META_FIELD_V2_ENABLED = "v2"
 META_FIELD_V2_ALPHA = "v2_alpha"
+META_FIELD_V2_MEMORY_DEVICE = "v2_memory_device"
 
 ADAPTER_FIELD = "adapter"
 
@@ -213,6 +214,7 @@ class QuantizeConfig():
 
     v2: bool = False
     v2_alpha: float = 0.25
+    v2_memory_device: str = "auto" #
 
     def __post_init__(self):
         fields_info = fields(self)

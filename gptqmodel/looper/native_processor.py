@@ -23,7 +23,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import DEVICE_1
+from ..quantization.gptq import DEVICE_1, CPU
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -73,8 +73,21 @@ class NativeProcessor(LoopProcessor):
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             inp = inp[0].detach()
-            # TODO: add CPU offloading for fp_inp for VRAM memory saving
-            self.native_inp_caches[name] += [inp.to(DEVICE_1)]
+
+            if self.qcfg.v2_memory_device == "auto":
+                v2_memory_device = DEVICE_1
+            elif self.qcfg.v2_memory_device == "cpu":
+                # slower but >= 4x vram memory reduction
+                v2_memory_device = CPU
+            elif isinstance(self.qcfg.v2_memory_device, str):
+                v2_memory_device = torch.device(self.qcfg.v2_memory_device)
+            elif isinstance(self.qcfg.v2_memory_device, torch.device):
+                v2_memory_device = self.qcfg.v2_memory_device
+            else:
+                v2_memory_device = DEVICE_1
+
+            self.native_inp_caches[name] += [inp.to(v2_memory_device)]
+            del inp, out
 
         return tmp
 
