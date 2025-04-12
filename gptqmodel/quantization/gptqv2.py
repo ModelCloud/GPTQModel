@@ -26,27 +26,26 @@ import torch
 import torch.nn as nn
 import transformers
 
+from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_compile, torch_sync
 from .gptq import DEVICE_1, GPTQ
 
 
 class GPTQv2(GPTQ):
-    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig]=None):
         from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
 
         super().__init__(module, qcfg)
 
         self.dXXT = None
 
-        self.native_inps = module.state[NATIVE_INPUTS_STATE_KEY]
-        module.state[NATIVE_INPUTS_STATE_KEY] = None
+        self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
     def process_batch(self, inp):
         batch_token_size, reshaped_inp, alpha, beta = super().process_batch(inp)
 
-        native_inp = self.native_inps[0].to(device=DEVICE_1, dtype=torch.float32)
-        del self.native_inps[0]
+        native_inp = self.native_inps.pop(0).to(device=DEVICE_1, dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):

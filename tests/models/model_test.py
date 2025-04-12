@@ -94,6 +94,7 @@ class ModelTest(unittest.TestCase):
     EXPECT_LM_HEAD_LOSS = None
 
     QUANTIZE_CONFIG_BITS = 4
+    QUANTIZE_CONFIG_GROUP_SIZE = 128
 
     V2 = False
 
@@ -166,7 +167,7 @@ class ModelTest(unittest.TestCase):
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
             bits=self.QUANTIZE_CONFIG_BITS,
-            group_size=128,
+            group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
             sym=self.SYM,
