@@ -36,17 +36,20 @@ class GPTQv2(GPTQ):
         from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
 
         super().__init__(module, qcfg)
+
+        self.dXXT = None
+
         self.native_inps = module.state[NATIVE_INPUTS_STATE_KEY]
         module.state[NATIVE_INPUTS_STATE_KEY] = None
 
     def process_batch(self, inp):
-        inp = inp.to(device=DEVICE_1, dtype=torch.float32)
+        batch_token_size, reshaped_inp, alpha, beta = super().process_batch(inp)
+
         native_inp = self.native_inps[0].to(device=DEVICE_1, dtype=torch.float32)
         del self.native_inps[0]
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            inp = inp.reshape(-1, inp.shape[-1])
             native_inp = native_inp.reshape(-1, native_inp.shape[-1])
         else:
             unfold = nn.Unfold(
@@ -56,25 +59,14 @@ class GPTQv2(GPTQ):
                 stride=self.module.stride,
             )
             # output size (batch_size, channels * \prod kernel_size, num_patches)
-            inp = unfold(inp)
-            inp = inp.transpose(1, 2).flatten(0, 1)
             native_inp = unfold(native_inp).transpose(1, 2).flatten(0, 1)
 
-        batch_token_size = inp.shape[0]
-
-        if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns),
+        if self.dXXT is None:
+            self.dXXT = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=DEVICE_1)
-            self.dXXT = self.H.clone()
 
-        beta = self.nsamples / (self.nsamples + batch_token_size)
-        alpha = 2.0 / (self.nsamples + batch_token_size)
-
-        self.H.addmm_(inp.T, inp, beta=beta, alpha=alpha)
-        self.dXXT.addmm_((native_inp.T-inp.T), inp, beta=beta, alpha=alpha)
-        # update number of collected samples
-        self.nsamples += batch_token_size
+        self.dXXT.addmm_((native_inp.T-reshaped_inp.T), reshaped_inp, beta=beta, alpha=alpha)
 
     # def process_batch(self, inp):
     #     inp = inp.to(device=DEVICE_1, dtype=torch.float32)

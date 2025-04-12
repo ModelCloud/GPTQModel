@@ -265,6 +265,9 @@ class GPTQ:
         # update number of collected samples
         self.nsamples += batch_token_size
 
+        # inp returned here is flattened/reshaped original inp
+        return batch_token_size, inp, alpha, beta
+
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
         self,
