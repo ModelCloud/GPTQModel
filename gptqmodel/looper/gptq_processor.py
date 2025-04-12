@@ -177,7 +177,7 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
-            QUANT_LOG_LOSS: f"{avg_loss:.8f}",
+            QUANT_LOG_LOSS: f"{avg_loss:.10f}",
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
