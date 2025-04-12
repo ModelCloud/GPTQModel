@@ -58,6 +58,5 @@ class DequantizeProcessor(LoopProcessor):
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         return False
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         return "de-quantize"

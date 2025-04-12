@@ -94,6 +94,5 @@ class NativeProcessor(LoopProcessor):
         else:
             return True
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         return "native"

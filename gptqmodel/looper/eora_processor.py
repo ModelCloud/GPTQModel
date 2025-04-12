@@ -246,6 +246,5 @@ class EoraProcessor(LoopProcessor):
                 return False
         return True
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         return "eora"

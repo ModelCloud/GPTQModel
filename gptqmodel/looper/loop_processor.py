@@ -59,6 +59,7 @@ class LoopProcessor:
 
         self.tokenizer = tokenizer
         self.qcfg = qcfg
+        self.qcfg_dynamic = None # cloned and dynamic filtered
 
         # TODO FIX ME: dequantize processor sets this to False but it is nver acted on!
         # if processor require fwd generate and hooks, set this to true
@@ -323,6 +324,5 @@ class LoopProcessor:
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         pass
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         pass

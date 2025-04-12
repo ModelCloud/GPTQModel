@@ -84,6 +84,9 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.v2 = self.qcfg.dynamic_get(module.full_name, "v2", qcfg_clone.v2)
             qcfg_clone.v2_alpha = self.qcfg.dynamic_get(module.full_name, "v2_alpha", qcfg_clone.v2_alpha)
 
+        # store last used qcfg_dynamic
+        self.qcfg_dynamic = qcfg_clone
+
         if qcfg_clone.v2 is True:
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
@@ -264,6 +267,6 @@ class GPTQProcessor(LoopProcessor):
         else:
             return True
 
-    @classmethod
-    def name(cls) -> str:
-        return "gptq"
+    def name(self) -> str:
+        qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
+        return "gptq v2" if qcfg.v2 else "gptq"
