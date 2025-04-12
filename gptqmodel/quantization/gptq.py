@@ -454,6 +454,7 @@ class GPTQ:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
+        del Hinv
         torch_sync()
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
@@ -461,6 +462,8 @@ class GPTQ:
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
             raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+
+        del Losses
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 

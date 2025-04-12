@@ -187,6 +187,7 @@ class GPTQv2(GPTQ):
 
         Hinv, damp = self.hessian_inverse(H)
         P = self.qcfg.v2_alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
+        del self.dXXT
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -232,6 +233,9 @@ class GPTQv2(GPTQ):
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
 
+        del Hinv
+        del P
+
         torch_sync()
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
@@ -239,6 +243,8 @@ class GPTQv2(GPTQ):
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
             raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+
+        del Losses
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
