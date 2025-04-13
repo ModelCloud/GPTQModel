@@ -290,7 +290,7 @@ class ModelTest(unittest.TestCase):
                     model_args=model_args,
                     output_path=tmp_dir,
                     framework=EVAL.LM_EVAL,
-                    tasks=[self.TASK_NAME],
+                    tasks=[self.TASK_NAME] if isinstance(self.TASK_NAME, str) else self.TASK_NAME,
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.EVAL_BATCH_SIZE,
