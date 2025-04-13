@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import itertools
+from functools import lru_cache
 from typing import List
 
 import torch
@@ -40,6 +41,7 @@ def dequant_kernel(
     qweight_ptr,
     qzeros_ptr,
     out_ptr,
+    out_dtype: tl.constexpr,
     numels,
     pack_bits: tl.constexpr,
     maxq: tl.constexpr,
@@ -55,21 +57,20 @@ def dequant_kernel(
     row_idx = x_index // out_features
     col_idx = x_index % out_features
 
-    elements_per_feature: tl.constexpr = pack_bits // bits
+    pack_scale: tl.constexpr = pack_bits // bits
     # For 3-bit, we need to handle packing specially since 32 isn't divisible by 3
     is_3bit: tl.constexpr = bits == 3
 
     # Load parameters
     g_idx = tl.load(g_idx_ptr + (row_idx), None, eviction_policy="evict_last")
     qweights = tl.load(
-        qweight_ptr + (col_idx + (out_features * (row_idx // elements_per_feature))),
+        qweight_ptr + (col_idx + (out_features * (row_idx // pack_scale))),
         None,
     )
 
     if is_3bit:
         # FIXME: pack_dtype is different
-        pack_scale = 32 // 3
-        weight_offset = row_idx % elements_per_feature
+        weight_offset = row_idx % pack_scale
         # 3 bits per weight, 10 weights per 32-bit int32 (with 2 bits unused)
         word_idx = weight_offset // pack_scale
         bit_pos = (weight_offset % pack_scale) * 3
@@ -79,7 +80,7 @@ def dequant_kernel(
         weights = (weight_word >> bit_pos) & maxq
     else:
         # Standard handling for 2/4/8 bits
-        wf_weights = (row_idx % elements_per_feature) * bits
+        wf_weights = (row_idx % pack_scale) * bits
         weights = (qweights >> wf_weights) & maxq
 
     tmp1 = g_idx + num_groups
@@ -89,31 +90,43 @@ def dequant_kernel(
     scales = tl.load(scales_ptr + (col_idx + (out_features * groups)), None).to(tl.float32)
 
     # Unpack zeros
-    qzero_ncols: tl.constexpr = out_features // elements_per_feature
+    qzero_ncols: tl.constexpr = out_features // pack_scale
     qzeros = tl.load(
-        qzeros_ptr + ((qzero_ncols * groups) + (col_idx // elements_per_feature)),
+        qzeros_ptr + ((qzero_ncols * groups) + (col_idx // pack_scale)),
         None,
         eviction_policy="evict_last",
     )
 
     if is_3bit:
         # FIXME: pack_dtype is different
-        pack_scale = 32 // 3
         # Special handling for 3-bit zeros
-        zero_offset = col_idx % elements_per_feature
+        zero_offset = col_idx % pack_scale
         word_idx = zero_offset // pack_scale
         bit_pos = (zero_offset % pack_scale) * 3
         zero_word = tl.load(qzeros_ptr + ((qzero_ncols * groups) + word_idx))
         zeros = (zero_word >> bit_pos) & maxq
     else:
-        wf_zeros = (col_idx % elements_per_feature) * bits
+        wf_zeros = (col_idx % pack_scale) * bits
         zeros = (qzeros >> wf_zeros) & maxq
 
     # Dequantize
     weights = (weights - zeros).to(tl.float32) * scales
-
+    weights = tl.cast(weights, out_dtype)
     tl.store(out_ptr + (x_index), weights, mask=xmask)
+    #tl.store(out_ptr + (x_index), weights.to(tl.float16 if out_ptr.dtype == tl.float16 else tl.bfloat16), mask=xmask)
 
+
+def torch_dtype_to_triton(dtype):
+    if dtype == torch.float32:
+        return tl.float32
+    elif dtype == torch.float16:
+        return tl.float16
+    elif dtype == torch.bfloat16:
+        return tl.bfloat16
+    elif dtype == torch.int32:
+        return tl.int32
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
 
 def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     """
@@ -126,6 +139,8 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     in_features = g_idx.shape[0]
 
     out = torch.empty((in_features, out_features), device=qweight.device, dtype=dtype)
+    out_dtype = dtype
+
     numels = out.numel()
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
@@ -135,6 +150,7 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
         qweight,
         qzeros,
         out,
+        torch_dtype_to_triton(out_dtype),
         numels,
         pack_bits=pack_bits,
         maxq=maxq,
