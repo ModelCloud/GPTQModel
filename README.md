@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 04/8/2025 2.3.0-dev: New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
+* 04/8/2025 2.3.0-dev: New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
@@ -367,22 +367,39 @@ dynamic = {
 
 ```bibtex
 # GPTQModel
-@misc{gptqmodel,
-    author = {ModelCloud.ai and qubitium@modelcloud.ai},
-    title = {GPTQModel},
-    year = {2025},
-    publisher = {GitHub},
-    journal = {GitHub repository},
-    howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
-    note = {Contact: qubitium@modelcloud.ai}
+@misc{qubitium2024gptqmodel,
+  author = {ModelCloud.ai and qubitium@modelcloud.ai},
+  title = {GPTQModel},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
+  note = {Contact: qubitium@modelcloud.ai},
+  year = {2024},
 }
 
 # GPTQ
 @article{frantar-gptq,
   title={{GPTQ}: Accurate Post-training Compression for Generative Pretrained Transformers}, 
   author={Elias Frantar and Saleh Ashkboos and Torsten Hoefler and Dan Alistarh},
-  year={2022},
-  journal={arXiv preprint arXiv:2210.17323}
+  journal={arXiv preprint arXiv:2210.17323},
+  year={2022}
+  
+}
+
+# GPTQ v2
+@article{li2025gptqv2,
+  title={GPTQv2: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
+  author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
+  journal={arXiv preprint arXiv:2504.02692},
+  year={2025}
+}
+
+# EoRA
+@article{liu2024eora,
+  title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
+  author={Liu, Shih-Yang and Yang, Huck and Wang, Chien-Yi and Fung, Nai Chit and Yin, Hongxu and Sakr, Charbel and Muralidharan, Saurav and Cheng, Kwang-Ting and Kautz, Jan and Wang, Yu-Chiang Frank and others},
+  journal={arXiv preprint arXiv:2410.21271},
+  year={2024}
 }
 
 # GPTQ Marlin Kernel
@@ -399,13 +416,5 @@ dynamic = {
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
-}
-
-# EoRA
-@article{liu2024eora,
-  title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
-  author={Liu, Shih-Yang and Yang, Huck and Wang, Chien-Yi and Fung, Nai Chit and Yin, Hongxu and Sakr, Charbel and Muralidharan, Saurav and Cheng, Kwang-Ting and Kautz, Jan and Wang, Yu-Chiang Frank and others},
-  journal={arXiv preprint arXiv:2410.21271},
-  year={2024}
 }
 ```
