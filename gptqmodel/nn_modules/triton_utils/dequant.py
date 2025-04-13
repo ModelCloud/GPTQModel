@@ -32,7 +32,6 @@ def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stage
 # tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128
 DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([512], [1], [1])
 #DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([128, 256, 512, 1024], [4, 8], [2]) <- slower
-
 @triton.autotune(DEFAULT_DEQUANT_CONFIGS, key=["numels"])
 @triton.jit
 def dequant_kernel(
@@ -57,6 +56,8 @@ def dequant_kernel(
     col_idx = x_index % out_features
 
     elements_per_feature: tl.constexpr = pack_bits // bits
+    # For 3-bit, we need to handle packing specially since 32 isn't divisible by 3
+    is_3bit: tl.constexpr = bits == 3
 
     # Load parameters
     g_idx = tl.load(g_idx_ptr + (row_idx), None, eviction_policy="evict_last")
@@ -65,18 +66,27 @@ def dequant_kernel(
         None,
     )
 
-    wf_weights = (row_idx % elements_per_feature) * bits
-    wf_zeros = (col_idx % elements_per_feature) * bits
+    if is_3bit:
+        # FIXME: pack_dtype is different
+        pack_scale = 32 // 3
+        weight_offset = row_idx % elements_per_feature
+        # 3 bits per weight, 10 weights per 32-bit int32 (with 2 bits unused)
+        word_idx = weight_offset // pack_scale
+        bit_pos = (weight_offset % pack_scale) * 3
+        # Load the entire packed(32-bit) word containing our weight
+        weight_word = tl.load(qweight_ptr + (col_idx + (out_features * word_idx)))
+        # Extract our 3-bit weight
+        weights = (weight_word >> bit_pos) & maxq
+    else:
+        # Standard handling for 2/4/8 bits
+        wf_weights = (row_idx % elements_per_feature) * bits
+        weights = (qweights >> wf_weights) & maxq
 
     tmp1 = g_idx + num_groups
     tmp2 = g_idx < 0
-    # tl.device_assert(g_idx >= 0, "index out of bounds: 0 <= tmp0 < 0")
     groups = tl.where(tmp2, tmp1, g_idx)  # tmp3 are g_idx
 
     scales = tl.load(scales_ptr + (col_idx + (out_features * groups)), None).to(tl.float32)
-
-    # Unpack weights
-    weights = (qweights >> wf_weights) & maxq  # bit shift qweight
 
     # Unpack zeros
     qzero_ncols: tl.constexpr = out_features // elements_per_feature
@@ -85,7 +95,19 @@ def dequant_kernel(
         None,
         eviction_policy="evict_last",
     )
-    zeros = (qzeros >> wf_zeros) & maxq
+
+    if is_3bit:
+        # FIXME: pack_dtype is different
+        pack_scale = 32 // 3
+        # Special handling for 3-bit zeros
+        zero_offset = col_idx % elements_per_feature
+        word_idx = zero_offset // pack_scale
+        bit_pos = (zero_offset % pack_scale) * 3
+        zero_word = tl.load(qzeros_ptr + ((qzero_ncols * groups) + word_idx))
+        zeros = (zero_word >> bit_pos) & maxq
+    else:
+        wf_zeros = (col_idx % elements_per_feature) * bits
+        zeros = (qzeros >> wf_zeros) & maxq
 
     # Dequantize
     weights = (weights - zeros).to(tl.float32) * scales
@@ -95,8 +117,9 @@ def dequant_kernel(
 
 def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     """
-    Launcher for triton dequant kernel.  Only valid for bits = 2, 4, 8
+    Launcher for triton dequant kernel. Supports bits = 2, 3, 4, 8
     """
+    assert bits in [2, 3, 4, 8], "Only 2, 3, 4, 8 bits are supported"
 
     num_groups = scales.shape[0]
     out_features = scales.shape[1]
@@ -120,6 +143,7 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
         num_groups=num_groups,
     )
     return out
+
 
 def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False):
     W = dequant(input.dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)

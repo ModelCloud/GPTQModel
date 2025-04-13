@@ -369,6 +369,7 @@ class GPTQModel:
             raise ValueError('Eval framework support llm_backend: [gptqmodel, vllm]')
 
         if isinstance(model_or_id_or_path, str):
+            log.info(f"Eval: loading using backend = `{backend}`")
             model = GPTQModel.load(model_id_or_path=model_or_id_or_path, backend=backend)
             model_id_or_path = model_or_id_or_path
         elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
