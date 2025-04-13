@@ -27,7 +27,7 @@ class DequantizeProcessor(LoopProcessor):
     def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
         super().__init__(tokenizer=None, qcfg=None, calibration_dataset=None, calibration_dataset_concat_size=None,
                          prepare_dataset_func=None, batch_size=1,
-                         logger_board="", require_fwd=True)
+                         logger_board="", require_fwd=False)
 
         self.quantized_modules = quantized_modules
 
@@ -58,6 +58,5 @@ class DequantizeProcessor(LoopProcessor):
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         return False
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         return "de-quantize"

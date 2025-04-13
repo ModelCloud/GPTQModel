@@ -29,7 +29,7 @@ from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_MAX_MEMORY)
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import CPU, CUDA_0, CUDA_1
+from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.torch import torch_compile, torch_sync
@@ -172,12 +172,12 @@ class EoraProcessor(LoopProcessor):
         self.durations.append(duration)
         self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stats_0 = torch.cuda.memory_stats(CUDA_0)
+        stats_0 = torch.cuda.memory_stats(DEVICE_0)
         active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
         peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         if torch.cuda.device_count() > 1:
-            stats_1 = torch.cuda.memory_stats(CUDA_1)
+            stats_1 = torch.cuda.memory_stats(DEVICE_1)
             active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
             peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
@@ -246,6 +246,5 @@ class EoraProcessor(LoopProcessor):
                 return False
         return True
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         return "eora"

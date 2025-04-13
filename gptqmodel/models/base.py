@@ -415,7 +415,7 @@ class BaseGPTQModel(nn.Module):
         # init processor with default GPTQ processor
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
-            quantize_processor = QQQProcessor(**args)
+            quantize_processor = [QQQProcessor(**args)]
 
             # rotate model
             if self.quantize_config.rotation:
@@ -436,14 +436,15 @@ class BaseGPTQModel(nn.Module):
                                              device=self.quantize_config.device, **module_name_args)
                 if auto_gc:
                     torch_empty_cache()
-
         else:
             from ..looper.gptq_processor import GPTQProcessor
-            quantize_processor = GPTQProcessor(**args)
+            quantize_processor = [GPTQProcessor(**args)]
 
+        if self.quantize_config.v2 is True:
+            from ..looper.native_processor import NativeProcessor
+            quantize_processor.insert(0, NativeProcessor(**args))
 
-        processors = [quantize_processor]
-
+        processors = quantize_processor
         # Append EoRA processor for lora adapter
         if needs_lora:
             processors.append(

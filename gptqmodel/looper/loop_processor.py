@@ -38,9 +38,18 @@ log = setup_logger()
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
-                 calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True):
+    def __init__(
+            self,
+            tokenizer, qcfg: QuantizeConfig,
+            calibration_dataset,
+            prepare_dataset_func,
+            calibration_dataset_concat_size: Optional[int],
+            batch_size: int = 1,
+            logger_board: str = "",
+            require_fwd: bool = True,
+            fwd_after_process: bool = True,
+            fwd_all_modules_in_single_pass: bool = False,
+    ):
 
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
@@ -50,10 +59,22 @@ class LoopProcessor:
 
         self.tokenizer = tokenizer
         self.qcfg = qcfg
+        self.qcfg_dynamic = None # cloned and dynamic filtered
 
+        # TODO FIX ME: dequantize processor sets this to False but it is nver acted on!
         # if processor require fwd generate and hooks, set this to true
         # looper should bypass generate + hooks if this is false
-        self.require_fwd = require_fwd
+        self.require_fwd = require_fwd # default True
+
+        # after process(), do we need to forward again? paried with require_fwd == True
+        # if true, forward output is captured post process() and saved for next loop as input
+        # if false, forward output before process() call is saved for next loop as input
+        self.fwd_after_process = fwd_after_process # default True
+
+        # native processor does not need to forward N times due to module depend segmentation
+        # if true, fwd is repeated based on module dep sub-groups
+        # if false, sub-module groups are merged as one and fwd happens in one pass
+        self.fwd_all_modules_in_single_pass = fwd_all_modules_in_single_pass # default False
 
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}
@@ -303,6 +324,5 @@ class LoopProcessor:
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         pass
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         pass

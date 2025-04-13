@@ -14,16 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from model_test import ModelTest
+from models.model_test import ModelTest
 
 
-class TestLlama3_2(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3567
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+class TestQwen2_5_GPTQv2(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    NATIVE_ARC_CHALLENGE_ACC = 0.2739
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
+    TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
+    EVAL_BATCH_SIZE = 6
     V2 = True
 
-    def test_llama3_2(self):
+    def test_qwen2_5(self):
         self.quant_lm_eval()

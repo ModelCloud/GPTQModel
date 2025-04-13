@@ -3,7 +3,7 @@ datasets>=3.5.0
 numpy>=1.26.4
 torch>=2.2.0
 safetensors>=0.5.3
-transformers>=4.51.1
+transformers>=4.51.2
 threadpoolctl>=3.6.0
 packaging>=24.2
 device-smi==0.4.1

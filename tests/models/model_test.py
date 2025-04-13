@@ -29,8 +29,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path  # noqa: E402
 from typing import Dict, List  # noqa: E402
 
-from device_smi import Device  # noqa: E402
-from gptqmodel.models._const import CUDA_0  # noqa: E402
 from logbar import LogBar  # noqa: E402
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
@@ -96,6 +94,9 @@ class ModelTest(unittest.TestCase):
     EXPECT_LM_HEAD_LOSS = None
 
     QUANTIZE_CONFIG_BITS = 4
+    QUANTIZE_CONFIG_GROUP_SIZE = 128
+
+    V2 = False
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -166,10 +167,11 @@ class ModelTest(unittest.TestCase):
     def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
             bits=self.QUANTIZE_CONFIG_BITS,
-            group_size=128,
+            group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
             sym=self.SYM,
+            v2=self.V2
         )
 
         log.info(f"Quant config: {quantize_config}")
@@ -288,7 +290,7 @@ class ModelTest(unittest.TestCase):
                     model_args=model_args,
                     output_path=tmp_dir,
                     framework=EVAL.LM_EVAL,
-                    tasks=[self.TASK_NAME],
+                    tasks=[self.TASK_NAME] if isinstance(self.TASK_NAME, str) else self.TASK_NAME,
                     apply_chat_template=apply_chat_template,
                     trust_remote_code=trust_remote_code,
                     batch_size=self.EVAL_BATCH_SIZE,

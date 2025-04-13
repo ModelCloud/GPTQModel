@@ -21,7 +21,6 @@ import os
 import sys
 import threading
 import time
-from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -42,14 +41,11 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 CPU = torch.device("cpu")
-CUDA_0 = auto_select_torch_device(index=0)
-CUDA_1 = auto_select_torch_device(index=1)
+DEVICE_0 = auto_select_torch_device(index=0)
+# device_1 may be same as device_0 if there is only 1 visible/active device
+DEVICE_1 = auto_select_torch_device(index=1)
 
 lock = threading.Lock()
-
-class QuantizationOrder(str, Enum):
-    DEFAULT = "default"
-    ACTIVATION = "activation"
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -231,19 +227,20 @@ class GPTQ:
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
-            if CUDA_0.index != CUDA_1.index:
-                self.fwd_inputs_buffered_data.append(inp.to(device=CUDA_1, non_blocking=True))
+            if DEVICE_0.index != DEVICE_1.index:
+                self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
             else:
                 self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
         else:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        inp = inp.to(device=CUDA_1, dtype=torch.float32)
+        reshaped_inp = inp.to(device=DEVICE_1, dtype=torch.float32)
+        del inp
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            inp = inp.reshape(-1, inp.shape[-1])
+            reshaped_inp = reshaped_inp.reshape(-1, reshaped_inp.shape[-1])
         else:
             unfold = nn.Unfold(
                 self.module.kernel_size,
@@ -252,22 +249,25 @@ class GPTQ:
                 stride=self.module.stride,
             )
             # output size (batch_size, channels * \prod kernel_size, num_patches)
-            inp = unfold(inp)
-            inp = inp.transpose(1, 2).flatten(0, 1)
+            reshaped_inp = unfold(reshaped_inp)
+            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        batch_token_size = inp.shape[0]
+        batch_token_size = reshaped_inp.shape[0]
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
-                        dtype=torch.float32,
-                        device=CUDA_1)
+                                 dtype=torch.float32,
+                                 device=DEVICE_1)
 
         beta = self.nsamples / (self.nsamples + batch_token_size)
         alpha = 2.0 / (self.nsamples + batch_token_size)
-        self.H.addmm_(inp.T, inp, beta=beta, alpha=alpha)
+        self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
 
         # update number of collected samples
         self.nsamples += batch_token_size
+
+        # inp returned here is flattened/reshaped original inp
+        return batch_token_size, reshaped_inp, alpha, beta
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -305,7 +305,7 @@ class GPTQ:
         damp = self.qcfg.damp_percent
         while 1 > damp > 0:
             try:
-                diag = torch.arange(self.columns, device=CUDA_1)
+                diag = torch.arange(self.columns, device=DEVICE_1)
                 H[diag, diag] += damp * torch.mean(torch.diag(H))
 
                 with lock:
@@ -370,7 +370,7 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=CUDA_1)
+            W = self._clone_module(device=DEVICE_1)
         else:
             W = self.module_copy
             self.module_copy = None
@@ -455,6 +455,7 @@ class GPTQ:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
+        del Hinv
         torch_sync()
 
         avg_loss = torch.sum(Losses).item() / self.nsamples
@@ -462,6 +463,8 @@ class GPTQ:
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
             raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+
+        del Losses
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
@@ -484,7 +487,7 @@ class GPTQ:
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=CUDA_1)
+        Q = Q.to(device=DEVICE_1)
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -505,6 +508,5 @@ class GPTQ:
         del self.module
 
         # torch_empty_cache(self.device)
-
 
 __all__ = ["GPTQ"]
