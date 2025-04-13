@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# adapted from https://github.com/Intelligent-Computing-Lab-Yale/GPTQv2
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import math
@@ -42,8 +43,9 @@ class GPTQv2(GPTQ):
 
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
-    # TODO FIXME: using v1 new process_batch kills v2 quantization quality
-    # def process_batch(self, inp):
+    # TODO FIXME: using v1 new process_batch kills v2 quantization quality, use original process_batch
+    # sample counter based on batch request # instead of batched token #.
+    #  def process_batch(self, inp):
     #     batch_token_size, reshaped_inp, alpha, beta = super().process_batch(inp)
     #     del inp
     #
