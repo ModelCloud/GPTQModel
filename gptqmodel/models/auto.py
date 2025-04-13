@@ -333,8 +333,8 @@ class GPTQModel:
             cls,
             model_or_id_or_path: str=None,
             tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
-            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLUPRO, List[EVAL.MMLUPRO]] = None, # set to None to fix mutable warning
-            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLUPRO]] = EVAL.LM_EVAL,
+            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLU_PRO, List[EVAL.MMLU_PRO]] = None, # set to None to fix mutable warning
+            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLU_PRO]] = EVAL.LM_EVAL,
             batch_size: Union[int, str] = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
@@ -351,8 +351,8 @@ class GPTQModel:
         if tasks is None:
             if framework == EVAL.LM_EVAL:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
-            if framework == EVAL.MMLUPRO:
-                tasks = [EVAL.MMLUPRO.MATH]
+            if framework == EVAL.MMLU_PRO:
+                tasks = [EVAL.MMLU_PRO.MATH]
             else:
                 tasks = [EVAL.EVALPLUS.HUMAN]
 
@@ -485,7 +485,7 @@ class GPTQModel:
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
             return results
-        elif framework == EVAL.MMLUPRO:
+        elif framework == EVAL.MMLU_PRO:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")

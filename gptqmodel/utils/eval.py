@@ -16,8 +16,8 @@
 
 import json
 import os
-from enum import Enum
-from typing import Optional, Union, List, Dict, Type
+from enum import Enum, EnumType
+from typing import Optional, Union, List, Dict, Type, Any
 
 from .evalplus import patch_evalplus
 
@@ -35,7 +35,7 @@ class EVAL:
         HUMAN = "humaneval"
         MBPP = "mbpp"
 
-    class MMLUPRO(str, Enum):
+    class MMLU_PRO(str, Enum):
         BIOLOGY = "biology"
         BUSINESS = "business"
         CHEMISTRY = "chemistry"
@@ -50,6 +50,17 @@ class EVAL:
         PHILOSOPHY = "philosophy"
         PHYSICS = "physics"
         PSYCHOLOGY = "psychology"
+
+    @classmethod
+    def get_tasks_for_framework(cls, framework: Union[str, Type[Enum]]) -> list:
+        if isinstance(framework, EnumType):
+            framework = framework.__name__
+
+        if not hasattr(cls, framework):
+            raise ValueError(f"No such EVAL framework: `{framework}`")
+
+        enum_class = getattr(cls, framework)
+        return list(enum_class)
 
     @classmethod
     def get_task_enums(cls):
@@ -94,7 +105,7 @@ class EVAL:
         task_to_framework = {}
 
         # Populate the mapping for all frameworks
-        for framework in [cls.LM_EVAL, cls.EVALPLUS, cls.MMLUPRO]:
+        for framework in [cls.LM_EVAL, cls.EVALPLUS, cls.MMLU_PRO]:
             for task in framework:
                 task_to_framework[task.value] = framework
 
