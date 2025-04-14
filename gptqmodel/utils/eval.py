@@ -16,8 +16,8 @@
 
 import json
 import os
-from enum import Enum
-from typing import Optional
+from enum import Enum, EnumType
+from typing import Dict, List, Optional, Type, Union
 
 from .evalplus import patch_evalplus
 
@@ -35,7 +35,7 @@ class EVAL:
         HUMAN = "humaneval"
         MBPP = "mbpp"
 
-    class MMLUPRO(str, Enum):
+    class MMLU_PRO(str, Enum):
         BIOLOGY = "biology"
         BUSINESS = "business"
         CHEMISTRY = "chemistry"
@@ -50,6 +50,17 @@ class EVAL:
         PHILOSOPHY = "philosophy"
         PHYSICS = "physics"
         PSYCHOLOGY = "psychology"
+
+    @classmethod
+    def get_tasks_for_framework(cls, framework: Union[str, Type[Enum]]) -> list:
+        if isinstance(framework, EnumType):
+            framework = framework.__name__
+
+        if not hasattr(cls, framework):
+            raise ValueError(f"No such EVAL framework: `{framework}`")
+
+        enum_class = getattr(cls, framework)
+        return list(enum_class)
 
     @classmethod
     def get_task_enums(cls):
@@ -72,6 +83,50 @@ class EVAL:
             if isinstance(attr, type) and issubclass(attr, Enum):
                 full_names.extend(cls.get_full_name(member) for member in attr)
         return ', '.join(full_names)
+
+    @classmethod
+    def get_task_groups_from_tasks(cls, tasks: Union[str, List[str]]) -> Dict[Type[Enum], List[str]]:
+        """Group tasks by their evaluation framework.
+
+        Args:
+            tasks: Either a single task name or list of task names
+
+        Returns:
+            Dictionary mapping framework enum classes to lists of tasks
+            Example: {EVAL.LM_EVAL: ["arc_challenge", "hellaswag"], EVAL.EVALPLUS: ["humaneval"]}
+
+        Raises:
+            ValueError: If any task doesn't match a known framework
+        """
+        if isinstance(tasks, str):
+            tasks = [tasks]
+
+        # Create a mapping of task values to their enum classes
+        task_to_framework = {}
+
+        # Populate the mapping for all frameworks
+        for framework in [cls.LM_EVAL, cls.EVALPLUS, cls.MMLU_PRO]:
+            for task in framework:
+                task_to_framework[task.value] = framework
+
+        # Group tasks by their framework
+        task_groups = {}
+        unknown_tasks = []
+
+        for task in tasks:
+            if task in task_to_framework:
+                framework = task_to_framework[task]
+                if framework not in task_groups:
+                    task_groups[framework] = []
+                task_groups[framework].append(task)
+            else:
+                unknown_tasks.append(task)
+
+        if unknown_tasks:
+            raise ValueError(f"Unknown tasks: {unknown_tasks}")
+
+        return task_groups
+
 
 def evalplus(
         model,

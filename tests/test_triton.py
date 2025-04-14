@@ -26,7 +26,11 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 import torch.utils.benchmark as benchmark  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from logbar import LogBar  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
+
+log = LogBar.shared()
 
 MODEL_ID = "/monster/data/model/Llama-7B-GPTQ"
 DATASET_ID = "timdettmers/openassistant-guanaco"
@@ -41,23 +45,18 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 def benchmark_forward(
     fn,
     *inputs,
+    dtype=torch.dtype,
     repeats="auto",
     desc="",
     verbose=True,
-    amp=False,
-    amp_dtype=torch.float16,
     **kwinputs,
 ):
     if verbose:
-        print(desc, "- Forward pass")
-
-    def amp_wrapper(*inputs, **kwinputs):
-        with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp):
-            fn(*inputs, **kwinputs)
+        log.info(desc, f"- Forward pass ({dtype})")
 
     t = benchmark.Timer(
-        stmt="fn_amp(*inputs, **kwinputs)",
-        globals={"fn_amp": amp_wrapper, "inputs": inputs, "kwinputs": kwinputs},
+        stmt="fn(*inputs, **kwinputs)",
+        globals={"fn": fn, "inputs": inputs, "kwinputs": kwinputs},
         num_threads=torch.get_num_threads(),
     )
     if repeats == "auto":
@@ -65,12 +64,13 @@ def benchmark_forward(
     else:
         m = t.timeit(repeats)
     if verbose:
-        print(m)
+        log.info(m)
     return t, m
 
 
 def get_model_and_tokenizer(
     model_id=MODEL_ID,
+    dtype: torch.dtype = None,
     **model_kwargs,
 ):
     tokenizer = AutoTokenizer.from_pretrained(
@@ -82,6 +82,7 @@ def get_model_and_tokenizer(
 
     model = GPTQModel.load(
         model_id,
+        torch_dtype=dtype,
         **model_kwargs,
     )
 
@@ -89,17 +90,25 @@ def get_model_and_tokenizer(
 
 
 class TestTriton(unittest.TestCase):
-    def test_triton_qlinear(self):
+    @parameterized.expand(
+        [
+            (torch.float16),
+            (torch.bfloat16)
+        ]
+    )
+    def test_triton_qlinear(self, dtype=torch.dtype):
         ref_model, _ = get_model_and_tokenizer(
             model_id=MODEL_ID,
             backend=BACKEND.TRITON,
+            dtype=dtype,
         )
 
         hidden_size = ref_model.model.model.embed_tokens.weight.shape[1]
-        test_data = torch.randn((1, 2048, hidden_size), dtype=torch.float16).cuda()
+        test_data = torch.randn((1, 2048, hidden_size), dtype=dtype).cuda()
 
         qlinear_ref = ref_model.model.model.layers[0].self_attn.q_proj
+        log.info(f"model dtype: {ref_model.model.dtype}")
 
         ref_out = qlinear_ref(test_data) # noqa: F841
 
-        _, measure_triton = benchmark_forward(qlinear_ref, test_data, desc="Triton", verbose=True)
+        _, measure_triton = benchmark_forward(qlinear_ref, test_data, dtype=dtype, desc="Triton", verbose=True)

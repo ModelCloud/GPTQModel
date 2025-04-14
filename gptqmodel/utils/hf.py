@@ -13,6 +13,10 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
             try:
                 cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
                 if cfg != model.generation_config:
+                    # migrated pad_token_id to config
+                    if hasattr(model.generation_config, "pad_token_id"):
+                        cfg.pad_token_id = model.generation_config.pad_token_id
+
                     model.generation_config = cfg
                     log.info(
                         "Model: Auto-fixed `generation_config` mismatch between model and `generation_config.json`.")

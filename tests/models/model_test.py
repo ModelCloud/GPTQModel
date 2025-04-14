@@ -191,7 +191,6 @@ class ModelTest(unittest.TestCase):
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype,
-            backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
             **args,
         )
@@ -260,6 +259,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
             **kargs
         )
@@ -272,7 +272,7 @@ class ModelTest(unittest.TestCase):
                 if self.USE_VLLM:
                     model_args = {
                         "pretrained": model.model_local_path,
-                        "dtype": "auto",
+                        "dtype": "auto", #"float16",
                         "gpu_memory_utilization": 0.8,
                         "tensor_parallel_size": 1,
                         "trust_remote_code": trust_remote_code,
@@ -282,34 +282,42 @@ class ModelTest(unittest.TestCase):
                     model_args = {}
                 if extra_args:
                     model_args.update(extra_args)
+
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
-                results = GPTQModel.eval(
-                    model_or_id_or_path=model,
-                    llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
-                    model_args=model_args,
-                    output_path=tmp_dir,
-                    framework=EVAL.LM_EVAL,
-                    tasks=[self.TASK_NAME] if isinstance(self.TASK_NAME, str) else self.TASK_NAME,
-                    apply_chat_template=apply_chat_template,
-                    trust_remote_code=trust_remote_code,
-                    batch_size=self.EVAL_BATCH_SIZE,
-                    gen_kwargs="temperature=0.0,top_k=50",
-                    random_seed=RAND_SEED,
-                    task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
-                )
 
-                print('--------Eval Result---------')
-                print(make_table(results))
-                if "groups" in results:
-                    print(make_table(results, "groups"))
-                print('--------Eval Result End---------')
-                task_results = {
-                    metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
-                    if metric != 'alias' and 'stderr' not in metric
-                }
-                print(task_results)
-                if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(model.model_local_path):
+                task_groups = EVAL.get_task_groups_from_tasks(self.TASK_NAME)
+
+                for framework, tasks in task_groups.items():
+                    log.info(f"TEST: EVAL starting: backend = {self.LOAD_BACKEND}")
+                    results = GPTQModel.eval(
+                        model_or_id_or_path=model,
+                        llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
+                        model_args=model_args,
+                        output_path=tmp_dir,
+                        framework=framework,
+                        tasks=tasks,
+                        apply_chat_template=apply_chat_template,
+                        trust_remote_code=trust_remote_code,
+                        batch_size=self.EVAL_BATCH_SIZE,
+                        gen_kwargs="temperature=0.0,top_k=50",
+                        random_seed=RAND_SEED,
+                        task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
+                    )
+
+                    print('--------Eval Result---------')
+                    print(make_table(results))
+                    if "groups" in results:
+                        print(make_table(results, "groups"))
+                    print('--------Eval Result End---------')
+                    task_results = {
+                        metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
+                        if metric != 'alias' and 'stderr' not in metric
+                    }
+                    print(task_results)
+
+                if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(
+                        model.model_local_path):
                     shutil.rmtree(model.model_local_path)
                 return task_results
         except BaseException as e:

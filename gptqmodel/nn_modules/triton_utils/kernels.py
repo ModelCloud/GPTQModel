@@ -17,17 +17,15 @@
 import torch
 import triton
 import triton.language as tl
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 from ...utils.logger import setup_logger
+from ...utils.torch import HAS_XPU
 from . import custom_autotune
 
 log = setup_logger()
 
-
 # code based https://github.com/fpgaminer/GPTQ-triton
-
-
 @custom_autotune.autotune(
     configs=[
         triton.Config(
@@ -99,6 +97,7 @@ log = setup_logger()
         "top_k": None,
     },
 )
+
 @triton.jit
 def quant_matmul_248_kernel(
     a_ptr,
@@ -134,6 +133,8 @@ def quant_matmul_248_kernel(
     zeros is of shape (G, N) float16
     g_ptr is of shape (K) int32
     """
+
+    # TODO FIXME: pack_dtype ratio is not always 32//bits
     infearure_per_bits = 32 // bits
 
     pid = tl.program_id(axis=0)
@@ -257,6 +258,7 @@ def quant_matmul_248_kernel(
     key=["M", "N", "K"],
     nearest_power_of_two=True,
 )
+
 @triton.jit
 def transpose_quant_matmul_248_kernel(
     a_ptr,
@@ -292,6 +294,7 @@ def transpose_quant_matmul_248_kernel(
     zeros is of shape (G, N) float16
     g_ptr is of shape (K) int32
     """
+    # TODO FIXME: pack_dtype ratio is not always 32//bits
     infearure_per_bits = 32 // bits
 
     pid = tl.program_id(axis=0)
@@ -419,7 +422,7 @@ def transpose_quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq
 
 class QuantLinearFunction(torch.autograd.Function):
     @staticmethod
-    @custom_fwd
+    @custom_bwd(device_type="xpu" if HAS_XPU else "cuda")
     def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, maxq):
         output = quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq)
         ctx.save_for_backward(qweight, scales, qzeros, g_idx)
@@ -427,7 +430,7 @@ class QuantLinearFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type="xpu" if HAS_XPU else "cuda")
     def backward(ctx, grad_output):
         qweight, scales, qzeros, g_idx = ctx.saved_tensors
         bits, maxq = ctx.bits, ctx.maxq
@@ -440,7 +443,7 @@ class QuantLinearFunction(torch.autograd.Function):
 
 def quant_matmul_inference_only_248(input, qweight, scales, qzeros, g_idx, bits, maxq):
     with torch.cuda.device(input.device):
-        output = torch.empty((input.shape[0], qweight.shape[1]), device=input.device, dtype=torch.float16)
+        output = torch.empty((input.shape[0], qweight.shape[1]), device=input.device, dtype=input.dtype)
         grid = lambda META: (  # noqa: E731
             triton.cdiv(input.shape[0], META["BLOCK_SIZE_M"]) * triton.cdiv(qweight.shape[1], META["BLOCK_SIZE_N"]),
         )
@@ -470,7 +473,7 @@ def quant_matmul_inference_only_248(input, qweight, scales, qzeros, g_idx, bits,
 
 class QuantLinearInferenceOnlyFunction(torch.autograd.Function):
     @staticmethod
-    @custom_fwd(cast_inputs=torch.float16)
+    @custom_fwd(device_type="xpu" if HAS_XPU else "cuda")
     def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, maxq):
         output = quant_matmul_248(input, qweight, scales, qzeros, g_idx, bits, maxq)
         return output
