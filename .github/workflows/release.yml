@@ -223,7 +223,9 @@ jobs:
           cache: 'pip'
 
       - name: Install requirements
-        run: pip install build setuptools -U
+        run: |
+          pip install build setuptools uv -U
+          uv pip install torch
 
       - name: Compile
         run: python -m build --no-isolation --sdist
