@@ -181,7 +181,7 @@ GPTQModel is validated for Linux, MacOS, and Windows 11:
 ```bash
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas, and ipex.
 # Example: pip install -v --no-build-isolation gptqmodel[vllm,sglang,bitblas,ipex,auto_round]
-pip install -v gptqmodel --no-build-isolation
+pip install -v gptqmodel --no-build-isolation 
 uv pip install -v gptqmodel --no-build-isolation
 ```
 
@@ -250,7 +250,27 @@ model = GPTQModel.load(model_id, quant_config)
 model.quantize(calibration_dataset, batch_size=2)
 
 model.save(quant_path)
+```
 
+### Quantization using GPTQ V2
+
+Enable GPTQ v2 quantization by setting `v2 = True` for potentially higher post-quantization accuracy recovery.
+```py
+# note v2 is currently experiemental and requires 2-4x more vram to execute
+# if oom on 1 gpu, please set CUDA_VISIBLE_DEVICES=0,1 to 2 gpu and gptqmodel will auto use second gpu
+quant_config = QuantizeConfig(bits=4, group_size=128, v2=True)
+```
+`Llama 3.1 8B-Instruct` quantized using `test/models/test_llama3_2.py`
+
+| Method  | Bits/Group Size | ARC_CHALLENGE   | GSM8K_Platinum_COT | 
+|---------|-----------------|-----------------|--------------------|
+| GPTQ    | 4 / 128         | 49.15           | 48.30              |
+| GPTQ v2 | 4 / 128         | 49.74 👍 +1.20% | 61.46 🔥 +27.25%   
+| GPTQ    | 3 / 128         | 39.93           | 43.26              |
+| GPTQ v2 | 3 / 128         | 41.13 👍 +3.01% | 50.54 🔥 +16.83%         | 
+
+# Quantization Inference
+```py
 # test post-quant inference
 model = GPTQModel.load(quant_path)
 result = model.generate("Uncovering deep insights begins with")[0] # tokens
@@ -356,13 +376,17 @@ dynamic = {
 
 ### Experimental Features
 
+* GPTQ v2: set `v2=True` in quantization config.
 * Multi-GPU Quantization: set `CUDA_VISIBLE_DEVICES=0,1` to two devices and GPTQModel will use second gpu for quantization.
 * Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
 * Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
 
 
+### Attribution of Quantization Methods:
 
-
+* GPTQ (v1): IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
+* GPTQ (v2): Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692
+* QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 
 ## Citation
 
