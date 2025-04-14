@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): New ground-breaking `GPTQ v2` quantization option for improved model quantization accuracy validated by over-performance of `GSM8K` benchmarks vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
+* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New ground-breaking `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` benchmarks vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
