@@ -125,6 +125,11 @@ Native support support some of the most popular multi-modal models:
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
 
+## GPTQ v2 quantization unlocks useful utral-low bit quantization
+
+<div align=center>
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9>
+</div>
 
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
@@ -139,6 +144,7 @@ Native support support some of the most popular multi-modal models:
 * ✨ Asymmetric `Sym=False` support. Model weights sharding support with optional hash check of model weights on load.
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 45% faster `packing` stage in quantization (Llama 3.1 8B). 50% faster PPL calculations (OPT).
+
 
 ## Quality: GPTQ 4bit (5.0 bpw) can match BF16:
 🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
