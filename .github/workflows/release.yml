@@ -225,7 +225,7 @@ jobs:
       - name: Install requirements
         run: |
           pip install build setuptools uv -U
-          uv pip install torch
+          uv pip install torch --system
 
       - name: Compile
         run: python -m build --no-isolation --sdist
