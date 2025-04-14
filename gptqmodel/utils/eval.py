@@ -17,7 +17,7 @@
 import json
 import os
 from enum import Enum, EnumType
-from typing import Optional, Union, List, Dict, Type, Any
+from typing import Dict, List, Optional, Type, Union
 
 from .evalplus import patch_evalplus
 
