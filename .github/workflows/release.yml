@@ -213,6 +213,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RELEASE_MODE: 0
+      BUILD_CUDA_EXT: '0'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
