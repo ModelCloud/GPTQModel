@@ -46,7 +46,7 @@ on:
         required: false
         default: false
       github_vm:
-        description: 'release source on github's vm'
+        description: 'release source on github vm'
         type: boolean
         required: false
         default: true
