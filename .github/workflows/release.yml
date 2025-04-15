@@ -45,6 +45,11 @@ on:
         type: boolean
         required: false
         default: false
+      github_vm:
+        description: 'release source on github vm'
+        type: boolean
+        required: false
+        default: true
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -70,6 +75,7 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       task_list: ${{ steps.assign.outputs.task_list }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
+    if: github.event.inputs.github_vm == 'false'
     steps:
       - name: Print env
         run: |
@@ -142,7 +148,7 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
-    
+
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
@@ -211,7 +217,7 @@ jobs:
 
   release-source:
     runs-on: [self-hosted, xeon5 ]
-    needs: 
+    needs:
       - check-vm
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
@@ -223,7 +229,7 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
-    
+
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
@@ -297,6 +303,78 @@ jobs:
 
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
+        env:
+          TWINE_USERNAME: "__token__"
+          TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
+        run: |
+          python -m twine upload dist/*gz
+
+
+  release-source-github:
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_MODE: 0
+      BUILD_CUDA_EXT: '0'
+    if: github.event.inputs.github_vm == 'true'
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.13
+          cache: 'pip'
+
+      - name: Install requirements
+        run: |
+          pip install build setuptools uv -U
+          uv pip install torch twine --system
+
+      - name: Compile
+        run: python -m build --no-isolation --sdist
+
+      - name: Check dist
+        run: |
+          ls -ahl dist
+          whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+
+          twine check dist/$whl
+
+      - name: Upload to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}
+
+      - name: Upload package to release
+        uses: svenstaro/upload-release-action@v2
+        if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
+        with:
+          file: dist/${{ env.WHL_NAME }}
+          tag: ${{ env.ref }}
+          file_glob: true
+          overwrite: true
+
+      - name: Waiting for confirmation
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
+        run: |
+          for i in {1..5}; do sleep 5; done
+
+      - name: Upload sdist to pypi
+        if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         env:
           TWINE_USERNAME: "__token__"
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
