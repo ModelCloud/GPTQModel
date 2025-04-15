@@ -226,7 +226,7 @@ jobs:
       - name: Install requirements
         run: |
           pip install build setuptools uv -U
-          uv pip install torch --system
+          uv pip install torch twine --system
 
       - name: Compile
         run: python -m build --no-isolation --sdist
