@@ -29,9 +29,11 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
+from ..utils.logger import setup_logger
 from ..utils.torch import torch_compile, torch_sync
 from .gptq import DEVICE_1, GPTQ
 
+log = setup_logger()
 
 class GPTQv2(GPTQ):
     def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig]=None):
@@ -72,9 +74,44 @@ class GPTQv2(GPTQ):
     #     self.dXXT.addmm_((native_inp.T-reshaped_inp.T), reshaped_inp, beta=beta, alpha=alpha)
     #     del native_inp, reshaped_inp
 
+    def find_closest_native_input(self, inp):
+        if not self.native_inps:
+            return None
+
+        # only match with exact same shape
+        shape_matches = []
+        for i, native_inp in enumerate(self.native_inps):
+            if native_inp.shape == inp.shape:
+                shape_matches.append((i, native_inp))
+
+        # then find the closest tensor value match
+        if shape_matches:
+            closest_idx = -1
+            min_diff = float('inf')
+            for i, native_inp in shape_matches:
+                native_inp = native_inp.to(device=inp.device)
+                diff = (native_inp - inp).abs().sum().item()
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_idx = i
+            if closest_idx != -1:
+                return self.native_inps.pop(closest_idx)
+
+        # no match found
+        return None
+
     def process_batch(self, inp):
         inp = inp.to(device=DEVICE_1, dtype=torch.float32)
-        native_inp = self.native_inps.pop(0).to(device=DEVICE_1, dtype=torch.float32)
+
+        # not compatible with Moe
+        # native_inp = self.native_inps.pop(0).to(device=DEVICE_1, dtype=torch.float32)
+
+        native_inp = self.find_closest_native_input(inp).to(device=inp.device)
+
+        if native_inp is None:
+            log.error(f"Skipping input of shape `{inp.shape}` as it not matched to native_inputs. If this is MoE model, this is safe to ignore.")
+            return
+
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
             native_inp = native_inp.unsqueeze(0)

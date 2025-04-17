@@ -137,12 +137,12 @@ def auto_select_torch_device(index: int = 0):
     if HAS_CUDA:
         # defensive check
         if index > 0 and torch.cuda.device_count() <= index :
-            index = 0
+            index = torch.cuda.device_count() - 1
         device = torch.device(f"cuda:{index}")
     elif HAS_XPU:
         # defensive check
         if index > 0 and torch.xpu.device_count() <= index:
-            index = 0
+            index = torch.xpu.device_count() - 1
         device = torch.device(f"xpu:{index}")
     elif HAS_MPS:
         device = torch.device("mps") # mps has no index
