@@ -361,15 +361,15 @@ class ModelTest(unittest.TestCase):
     def quant_lm_eval(self):
         self.model = None
         # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
-        if self.QUANT_SAVE_PATH:
-            self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        #if self.QUANT_SAVE_PATH:
+        #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
         if not self.model:
             self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=self.model,
+        task_results = self.lm_eval(model=self.QUANT_SAVE_PATH if self.QUANT_SAVE_PATH else self.model ,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                                     trust_remote_code=self.TRUST_REMOTE_CODE,
                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
