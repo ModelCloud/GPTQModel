@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import itertools
-from functools import lru_cache
 from typing import List
 
 import torch

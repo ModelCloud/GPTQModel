@@ -3,9 +3,8 @@ import tempfile
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
-from logbar import LogBar
-
 from gptqmodel.utils.eval import EVAL
+from logbar import LogBar
 
 log = LogBar.shared()
 
@@ -69,7 +68,6 @@ if not EVAL_ONLY:
     log.info(f"Quant Model Saved to: {QUANT_SAVE_PATH}")
 
 # eval
-from lm_eval.tasks import TaskManager
 from lm_eval.utils import make_table
 
 with tempfile.TemporaryDirectory() as tmp_dir:

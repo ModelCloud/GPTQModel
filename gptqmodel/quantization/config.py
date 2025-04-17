@@ -18,12 +18,11 @@ import copy
 import json
 import os.path
 import re
-
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from importlib.metadata import version as pkg_version
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
-from enum import Enum
 
 import torch
 from packaging import version

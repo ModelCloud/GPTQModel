@@ -1,8 +1,10 @@
 import os
+
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-from logbar import LogBar
 from huggingface_hub import HfApi
+from logbar import LogBar
+
 api = HfApi()
 
 log = LogBar.shared()
