@@ -82,7 +82,6 @@ class ModelTest(unittest.TestCase):
     SYM = True
 
     DISABLE_FLASH_ATTN = False
-    LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
@@ -361,11 +360,10 @@ class ModelTest(unittest.TestCase):
 
     def quant_lm_eval(self):
         self.model = None
-        if self.LOAD_QUANTIZED_MODEL:
-            try:
-                self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
-            except BaseException as e:
-                print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong {e}\n use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
+        # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
+        if self.QUANT_SAVE_PATH:
+            self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+
         if not self.model:
             self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
