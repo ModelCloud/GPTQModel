@@ -83,7 +83,6 @@ class ModelTest(unittest.TestCase):
 
     DISABLE_FLASH_ATTN = False
     LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
-    SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
@@ -97,6 +96,7 @@ class ModelTest(unittest.TestCase):
     QUANTIZE_CONFIG_GROUP_SIZE = 128
 
     V2 = False
+    QUANT_SAVE_PATH = None # default is temp folder
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -216,15 +216,18 @@ class ModelTest(unittest.TestCase):
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
-            with (contextlib.nullcontext(self.SAVE_QUANTIZED_MODEL) if self.SAVE_QUANTIZED_MODEL else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
-                os.makedirs(tmpdirname, exist_ok=True)
-                self.clear_directory(tmpdirname)
+            # TODO: make into shared method
+            with (contextlib.nullcontext(self.QUANT_SAVE_PATH) if self.QUANT_SAVE_PATH else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as path:
+                os.makedirs(path, exist_ok=True)
+                self.clear_directory(path)
 
-                model.save(tmpdirname)
-                tokenizer.save_pretrained(tmpdirname)
-                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+                model.save(path)
+                tokenizer.save_pretrained(path)
+                log.info(f"Quantized Model saved to tmp dir: {path}")
+                q_model, q_tokenizer = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
                 if need_create_processor:
-                    processor = AutoProcessor.from_pretrained(tmpdirname)
+                    processor = AutoProcessor.from_pretrained(path)
+
         else:
             if need_create_processor:
                 processor = AutoProcessor.from_pretrained(model_id_or_path)
@@ -316,8 +319,10 @@ class ModelTest(unittest.TestCase):
                     }
                     print(task_results)
 
+                # only delete tmp folders
                 if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(
                         model.model_local_path):
+                    log.info(f"Deleting temp model: {model.model_local_path}")
                     shutil.rmtree(model.model_local_path)
                 return task_results
         except BaseException as e:
@@ -358,7 +363,7 @@ class ModelTest(unittest.TestCase):
         self.model = None
         if self.LOAD_QUANTIZED_MODEL:
             try:
-                self.model, _ = self.quantModel(self.SAVE_QUANTIZED_MODEL, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+                self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
             except BaseException as e:
                 print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong {e}\n use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
         if not self.model:
