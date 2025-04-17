@@ -106,11 +106,13 @@ class GPTQv2(GPTQ):
         # not compatible with Moe
         # native_inp = self.native_inps.pop(0).to(device=DEVICE_1, dtype=torch.float32)
 
-        native_inp = self.find_closest_native_input(inp).to(device=inp.device)
+        native_inp = self.find_closest_native_input(inp)
 
         if native_inp is None:
             log.error(f"Skipping input of shape `{inp.shape}` as it not matched to native_inputs. If this is MoE model, this is safe to ignore.")
             return
+
+        native_inp = native_inp.to(device=inp.device)
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
