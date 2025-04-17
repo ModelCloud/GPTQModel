@@ -19,6 +19,7 @@ import json
 import os.path
 import re
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from importlib.metadata import version as pkg_version
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -69,7 +70,7 @@ ADAPTER_FIELD = "adapter"
 PKG_AUTO_ROUND = "auto-round"
 
 # saved formats
-class FORMAT:
+class FORMAT(str, Enum):
     GPTQ = "gptq"
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
@@ -80,7 +81,7 @@ class FORMAT:
 
 
 # quant methods
-class QUANT_METHOD:
+class QUANT_METHOD(str, Enum):
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
     QQQ = "qqq"
