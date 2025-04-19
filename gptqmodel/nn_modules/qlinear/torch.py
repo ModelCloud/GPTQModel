@@ -106,7 +106,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
         if backend is None:
             # MPS doesn't support inductor.
-            backend = "inductor" if self.dequantize_weight.device.type != "mps" else "aot_eager"
+            backend = "inductor" if self.list_buffers()[0].device.type != "mps" else "aot_eager"
 
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
