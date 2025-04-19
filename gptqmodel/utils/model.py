@@ -150,9 +150,10 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     return res
 
 
-def get_module_by_name_prefix(model, module_name: List[str]):
+def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
+    module_name_list = module_name if isinstance(module_name, list) else [module_name]
     for name, module in model.named_modules():
-        for prefix in module_name:
+        for prefix in module_name_list:
             if name.startswith(prefix):
                 return module, prefix
 
