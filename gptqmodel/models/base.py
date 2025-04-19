@@ -421,7 +421,7 @@ class BaseGPTQModel(nn.Module):
                                     f"current model is {self.__class__.__name__}")
 
             if self.model.config.tie_word_embeddings:
-                print("Rotation requires word embeddings to be untied. Untying.")
+                log.info("Rotation requires word embeddings to be untied. Untying.")
                 self.model.config.tie_word_embeddings = False
                 lm_head, _ = get_module_by_name_prefix(self.model, self.lm_head)
                 lm_head.weight = nn.Parameter(lm_head.weight.data.clone())
