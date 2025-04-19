@@ -100,9 +100,13 @@ class TorchQuantLinear(PackableQuantLinear):
         # torch benefits the most from torch.compile, enable it by default
         self.optimize()
 
-    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+    def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
+
+        if backend is None:
+            # MPS doesn't support inductor.
+            backend = "inductor" if self.dequantize_weight.device.type != "mps" else "aot_eager"
 
         # compile dequantize
         self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)

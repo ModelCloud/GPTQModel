@@ -412,30 +412,40 @@ class BaseGPTQModel(nn.Module):
             "retain_w": needs_lora,  # lora needs original w
         }
 
+        # rotate model
+        if self.quantize_config.rotation:
+            from gptqmodel.models.definitions.llama import LlamaGPTQ
+            from gptqmodel.models.definitions.qwen2 import Qwen2GPTQ
+            if not isinstance(self, (LlamaGPTQ, Qwen2GPTQ)):
+                raise ValueError(f"rotation only supports: llama/qwen2 model, "
+                                    f"current model is {self.__class__.__name__}")
+
+            if self.model.config.tie_word_embeddings:
+                print("Rotation requires word embeddings to be untied. Untying.")
+                self.model.config.tie_word_embeddings = False
+                lm_head, _ = get_module_by_name_prefix(self.model, self.lm_head)
+                lm_head.weight = nn.Parameter(lm_head.weight.data.clone())
+
+            module_name_args = {
+                "layers_node": self.layers_node,
+                "lm_head_name": self.lm_head
+            }
+            self.model = fuse_layer_norms(model=self.model,
+                                            pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
+                                            **module_name_args)
+
+            # MPS does not support float64.
+            rotation_device = self.quantize_config.device if self.quantize_config.device != DEVICE.MPS else DEVICE.CPU
+            self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
+                                            device=rotation_device, **module_name_args)
+            if auto_gc:
+                torch_empty_cache()
+
         # init processor with default GPTQ processor
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = [QQQProcessor(**args)]
 
-            # rotate model
-            if self.quantize_config.rotation:
-                from gptqmodel.models.definitions.llama import LlamaGPTQ
-                from gptqmodel.models.definitions.qwen2 import Qwen2GPTQ
-                if not isinstance(self, (LlamaGPTQ, Qwen2GPTQ)):
-                    raise ValueError(f"rotation only supports: llama/qwen2 model, "
-                                     f"current model is {self.__class__.__name__}")
-                module_name_args = {
-                    "layers_node": self.layers_node,
-                    "lm_head_name": self.lm_head
-                }
-                self.model = fuse_layer_norms(model=self.model,
-                                              pre_lm_head_norm_module_name=self.pre_lm_head_norm_module,
-                                              **module_name_args)
-
-                self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
-                                             device=self.quantize_config.device, **module_name_args)
-                if auto_gc:
-                    torch_empty_cache()
         else:
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = [GPTQProcessor(**args)]
