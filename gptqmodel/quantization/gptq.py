@@ -242,14 +242,36 @@ class GPTQ:
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             reshaped_inp = reshaped_inp.reshape(-1, reshaped_inp.shape[-1])
         else:
-            unfold = nn.Unfold(
-                self.module.kernel_size,
-                dilation=self.module.dilation,
-                padding=self.module.padding,
-                stride=self.module.stride,
-            )
-            # output size (batch_size, channels * \prod kernel_size, num_patches)
-            reshaped_inp = unfold(reshaped_inp)
+            if isinstance(self.module, nn.Conv1d):
+                reshaped_inp = reshaped_inp.reshape(
+                    reshaped_inp.size(0) * self.module.groups,
+                    reshaped_inp.size(1) // self.module.groups,
+                    reshaped_inp.shape[2],
+                    1,
+                )
+                unfold = nn.Unfold(
+                    self.module.kernel_size + (1,),
+                    dilation=self.module.dilation + (1,),
+                    padding=self.module.padding + (0,),
+                    stride=self.module.stride + (1,),
+                )
+                # output size (batch_size, channels * \prod kernel_size, num_patches)
+                reshaped_inp = unfold(reshaped_inp)
+            else:
+                reshaped_inp = reshaped_inp.reshape(
+                    reshaped_inp.size(0) * self.module.groups,
+                    reshaped_inp.size(1) // self.module.groups,
+                    reshaped_inp.shape[2],
+                    reshaped_inp.shape[3],
+                )
+                unfold = nn.Unfold(
+                    self.module.kernel_size,
+                    dilation=self.module.dilation,
+                    padding=self.module.padding,
+                    stride=self.module.stride,
+                )
+                # output size (batch_size, channels * \prod kernel_size, num_patches)
+                reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
         batch_token_size = reshaped_inp.shape[0]
@@ -345,7 +367,7 @@ class GPTQ:
         blocksize=128,
     ):
 
-        #self.H = self.H.to(device=CUDA_0)
+        # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
