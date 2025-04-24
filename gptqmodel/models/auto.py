@@ -135,6 +135,7 @@ MODEL_MAP = {
     "moss": MOSSGPTQ,
     "chatglm": ChatGLM,
     "glm": GLM,
+    "glm4": GLM,
     "gpt_bigcode": GPTBigCodeGPTQ,
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
