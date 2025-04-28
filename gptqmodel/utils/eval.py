@@ -30,6 +30,9 @@ class EVAL:
         HELLASWAG = "hellaswag"
         MMLU = "mmlu"
         GPQA = "gpqa"
+        ARC_EASY = "arc_easy"
+        BOOLQ = "boolq"
+        OPENBOOKQA = "openbookqa"
 
     class EVALPLUS(str, Enum):
         HUMAN = "humaneval"
