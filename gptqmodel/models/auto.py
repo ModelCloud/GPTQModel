@@ -148,6 +148,7 @@ MODEL_MAP = {
     "internlm2": InternLM2GPTQ,
     "qwen": QwenGPTQ,
     "mistral": MistralGPTQ,
+    "mistral3": MistralGPTQ,
     "Yi": YiGPTQ,
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
