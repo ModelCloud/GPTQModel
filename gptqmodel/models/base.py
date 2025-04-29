@@ -200,6 +200,7 @@ class BaseGPTQModel(nn.Module):
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
+        calibration_data_min_length: int = 10,
     ):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
             if self.tokenizer is None:
@@ -240,7 +241,7 @@ class BaseGPTQModel(nn.Module):
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
             # filter if input_ids is too short
-            if len(input_ids[0]) <= 10:
+            if len(input_ids[0]) <= calibration_data_min_length:
                 too_short_calibration_data_count += 1
                 continue
 
@@ -252,7 +253,8 @@ class BaseGPTQModel(nn.Module):
             )
 
         if too_short_calibration_data_count > 0:
-            log.warn(f"Quantize: {too_short_calibration_data_count} too short calibration data removed(<=10 tokens)")
+            log.warn(f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+                     f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
 
         if calibration_dataset_concat_size:
             concatenated_data = []
@@ -350,6 +352,8 @@ class BaseGPTQModel(nn.Module):
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        # minimum length of calibration data, default is 10
+        calibration_data_min_length: int = 10,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
