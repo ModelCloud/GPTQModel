@@ -240,7 +240,7 @@ class BaseGPTQModel(nn.Module):
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
             # filter if input_ids is too short
-            if len(input_ids) <= 10:
+            if len(input_ids[0]) <= 10:
                 too_short_calibration_data_count += 1
                 continue
 
