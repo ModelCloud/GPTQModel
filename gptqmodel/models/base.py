@@ -234,9 +234,11 @@ class BaseGPTQModel(nn.Module):
             return [tensor]
 
         new_calibration_dataset = []
+        too_short_calibration_data_count = 0
         for example in calibration_dataset:
             # filter if input_ids is empty
-            if example["input_ids"].shape[1] == 0:
+            if example["input_ids"].shape[1] <= 10:
+                too_short_calibration_data_count += 1
                 continue
 
             input_ids = _convert_tensor_to_list(example["input_ids"])
@@ -248,6 +250,9 @@ class BaseGPTQModel(nn.Module):
                     "attention_mask": attention_mask,
                 }
             )
+
+        if too_short_calibration_data_count > 0:
+            log.warn(f"Quantize: {too_short_calibration_data_count} too short calibration data removed(<=10 tokens)")
 
         if calibration_dataset_concat_size:
             concatenated_data = []
