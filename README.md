@@ -128,7 +128,7 @@ Native support support some of the most popular multi-modal models:
 ## GPTQ v2 quantization unlocks useful utral-low bit quantization
 
 <div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9>
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 height="25%">
 </div>
 
 ## Features
@@ -158,9 +158,9 @@ Native support support some of the most popular multi-modal models:
 | Bloom             | ✅ | Gemma 1/2/3 | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
 | ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2 | ✅ | XVERSE    | ✅ |
 | CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
-| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
-| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2/3 MoE  | ✅ |           |   |
-| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2/2.5 VL   | ✅ |           |   |
+| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen 1/2/3      | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen 2/3 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen 2/2.5 VL   | ✅ |           |   |
 | DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
 | DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
 | Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
