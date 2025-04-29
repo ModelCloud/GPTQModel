@@ -235,6 +235,10 @@ class BaseGPTQModel(nn.Module):
 
         new_calibration_dataset = []
         for example in calibration_dataset:
+            # filter if input_ids is empty
+            if example["input_ids"].shape[1] == 0:
+                continue
+
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
