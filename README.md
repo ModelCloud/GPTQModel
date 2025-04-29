@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 04/29/2025 3.1.0-dev `main`: Qwen 3 and 3 MoE model support plus new arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
 * 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New ground-breaking `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
@@ -128,7 +129,7 @@ Native support support some of the most popular multi-modal models:
 ## GPTQ v2 quantization unlocks useful utral-low bit quantization
 
 <div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9>
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 height="25%">
 </div>
 
 ## Features
@@ -158,9 +159,9 @@ Native support support some of the most popular multi-modal models:
 | Bloom             | ✅ | Gemma 1/2/3 | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
 | ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2 | ✅ | XVERSE    | ✅ |
 | CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
-| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
-| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2/3 MoE  | ✅ |           |   |
-| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2/2.5 VL   | ✅ |           |   |
+| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen 1/2/3      | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen 2/3 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen 2/2.5 VL   | ✅ |           |   |
 | DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
 | DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
 | Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
