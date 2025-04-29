@@ -276,6 +276,10 @@ class GPTQ:
 
         batch_token_size = reshaped_inp.shape[0]
 
+        # moe model may receive an empty batch; , return early
+        if batch_token_size == 0:
+            return batch_token_size, reshaped_inp, 0, 0
+
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
@@ -366,7 +370,6 @@ class GPTQ:
         self,
         blocksize=128,
     ):
-
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
@@ -480,11 +483,15 @@ class GPTQ:
         del Hinv
         torch_sync()
 
-        avg_loss = torch.sum(Losses).item() / self.nsamples
+        if self.nsamples != 0:
+            avg_loss = torch.sum(Losses).item() / self.nsamples
 
-        if math.isnan(avg_loss):
-            print("Losses sum item:", torch.sum(Losses).item())
-            raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+            if math.isnan(avg_loss):
+                print("Losses sum item:", torch.sum(Losses).item())
+                raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+        else:
+            log.warn(f"Quantization: {self.name} is not activated due to model inference logic (MoE)")
+            avg_loss = 999999999
 
         del Losses
 
