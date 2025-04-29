@@ -276,14 +276,14 @@ class GPTQ:
 
         batch_token_size = reshaped_inp.shape[0]
 
-        # moe model may receive an empty batch; , return early
-        if batch_token_size == 0:
-            return batch_token_size, reshaped_inp, 0, 0
-
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=DEVICE_1)
+
+        # moe model may receive an empty batch, return early
+        if batch_token_size == 0:
+            return batch_token_size, reshaped_inp, 0, 0
 
         beta = self.nsamples / (self.nsamples + batch_token_size)
         alpha = 2.0 / (self.nsamples + batch_token_size)
