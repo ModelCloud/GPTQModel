@@ -294,7 +294,7 @@ class LoopProcessor:
         pass
 
     # do work and return processor.self state which will updated/merged
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, device: torch.device = None):
         pass
 
     # last step, after all loop processor is called

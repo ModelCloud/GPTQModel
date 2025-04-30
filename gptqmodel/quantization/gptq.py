@@ -44,6 +44,9 @@ CPU = torch.device("cpu")
 DEVICE_0 = auto_select_torch_device(index=0)
 # device_1 may be same as device_0 if there is only 1 visible/active device
 DEVICE_1 = auto_select_torch_device(index=1)
+DEVICE_2 = auto_select_torch_device(index=2)
+DEVICE_3 = auto_select_torch_device(index=3)
+DEVICE_4 = auto_select_torch_device(index=4)
 
 lock = threading.Lock()
 
@@ -235,7 +238,9 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        reshaped_inp = inp.to(device=DEVICE_1, dtype=torch.float32)
+        # device = DEVICE_1
+        device = DEVICE_0
+        reshaped_inp = inp.to(device=device, dtype=torch.float32)
         del inp
 
         # input reshaping
@@ -279,7 +284,7 @@ class GPTQ:
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
-                                 device=DEVICE_1)
+                                 device=device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
@@ -331,7 +336,7 @@ class GPTQ:
         damp = self.qcfg.damp_percent
         while 1 > damp > 0:
             try:
-                diag = torch.arange(self.columns, device=DEVICE_1)
+                diag = torch.arange(self.columns, device=H.device)
                 H[diag, diag] += damp * torch.mean(torch.diag(H))
 
                 with lock:
@@ -395,7 +400,7 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=DEVICE_1)
+            W = self._clone_module()
         else:
             W = self.module_copy
             self.module_copy = None
@@ -516,7 +521,7 @@ class GPTQ:
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=DEVICE_1)
+        #Q = Q.to(device=use_device)
 
         if scale == []:
             scale.append(self.quantizer.scale)
