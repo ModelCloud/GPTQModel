@@ -1,3 +1,4 @@
+# isort: off
 # Copyright 2024-2025 ModelCloud.ai
 # Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
