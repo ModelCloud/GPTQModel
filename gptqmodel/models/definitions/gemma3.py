@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import GemmaGPTQ
+from . import LlamaGPTQ
 
 
-class Gemma3GPTQ(GemmaGPTQ):
+class Gemma3GPTQ(LlamaGPTQ):
     layer_type = "Gemma3DecoderLayer"
