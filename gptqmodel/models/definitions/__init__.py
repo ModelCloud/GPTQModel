@@ -1,3 +1,4 @@
+# isort: off
 # Copyright 2024-2025 ModelCloud.ai
 # Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
@@ -14,6 +15,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Many model architectures inherit from LlamaGPTQ, so it’s necessary to import llama first to avoid circular imports.
+from .llama import LlamaGPTQ
+
+# other model
 from .baichuan import BaiChuanGPTQ
 from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
