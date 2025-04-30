@@ -195,7 +195,7 @@ class HookedLinear(torch.nn.Linear):
         return output
 
 
-def _replace_module(module, child, name, level: int = 0, debug: bool = False):
+def _replace_module(module, child, name, level: int = 0, debug: bool = False) -> bool:
     level_indent = "---" * level
     instance_type = type(child)
     if debug:
@@ -212,6 +212,9 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False):
     else:
         if debug:
             log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
+        return False
+
+    return True
 
 
 def replace_module_with_hooked_legacy(module, level: int = 0):
@@ -219,7 +222,8 @@ def replace_module_with_hooked_legacy(module, level: int = 0):
         log.info("Hooked Modules: Using legacy based config for targeting of modules")
 
     for name, child in module.named_children():
-        _replace_module(module, child, name, level)
+        if not _replace_module(module, child, name, level):
+            replace_module_with_hooked_legacy(child, level=level+1)
 
 
 def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: int = 0, debug: bool = False):
