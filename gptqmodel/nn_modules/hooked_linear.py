@@ -257,13 +257,13 @@ def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: 
                         # follow tree node if name in tree and tree is a dict
                         if debug:
                             log.info(f"{level_indent} Hook: follow tree node: {name} -> nest into {name}")
-                            
+
                         replace_module_with_hooked_tree(child, tree=tree[name],
                                                         level=level+1, debug=debug)
                     else:
                         if debug:
                             log.warn(f"{level_indent} Hook: skipped unknown tree node dict: {name} vs tree: {tree}")
-                            
+
                 elif "#" in tree and name.isdigit():
                     if debug:
                         log.info(f"{level_indent} Hook: follow tree node: {name} -> nest into {name}")

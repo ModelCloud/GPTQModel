@@ -21,7 +21,6 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
-from .definitions.dream import DreamGPTQ
 
 log = setup_logger()
 
@@ -74,6 +73,7 @@ from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
+from .definitions.dream import DreamGPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
@@ -91,6 +91,7 @@ from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
+from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
 from .definitions.mistral import MistralGPTQ  # noqa: E402
@@ -187,6 +188,7 @@ MODEL_MAP = {
     "ovis": OvisGPTQ,
     "telechat": TeleChat2GPTQ,
     "instella": InstellaGPTQ,
+    "mimo": MimoGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())

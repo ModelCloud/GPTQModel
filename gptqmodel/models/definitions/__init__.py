@@ -43,6 +43,7 @@ from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
 from .longllama import LongLlamaGPTQ
+from .mimo import MimoGPTQ
 from .minicpm3 import MiniCPM3GPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
