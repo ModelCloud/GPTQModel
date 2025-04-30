@@ -34,7 +34,7 @@ from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1, DEVICE_2, DEVICE_3, DEV
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache
+from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA
 
 log = setup_logger()
 
@@ -370,74 +370,73 @@ class ModuleLooper():
 
                         for name in moe_skip_modules:
                             subset.pop(name)
-                    
-                    # for name_index, name in enumerate(subset):
-                    #     m = subset[name]
-                    #     processor.process(module=m, auto_gc=auto_gc)
-                    #     processed_subset[name] = m
-                    from concurrent.futures import ThreadPoolExecutor
 
-                    cuda_devices = [DEVICE_0, DEVICE_1, DEVICE_2, DEVICE_3, DEVICE_4]
-                    device_index = [0]  # Using list to make it mutable
-
-                    # Create a stream for asynchronous copies for each device
-                    streams = [torch.cuda.Stream(device=f'cuda:{i}') for i in range(len(cuda_devices))]
-
-                    # Counter to cycle through devices
-                    device_index = 0
-
-                    for name in subset:
-                        m = subset[name]
-
-                        # Get current device and stream
-                        current_device = cuda_devices[device_index]
-                        current_stream = streams[device_index]
-
-                        log.info(f"stream device -> {current_device}")
-
-                        # Move tensors asynchronously
-                        with torch.cuda.stream(current_stream):
-                            # Move H tensor
-                            # if hasattrattr(m, 'H'):
-                            g = processor.tasks[name]
-                            g.H = g.H.to(device=current_device, non_blocking=True)
-
-                            # Move weight.data tensor
-                            # if hasattr(m, 'weight') and hasattr(m.weight, 'data'):
-                            m.weight.data = m.weight.data.to(device=current_device, non_blocking=True)
-
-                        # Cycle to next device
-                        device_index = (device_index + 1) % len(cuda_devices)
-
-                    # Synchronize all streams to ensure copies are complete
-                    for stream in streams:
-                        stream.synchronize()
-
-                    log.info("streams synced")
-
-                    # Use ThreadPoolExecutor with 3 threads
-                    with ThreadPoolExecutor(max_workers=len(cuda_devices)) as executor:
-                        futures = []
-                        # with self.lock:
-                        #     device = devices[device_index[0]]
-                        #     device_index[0] = (device_index[0] + 1) % len(devices)
-                        #
-                        # log.info(f"using device = {device}")
-                        def process_module(name, m):
+                    sys_devices = torch_devices()
+                    if len(sys_devices) <= 1:
+                        for name_index, name in enumerate(subset):
+                            m = subset[name]
                             processor.process(module=m, auto_gc=auto_gc)
-                            return name, m
+                            processed_subset[name] = m
+                    else:
+                        from concurrent.futures import ThreadPoolExecutor
+
+                        # Create a stream for asynchronous copies for each device
+                        if HAS_CUDA:
+                            streams = [torch.cuda.Stream(device=device) for device in sys_devices]
+                        else:
+                            streams = [torch.xpu.Stream(device=device) for device in sys_devices]
+
+                        # Counter to cycle through devices
+                        device_index = 0
 
                         for name in subset:
                             m = subset[name]
-                            futures.append(executor.submit(
-                                process_module,
-                                name,
-                                m
-                            ))
 
-                        for future in futures:
-                            name, m = future.result()
-                            processed_subset[name] = m
+                            # Get current device and stream
+                            current_device = sys_devices[device_index]
+                            current_stream = streams[device_index]
+
+                            log.info(f"stream device -> {current_device}")
+
+                            # Move tensors asynchronously
+                            ctx = torch.cuda.stream(current_stream) if HAS_CUDA else torch.xpu.stream(current_stream)
+                            with ctx:
+                                # Move H tensor
+                                # if hasattrattr(m, 'H'):
+                                g = processor.tasks[name]
+                                g.H = g.H.to(device=current_device, non_blocking=True)
+
+                                # Move weight.data tensor
+                                # if hasattr(m, 'weight') and hasattr(m.weight, 'data'):
+                                m.weight.data = m.weight.data.to(device=current_device, non_blocking=True)
+
+                            # Cycle to next device
+                            device_index = (device_index + 1) % len(sys_devices)
+
+                        # Synchronize all streams to ensure copies are complete
+                        for stream in streams:
+                            stream.synchronize()
+
+                        log.info("streams synced")
+
+                        # Use ThreadPoolExecutor with 3 threads
+                        with ThreadPoolExecutor(max_workers=len(sys_devices)) as executor:
+                            futures = []
+                            def process_module(name, m):
+                                processor.process(module=m, auto_gc=auto_gc)
+                                return name, m
+
+                            for name in subset:
+                                m = subset[name]
+                                futures.append(executor.submit(
+                                    process_module,
+                                    name,
+                                    m
+                                ))
+
+                            for future in futures:
+                                name, m = future.result()
+                                processed_subset[name] = m
 
                     # Prepare arguments for each task
                     # args_list = [

@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import gc as py_gc
-from typing import Callable, Union
+from typing import Callable, Union, List
 
 import torch
 from packaging.version import Version
@@ -150,3 +150,14 @@ def auto_select_torch_device(index: int = 0):
         device = torch.device("cpu") # cpu has no index
 
     return device
+
+# some device types can have multiple gpus cuda/rocm + xpu
+def torch_devices() -> List[torch.device]:
+    if HAS_CUDA:
+        return [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
+    elif HAS_XPU:
+        return [torch.device(f"xpu:{i}") for i in range(torch.xpu.device_count())]
+    elif HAS_MPS:
+        return [torch.device("mps")]
+    else:
+        return [torch.device("cpu")]
