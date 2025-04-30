@@ -253,7 +253,7 @@ def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: 
                     if isinstance(tree[name], Tuple) and name in tree[name]:
                         # do replace if name in tree and tree is a tuple
                         _replace_module(module, child, name, level, debug)
-                    elif isinstance(tree[name], Dict):
+                    elif isinstance(tree[name], (Dict, Tuple)):
                         # follow tree node if name in tree and tree is a dict
                         if debug:
                             log.info(f"{level_indent} Hook: follow tree node: {name} -> nest into {name}")
