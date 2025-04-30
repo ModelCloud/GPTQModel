@@ -14,33 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from . import Qwen2GPTQ
 
 
 # MiMo is based on Qwen2
 # https://huggingface.co/XiaomiMiMo/MiMo-7B-RL/blob/main/modeling_mimo.py
-class MimoGPTQ(BaseGPTQModel):
+class MimoGPTQ(Qwen2GPTQ):
     require_trust_remote_code = True
     layer_type = "MiMoMTPLayers"
-
-    base_modules = ["model.embed_tokens", "model.norm"]
-    pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
-
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
-
-    layers_modules_tree = [
-        "model",
-        "layers",
-        "#",
-        {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-            "mlp": ("up_proj", "gate_proj", "down_proj"),
-        }
-    ]
