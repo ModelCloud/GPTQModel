@@ -41,9 +41,8 @@ class HookedConv1D(transformers.Conv1D):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_device = input.device
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input).to(device=input_device)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
         return output
@@ -95,9 +94,8 @@ class HookedConv1d(torch.nn.Conv1d):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_device = input.device
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input).to(device=input_device)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
         return output
@@ -150,9 +148,8 @@ class HookedConv2d(torch.nn.Conv2d):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_device = input.device
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input).to(device=input_device)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
         return output
@@ -173,9 +170,8 @@ class HookedTransformerConv1D(transformers.Conv1D):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_device = input.device
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input).to(device=input_device)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
         return output
@@ -197,9 +193,8 @@ class HookedLinear(torch.nn.Linear):
         return custom_linear
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_device = input.device
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input).to(device=input_device)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
         return output
