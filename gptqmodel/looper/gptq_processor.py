@@ -103,8 +103,8 @@ class GPTQProcessor(LoopProcessor):
         # all sub-modules within a single layer needs to store all the inputs.
         # deepseek has massive # of sub-modules per layer, causing vram pressure
         # buffered mode is slower due to gpu<->cpu movement
-        if buffered_fwd:  # TODO tweak this number for masive MoE
-            log.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
+        if buffered_fwd:
+            log.info.once(f"Quantize: enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
