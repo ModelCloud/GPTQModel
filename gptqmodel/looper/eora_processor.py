@@ -31,7 +31,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
-from ..utils.torch import torch_compile, torch_sync, CPU
+from ..utils.torch import CPU, torch_compile, torch_sync
 
 log = setup_logger()
 

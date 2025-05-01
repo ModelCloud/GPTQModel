@@ -15,7 +15,7 @@
 # limitations under the License.
 import contextlib
 import gc as py_gc
-from typing import Callable, Union, List
+from typing import Callable, List, Union
 
 import torch
 from packaging.version import Version

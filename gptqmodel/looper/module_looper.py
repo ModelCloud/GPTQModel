@@ -16,10 +16,10 @@
 import copy
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import torch
-from concurrent.futures import ThreadPoolExecutor
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -34,7 +34,8 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replac
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA, torch_sync, torch_new_stream_ctx, CPU, ALL_DEVICES, torch_streamCtx
+from ..utils.torch import (ALL_DEVICES, CPU, HAS_CUDA, torch_devices, torch_empty_cache,
+                           torch_new_stream_ctx, torch_streamCtx, torch_sync)
 
 log = setup_logger()
 
@@ -412,26 +413,6 @@ class ModuleLooper():
 
                         torch_sync()
 
-                    # Prepare arguments for each task
-                    # args_list = [
-                    #     (name, module, CUDA_DEVICES[i % len(CUDA_DEVICES)], auto_gc)
-                    #     for i, (name, module) in enumerate(subset.items())
-                    # ]
-                    #
-                    # print(f"args_list {args_list}, ")
-                    #
-                    # # Process with ThreadPool
-                    # with ThreadPoolExecutor(max_workers=len(CUDA_DEVICES)) as executor:
-                    #     # Convert to list to force waiting for all results
-                    #     results = list(executor.map(process_module, args_list))
-                    #
-                    #     # Now we're guaranteed all work is done
-                    #     for name, module in results:
-                    #         print(f"thread completed for {name}")
-                    #         processed_subset[name] = module
-
-                    # print(f"results: {results}")
-
                     if index == len(modules) - 1:
                         if auto_gc:
                             torch_empty_cache()
@@ -541,7 +522,6 @@ class ModuleLooper():
             reverse_p.finalize(model=self.gptq_model, **kwargs)
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
-
 
         if auto_gc:
             torch_empty_cache()

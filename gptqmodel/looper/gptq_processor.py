@@ -29,7 +29,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync, DEVICE_0, CPU, torch_streamCtx
+from ..utils.torch import CPU, DEVICE_0, torch_empty_cache, torch_streamCtx, torch_sync
 
 log = setup_logger()
 

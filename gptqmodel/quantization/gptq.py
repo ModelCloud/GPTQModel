@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_compile, torch_sync, CPU, device_next
+from ..utils.torch import CPU, device_next, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
