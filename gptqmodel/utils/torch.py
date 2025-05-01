@@ -119,8 +119,10 @@ def torch_empty_cache(device: torch.device = None, gc: bool = True):
     # check all backends
     if device is None:
         if HAS_CUDA:
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
         if HAS_XPU:
+            torch.xpu.synchronize()
             torch.xpu.empty_cache()
         if HAS_MPS:
             torch.mps.empty_cache()

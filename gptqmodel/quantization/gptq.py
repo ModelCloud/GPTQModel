@@ -76,12 +76,12 @@ class GPTQ:
         else:
             self.name = HF_OPTIMUM
             self.module = module
+            # emulate NamedModule properties
+            self.module.target_device, self.module.target_device_stream = device_next()
 
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
-
-        self.device, self.device_stream = device_next()
 
         self.module_copy = None
 
@@ -130,14 +130,14 @@ class GPTQ:
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
         self.fwd_counter += 1
 
-        if self.fwd_inputs_buffered:
-            with torch_streamCtx(self.device_stream):
-                self.fwd_inputs_buffered_data.append(inp.to(device=self.device, non_blocking=True))
-        else:
-            self.process_batch(inp)
+        with torch_streamCtx(self.module.target_device_stream):
+            if self.fwd_inputs_buffered:
+                    self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=True))
+            else:
+                self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        reshaped_inp = inp.to(device=self.device, dtype=torch.float32)
+        reshaped_inp = inp.to(device=self.module.target_device, dtype=torch.float32)
         del inp
 
         # input reshaping
@@ -179,8 +179,6 @@ class GPTQ:
         batch_token_size = reshaped_inp.shape[0]
 
         if self.H is None:
-            # with self.device_stream:
-            #     self.module.weight.data = self.module.weight.data.to(device=self.device, non_blocking=True)
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=reshaped_inp.device)
@@ -233,7 +231,6 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
-
         damp = self.qcfg.damp_percent
         diag = torch.arange(self.columns, device=H.device)
         mean = torch.mean(torch.diag(H))
@@ -274,7 +271,7 @@ class GPTQ:
 
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
-            torch_sync(device=self.device)
+            torch_sync(device=self.module.target_device)
 
             for inp in self.fwd_inputs_buffered_data:
                 self.process_batch(inp)

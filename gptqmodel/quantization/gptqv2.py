@@ -73,8 +73,8 @@ class GPTQv2(GPTQ):
     #     del native_inp, reshaped_inp
 
     def process_batch(self, inp):
-        inp = inp.to(device=self.device, dtype=torch.float32)
-        native_inp = self.native_inps.pop(0).to(device=self.device, dtype=torch.float32)
+        inp = inp.to(device=self.module.target_device, dtype=torch.float32)
+        native_inp = self.native_inps.pop(0).to(device=inp.device, dtype=torch.float32)
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
             native_inp = native_inp.unsqueeze(0)

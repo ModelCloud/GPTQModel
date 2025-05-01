@@ -422,7 +422,7 @@ class BaseGPTQModel(nn.Module):
             "calibration_dataset_concat_size": calibration_dataset_concat_size,
             "batch_size": batch_size,
             "logger_board": logger_board,
-            "retain_w": needs_lora,  # lora needs original w
+            "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
 
         # rotate model
