@@ -40,7 +40,9 @@ log = setup_logger()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-lock = threading.Lock()
+# TODO: is there a threading init bug in torch.linalg?
+# bypass strange threading bug
+torch.linalg.cholesky(torch.eye(64, device='cuda'))
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -237,15 +239,14 @@ class GPTQ:
 
         damp = self.qcfg.damp_percent
         diag = torch.arange(self.columns, device=H.device)
-        H_mean = torch.mean(torch.diag(H))
+        mean = torch.mean(torch.diag(H))
         while 0 < damp < 1:
             try:
                 H2 = H.clone()
-                H2[diag, diag] += damp * H_mean
+                H2[diag, diag] += damp * mean
                 # TODO call to torch.linalg is not threadsafe? Porque no? Esta muy mal.
-                with lock:
-                    H2 = torch.linalg.cholesky(H2)
-                    Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                H2 = torch.linalg.cholesky(H2)
+                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
                 del H, H2
                 break
             except torch._C._LinAlgError as e:
