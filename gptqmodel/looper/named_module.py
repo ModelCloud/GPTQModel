@@ -18,10 +18,9 @@ from typing import Any, Dict
 
 import torch
 import transformers
+from gptqmodel.utils.torch import device_next
 from torch import nn
 from torch.nn.modules.conv import _ConvNd
-
-from gptqmodel.utils.torch import device_next
 
 
 class NamedModule(torch.nn.Module):
