@@ -23,7 +23,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import CPU, DEVICE_1
+from ..quantization.gptq import CPU, DEVICE_1, DEVICE_2
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -75,7 +75,7 @@ class NativeProcessor(LoopProcessor):
             inp = inp[0].detach()
 
             if self.qcfg.v2_memory_device == "auto":
-                v2_memory_device = DEVICE_1
+                v2_memory_device = DEVICE_2
             elif self.qcfg.v2_memory_device == "cpu":
                 # slower but >= 4x vram memory reduction
                 v2_memory_device = CPU
@@ -84,7 +84,7 @@ class NativeProcessor(LoopProcessor):
             elif isinstance(self.qcfg.v2_memory_device, torch.device):
                 v2_memory_device = self.qcfg.v2_memory_device
             else:
-                v2_memory_device = DEVICE_1
+                v2_memory_device = DEVICE_2
 
             self.native_inp_caches[name] += [inp.to(device=v2_memory_device)]
             del inp, out
