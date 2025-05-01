@@ -30,11 +30,10 @@ from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
-from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1, DEVICE_2, DEVICE_3, DEVICE_4, ALL_DEVICES
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA, torch_sync, torch_new_stream_ctx
+from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA, torch_sync, torch_new_stream_ctx, CPU, ALL_DEVICES
 
 log = setup_logger()
 

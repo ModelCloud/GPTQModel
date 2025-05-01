@@ -19,6 +19,7 @@ from typing import Callable, Union, List
 
 import torch
 from packaging.version import Version
+from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
 
@@ -161,3 +162,23 @@ def torch_devices() -> List[torch.device]:
         return [torch.device("mps")]
     else:
         return [torch.device("cpu")]
+
+CPU = torch.device("cpu")
+DEVICE_0 = auto_select_torch_device(index=0)
+# device_1 may be same as device_0 if there is only 1 visible/active device
+DEVICE_1 = auto_select_torch_device(index=1)
+
+ALL_DEVICES = torch_devices()
+ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES] if HAS_CUDA else [
+    torch.xpu.Stream(device=device) for device in ALL_DEVICES]
+
+NEXT_DEVICE_INDEX = 0
+
+def device_next() -> (torch.device, Union[torch.cuda.StreamContext, torch.xpu.StreamContext]):
+    global NEXT_DEVICE_INDEX
+    device = ALL_DEVICES[NEXT_DEVICE_INDEX]
+    device_stream = ALL_STREAMS[NEXT_DEVICE_INDEX]
+    if NEXT_DEVICE_INDEX < len(ALL_DEVICES) - 1:
+        NEXT_DEVICE_INDEX += 1
+
+    return (device, device_stream)

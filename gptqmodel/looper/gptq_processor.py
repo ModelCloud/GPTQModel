@@ -27,10 +27,9 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
-from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync, DEVICE_0, CPU
 
 log = setup_logger()
 
@@ -122,7 +121,7 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
-    def process(self, module: NamedModule, auto_gc: bool = True):
+    def process(self, module: NamedModule, auto_gc: bool = True, DEVICE_1=None):
         # need to sync stream copies
         # if torch.cuda.device_count() > 1:
         #     torch.cuda.synchronize()

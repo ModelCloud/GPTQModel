@@ -29,10 +29,9 @@ from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_MAX_MEMORY)
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
-from ..utils.torch import torch_compile, torch_sync
+from ..utils.torch import torch_compile, torch_sync, CPU
 
 log = setup_logger()
 

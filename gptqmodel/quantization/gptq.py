@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import auto_select_torch_device, torch_compile, torch_sync, torch_devices, HAS_CUDA
+from ..utils.torch import torch_compile, torch_sync, CPU, device_next
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -40,19 +40,7 @@ log = setup_logger()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-CPU = torch.device("cpu")
-DEVICE_0 = auto_select_torch_device(index=0)
-# device_1 may be same as device_0 if there is only 1 visible/active device
-DEVICE_1 = auto_select_torch_device(index=1)
-DEVICE_2 = auto_select_torch_device(index=2)
-DEVICE_3 = auto_select_torch_device(index=3)
-DEVICE_4 = auto_select_torch_device(index=4)
-
 lock = threading.Lock()
-
-ALL_DEVICES = torch_devices()
-ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES] if HAS_CUDA else [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
-ALL_DEVICES_INDEX = 0
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -90,15 +78,8 @@ class GPTQ:
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
-        #self.device = self.module.weight.device
 
-        global ALL_DEVICES_INDEX, ALL_DEVICES
-        self.device = ALL_DEVICES[ALL_DEVICES_INDEX]
-        self.device_stream = ALL_STREAMS[ALL_DEVICES_INDEX]
-        if ALL_DEVICES_INDEX < len(ALL_DEVICES) - 1:
-            ALL_DEVICES_INDEX += 1
-        else:
-            ALL_DEVICES_INDEX = 0
+        self.device, self.device_stream = device_next()
 
         self.module_copy = None
 
@@ -148,6 +129,7 @@ class GPTQ:
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
+            # TODO FIXME
             if DEVICE_0.index != DEVICE_1.index:
                 self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
             else:

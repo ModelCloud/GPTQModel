@@ -30,7 +30,7 @@ import transformers
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_compile, torch_sync
-from .gptq import DEVICE_1, GPTQ
+from .gptq import GPTQ
 
 
 class GPTQv2(GPTQ):
@@ -73,8 +73,8 @@ class GPTQv2(GPTQ):
     #     del native_inp, reshaped_inp
 
     def process_batch(self, inp):
-        inp = inp.to(device=DEVICE_1, dtype=torch.float32)
-        native_inp = self.native_inps.pop(0).to(device=DEVICE_1, dtype=torch.float32)
+        inp = inp.to(device=self.device, dtype=torch.float32)
+        native_inp = self.native_inps.pop(0).to(device=self.device, dtype=torch.float32)
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
             native_inp = native_inp.unsqueeze(0)
@@ -104,7 +104,7 @@ class GPTQv2(GPTQ):
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
-                                 device=DEVICE_1)
+                                 device=inp.device)
             self.dXXT = self.H.clone()
         else:
             self.H *= self.nsamples / (self.nsamples + batch_size)
@@ -145,7 +145,7 @@ class GPTQv2(GPTQ):
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=DEVICE_1)
+            W = self._clone_module(device=self.H.device)
         else:
             W = self.module_copy
             self.module_copy = None
@@ -269,7 +269,7 @@ class GPTQv2(GPTQ):
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=DEVICE_1)
+        #Q = Q.to(device=DEVICE_1)
 
         if scale == []:
             scale.append(self.quantizer.scale)

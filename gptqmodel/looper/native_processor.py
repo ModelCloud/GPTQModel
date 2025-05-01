@@ -23,8 +23,8 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import CPU, DEVICE_1
 from ..utils.logger import setup_logger
+from ..utils.torch import CPU, DEVICE_1
 
 log = setup_logger()
 
