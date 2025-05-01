@@ -86,7 +86,7 @@ class GPTQ:
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
-        self.device = self.module.weight.device
+        #self.device = self.module.weight.device
 
         self.module_copy = None
 
@@ -238,12 +238,7 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        device = inp.device
-        # device = DEVICE_1
-        # device = DEVICE_0
-        # reshaped_inp = inp.to(device=device, dtype=torch.float32)
-        # del inp
-        reshaped_inp = inp
+        reshaped_inp = inp.to(dtype=torch.float32)
         del inp
 
         # input reshaping
@@ -282,13 +277,12 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        reshaped_inp = reshaped_inp.to(device=device, dtype=torch.float32)
         batch_token_size = reshaped_inp.shape[0]
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
-                                 device=device)
+                                 device=reshaped_inp.device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
@@ -302,7 +296,8 @@ class GPTQ:
         self.nsamples += batch_token_size
 
         # inp returned here is flattened/reshaped original inp
-        return batch_token_size, reshaped_inp, alpha, beta
+        #return batch_token_size, reshaped_inp, alpha, beta
+        del batch_token_size, reshaped_inp, alpha, beta
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
