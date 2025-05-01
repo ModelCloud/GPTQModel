@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import CPU, device_next, torch_compile
+from ..utils.torch import CPU, device_next, torch_compile, torch_streamCtx, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -131,11 +131,8 @@ class GPTQ:
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
-            # TODO FIXME
-            if DEVICE_0.index != DEVICE_1.index:
-                self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
-            else:
-                self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
+            with torch_streamCtx(self.device_stream):
+                self.fwd_inputs_buffered_data.append(inp.to(device=self.device, non_blocking=True))
         else:
             self.process_batch(inp)
 
@@ -277,7 +274,7 @@ class GPTQ:
 
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
-            torch.cuda.synchronize()
+            torch_sync(device=self.device)
 
             for inp in self.fwd_inputs_buffered_data:
                 self.process_batch(inp)

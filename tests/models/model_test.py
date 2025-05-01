@@ -211,7 +211,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=True)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 

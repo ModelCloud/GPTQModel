@@ -66,7 +66,8 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_stream_hook(self, module: NamedModule):
         g = self.tasks[module.name]
         with torch_streamCtx(g.device_stream):
-            g.H = g.H.to(device=g.device, non_blocking=True)
+            if g.H is not None:
+                g.H = g.H.to(device=g.device, non_blocking=True)
             module.weight.data = module.weight.data.to(device=g.device, non_blocking=True)
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
