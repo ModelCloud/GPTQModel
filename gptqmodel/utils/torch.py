@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import contextlib
 import gc as py_gc
 from typing import Callable, Union, List
 
@@ -83,7 +83,7 @@ def torch_new_stream_ctx():
         return torch.cuda.stream(torch_new_stream())
     if HAS_XPU:
         return torch.xpu.Stream(torch_new_stream())
-    return None
+    return contextlib.nullcontext()
 
 def torch_sync(device: torch.device = None):
     # check all backends

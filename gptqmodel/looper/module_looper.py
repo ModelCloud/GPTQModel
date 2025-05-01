@@ -34,7 +34,7 @@ from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1, DEVICE_2, DEVICE_3, DEV
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA
+from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA, torch_sync, torch_new_stream_ctx
 
 log = setup_logger()
 
@@ -300,24 +300,30 @@ class ModuleLooper():
 
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
                     fwd_start = time.time()
+
                     layer_outputs = []
                     for j in range(processor.num_batches):
-                        layer_input = []
-                        # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
+                        with torch_new_stream_ctx():
+                            layer_input = []
+                            # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
+                            for k, layer_inp in enumerate(layer_inputs[j]):
+                                layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=True))
 
-                        mask = attention_masks[j]
-                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
+                            mask = attention_masks[j]
+                            layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=True)
 
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
-                        )
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
+                            additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
+                            layer_position_ids = (
+                                None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=True)
+                            )
+
+                            if layer_position_ids is not None:
+                                additional_layer_inputs["position_ids"] = layer_position_ids
+                            for k, v in layer_input_kwargs[j].items():
+                                additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=True)
+
+                        # sync above stream copies
+                        torch_sync()
 
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
@@ -396,7 +402,7 @@ class ModuleLooper():
                             current_device = sys_devices[device_index]
                             current_stream = streams[device_index]
 
-                            log.info(f"stream device -> {current_device}")
+                            # log.info(f"stream device -> {current_device}")
 
                             # Move tensors asynchronously
                             ctx = torch.cuda.stream(current_stream) if HAS_CUDA else torch.xpu.stream(current_stream)
@@ -414,10 +420,11 @@ class ModuleLooper():
                             device_index = (device_index + 1) % len(sys_devices)
 
                         # Synchronize all streams to ensure copies are complete
-                        for stream in streams:
-                            stream.synchronize()
+                        # for stream in streams:
+                        #     stream.synchronize()
+                        torch_sync()
 
-                        log.info("streams synced")
+                        # log.info("streams synced")
 
                         # Use ThreadPoolExecutor with 3 threads
                         with ThreadPoolExecutor(max_workers=len(sys_devices)) as executor:
@@ -480,16 +487,23 @@ class ModuleLooper():
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
                             layer_input.append(move_to(layer_inp, device=cur_layer_device))
+                            # layer_input.append(layer_inp)
 
                         mask = attention_masks[j]
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
+                        # layer_attention_mask = attention_masks[j]
 
                         additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
+
                         layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids
+                        # if position_ids is not None:
+                        #     additional_layer_inputs["position_ids"] = position_ids[j]
+
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
+                            # additional_layer_inputs[k] = v
 
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:
@@ -500,7 +514,10 @@ class ModuleLooper():
                             module(*layer_input)[0] if is_lm_head_module else
                             module(*layer_input, **additional_layer_inputs)[0],
                             device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                            # stream=True,
                         )
+
+                        # layer_output = module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
                         layer_outputs.append([layer_output])
 
                         del layer_input

@@ -238,9 +238,12 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
+        device = inp.device
         # device = DEVICE_1
-        device = DEVICE_0
-        reshaped_inp = inp.to(device=device, dtype=torch.float32)
+        # device = DEVICE_0
+        # reshaped_inp = inp.to(device=device, dtype=torch.float32)
+        # del inp
+        reshaped_inp = inp
         del inp
 
         # input reshaping
@@ -279,6 +282,7 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
+        reshaped_inp = reshaped_inp.to(device=device, dtype=torch.float32)
         batch_token_size = reshaped_inp.shape[0]
 
         if self.H is None:

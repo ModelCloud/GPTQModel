@@ -195,10 +195,16 @@ class GPTQProcessor(LoopProcessor):
 
         #log.info(stat)
 
+        # self.result_save(module.full_name, {
+        #     "scale": move_to(scale, device=CPU, stream=self.stream),
+        #     "zero": move_to(zero, device=CPU, stream=self.stream),
+        #     "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
+        # })
+
         self.result_save(module.full_name, {
-            "scale": move_to(scale, device=CPU, stream=self.stream),
-            "zero": move_to(zero, device=CPU, stream=self.stream),
-            "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
+            "scale": scale,
+            "zero": zero,
+            "g_idx": g_idx,
         })
 
         if self.retain_w:

@@ -55,7 +55,7 @@ class LoopProcessor:
         self._results: Dict[str, Any] = {}
 
         # toggle to enable stream from gpu to cpu
-        self.stream = True
+        self.stream = False
 
         self.tokenizer = tokenizer
         self.qcfg = qcfg
