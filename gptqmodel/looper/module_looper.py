@@ -34,8 +34,8 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replac
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import (ALL_DEVICES, CPU, HAS_CUDA, torch_devices, torch_empty_cache,
-                           torch_new_stream_ctx, torch_streamCtx, torch_sync)
+from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA,
+                           BalanceStrategy, torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
 
 log = setup_logger()
 
@@ -304,7 +304,8 @@ class ModuleLooper():
 
                     layer_outputs = []
                     for j in range(processor.num_batches):
-                        with torch_new_stream_ctx():
+                        # TODO FIX ME
+                        with torch_streamCtx(ALL_STREAMS[0]):
                             layer_input = []
                             # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
                             for k, layer_inp in enumerate(layer_inputs[j]):
@@ -324,7 +325,7 @@ class ModuleLooper():
                                 additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=True)
 
                         # sync above stream copies
-                        torch_sync()
+                        torch_sync(device=cur_layer_device)
 
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
@@ -393,7 +394,8 @@ class ModuleLooper():
                         # log.info("streams synced")
 
                         # Use ThreadPoolExecutor with 3 threads
-                        with ThreadPoolExecutor(max_workers=len(ALL_DEVICES)) as executor:
+                        max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []
                             def process_module(name, m):
                                 processor.process(module=m, auto_gc=auto_gc)

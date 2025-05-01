@@ -15,6 +15,7 @@
 # limitations under the License.
 import contextlib
 import gc as py_gc
+from enum import Enum
 from typing import Callable, List, Union
 
 import torch
@@ -28,6 +29,13 @@ HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
 
+class BalanceStrategy(str, Enum):
+    MEMORY = "memory", # make vram more spread out
+    GPU = "gpu" # vram is less balanced (gpu0) but gpu0 is also used for quantization
+
+DEFAULT_BALANCE_STRATEGY = BalanceStrategy.MEMORY
+
+# TODO FIX ME...this should be removed
 STREAM = None # cache
 
 log = setup_logger()
@@ -98,9 +106,9 @@ def torch_sync(device: torch.device = None):
         return
 
     if device.type == "cuda":
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device=device)
     elif device.type == "xpu":
-        torch.xpu.synchronize()
+        torch.xpu.synchronize(device=device)
     elif device.type == "mps":
         torch.mps.synchronize()
 
@@ -169,17 +177,32 @@ DEVICE_0 = auto_select_torch_device(index=0)
 DEVICE_1 = auto_select_torch_device(index=1)
 
 ALL_DEVICES = torch_devices()
-ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES] if HAS_CUDA else [
-    torch.xpu.Stream(device=device) for device in ALL_DEVICES]
 
-NEXT_DEVICE_INDEX = 0
+if HAS_CUDA:
+    ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES]
+elif HAS_XPU:
+    ALL_STREAMS = [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
+else:
+    ALL_STREAMS = [contextlib.nullcontext()]
 
-def device_next() -> (torch.device, Union[torch.cuda.Stream, torch.xpu.Stream]):
+NEXT_DEVICE_INDEX = 1 # start in 1 since device 0 (main) already does double duty as fwd so it has most memory pressure
+
+def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> (torch.device, Union[torch.cuda.Stream, torch.xpu.Stream]):
     global NEXT_DEVICE_INDEX
+
+    if len(ALL_DEVICES) <= 1:
+        return ALL_DEVICES[0], ALL_STREAMS[0]
+
     device = ALL_DEVICES[NEXT_DEVICE_INDEX]
     device_stream = ALL_STREAMS[NEXT_DEVICE_INDEX]
     if NEXT_DEVICE_INDEX < len(ALL_DEVICES) - 1:
         NEXT_DEVICE_INDEX += 1
+    else:
+        if balance_strategy == BalanceStrategy.MEMORY:
+            NEXT_DEVICE_INDEX = 1
+        else:
+            NEXT_DEVICE_INDEX = 0
+
 
     return (device, device_stream)
 

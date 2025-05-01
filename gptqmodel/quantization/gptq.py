@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import CPU, device_next, torch_compile, torch_sync
+from ..utils.torch import CPU, device_next, torch_compile
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -242,8 +242,10 @@ class GPTQ:
             try:
                 H2 = H.clone()
                 H2[diag, diag] += damp * H_mean
-                H2 = torch.linalg.cholesky(H2)
-                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                # TODO call to torch.linalg is not threadsafe? Porque no? Esta muy mal.
+                with lock:
+                    H2 = torch.linalg.cholesky(H2)
+                    Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
                 del H, H2
                 break
             except torch._C._LinAlgError as e:
@@ -377,7 +379,9 @@ class GPTQ:
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         del Hinv
-        torch_sync()
+
+        # TODO: why is there a torch_sync here? There are no streaming ops here?
+        # torch_sync(device=self.device)
 
         if self.nsamples != 0:
             avg_loss = torch.sum(Losses).item() / self.nsamples
