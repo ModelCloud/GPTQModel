@@ -465,7 +465,9 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.v2 is True:
             from ..looper.native_processor import NativeProcessor
-            quantize_processor.insert(0, NativeProcessor(**args))
+            args_clone = copy.deepcopy(args)
+            args_clone.pop("calculate_w_wq_diff", None)
+            quantize_processor.insert(0, NativeProcessor(**args_clone))
 
         processors = quantize_processor
         # Append EoRA processor for lora adapter
