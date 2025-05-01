@@ -174,7 +174,7 @@ ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES] if HA
 
 NEXT_DEVICE_INDEX = 0
 
-def device_next() -> (torch.device, Union[torch.cuda.StreamContext, torch.xpu.StreamContext]):
+def device_next() -> (torch.device, Union[torch.cuda.Stream, torch.xpu.Stream]):
     global NEXT_DEVICE_INDEX
     device = ALL_DEVICES[NEXT_DEVICE_INDEX]
     device_stream = ALL_STREAMS[NEXT_DEVICE_INDEX]
@@ -182,3 +182,6 @@ def device_next() -> (torch.device, Union[torch.cuda.StreamContext, torch.xpu.St
         NEXT_DEVICE_INDEX += 1
 
     return (device, device_stream)
+
+def torch_streamCtx(stream: Union[torch.cuda.Stream, torch.xpu.Stream]) -> StreamContext:
+    return torch.cuda.stream(stream) if HAS_CUDA else torch.xpu.stream(stream)

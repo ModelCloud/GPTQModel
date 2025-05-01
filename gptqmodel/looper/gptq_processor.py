@@ -29,7 +29,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync, DEVICE_0, CPU
+from ..utils.torch import torch_empty_cache, torch_sync, DEVICE_0, CPU, torch_streamCtx
 
 log = setup_logger()
 
@@ -62,6 +62,12 @@ class GPTQProcessor(LoopProcessor):
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
+
+    def pre_process_stream_hook(self, module: NamedModule):
+        g = self.tasks[module.name]
+        with torch_streamCtx(g.device_stream):
+            g.H = g.H.to(device=g.device, non_blocking=True)
+            module.weight.data = module.weight.data.to(device=g.device, non_blocking=True)
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         # entire module is skipped
@@ -219,7 +225,7 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
         # if auto_gc:
         #     torch_empty_cache()
-        with g.device_stream:
+        with torch_streamCtx(g.device_stream):
             wq = wq.to(device=DEVICE_0, non_blocking=True) # TODO FIX ME
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")

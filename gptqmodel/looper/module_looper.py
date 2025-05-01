@@ -19,6 +19,7 @@ import time
 from typing import List
 
 import torch
+from concurrent.futures import ThreadPoolExecutor
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -33,7 +34,7 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replac
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA, torch_sync, torch_new_stream_ctx, CPU, ALL_DEVICES
+from ..utils.torch import torch_empty_cache, torch_devices, HAS_CUDA, torch_sync, torch_new_stream_ctx, CPU, ALL_DEVICES, torch_streamCtx
 
 log = setup_logger()
 
@@ -382,46 +383,10 @@ class ModuleLooper():
                             processor.process(module=m, auto_gc=auto_gc)
                             processed_subset[name] = m
                     else:
-                        from concurrent.futures import ThreadPoolExecutor
-
-                        # Create a stream for asynchronous copies for each device
-                        # if HAS_CUDA:
-                        #     streams = [torch.cuda.Stream(device=device) for device in sys_devices]
-                        # else:
-                        #     streams = [torch.xpu.Stream(device=device) for device in sys_devices]
-                        #
-                        # # Counter to cycle through devices
-                        # device_index = 0
-
                         for name in subset:
                             m = subset[name]
+                            processor.pre_process_stream_hook(module=m)
 
-                            # Get current device and stream
-                            # current_device = sys_devices[device_index]
-                            # current_stream = streams[device_index]
-
-                            # log.info(f"stream device -> {current_device}")
-
-                            # Move tensors asynchronously
-                            # ctx = torch.cuda.stream(current_stream) if HAS_CUDA else torch.xpu.stream(current_stream)
-                            g = processor.tasks[name]
-                            with g.device_stream:
-                                # Move H tensor
-                                # if hasattrattr(m, 'H'):
-
-                                g.H = g.H.to(device=g.device, non_blocking=True)
-
-                                # Move weight.data tensor
-                                # if hasattr(m, 'weight') and hasattr(m.weight, 'data'):
-                                m.weight.data = m.weight.data.to(device=g.device, non_blocking=True)
-                                # g.W = m.weight # TODO HACK
-
-                            # Cycle to next device
-                            #device_index = (device_index + 1) % len(sys_devices)
-
-                        # Synchronize all streams to ensure copies are complete
-                        # for stream in streams:
-                        #     stream.synchronize()
                         torch_sync()
 
                         # log.info("streams synced")
