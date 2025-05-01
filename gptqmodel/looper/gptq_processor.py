@@ -216,20 +216,21 @@ class GPTQProcessor(LoopProcessor):
 
         self.tasks[module.name].free()
 
-
-
         # prepare for module.forward post generate
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
         # if auto_gc:
         #     torch_empty_cache()
-        wq = wq.to(device=DEVICE_0)
+        with g.device_stream:
+            wq = wq.to(device=DEVICE_0, non_blocking=True) # TODO FIX ME
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
             "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
 
+        old = module.weight.data # TODO HACK since we cannot delete weight.data directly
         module.weight.data = wq
+        del old
 
         if auto_gc:
             torch_empty_cache()

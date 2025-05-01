@@ -30,7 +30,7 @@ from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
-from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1, DEVICE_2, DEVICE_3, DEVICE_4
+from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1, DEVICE_2, DEVICE_3, DEVICE_4, ALL_DEVICES
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
@@ -377,8 +377,7 @@ class ModuleLooper():
                         for name in moe_skip_modules:
                             subset.pop(name)
 
-                    sys_devices = torch_devices()
-                    if len(sys_devices) <= 1:
+                    if len(ALL_DEVICES) <= 1:
                         for name_index, name in enumerate(subset):
                             m = subset[name]
                             processor.process(module=m, auto_gc=auto_gc)
@@ -387,37 +386,39 @@ class ModuleLooper():
                         from concurrent.futures import ThreadPoolExecutor
 
                         # Create a stream for asynchronous copies for each device
-                        if HAS_CUDA:
-                            streams = [torch.cuda.Stream(device=device) for device in sys_devices]
-                        else:
-                            streams = [torch.xpu.Stream(device=device) for device in sys_devices]
-
-                        # Counter to cycle through devices
-                        device_index = 0
+                        # if HAS_CUDA:
+                        #     streams = [torch.cuda.Stream(device=device) for device in sys_devices]
+                        # else:
+                        #     streams = [torch.xpu.Stream(device=device) for device in sys_devices]
+                        #
+                        # # Counter to cycle through devices
+                        # device_index = 0
 
                         for name in subset:
                             m = subset[name]
 
                             # Get current device and stream
-                            current_device = sys_devices[device_index]
-                            current_stream = streams[device_index]
+                            # current_device = sys_devices[device_index]
+                            # current_stream = streams[device_index]
 
                             # log.info(f"stream device -> {current_device}")
 
                             # Move tensors asynchronously
-                            ctx = torch.cuda.stream(current_stream) if HAS_CUDA else torch.xpu.stream(current_stream)
-                            with ctx:
+                            # ctx = torch.cuda.stream(current_stream) if HAS_CUDA else torch.xpu.stream(current_stream)
+                            g = processor.tasks[name]
+                            with g.device_stream:
                                 # Move H tensor
                                 # if hasattrattr(m, 'H'):
-                                g = processor.tasks[name]
-                                g.H = g.H.to(device=current_device, non_blocking=True)
+
+                                g.H = g.H.to(device=g.device, non_blocking=True)
 
                                 # Move weight.data tensor
                                 # if hasattr(m, 'weight') and hasattr(m.weight, 'data'):
-                                m.weight.data = m.weight.data.to(device=current_device, non_blocking=True)
+                                m.weight.data = m.weight.data.to(device=g.device, non_blocking=True)
+                                # g.W = m.weight # TODO HACK
 
                             # Cycle to next device
-                            device_index = (device_index + 1) % len(sys_devices)
+                            #device_index = (device_index + 1) % len(sys_devices)
 
                         # Synchronize all streams to ensure copies are complete
                         # for stream in streams:
@@ -427,7 +428,7 @@ class ModuleLooper():
                         # log.info("streams synced")
 
                         # Use ThreadPoolExecutor with 3 threads
-                        with ThreadPoolExecutor(max_workers=len(sys_devices)) as executor:
+                        with ThreadPoolExecutor(max_workers=len(ALL_DEVICES)) as executor:
                             futures = []
                             def process_module(name, m):
                                 processor.process(module=m, auto_gc=auto_gc)
@@ -444,6 +445,8 @@ class ModuleLooper():
                             for future in futures:
                                 name, m = future.result()
                                 processed_subset[name] = m
+
+                        torch_sync()
 
                     # Prepare arguments for each task
                     # args_list = [
@@ -487,23 +490,18 @@ class ModuleLooper():
                         layer_input = []
                         for k, layer_inp in enumerate(layer_inputs[j]):
                             layer_input.append(move_to(layer_inp, device=cur_layer_device))
-                            # layer_input.append(layer_inp)
 
                         mask = attention_masks[j]
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
-                        # layer_attention_mask = attention_masks[j]
 
                         additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
 
                         layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids
-                        # if position_ids is not None:
-                        #     additional_layer_inputs["position_ids"] = position_ids[j]
 
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
-                            # additional_layer_inputs[k] = v
 
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:
@@ -517,7 +515,6 @@ class ModuleLooper():
                             # stream=True,
                         )
 
-                        # layer_output = module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
                         layer_outputs.append([layer_output])
 
                         del layer_input
@@ -528,6 +525,8 @@ class ModuleLooper():
 
                 # TODO move to processor?
                 if p_index == len(self.processors) - 1:
+                    torch_sync()
+
                     if not is_lm_head_module:
                         layers[layer_index] = self.gptq_model.post_quantize(module)
                     else:
@@ -541,6 +540,8 @@ class ModuleLooper():
 
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
+                    torch_sync()
+
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])

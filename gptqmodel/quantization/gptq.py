@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import auto_select_torch_device, torch_compile, torch_sync
+from ..utils.torch import auto_select_torch_device, torch_compile, torch_sync, torch_devices, HAS_CUDA
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -49,6 +49,10 @@ DEVICE_3 = auto_select_torch_device(index=3)
 DEVICE_4 = auto_select_torch_device(index=4)
 
 lock = threading.Lock()
+
+ALL_DEVICES = torch_devices()
+ALL_STREAMS = [torch.cuda.Stream(device=device) for device in ALL_DEVICES] if HAS_CUDA else [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
+ALL_DEVICES_INDEX = 0
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -74,7 +78,7 @@ class GPTQ:
         # self.issue_nan_hessian = False
         # self.issue_non_invertible = False
 
-        self.W = module.weight
+        # self.W = module.weight
         self.rows, self.columns = get_number_of_rows_and_cols(module)
         if isinstance(module, NamedModule):
             self.module = module.module
@@ -87,6 +91,14 @@ class GPTQ:
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
         #self.device = self.module.weight.device
+
+        global ALL_DEVICES_INDEX, ALL_DEVICES
+        self.device = ALL_DEVICES[ALL_DEVICES_INDEX]
+        self.device_stream = ALL_STREAMS[ALL_DEVICES_INDEX]
+        if ALL_DEVICES_INDEX < len(ALL_DEVICES) - 1:
+            ALL_DEVICES_INDEX += 1
+        else:
+            ALL_DEVICES_INDEX = 0
 
         self.module_copy = None
 
@@ -132,100 +144,6 @@ class GPTQ:
 
         return clone.float()
 
-    @torch.inference_mode()
-    def block_cholesky_inverse(self, L: torch.Tensor, upper=False, block_size=512):
-        """
-        Optimized Cholesky inverse with O(block_size^2) memory usage.
-        Args:
-            L (torch.Tensor): Cholesky factor (lower triangular)
-            upper (bool): If True, L is upper triangular
-            block_size (int): Processing block size (tunes memory/performance)
-        Returns:
-            torch.Tensor: The inverse matrix
-        """
-        assert L.dim() == 2 and L.size(0) == L.size(1), "Input must be square"
-        n = L.size(0)
-        device = L.device
-        dtype = L.dtype
-
-        if upper:
-            L = L.t()
-
-        invA = torch.zeros_like(L)
-        num_blocks = math.ceil(n / block_size)
-
-        # Cache for invL blocks to avoid recomputation
-        invL_cache = {}
-
-        for k in reversed(range(num_blocks)):
-            k_start = k * block_size
-            k_end = min((k + 1) * block_size, n)
-            k_size = k_end - k_start
-
-            # Diagonal block inversion
-            L_block = L[k_start:k_end, k_start:k_end]
-            invL_block = torch.linalg.solve_triangular(
-                L_block,
-                torch.eye(k_size, device=device, dtype=dtype),
-                upper=False
-            )
-            invL_cache[k] = invL_block
-
-            # Diagonal block contribution
-            invA[k_start:k_end, k_start:k_end] = invL_block.t() @ invL_block
-
-            # Process off-diagonal blocks in parallel where possible
-            for j in range(k):
-                j_start = j * block_size
-                j_end = min((j + 1) * block_size, n)
-                j_size = j_end - j_start
-
-                # Compute all required invL_ik blocks first
-                invL_ik_blocks = []
-                for i in range(k, num_blocks):
-                    i_start = i * block_size
-                    i_end = min((i + 1) * block_size, n)
-
-                    if i == k:
-                        invL_ik = invL_block
-                    else:
-                        if i in invL_cache:
-                            invL_ii = invL_cache[i]
-                        else:
-                            L_ii = L[i_start:i_end, i_start:i_end]
-                            invL_ii = torch.linalg.solve_triangular(
-                                L_ii,
-                                torch.eye(i_end - i_start, device=device, dtype=dtype),
-                                upper=False
-                            )
-                            invL_cache[i] = invL_ii
-
-                        L_ik = L[i_start:i_end, k_start:k_end]
-                        invL_ik = -invL_ii @ (L_ik @ invL_block)
-                        del invL_ii
-
-                    invL_ik_blocks.append(invL_ik)
-                    del invL_ik
-
-                # Stack blocks for batched operations
-                L_jk = L[j_start:j_end, k_start:k_end]
-
-                # Compute contributions in a more vectorized way
-                temp_col = torch.cat([
-                    (invL_ik.t() @ L_jk.t()) for invL_ik in invL_ik_blocks
-                ], dim=0)
-
-                del invL_ik_blocks
-
-                # Accumulate to output
-                invA[j_start:j_end, k_start:k_end] = temp_col[:j_size].t()
-                invA[k_start:k_end, j_start:j_end] = temp_col[:j_size]
-
-                del temp_col
-
-        del invL_cache
-        return invA
-
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
         self.fwd_counter += 1
 
@@ -238,7 +156,7 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        reshaped_inp = inp.to(dtype=torch.float32)
+        reshaped_inp = inp.to(device=self.device, dtype=torch.float32)
         del inp
 
         # input reshaping
@@ -280,6 +198,8 @@ class GPTQ:
         batch_token_size = reshaped_inp.shape[0]
 
         if self.H is None:
+            # with self.device_stream:
+            #     self.module.weight.data = self.module.weight.data.to(device=self.device, non_blocking=True)
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=reshaped_inp.device)
@@ -332,27 +252,17 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
+
         damp = self.qcfg.damp_percent
-        while 1 > damp > 0:
+        diag = torch.arange(self.columns, device=H.device)
+        H_mean = torch.mean(torch.diag(H))
+        while 0 < damp < 1:
             try:
-                diag = torch.arange(self.columns, device=H.device)
-                H[diag, diag] += damp * torch.mean(torch.diag(H))
-
-                with lock:
-                    # print(f"H SHAPE: {H.shape}")
-                    H = torch.linalg.cholesky(H)
-
-                    try:
-                        # H = self.block_cholesky_inverse(H, block_size=H.shape[0])
-                        H = torch.cholesky_inverse(H)
-                    except torch.OutOfMemoryError:
-                        # half the block size will use ~18% less memory but at higher accuracy loss: 1^-2 vs 1^-8
-                        # worth the tradeoff since it's either oom or slightly higher accuracy loss
-                        H = self.block_cholesky_inverse(H, block_size=self.columns // 2)
-                        log.warn(
-                            "Quantization: OOM bypassed via low memory math at a cost of lower accuracy: `cholesky_inverse`")
-
-                    Hinv = torch.linalg.cholesky(H, upper=True)
+                H2 = H.clone()
+                H2[diag, diag] += damp * H_mean
+                H2 = torch.linalg.cholesky(H2)
+                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                del H, H2
                 break
             except torch._C._LinAlgError as e:
                 if self.qcfg.damp_auto_increment != 0:
