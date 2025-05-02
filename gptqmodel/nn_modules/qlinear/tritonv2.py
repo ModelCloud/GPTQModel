@@ -23,8 +23,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.python import has_gil, log_gil_required
-
+from ...utils.python import has_gil
 from .torch import TorchQuantLinear
 
 try:

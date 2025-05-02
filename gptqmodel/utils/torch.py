@@ -22,8 +22,8 @@ import torch
 from packaging.version import Version
 from torch.cpu import StreamContext
 
-from . import has_gil, log_gil_required
 from ..utils.logger import setup_logger
+from . import has_gil, log_gil_required
 
 HAS_CUDA = False
 HAS_XPU = False
