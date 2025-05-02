@@ -104,7 +104,7 @@ class EoraProcessor(LoopProcessor):
         # dynamic override removed eora processing for this module
         return module.adapter_cfg in [None, {}]
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
             self.eora_process_input(
                 input=input,
@@ -115,7 +115,7 @@ class EoraProcessor(LoopProcessor):
             )
         return tmp
 
-    def pre_process_stream_hook(self, module: NamedModule):
+    def pre_process_streaming(self, module: NamedModule):
         eigen_matrix = self.eigen_scaling_diag_matrix[module.name]
         with torch_streamCtx(module.target_device_stream):
             if eigen_matrix is not None:

@@ -106,14 +106,14 @@ class QQQProcessor(LoopProcessor):
         else:
             return False
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
             q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def pre_process_stream_hook(self, module: NamedModule):
+    def pre_process_streaming(self, module: NamedModule):
         q = self.tasks[module.name]
         with torch_streamCtx(module.target_device_stream):
             if q.H is not None:
@@ -122,9 +122,6 @@ class QQQProcessor(LoopProcessor):
 
 
     def process(self, module: NamedModule, auto_gc: bool = True):
-        # need to sync stream copies
-        torch_sync()
-
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
         qqq = self.tasks
 

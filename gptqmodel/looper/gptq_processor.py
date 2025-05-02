@@ -113,7 +113,7 @@ class GPTQProcessor(LoopProcessor):
         else:
             return False
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             g = self.tasks[name]  # noqa: F821
@@ -121,7 +121,7 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
-    def pre_process_stream_hook(self, module: NamedModule):
+    def pre_process_streaming(self, module: NamedModule):
         g = self.tasks[module.name]
         with torch_streamCtx(module.target_device_stream):
             if g.H is not None:
@@ -129,10 +129,6 @@ class GPTQProcessor(LoopProcessor):
             module.weight.data = module.weight.data.to(device=module.target_device, non_blocking=True)
 
     def process(self, module: NamedModule, auto_gc: bool = True):
-        # need to sync stream copies
-        # if torch.cuda.device_count() > 1:
-        #     torch.cuda.synchronize()
-
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
         self.pb.title(f"Quantizing {module.name} in layer ").draw()

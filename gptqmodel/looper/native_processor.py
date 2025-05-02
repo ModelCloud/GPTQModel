@@ -68,7 +68,7 @@ class NativeProcessor(LoopProcessor):
         # TODO: Add skipping certain modules
         return False
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             inp = inp[0].detach()
