@@ -375,7 +375,7 @@ class GPTQ:
         del Hinv
 
         # TODO: why is there a torch_sync here? There are no streaming ops here?
-        # torch_sync(device=self.device)
+        # torch_sync(device=self.module.target_device)
 
         if self.nsamples != 0:
             avg_loss = torch.sum(Losses).item() / self.nsamples
