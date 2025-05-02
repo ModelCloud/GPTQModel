@@ -30,21 +30,21 @@ from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, torch_sync
+from ..utils.torch import CPU, torch_sync, torch_streamCtx, DEVICE_0
 
 log = setup_logger()
 
 class QQQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
+                 logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
                          calibration_dataset_concat_size=calibration_dataset_concat_size,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          logger_board=logger_board, require_fwd=require_fwd)
 
-        self.retain_w = retain_w
+        self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
 
     def log_plotly(self):
@@ -89,8 +89,8 @@ class QQQProcessor(LoopProcessor):
         # all sub-modules within a single layer needs to store all the inputs.
         # deepseek has massive # of sub-modules per layer, causing vram pressure
         # buffered mode is slower due to gpu<->cpu movement
-        if buffered_fwd:  # TODO tweak this number for masive MoE
-            log.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
+        if buffered_fwd:
+            log.info(f"Quantize: Enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
@@ -109,22 +109,29 @@ class QQQProcessor(LoopProcessor):
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
-            g = self.tasks[name]  # noqa: F821
-            g.add_batch(inp[0].data, out.data)  # noqa: F821
+            q = self.tasks[name]  # noqa: F821
+            q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: NamedModule):
+    def pre_process_stream_hook(self, module: NamedModule):
+        q = self.tasks[module.name]
+        with torch_streamCtx(module.target_device_stream):
+            if q.H is not None:
+                q.H = q.H.to(device=module.target_device, non_blocking=True)
+            module.weight.data = module.weight.data.to(device=module.target_device, non_blocking=True)
+
+
+    def process(self, module: NamedModule, auto_gc: bool = True):
         # need to sync stream copies
-        if torch.cuda.device_count() > 1:
-            torch.cuda.synchronize()
+        torch_sync()
 
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
-        gptq = self.tasks
+        qqq = self.tasks
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        g = gptq[module.name]
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, nsamples = g.quantize()
+        q = qqq[module.name]
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, nsamples = q.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -153,7 +160,7 @@ class QQQProcessor(LoopProcessor):
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
-            QUANT_LOG_LOSS: f"{avg_loss:.5f}",
+            QUANT_LOG_LOSS: f"{avg_loss:.10f}",
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
@@ -164,7 +171,7 @@ class QQQProcessor(LoopProcessor):
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
         self.log.append(stat)
-        log.info(stat)
+        self.log_new_row(stat)
 
         self.result_save(module.full_name, {
             "scale": move_to(scale, device=CPU, stream=self.stream),
@@ -173,20 +180,20 @@ class QQQProcessor(LoopProcessor):
             "scale_extra": move_to(scale_extra, device=CPU, stream=self.stream),
         })
 
-        if self.retain_w:
-            # TODO need modify qqq.GPTQ
-            # original weights
-            w = module.weight.data
+        if self.calculate_w_wq_diff:
+            if module.weight.data.dtype == torch.float16:
+                # diff in float16
+                w_wq_diff = module.weight.data - wq
+            else:
+                # diff in float32
+                w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+
             module.state.update({
-                "w": w,  # bf16/fp16, non-quantized native weight
+                "w_wq_diff": w_wq_diff,
             })
 
-        gptq[module.name].free()
-
-        # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        module.state.update({
-            "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
-        })
+        with torch_streamCtx(module.target_device_stream):
+            wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
 
         # prepare for module.forward post generate
         module.weight.data = wq
@@ -194,7 +201,7 @@ class QQQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
+        module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseGPTQModel, **kwargs):

@@ -29,7 +29,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, torch_empty_cache, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
@@ -97,7 +97,7 @@ class GPTQProcessor(LoopProcessor):
         # deepseek has massive # of sub-modules per layer, causing vram pressure
         # buffered mode is slower due to gpu<->cpu movement
         if buffered_fwd:
-            log.info.once(f"Quantize: enabling fwd buffered mode for: `{module.name}`")
+            log.info.once(f"Quantize: Enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
@@ -128,7 +128,7 @@ class GPTQProcessor(LoopProcessor):
                 g.H = g.H.to(device=module.target_device, non_blocking=True)
             module.weight.data = module.weight.data.to(device=module.target_device, non_blocking=True)
 
-    def process(self, module: NamedModule, auto_gc: bool = True, DEVICE_1=None):
+    def process(self, module: NamedModule, auto_gc: bool = True):
         # need to sync stream copies
         # if torch.cuda.device_count() > 1:
         #     torch.cuda.synchronize()
@@ -232,7 +232,7 @@ class GPTQProcessor(LoopProcessor):
         # if auto_gc:
         #     torch_empty_cache()
         with torch_streamCtx(module.target_device_stream):
-            wq = wq.to(device=DEVICE_0, non_blocking=True) # TODO FIX ME
+            wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
         module.state.update({
