@@ -293,12 +293,13 @@ class ModuleLooper():
                     for name in subset:
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
-                            subset[name].forward_hook = processor.preprocess_fwd_hook(name)
+                            subset[name].forward_hook = processor.pre_process_fwd_hook(name)
                         else:
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
                             assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
-                            handle.append(subset[name].register_forward_hook(processor.preprocess_fwd_hook(name)))
+                            handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
 
+                    # ---- Start Pre-Quantized Forward ----
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
                     fwd_start = time.time()
 
@@ -367,6 +368,7 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = None
 
+
                     # TODO FIXME: MoE modules forward() may not trigger if dataset is too small
                     # and moe gating logic does not trigger some moes
                     if isinstance(processor, GPTQProcessor):
@@ -378,7 +380,9 @@ class ModuleLooper():
 
                         for name in moe_skip_modules:
                             subset.pop(name)
+                    # ---- END Pre-Quantized Forward ----
 
+                    # ---- Start Proceess Hook ----
                     if len(ALL_DEVICES) <= 1:
                         for name_index, name in enumerate(subset):
                             m = subset[name]
@@ -387,11 +391,9 @@ class ModuleLooper():
                     else:
                         for name in subset:
                             m = subset[name]
-                            processor.pre_process_stream_hook(module=m)
+                            processor.pre_process_streaming(module=m)
 
                         torch_sync()
-
-                        # log.info("streams synced")
 
                         # Use ThreadPoolExecutor with 3 threads
                         max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
@@ -414,6 +416,7 @@ class ModuleLooper():
                                 processed_subset[name] = m
 
                         torch_sync()
+                    # ---- End Process Hook ----
 
                     if index == len(modules) - 1:
                         if auto_gc:
