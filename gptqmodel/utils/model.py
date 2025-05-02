@@ -639,7 +639,11 @@ def pack_model(
     names = list(qModules.keys())
     lock = threading.Lock()
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    from device_smi import Device
+    cpu = Device("cpu")
+    max_packers = cpu.count * cpu.cores
+
+    with ThreadPoolExecutor(max_workers=max_packers) as executor:
         with log.pb(names).manual() as pb:
             def wrapper(name):
                 # TODO FIX, thread pool executor does not advance iterator
