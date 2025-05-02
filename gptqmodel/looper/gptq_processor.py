@@ -221,10 +221,9 @@ class GPTQProcessor(LoopProcessor):
                 # diff in float32
                 w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
 
-            with self.lock:
-                module.state.update({
-                    "w_wq_diff": w_wq_diff,
-                })
+            module.state.update({
+                "w_wq_diff": w_wq_diff,
+            })
 
         with self.lock:
             self.tasks[module.name].free()
@@ -237,10 +236,10 @@ class GPTQProcessor(LoopProcessor):
             wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        with self.lock:
-            module.state.update({
-                "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
-            })
+
+        module.state.update({
+            "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+        })
 
         module.weight.data = wq
 

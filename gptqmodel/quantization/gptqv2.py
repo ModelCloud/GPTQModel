@@ -130,7 +130,7 @@ class GPTQv2(GPTQ):
 
         # process buffered inputs
         for inp in self.fwd_inputs_buffered_data:
-            torch.cuda.synchronize()
+            torch_sync(device=self.module.target_device)
             self.process_batch(inp)
 
         # release buffer
