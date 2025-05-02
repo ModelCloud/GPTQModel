@@ -415,13 +415,13 @@ jobs:
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
-          url="http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
+          url="http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
           echo "$url"
           while [ "$gpu_id" -lt 0 ]; do
             gpu_id=$(curl -s "$url")
 
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
+              echo "http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               curl http://$XEON5/gpu/status2
               sleep 5
@@ -448,7 +448,7 @@ jobs:
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
+        run: curl -X GET "http://$XEON5/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
       - name: Clean cache
         if: always()
@@ -629,12 +629,12 @@ jobs:
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
-          url="http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
+          url="http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
           echo "$url"
           while [ "$gpu_id" -lt 0 ]; do
             gpu_id=$(curl -s "$url")
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
+              echo "http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               curl http://$XEON5/gpu/status2
               sleep 5
@@ -667,7 +667,7 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://$RUNNER/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
