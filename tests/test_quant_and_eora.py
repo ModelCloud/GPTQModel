@@ -16,21 +16,21 @@
 # -- do not touch
 import os
 
-from gptqmodel.quantization import FORMAT, QUANT_METHOD
-from parameterized import parameterized
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
+import gzip, json  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
+# from datasets import load_dataset  # noqa: E402
+from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
+# from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from tabulate import tabulate  # noqa: E402
 
@@ -50,7 +50,7 @@ class Test(ModelTest):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, True), # gptq v2
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, True), # gptq v2
             (QUANT_METHOD.GPTQ, FORMAT.GPTQ, False), # gptq v1
             #(QUANT_METHOD.QQQ, FORMAT.QQQ),
         ]
@@ -83,11 +83,15 @@ class Test(ModelTest):
             "adapter_path": adapter_path,
         }
 
-        calibration_dataset = load_dataset(
-            dataset_id,
-            data_files=dataset_files,
-            split="train"
-        ).select(range(calibration_dataset_rows))["text"]
+        # calibration_dataset = load_dataset(
+        #     dataset_id,
+        #     data_files=dataset_files,
+        #     split="train"
+        # ).select(range(calibration_dataset_rows))["text"]
+
+        with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
+            data = [json.loads(line)["text"] for line in f]
+            calibration_dataset = data[:calibration_dataset_rows]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
@@ -127,25 +131,25 @@ class Test(ModelTest):
             torch_empty_cache()
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [ BACKEND.AUTO ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-                base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
-                eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
-
-                print('--------GPTQModel + EoRA Config ---------')
-
-                # Convert the dictionary to a list of lists for tabulate
-                table_data = [[key, value] for key, value in config_dict.items()]
-                print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
-
-                print(f'--------Eval {quant_method} Result---------')
-                print(make_table(base_bench))
-                if "groups" in base_bench:
-                    print(make_table(base_bench, "groups"))
-
-                print(f'--------Eval {quant_method} + EoRA Result---------')
-                print(make_table(eora_bench))
-                if "groups" in eora_bench:
-                    print(make_table(eora_bench, "groups"))
+            # for backend in [ BACKEND.AUTO ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            #     base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
+            #     eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
+            #
+            #     print('--------GPTQModel + EoRA Config ---------')
+            #
+            #     # Convert the dictionary to a list of lists for tabulate
+            #     table_data = [[key, value] for key, value in config_dict.items()]
+            #     print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+            #
+            #     print(f'--------Eval {quant_method} Result---------')
+            #     print(make_table(base_bench))
+            #     if "groups" in base_bench:
+            #         print(make_table(base_bench, "groups"))
+            #
+            #     print(f'--------Eval {quant_method} + EoRA Result---------')
+            #     print(make_table(eora_bench))
+            #     if "groups" in eora_bench:
+            #         print(make_table(eora_bench, "groups"))
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
