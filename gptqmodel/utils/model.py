@@ -571,7 +571,7 @@ def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers,
         layer = layer.to(CPU)
         scale = scale.to(CPU)
         zero = zero.to(CPU)
-        g_idx = g_idx.to(CPU) if g_idx is not None else None,
+        g_idx = g_idx.to(CPU) if g_idx is not None else None
 
         with lock:
             qModules[name] = module
