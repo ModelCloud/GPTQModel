@@ -1,5 +1,5 @@
 accelerate>=1.6.0
-datasets>=3.5.0
+# datasets>=3.5.0
 numpy>=1.26.4
 torch>=2.4.1
 safetensors>=0.5.3

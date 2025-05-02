@@ -24,6 +24,10 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# if not os.environ.get("PYTHON_GIL", None):
+#     os.environ["PYTHON_GIL"] = '0'
+#     log.info("ENV: Auto disable GIL and use free-threading mode when applicable: Python 3.13t+. You must install the -t edition of Python.")
+
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     log.info("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")

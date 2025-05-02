@@ -22,6 +22,7 @@ import torch
 from packaging.version import Version
 from torch.cpu import StreamContext
 
+from . import has_gil, log_gil_required
 from ..utils.logger import setup_logger
 
 HAS_CUDA = False
@@ -64,6 +65,11 @@ except BaseException:
     pass
 
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
+    # torch compile broken for free threading
+    if not has_gil():
+        log_gil_required("Torch Compile")
+        return module
+
     from ..models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
 
     if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
