@@ -186,8 +186,40 @@ def ModelLoader(cls):
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
+        # model_init_kwargs["low_cpu_mem_usage"] = True
 
         model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+
+        # from concurrent.futures import ThreadPoolExecutor
+        #
+        # def fast_pin_model(model):
+        #     # Get total size needed in bytes
+        #     total_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        #
+        #     # Create pinned memory buffer (byte tensor)
+        #     pinned_buffer = torch.ByteTensor(total_bytes).pin_memory()
+        #
+        #     # Copy all parameters into the buffer
+        #     offset = 0
+        #     for param in model.parameters():
+        #         num_bytes = param.numel() * param.element_size()
+        #
+        #         # Create view into buffer
+        #         param_bytes = pinned_buffer[offset:offset + num_bytes].view(param.dtype)
+        #         param_bytes.copy_(param.data.view(-1))
+        #
+        #         # Replace parameter data with pinned version
+        #         param.data = param_bytes.view_as(param.data)
+        #         offset += num_bytes
+        #
+        #     return model
+
+        # model = fast_pin_model(model)  # 10-100x faster than per-tensor pinning
+
+        # log.info("Model: pinned memory to cpu")
+        # model = fast_pin_model(model)
+
+        # log.info(f"pinned memory == {next(model.parameters()).is_pinned()}")  # Should return `True`
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -232,7 +264,7 @@ def ModelLoader(cls):
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
-            backend = BACKEND(backend)
+            backend =  (backend)
         device = auto_select_device(device, backend)
         device_map = device.to_device_map()
 

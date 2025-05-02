@@ -422,7 +422,7 @@ class BaseGPTQModel(nn.Module):
             "calibration_dataset_concat_size": calibration_dataset_concat_size,
             "batch_size": batch_size,
             "logger_board": logger_board,
-            "retain_w": needs_lora,  # lora needs original w
+            "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
 
         # rotate model
@@ -465,7 +465,9 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.v2 is True:
             from ..looper.native_processor import NativeProcessor
-            quantize_processor.insert(0, NativeProcessor(**args))
+            args_clone = copy.deepcopy(args)
+            args_clone.pop("calculate_w_wq_diff", None)
+            quantize_processor.insert(0, NativeProcessor(**args_clone))
 
         processors = quantize_processor
         # Append EoRA processor for lora adapter

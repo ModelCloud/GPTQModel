@@ -41,6 +41,7 @@ class HookedConv1D(transformers.Conv1D):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -93,6 +94,7 @@ class HookedConv1d(torch.nn.Conv1d):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -146,6 +148,7 @@ class HookedConv2d(torch.nn.Conv2d):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -167,6 +170,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -189,6 +193,7 @@ class HookedLinear(torch.nn.Linear):
         return custom_linear
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)

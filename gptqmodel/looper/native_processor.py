@@ -23,8 +23,8 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..quantization.config import QuantizeConfig
-from ..quantization.gptq import CPU, DEVICE_1
 from ..utils.logger import setup_logger
+from ..utils.torch import CPU, DEVICE_1
 
 log = setup_logger()
 
@@ -34,7 +34,7 @@ NATIVE_INPUTS_STATE_KEY = "native_inp"
 class NativeProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
+                 logger_board: str = "", require_fwd: bool = True):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
                          calibration_dataset_concat_size=calibration_dataset_concat_size,
@@ -42,7 +42,6 @@ class NativeProcessor(LoopProcessor):
                          logger_board=logger_board, require_fwd=require_fwd, fwd_after_process=False,
                          fwd_all_modules_in_single_pass=True)
 
-        self.retain_w = retain_w
         self.native_inp_caches = {}
 
     def log_plotly(self):

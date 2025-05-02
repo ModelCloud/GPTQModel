@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 import torch
 import transformers
+from gptqmodel.utils.torch import device_next
 from torch import nn
 from torch.nn.modules.conv import _ConvNd
 
@@ -31,6 +32,9 @@ class NamedModule(torch.nn.Module):
         self.name = name # module name
         self.full_name = full_name # module full name (path) within model
         self.layer_index = layer_index # layerid in a repeating layer, if in outside layer, this info may be fake
+
+        # some processing will move this module to target_device gptq, eora, etc
+        self.target_device, self.target_device_stream = device_next()
 
         # persistent work state forLoopProcessors
         # store all `processed()` work state/data/result here

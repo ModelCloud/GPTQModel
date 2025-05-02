@@ -293,8 +293,12 @@ class LoopProcessor:
     def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass
 
+    # do work right before process where stream async/weight copies may happen
+    def pre_process_stream_hook(self, module: NamedModule):
+        pass
+
     # do work and return processor.self state which will updated/merged
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, device: torch.device = None):
         pass
 
     # last step, after all loop processor is called
