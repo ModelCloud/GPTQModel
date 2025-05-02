@@ -29,7 +29,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
@@ -235,9 +235,7 @@ class GPTQProcessor(LoopProcessor):
             "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
 
-        old = module.weight.data # TODO HACK since we cannot delete weight.data directly
         module.weight.data = wq
-        del old
 
         # if auto_gc:
         #     torch_empty_cache()
