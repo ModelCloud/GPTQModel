@@ -34,7 +34,7 @@ class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
     GPU = "gpu" # vram is less balanced (gpu0) but gpu0 is also used for quantization
 
-DEFAULT_BALANCE_STRATEGY = BalanceStrategy.MEMORY
+DEFAULT_BALANCE_STRATEGY = BalanceStrategy.GPU
 
 # TODO FIX ME...this should be removed
 STREAM = None # cache
