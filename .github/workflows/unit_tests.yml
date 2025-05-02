@@ -347,13 +347,13 @@ jobs:
           echo "sha256=$sha256"
           echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
 
-      - name: Download source from github
-        if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v4
-        with:
-          name: source
-          path: dist
-          run-id: ${{ github.run_id }}
+      # - name: Download source from github
+      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: source
+      #     path: dist
+      #     run-id: ${{ github.run_id }}
 
 #      - name: Uncompress source
  #       continue-on-error: true
@@ -415,8 +415,10 @@ jobs:
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
+          url="http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
+          echo "$url"
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}")
+            gpu_id=$(curl -s "$url")
 
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
@@ -510,13 +512,13 @@ jobs:
           echo "sha256=$sha256"
           echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
 
-      - name: Download source from github
-        if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v4
-        with:
-          name: source
-          path: dist
-          run-id: ${{ github.run_id }}
+      # - name: Download source from github
+      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: source
+      #     path: dist
+      #     run-id: ${{ github.run_id }}
 
  #     - name: Uncompress source
   #      continue-on-error: true
@@ -627,9 +629,10 @@ jobs:
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
+          url="http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
+          echo "$url"
           while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}")
-
+            gpu_id=$(curl -s "$url")
             if [ "$gpu_id" -lt 0 ]; then
               echo "http://$RUNNER/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
