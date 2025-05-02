@@ -355,12 +355,12 @@ jobs:
           path: dist
           run-id: ${{ github.run_id }}
 
-      - name: Uncompress source
-        continue-on-error: true
-        run: |
-          find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-          ls -ahl .
-          tar -zxf gptqmodel_source.tar.gz
+#      - name: Uncompress source
+ #       continue-on-error: true
+  #      run: |
+   #       find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+    #      ls -ahl .
+     #     tar -zxf gptqmodel_source.tar.gz
 
       - name: Download wheel from local
         continue-on-error: true
