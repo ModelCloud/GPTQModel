@@ -290,11 +290,12 @@ class LoopProcessor:
         self.tasks = {}
         self.inputs_cache.layer_inputs = []
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass
 
-    # do work right before process where stream async/weight copies may happen
-    def pre_process_stream_hook(self, module: NamedModule):
+    # only called when more than 1 gpu devices are active
+    # do work right before process starts and after all fwd_hook ends where stream async/weight copies may happen
+    def pre_process_streaming(self, module: NamedModule):
         pass
 
     # do work and return processor.self state which will updated/merged
