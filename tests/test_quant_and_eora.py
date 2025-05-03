@@ -23,7 +23,7 @@ import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 import gzip, json  # noqa: E402
 
-# from datasets import load_dataset  # noqa: E402
+from datasets import load_dataset  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
@@ -83,15 +83,15 @@ class Test(ModelTest):
             "adapter_path": adapter_path,
         }
 
-        # calibration_dataset = load_dataset(
-        #     dataset_id,
-        #     data_files=dataset_files,
-        #     split="train"
-        # ).select(range(calibration_dataset_rows))["text"]
+        calibration_dataset = load_dataset(
+            dataset_id,
+            data_files=dataset_files,
+            split="train"
+        ).select(range(calibration_dataset_rows))["text"]
 
-        with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
-            data = [json.loads(line)["text"] for line in f]
-            calibration_dataset = data[:calibration_dataset_rows]
+        # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
+        #     data = [json.loads(line)["text"] for line in f]
+        #     calibration_dataset = data[:calibration_dataset_rows]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
