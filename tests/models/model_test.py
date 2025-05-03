@@ -40,7 +40,7 @@ import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
 import transformers  # noqa: E402
-# from datasets import load_dataset  # noqa: E402
+from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT  # noqa: E402
@@ -144,14 +144,14 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
-        # traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
         # Load data directly from gzipped JSON file
-        with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
-            traindata = [json.loads(line) for line in f]
-
+        # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
+        #     traindata = [json.loads(line) for line in f]
+        #
         if not tokenizer:
-            # return traindata.select(range(rows))
-            return traindata[:rows]
+            return traindata.select(range(rows))
+        #     return traindata[:rows]
 
         datas = []
         for index, sample in enumerate(traindata):
