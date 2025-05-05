@@ -639,9 +639,12 @@ def pack_model(
     names = list(qModules.keys())
     lock = threading.Lock()
 
-    from device_smi import Device
-    cpu = Device("cpu")
-    max_packers = cpu.count * cpu.cores
+    if not has_gil():
+        from device_smi import Device
+        cpu = Device("cpu")
+        max_packers = cpu.count * cpu.core
+    else:
+        max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
     with ThreadPoolExecutor(max_workers=max_packers) as executor:
         with log.pb(names).manual() as pb:

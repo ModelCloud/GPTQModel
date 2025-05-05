@@ -393,7 +393,7 @@ class ModuleLooper():
 
                         torch_sync()
 
-                        # Use ThreadPoolExecutor with 3 threads
+                        # set to number of devices
                         max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []
