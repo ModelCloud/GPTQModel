@@ -215,7 +215,6 @@ def get_dataloader(
         note values of `batch_size`, `shuffle` and `collate_fn` will always be overridden to fixed value
     :return: torch.utils.data.DataLoader
     """
-    #if has_gil():
     from datasets import DatasetDict, IterableDatasetDict, load_dataset
 
     if not load_fn_kwargs:
@@ -226,12 +225,9 @@ def get_dataloader(
     if load_fn:
         ds = load_fn(data_path_or_name, **load_fn_kwargs)
     else:
-        ## TODO gil fix
-        #if has_gil():
         ds = load_dataset(data_path_or_name, **load_fn_kwargs)
 
-    # TODO gil fix
-    if has_gil() and isinstance(ds, (DatasetDict, IterableDatasetDict)):
+    if isinstance(ds, (DatasetDict, IterableDatasetDict)):
         if "evaluation" in ds:
             ds = ds["evaluation"]
         elif "test" in ds:
