@@ -327,7 +327,7 @@ jobs:
     container:
       image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04
       volumes:
-        - /home/ci/models/docker:/opt/pyenv
+        - /home/ci/models/docker:/opt/pyenv2
         - /home/ci/models:/opt/model
     steps:
       - name: Checkout Codes
@@ -349,10 +349,8 @@ jobs:
         run: |
           echo "ls /opt"
           ls -alh /opt
-          echo "ls /opt/model"
-          ls /opt/model
-          echo "ls /opt/pyenv"
-          ls /opt/pyenv
+          echo "ls /opt/pyenv2"
+          ls /opt/pyenv2
           echo "cat /etc/profile.d/pyenv.sh"
           cat /etc/profile.d/pyenv.sh
           echo "PYENV_ROOT: "
