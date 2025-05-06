@@ -19,10 +19,10 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import gzip  # noqa: E402
+import json
 import tempfile  # noqa: E402
-import gzip, json  # noqa: E402
 from typing import Optional  # noqa: E402
-
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
@@ -30,7 +30,6 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 # from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
@@ -72,27 +71,11 @@ class TestEoraPostQuant(ModelTest):
         pass
 
     def test_post_quant_eora(self):
-        bits = 4
-        group_size = 128
-        desc_act = True
         rank = 256
-        batch_size = 1
         calibration_dataset_rows = 512
         calibration_dataset_concat_size = 0  # disable
         auto_gc = False
-        adapter_file_name = "eora.safetensors"
 
-        config_dict = {
-            "bits": bits,
-            "group_size": group_size,
-            "desc_act": desc_act,
-            "rank": rank,
-            "batch_size": batch_size,
-            "calibration_dataset_rows": calibration_dataset_rows,
-            "calibration_dataset_concat_size": calibration_dataset_concat_size,
-            "auto_gc": auto_gc,
-            "adapter_file_name": adapter_file_name,
-        }
 
         with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
             data = [json.loads(line)["text"] for line in f]

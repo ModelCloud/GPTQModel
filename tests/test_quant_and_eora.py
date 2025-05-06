@@ -21,18 +21,16 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
-import gzip, json  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
-from parameterized import parameterized  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
+from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 # from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from tabulate import tabulate  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 
 
 class Test(ModelTest):
@@ -68,20 +66,6 @@ class Test(ModelTest):
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
 
-        config_dict = {
-            "model_id": self.NATIVE_MODEL_ID,
-            "dataset_id": dataset_id,
-            "dataset_files": dataset_files,
-            "bits": bits,
-            "group_size": group_size,
-            "desc_act": desc_act,
-            "rank": rank,
-            "batch_size": batch_size,
-            "calibration_dataset_rows": calibration_dataset_rows,
-            "calibration_dataset_concat_size": calibration_dataset_concat_size,
-            "auto_gc": auto_gc,
-            "adapter_path": adapter_path,
-        }
 
         calibration_dataset = load_dataset(
             dataset_id,
