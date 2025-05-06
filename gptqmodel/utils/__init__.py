@@ -15,5 +15,13 @@
 # limitations under the License.
 
 from .backend import BACKEND
-from .perplexity import Perplexity
+from .logger import setup_logger
+from .python import has_gil, log_gil_required
+
+# TODO: datasets is not compatible with free threading
+if has_gil():
+    from .perplexity import Perplexity
+else:
+    log_gil_required("utils/Perplexity")
+
 from .vram import get_vram

@@ -131,7 +131,8 @@ class EoraProcessor(LoopProcessor):
 
         start = time.time()
 
-        eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix[module.name]
+        with self.lock:
+            eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix.pop(module.name)
 
         w_wq_delta: torch.Tensor = module.state.pop("w_wq_diff").to(dtype=torch.float32)
         wq: torch.Tensor = module.state["wq"]
@@ -168,8 +169,9 @@ class EoraProcessor(LoopProcessor):
         # lowrank_dict[f'{layer_name}.lora_B.weight'] = B.cpu().to(dtype=torch.float16)
 
         duration = time.time() - start
-        self.durations.append(duration)
-        self.module_names.append(f"layer-{module.layer_index}-{module.name}")
+        with self.lock:
+            self.durations.append(duration)
+            self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
         stats_0 = torch.cuda.memory_stats(DEVICE_0)
         active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
@@ -196,16 +198,19 @@ class EoraProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
-        self.log.append(stat)
+        with self.lock:
+            self.log.append(stat)
+
         # log.info(stat)
         self.log_new_row(stat)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        self.result_save(module.full_name, {
-            "rank": module.adapter_cfg.rank,
-            "lora_A.weight": move_to(A.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
-            "lora_B.weight": move_to(B.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
-        })
+        with self.lock:
+            self.result_save(module.full_name, {
+                "rank": module.adapter_cfg.rank,
+                "lora_A.weight": move_to(A.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
+                "lora_B.weight": move_to(B.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
+            })
 
         # eora = Lora(rank=module.adapter_cfg.rank, lora_A=A, lora_B=B)
         #

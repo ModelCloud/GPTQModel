@@ -305,28 +305,26 @@ class ModuleLooper():
 
                     layer_outputs = []
                     for j in range(processor.num_batches):
-                        # TODO FIX ME
-                        with torch_streamCtx(ALL_STREAMS[0]):
-                            layer_input = []
-                            # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
-                            for k, layer_inp in enumerate(layer_inputs[j]):
-                                layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=True))
+                        layer_input = []
+                        # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
+                        for k, layer_inp in enumerate(layer_inputs[j]):
+                            layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=False))
 
-                            mask = attention_masks[j]
-                            layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=True)
+                        mask = attention_masks[j]
+                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=False)
 
-                            additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                            layer_position_ids = (
-                                None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=True)
-                            )
+                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
+                        layer_position_ids = (
+                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
+                        )
 
-                            if layer_position_ids is not None:
-                                additional_layer_inputs["position_ids"] = layer_position_ids
-                            for k, v in layer_input_kwargs[j].items():
-                                additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=True)
+                        if layer_position_ids is not None:
+                            additional_layer_inputs["position_ids"] = layer_position_ids
+                        for k, v in layer_input_kwargs[j].items():
+                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
 
                         # sync above stream copies
-                        torch_sync(device=cur_layer_device)
+                        #torch_sync(device=cur_layer_device)
 
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
@@ -395,7 +393,7 @@ class ModuleLooper():
 
                         torch_sync()
 
-                        # Use ThreadPoolExecutor with 3 threads
+                        # set to number of devices
                         max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []

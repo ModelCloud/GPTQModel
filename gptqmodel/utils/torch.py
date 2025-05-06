@@ -23,6 +23,7 @@ from packaging.version import Version
 from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
+from . import has_gil, log_gil_required
 
 HAS_CUDA = False
 HAS_XPU = False
@@ -33,7 +34,7 @@ class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
     GPU = "gpu" # vram is less balanced (gpu0) but gpu0 is also used for quantization
 
-DEFAULT_BALANCE_STRATEGY = BalanceStrategy.MEMORY
+DEFAULT_BALANCE_STRATEGY = BalanceStrategy.GPU
 
 # TODO FIX ME...this should be removed
 STREAM = None # cache
@@ -64,6 +65,11 @@ except BaseException:
     pass
 
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
+    # torch compile broken for free threading
+    if not has_gil():
+        log_gil_required("Torch Compile")
+        return module
+
     from ..models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
 
     if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:

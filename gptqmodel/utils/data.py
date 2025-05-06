@@ -20,7 +20,6 @@ from functools import partial
 from typing import Callable, Dict, List, Optional
 
 import torch
-from datasets import DatasetDict, IterableDatasetDict, load_dataset
 from torch import LongTensor, Tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
@@ -216,6 +215,7 @@ def get_dataloader(
         note values of `batch_size`, `shuffle` and `collate_fn` will always be overridden to fixed value
     :return: torch.utils.data.DataLoader
     """
+    from datasets import DatasetDict, IterableDatasetDict, load_dataset
 
     if not load_fn_kwargs:
         load_fn_kwargs = {}
@@ -226,6 +226,7 @@ def get_dataloader(
         ds = load_fn(data_path_or_name, **load_fn_kwargs)
     else:
         ds = load_dataset(data_path_or_name, **load_fn_kwargs)
+
     if isinstance(ds, (DatasetDict, IterableDatasetDict)):
         if "evaluation" in ds:
             ds = ds["evaluation"]

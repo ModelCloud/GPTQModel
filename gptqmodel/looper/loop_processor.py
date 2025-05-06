@@ -35,6 +35,8 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# global level lock
+PROCESSOR_GLOBAL_LOCK = threading.Lock()
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
@@ -50,6 +52,8 @@ class LoopProcessor:
             fwd_after_process: bool = True,
             fwd_all_modules_in_single_pass: bool = False,
     ):
+        # process level lock
+        self.lock = threading.Lock()
 
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}

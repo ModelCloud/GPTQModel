@@ -135,7 +135,9 @@ class GPTQProcessor(LoopProcessor):
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        g = self.tasks[module.name]
+        with self.lock:
+            g = self.tasks[module.name]
+
         # TODO FIX ME, quantize does NOT need to pass any args! Check HF compat!
         wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
         ## Assign the quantized weight to the weight
@@ -190,7 +192,8 @@ class GPTQProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
-        self.log.append(stat)
+        with self.lock:
+            self.log.append(stat)
 
         # Log the new row
         self.log_new_row(stat)
@@ -203,11 +206,12 @@ class GPTQProcessor(LoopProcessor):
         #     "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
         # })
 
-        self.result_save(module.full_name, {
-            "scale": scale,
-            "zero": zero,
-            "g_idx": g_idx,
-        })
+        with self.lock:
+            self.result_save(module.full_name, {
+                "scale": scale,
+                "zero": zero,
+                "g_idx": g_idx,
+            })
 
         if self.calculate_w_wq_diff:
             if module.weight.data.dtype == torch.float16:
@@ -221,7 +225,8 @@ class GPTQProcessor(LoopProcessor):
                 "w_wq_diff": w_wq_diff,
             })
 
-        self.tasks[module.name].free()
+        with self.lock:
+            self.tasks[module.name].free()
 
         # prepare for module.forward post generate
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
@@ -231,6 +236,7 @@ class GPTQProcessor(LoopProcessor):
             wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+
         module.state.update({
             "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
