@@ -346,6 +346,7 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "PYENV_ROOT: $PYENV_ROOT"
           echo "---"
           whereis pyenv
           echo "---"
