@@ -104,13 +104,6 @@ jobs:
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
 
-      - name: Assign tasks
-        id: assign
-        run: |
-          release_map=$(python .github/scripts/release_map.py)
-          echo "task_list=$release_map" >> "$GITHUB_OUTPUT"
-          echo "task_list=$release_map"
-
   release:
     strategy:
       fail-fast: false
