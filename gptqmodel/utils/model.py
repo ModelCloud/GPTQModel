@@ -45,6 +45,7 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from . import has_gil
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
