@@ -643,7 +643,7 @@ def pack_model(
     if not has_gil():
         from device_smi import Device
         cpu = Device("cpu")
-        max_packers = cpu.count * cpu.core
+        max_packers = cpu.count * cpu.cores
     else:
         max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
