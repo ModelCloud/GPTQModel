@@ -107,7 +107,7 @@ jobs:
       - name: Assign tasks
         id: assign
         run: |
-          release_map=$(python scripts/release_map.py.py)
+          release_map=$(python scripts/release_map.py)
           echo "task_list=$release_map" >> "$GITHUB_OUTPUT"
           echo "task_list=$release_map"
 
