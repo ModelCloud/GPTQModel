@@ -116,13 +116,214 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
-        cuda: [118, 121, 124, 126, 128]
-        python: [39, 310, 311, 312, 313]
-        torch: ["2.0.1", "2.1.2", "2.2.2", "2.3.1", "2.4.1", "2.5.1", "2.6.0", "2.7.0"]
+        include:
+          - cuda: 118
+            python: 39
+            torch: 2.0.1
+          - cuda: 118
+            python: 39
+            torch: 2.1.2
+          - cuda: 118
+            python: 39
+            torch: 2.2.2
+          - cuda: 118
+            python: 39
+            torch: 2.3.1
+          - cuda: 118
+            python: 39
+            torch: 2.4.1
+          - cuda: 118
+            python: 39
+            torch: 2.5.1
+          - cuda: 118
+            python: 310
+            torch: 2.0.1
+          - cuda: 118
+            python: 310
+            torch: 2.1.2
+          - cuda: 118
+            python: 310
+            torch: 2.2.2
+          - cuda: 118
+            python: 310
+            torch: 2.3.1
+          - cuda: 118
+            python: 310
+            torch: 2.4.1
+          - cuda: 118
+            python: 310
+            torch: 2.5.1
+          - cuda: 118
+            python: 311
+            torch: 2.0.1
+          - cuda: 118
+            python: 311
+            torch: 2.1.2
+          - cuda: 118
+            python: 311
+            torch: 2.2.2
+          - cuda: 118
+            python: 311
+            torch: 2.3.1
+          - cuda: 118
+            python: 311
+            torch: 2.4.1
+          - cuda: 118
+            python: 311
+            torch: 2.5.1
+          - cuda: 118
+            python: 312
+            torch: 2.2.2
+          - cuda: 118
+            python: 312
+            torch: 2.3.1
+          - cuda: 118
+            python: 312
+            torch: 2.4.1
+          - cuda: 118
+            python: 312
+            torch: 2.5.1
+          - cuda: 118
+            python: 313
+            torch: 2.5.1
+          - cuda: 121
+            python: 39
+            torch: 2.1.2
+          - cuda: 121
+            python: 39
+            torch: 2.2.2
+          - cuda: 121
+            python: 39
+            torch: 2.3.1
+          - cuda: 121
+            python: 39
+            torch: 2.4.1
+          - cuda: 121
+            python: 39
+            torch: 2.5.1
+          - cuda: 121
+            python: 310
+            torch: 2.1.2
+          - cuda: 121
+            python: 310
+            torch: 2.2.2
+          - cuda: 121
+            python: 310
+            torch: 2.3.1
+          - cuda: 121
+            python: 310
+            torch: 2.4.1
+          - cuda: 121
+            python: 310
+            torch: 2.5.1
+          - cuda: 121
+            python: 311
+            torch: 2.1.2
+          - cuda: 121
+            python: 311
+            torch: 2.2.2
+          - cuda: 121
+            python: 311
+            torch: 2.3.1
+          - cuda: 121
+            python: 311
+            torch: 2.4.1
+          - cuda: 121
+            python: 311
+            torch: 2.5.1
+          - cuda: 121
+            python: 312
+            torch: 2.2.2
+          - cuda: 121
+            python: 312
+            torch: 2.3.1
+          - cuda: 121
+            python: 312
+            torch: 2.4.1
+          - cuda: 121
+            python: 312
+            torch: 2.5.1
+          - cuda: 121
+            python: 313
+            torch: 2.5.1
+          - cuda: 124
+            python: 39
+            torch: 2.5.1
+          - cuda: 124
+            python: 310
+            torch: 2.5.1
+          - cuda: 124
+            python: 311
+            torch: 2.5.1
+          - cuda: 124
+            python: 312
+            torch: 2.5.1
+          - cuda: 124
+            python: 313
+            torch: 2.5.1
+          - cuda: 126
+            python: 39
+            torch: 2.6.0
+          - cuda: 126
+            python: 39
+            torch: 2.7.0
+          - cuda: 126
+            python: 310
+            torch: 2.6.0
+          - cuda: 126
+            python: 310
+            torch: 2.7.0
+          - cuda: 126
+            python: 311
+            torch: 2.6.0
+          - cuda: 126
+            python: 311
+            torch: 2.7.0
+          - cuda: 126
+            python: 312
+            torch: 2.6.0
+          - cuda: 126
+            python: 312
+            torch: 2.7.0
+          - cuda: 126
+            python: 313
+            torch: 2.6.0
+          - cuda: 126
+            python: 313
+            torch: 2.7.0
+          - cuda: 128
+            python: 39
+            torch: 2.6.0
+          - cuda: 128
+            python: 39
+            torch: 2.7.0
+          - cuda: 128
+            python: 310
+            torch: 2.6.0
+          - cuda: 128
+            python: 310
+            torch: 2.7.0
+          - cuda: 128
+            python: 311
+            torch: 2.6.0
+          - cuda: 128
+            python: 311
+            torch: 2.7.0
+          - cuda: 128
+            python: 312
+            torch: 2.6.0
+          - cuda: 128
+            python: 312
+            torch: 2.7.0
+          - cuda: 128
+            python: 313
+            torch: 2.6.0
+          - cuda: 128
+            python: 313
+            torch: 2.7.0
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
-    if: fromJson(needs.check-vm.outputs.task_list)[${{ matrix.cuda }}][${{ matrix.python }}][${{ matrix.torch }}] == 1 && !cancelled()
     container:
       image: 10.0.13.31:5000/modelcloud/gptqmodel:${{ matrix.cuda }}-ubuntu22.04
     steps:
