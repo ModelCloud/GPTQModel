@@ -349,6 +349,8 @@ jobs:
         run: |
           echo "ls /opt"
           ls -alh /opt
+          echo "ls /opt/model"
+          ls /opt/model
           echo "ls /opt/pyenv"
           ls /opt/pyenv
           echo "cat /etc/profile.d/pyenv.sh"
