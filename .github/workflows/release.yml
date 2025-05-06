@@ -77,6 +77,12 @@ jobs:
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
     if: github.event.inputs.github_vm == 'false'
     steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
       - name: Print env
         run: |
           echo "event name: ${{ github.event_name }}"
