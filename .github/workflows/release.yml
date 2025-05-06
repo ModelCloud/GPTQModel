@@ -344,7 +344,11 @@ jobs:
 
       - name: Print Env
         run: |
-          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${{ matrix.python }}"
+          python_version=$3
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py$python_version"
           pyenv local $env_name
           pyenv activate $env_name
           echo "== pyenv =="
