@@ -31,7 +31,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import device_next, torch_compile, torch_streamCtx, torch_sync
+from ..utils.torch import device_next, torch_compile, torch_streamCtx, torch_sync, HAS_CUDA, HAS_XPU
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -41,7 +41,10 @@ torch.backends.cudnn.allow_tf32 = False
 
 # TODO: is there a threading init bug in torch.linalg?
 # bypass strange threading bug
-torch.linalg.cholesky(torch.eye(64, device='cuda'))
+if HAS_CUDA or HAS_XPU:
+    tmp_eye = torch.eye(64, device="cuda" if HAS_CUDA else "xpu")
+    torch.linalg.cholesky(tmp_eye)
+    del tmp_eye
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
