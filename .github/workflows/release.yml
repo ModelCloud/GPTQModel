@@ -120,207 +120,207 @@ jobs:
           - cuda: 118
             python: 39
             torch: 2.0.1
-          - cuda: 118
-            python: 39
-            torch: 2.1.2
-          - cuda: 118
-            python: 39
-            torch: 2.2.2
-          - cuda: 118
-            python: 39
-            torch: 2.3.1
-          - cuda: 118
-            python: 39
-            torch: 2.4.1
-          - cuda: 118
-            python: 39
-            torch: 2.5.1
-          - cuda: 118
-            python: 310
-            torch: 2.0.1
-          - cuda: 118
-            python: 310
-            torch: 2.1.2
-          - cuda: 118
-            python: 310
-            torch: 2.2.2
-          - cuda: 118
-            python: 310
-            torch: 2.3.1
-          - cuda: 118
-            python: 310
-            torch: 2.4.1
-          - cuda: 118
-            python: 310
-            torch: 2.5.1
-          - cuda: 118
-            python: 311
-            torch: 2.0.1
-          - cuda: 118
-            python: 311
-            torch: 2.1.2
-          - cuda: 118
-            python: 311
-            torch: 2.2.2
-          - cuda: 118
-            python: 311
-            torch: 2.3.1
-          - cuda: 118
-            python: 311
-            torch: 2.4.1
-          - cuda: 118
-            python: 311
-            torch: 2.5.1
-          - cuda: 118
-            python: 312
-            torch: 2.2.2
-          - cuda: 118
-            python: 312
-            torch: 2.3.1
-          - cuda: 118
-            python: 312
-            torch: 2.4.1
-          - cuda: 118
-            python: 312
-            torch: 2.5.1
-          - cuda: 118
-            python: 313
-            torch: 2.5.1
-          - cuda: 121
-            python: 39
-            torch: 2.1.2
-          - cuda: 121
-            python: 39
-            torch: 2.2.2
-          - cuda: 121
-            python: 39
-            torch: 2.3.1
-          - cuda: 121
-            python: 39
-            torch: 2.4.1
-          - cuda: 121
-            python: 39
-            torch: 2.5.1
-          - cuda: 121
-            python: 310
-            torch: 2.1.2
-          - cuda: 121
-            python: 310
-            torch: 2.2.2
-          - cuda: 121
-            python: 310
-            torch: 2.3.1
-          - cuda: 121
-            python: 310
-            torch: 2.4.1
-          - cuda: 121
-            python: 310
-            torch: 2.5.1
-          - cuda: 121
-            python: 311
-            torch: 2.1.2
-          - cuda: 121
-            python: 311
-            torch: 2.2.2
-          - cuda: 121
-            python: 311
-            torch: 2.3.1
-          - cuda: 121
-            python: 311
-            torch: 2.4.1
-          - cuda: 121
-            python: 311
-            torch: 2.5.1
-          - cuda: 121
-            python: 312
-            torch: 2.2.2
-          - cuda: 121
-            python: 312
-            torch: 2.3.1
-          - cuda: 121
-            python: 312
-            torch: 2.4.1
-          - cuda: 121
-            python: 312
-            torch: 2.5.1
-          - cuda: 121
-            python: 313
-            torch: 2.5.1
-          - cuda: 124
-            python: 39
-            torch: 2.5.1
-          - cuda: 124
-            python: 310
-            torch: 2.5.1
-          - cuda: 124
-            python: 311
-            torch: 2.5.1
-          - cuda: 124
-            python: 312
-            torch: 2.5.1
-          - cuda: 124
-            python: 313
-            torch: 2.5.1
-          - cuda: 126
-            python: 39
-            torch: 2.6.0
-          - cuda: 126
-            python: 39
-            torch: 2.7.0
-          - cuda: 126
-            python: 310
-            torch: 2.6.0
-          - cuda: 126
-            python: 310
-            torch: 2.7.0
-          - cuda: 126
-            python: 311
-            torch: 2.6.0
-          - cuda: 126
-            python: 311
-            torch: 2.7.0
-          - cuda: 126
-            python: 312
-            torch: 2.6.0
-          - cuda: 126
-            python: 312
-            torch: 2.7.0
-          - cuda: 126
-            python: 313
-            torch: 2.6.0
-          - cuda: 126
-            python: 313
-            torch: 2.7.0
-          - cuda: 128
-            python: 39
-            torch: 2.6.0
-          - cuda: 128
-            python: 39
-            torch: 2.7.0
-          - cuda: 128
-            python: 310
-            torch: 2.6.0
-          - cuda: 128
-            python: 310
-            torch: 2.7.0
-          - cuda: 128
-            python: 311
-            torch: 2.6.0
-          - cuda: 128
-            python: 311
-            torch: 2.7.0
-          - cuda: 128
-            python: 312
-            torch: 2.6.0
-          - cuda: 128
-            python: 312
-            torch: 2.7.0
-          - cuda: 128
-            python: 313
-            torch: 2.6.0
-          - cuda: 128
-            python: 313
-            torch: 2.7.0
+#          - cuda: 118
+#            python: 39
+#            torch: 2.1.2
+#          - cuda: 118
+#            python: 39
+#            torch: 2.2.2
+#          - cuda: 118
+#            python: 39
+#            torch: 2.3.1
+#          - cuda: 118
+#            python: 39
+#            torch: 2.4.1
+#          - cuda: 118
+#            python: 39
+#            torch: 2.5.1
+#          - cuda: 118
+#            python: 310
+#            torch: 2.0.1
+#          - cuda: 118
+#            python: 310
+#            torch: 2.1.2
+#          - cuda: 118
+#            python: 310
+#            torch: 2.2.2
+#          - cuda: 118
+#            python: 310
+#            torch: 2.3.1
+#          - cuda: 118
+#            python: 310
+#            torch: 2.4.1
+#          - cuda: 118
+#            python: 310
+#            torch: 2.5.1
+#          - cuda: 118
+#            python: 311
+#            torch: 2.0.1
+#          - cuda: 118
+#            python: 311
+#            torch: 2.1.2
+#          - cuda: 118
+#            python: 311
+#            torch: 2.2.2
+#          - cuda: 118
+#            python: 311
+#            torch: 2.3.1
+#          - cuda: 118
+#            python: 311
+#            torch: 2.4.1
+#          - cuda: 118
+#            python: 311
+#            torch: 2.5.1
+#          - cuda: 118
+#            python: 312
+#            torch: 2.2.2
+#          - cuda: 118
+#            python: 312
+#            torch: 2.3.1
+#          - cuda: 118
+#            python: 312
+#            torch: 2.4.1
+#          - cuda: 118
+#            python: 312
+#            torch: 2.5.1
+#          - cuda: 118
+#            python: 313
+#            torch: 2.5.1
+#          - cuda: 121
+#            python: 39
+#            torch: 2.1.2
+#          - cuda: 121
+#            python: 39
+#            torch: 2.2.2
+#          - cuda: 121
+#            python: 39
+#            torch: 2.3.1
+#          - cuda: 121
+#            python: 39
+#            torch: 2.4.1
+#          - cuda: 121
+#            python: 39
+#            torch: 2.5.1
+#          - cuda: 121
+#            python: 310
+#            torch: 2.1.2
+#          - cuda: 121
+#            python: 310
+#            torch: 2.2.2
+#          - cuda: 121
+#            python: 310
+#            torch: 2.3.1
+#          - cuda: 121
+#            python: 310
+#            torch: 2.4.1
+#          - cuda: 121
+#            python: 310
+#            torch: 2.5.1
+#          - cuda: 121
+#            python: 311
+#            torch: 2.1.2
+#          - cuda: 121
+#            python: 311
+#            torch: 2.2.2
+#          - cuda: 121
+#            python: 311
+#            torch: 2.3.1
+#          - cuda: 121
+#            python: 311
+#            torch: 2.4.1
+#          - cuda: 121
+#            python: 311
+#            torch: 2.5.1
+#          - cuda: 121
+#            python: 312
+#            torch: 2.2.2
+#          - cuda: 121
+#            python: 312
+#            torch: 2.3.1
+#          - cuda: 121
+#            python: 312
+#            torch: 2.4.1
+#          - cuda: 121
+#            python: 312
+#            torch: 2.5.1
+#          - cuda: 121
+#            python: 313
+#            torch: 2.5.1
+#          - cuda: 124
+#            python: 39
+#            torch: 2.5.1
+#          - cuda: 124
+#            python: 310
+#            torch: 2.5.1
+#          - cuda: 124
+#            python: 311
+#            torch: 2.5.1
+#          - cuda: 124
+#            python: 312
+#            torch: 2.5.1
+#          - cuda: 124
+#            python: 313
+#            torch: 2.5.1
+#          - cuda: 126
+#            python: 39
+#            torch: 2.6.0
+#          - cuda: 126
+#            python: 39
+#            torch: 2.7.0
+#          - cuda: 126
+#            python: 310
+#            torch: 2.6.0
+#          - cuda: 126
+#            python: 310
+#            torch: 2.7.0
+#          - cuda: 126
+#            python: 311
+#            torch: 2.6.0
+#          - cuda: 126
+#            python: 311
+#            torch: 2.7.0
+#          - cuda: 126
+#            python: 312
+#            torch: 2.6.0
+#          - cuda: 126
+#            python: 312
+#            torch: 2.7.0
+#          - cuda: 126
+#            python: 313
+#            torch: 2.6.0
+#          - cuda: 126
+#            python: 313
+#            torch: 2.7.0
+#          - cuda: 128
+#            python: 39
+#            torch: 2.6.0
+#          - cuda: 128
+#            python: 39
+#            torch: 2.7.0
+#          - cuda: 128
+#            python: 310
+#            torch: 2.6.0
+#          - cuda: 128
+#            python: 310
+#            torch: 2.7.0
+#          - cuda: 128
+#            python: 311
+#            torch: 2.6.0
+#          - cuda: 128
+#            python: 311
+#            torch: 2.7.0
+#          - cuda: 128
+#            python: 312
+#            torch: 2.6.0
+#          - cuda: 128
+#            python: 312
+#            torch: 2.7.0
+#          - cuda: 128
+#            python: 313
+#            torch: 2.6.0
+#          - cuda: 128
+#            python: 313
+#            torch: 2.7.0
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
