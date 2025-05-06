@@ -346,6 +346,11 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "---"
+          whereis pyenv
+          echo "---"
+          pyenv versions
+          echo "---"
           python_version=${{ matrix.python }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
