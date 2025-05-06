@@ -1,6 +1,6 @@
 <p align=center>
 <div align=center>
-<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=50%>
+<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2">
 </div>
 <h1 align="center">GPTQModel</h1>
 </p>
@@ -132,7 +132,7 @@ Native support support some of the most popular multi-modal models:
 ## GPTQ v2 quantization unlocks useful utral-low bit quantization
 
 <div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 height="400">
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 >
 </div>
 
 ## Features

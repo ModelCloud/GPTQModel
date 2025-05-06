@@ -248,15 +248,17 @@ class GPTQ:
             except torch._C._LinAlgError as e:
                 if self.qcfg.damp_auto_increment != 0:
                     log.warn(
-                        f"Quantization: Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
+                        f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
                     damp += self.qcfg.damp_auto_increment
                 else:
                     log.warn(
-                        "Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
+                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
                     raise e
 
         if not (0 < damp < 1):
-            raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
+            log.error(f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
+            #raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
+            return None, 1.0
 
         return Hinv, damp
 
@@ -340,11 +342,14 @@ class GPTQ:
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+
+            if Hinv is not None:
+                Hinv1 = Hinv[i1:i2, i1:i2]
 
             for i in range(count):
                 w = W1[:, i]
-                d = Hinv1[i, i]
+                if Hinv is not None:
+                    d = Hinv1[i, i]
 
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
@@ -364,30 +369,32 @@ class GPTQ:
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
-
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                if Hinv is not None:
+                    Losses1[:, i] = (w - q) ** 2 / d**2
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
-
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-
-        del Hinv
+            if Hinv is not None:
+                Losses[:, i1:i2] = Losses1 / 2
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         # TODO: why is there a torch_sync here? There are no streaming ops here?
         # torch_sync(device=self.module.target_device)
 
-        if self.nsamples != 0:
-            avg_loss = torch.sum(Losses).item() / self.nsamples
+        if Hinv is not None:
+            del Hinv
+            if self.nsamples != 0:
+                avg_loss = torch.sum(Losses).item() / self.nsamples
 
-            if math.isnan(avg_loss):
-                print("Losses sum item:", torch.sum(Losses).item())
-                raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+                if math.isnan(avg_loss):
+                    print("Losses sum item:", torch.sum(Losses).item())
+                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+            else:
+                log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
+                avg_loss = 999999999
         else:
-            log.warn(f"Quantization: {self.name} is not activated due to model inference logic (MoE)")
             avg_loss = 999999999
 
         del Losses
