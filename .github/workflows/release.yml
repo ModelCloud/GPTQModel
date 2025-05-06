@@ -122,9 +122,9 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
-    if: needs.check-vm.outputs.task_list != '' && !cancelled()
+    if: fromJson(needs.check-vm.outputs.task_list)[matrix.cuda][matrix.python][matrix.torch] == 1 && !cancelled()
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.cuda }}-ubuntu22.04
+      image: 10.0.13.31:5000/modelcloud/gptqmodel:${{ matrix.cuda }}-ubuntu22.04
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
