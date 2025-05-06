@@ -346,6 +346,9 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "ls /opt/pyenv"
+          ls /opt/pyenv
+          echo "cat /etc/profile.d/pyenv.sh"
           cat /etc/profile.d/pyenv.sh
           echo "PYENV_ROOT: "
           echo $PYENV_ROOT
