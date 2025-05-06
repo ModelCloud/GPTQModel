@@ -45,6 +45,7 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from . import has_gil
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
@@ -642,7 +643,7 @@ def pack_model(
     if not has_gil():
         from device_smi import Device
         cpu = Device("cpu")
-        max_packers = cpu.count * cpu.core
+        max_packers = cpu.count * cpu.cores
     else:
         max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
