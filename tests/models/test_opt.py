@@ -25,8 +25,5 @@ class TestOpt(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
     INPUTS_MAX_LENGTH = 2048 # opt embedding is max 2048
 
-    KERNEL_QUANT = {AUTO_SELECT_BACKEND_ORDER[BACKEND.TRITON]}
-    KERNEL_INFERENCE = {AUTO_SELECT_BACKEND_ORDER[BACKEND.MARLIN]}
-
     def test_opt(self):
         self.quant_lm_eval()
