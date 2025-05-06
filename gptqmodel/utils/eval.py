@@ -16,7 +16,11 @@
 
 import json
 import os
-from enum import Enum, EnumType
+from enum import Enum
+try:
+    from enum import EnumType
+except ImportError:
+    EnumType = type(Enum)
 from typing import Dict, List, Optional, Type, Union
 
 from .evalplus import patch_evalplus
