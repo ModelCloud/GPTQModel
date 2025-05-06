@@ -346,10 +346,6 @@ jobs:
 
       - name: Print Env
         run: |
-          whereis pyenv
-          echo "---"
-          pyenv versions
-          echo "---"
           python_version=${{ matrix.python }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
@@ -368,9 +364,6 @@ jobs:
 
       - name: Install requirements
         run: |
-          cuda_version=$(echo ${{ matrix.tag }} | grep -oP 'cuda\K[0-9.]+')
-          torch_version=$(echo ${{ matrix.tag }} | grep -oP 'torch\K[0-9.]+')
-          python_version=$(echo ${{ matrix.tag }} | grep -oP 'python\K[0-9.]+')
           # bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ $cuda_version $torch_version $python_version
 
       - name: Compile
