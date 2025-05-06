@@ -326,6 +326,8 @@ jobs:
       - check-vm
     container:
       image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04
+      volumes:
+        - /home/ci/models/docker:/opt/pyenv
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
