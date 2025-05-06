@@ -159,6 +159,8 @@ def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
             if name.startswith(prefix):
                 return module, prefix
 
+    return None, ""
+
 
 def get_module_by_name_suffix(model, module_name: str):
     for name, module in model.named_modules():
