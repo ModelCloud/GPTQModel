@@ -349,17 +349,17 @@ setup(
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.9.6", "isort==6.0.0"],
-        'vllm': ["vllm>=0.7.3",  "flashinfer-python>=0.2.1"],
-        'sglang': ["sglang[srt]>=0.3.2",  "flashinfer-python>=0.2.1"],
+        'vllm': ["vllm>=0.8.5",  "flashinfer-python>=0.2.1"],
+        'sglang': ["sglang[srt]>=0.4.6",  "flashinfer-python>=0.2.1"],
         'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
-        'ipex': ["intel_extension_for_pytorch>=2.6.0"],
+        'ipex': ["intel_extension_for_pytorch>=2.7.0"],
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        'triton': ["triton>=2.0.0"],
+        'triton': ["triton>=3.0.0"],
         'openai': ["uvicorn", "fastapi", "pydantic"],
-        'mlx': ["mlx_lm>=0.20.6"]
+        'mlx': ["mlx_lm>=0.24.0"]
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",
