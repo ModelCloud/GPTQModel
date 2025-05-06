@@ -49,7 +49,7 @@ on:
         description: 'release source on github vm'
         type: boolean
         required: false
-        default: true
+        default: false
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -68,7 +68,7 @@ concurrency:
 
 jobs:
   check-vm:
-    runs-on: [self-hosted, Linux]
+    runs-on: [ self-hosted, Linux ]
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
@@ -101,47 +101,24 @@ jobs:
       - name: Assign tasks
         id: assign
         run: |
-          input="${{ github.event.inputs.target }}"
-
-          if [[ -z "$input" ]]; then
-            server_lists=$(curl -s "http://${RUNNER}/gpu/runner/docker?json=1")
-            echo "lists=$server_lists"
-
-            IFS=$'+' read -r list_1 list_2 <<< "$server_lists"
-
-            echo "list 1: $list_1"
-            echo "list 2: $list_2"
-          else
-            echo "inputed target is: $input"
-
-            if [[ "$input" =~ \  ]]; then
-              echo "extracting cuda torch and python"
-              read -r cuda torch py <<< "$input"
-              task=compiler_cuda$cuda-torch$torch-python$py
-              list_1="[\"$task\"]"
-            else
-              echo "use inputed image name"
-              list_1="[\"$input\"]"
-            fi
-              list_2="[]"
-
-            echo "task list: $list_1"
-          fi
-
-          echo "task_list=$list_1" >> "$GITHUB_OUTPUT"
+          release_map=$(python scripts/release_map.py.py)
+          echo "task_list=$release_map" >> "$GITHUB_OUTPUT"
+          echo "task_list=$release_map"
 
   release:
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
-        tag: ${{ fromJSON(needs.check-vm.outputs.task_list) }}
-    runs-on: [self-hosted, xeon5 ]
+        cuda: [118, 121, 124, 126, 128]
+        python: [39, 310, 311, 312, 313]
+        torch: ["2.0.1", "2.1.2", "2.2.2", "2.3.1", "2.4.1", "2.5.1", "2.6.0", "2.7.0"]
+    runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
     if: needs.check-vm.outputs.task_list != '' && !cancelled()
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.tag }}
+      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:${{ matrix.cuda }}-ubuntu22.04
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v4
@@ -216,7 +193,7 @@ jobs:
           overwrite: true
 
   release-source:
-    runs-on: [self-hosted, xeon5 ]
+    runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
     container:
