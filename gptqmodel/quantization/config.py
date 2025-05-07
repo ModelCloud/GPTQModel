@@ -165,9 +165,9 @@ class QuantizeConfig():
     # use 32 for highest quality with slower inference and higher vram usage
     group_size: int = field(default=128)
 
-    # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
-    damp_percent: float = field(default=0.01)
-    damp_auto_increment: float = field(default=0.0025)
+    # increase damp if NaN is encountered during `.quantize()` and/or increase calib dataset size
+    damp_percent: float = field(default=0.05)
+    damp_auto_increment: float = field(default=0.01)
 
     desc_act: bool = field(default=True)
     static_groups: bool = field(default=False)
