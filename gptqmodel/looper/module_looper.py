@@ -387,11 +387,12 @@ class ModuleLooper():
                             processor.process(module=m, auto_gc=auto_gc)
                             processed_subset[name] = m
                     else:
-                        for name in subset:
-                            m = subset[name]
-                            processor.pre_process_streaming(module=m)
-
-                        torch_sync()
+                        # TODO: there are threading/sync issues with streaming transfers
+                        # for name in subset:
+                        #     m = subset[name]
+                        #     processor.pre_process_streaming(module=m)
+                        #
+                        # torch_sync()
 
                         # set to number of devices
                         max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1

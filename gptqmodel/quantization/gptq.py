@@ -19,6 +19,7 @@
 import math
 import os
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -35,7 +36,7 @@ from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_compile, torch_s
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
-
+lock = threading.Lock()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
@@ -61,6 +62,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 class GPTQ:
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+        # self.lock = threading.Lock()
+
         # self.num_tied_handles = 0
         # if qcfg.tied_gptq_handle is not None:
         #     qcfg.tied_gptq_handle.num_tied_handles += 1
@@ -139,18 +142,17 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        reshaped_inp = inp.to(device=self.module.target_device, dtype=torch.float32)
-        del inp
+        inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            reshaped_inp = reshaped_inp.reshape(-1, reshaped_inp.shape[-1])
+            reshaped_inp = inp.reshape(-1, inp.shape[-1])
         else:
             if isinstance(self.module, nn.Conv1d):
-                reshaped_inp = reshaped_inp.reshape(
-                    reshaped_inp.size(0) * self.module.groups,
-                    reshaped_inp.size(1) // self.module.groups,
-                    reshaped_inp.shape[2],
+                reshaped_inp = inp.reshape(
+                    inp.size(0) * self.module.groups,
+                    inp.size(1) // self.module.groups,
+                    inp.shape[2],
                     1,
                 )
                 unfold = nn.Unfold(
@@ -162,11 +164,11 @@ class GPTQ:
                 # output size (batch_size, channels * \prod kernel_size, num_patches)
                 reshaped_inp = unfold(reshaped_inp)
             else:
-                reshaped_inp = reshaped_inp.reshape(
-                    reshaped_inp.size(0) * self.module.groups,
-                    reshaped_inp.size(1) // self.module.groups,
-                    reshaped_inp.shape[2],
-                    reshaped_inp.shape[3],
+                reshaped_inp = inp.reshape(
+                    inp.size(0) * self.module.groups,
+                    inp.size(1) // self.module.groups,
+                    inp.shape[2],
+                    inp.shape[3],
                 )
                 unfold = nn.Unfold(
                     self.module.kernel_size,
@@ -191,6 +193,7 @@ class GPTQ:
 
         beta = self.nsamples / (self.nsamples + batch_token_size)
         alpha = 2.0 / (self.nsamples + batch_token_size)
+
         self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
 
         # update number of collected samples
@@ -292,14 +295,14 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module()
+            W = self._clone_module(device=self.module.target_device)
         else:
-            W = self.module_copy
-            self.module_copy = None
+            W = self.module_copy.to(device=self.module.target_device)
+            del self.module_copy
 
         self.quantizer.find_params(W, weight=True)
 
-        H = self.H
+        H = self.H.to(device=self.module.target_device)
         del self.H
 
         dead = torch.diag(H) == 0
@@ -437,7 +440,8 @@ class GPTQ:
         if hasattr(self, "H"):
             del self.H
         del self.quantizer
-        del self.module_copy
+        if hasattr(self, "module_copy"):
+            del self.module_copy
         del self.module
 
         # torch_empty_cache(self.device)
