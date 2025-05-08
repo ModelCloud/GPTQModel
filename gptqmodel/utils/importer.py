@@ -251,6 +251,8 @@ def select_quant_linear(
         qlinear = QQQQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
+    elif backend == BACKEND.MACHETE:
+        qlinear = MacheteQuantLinear
     else:
         qlinear = TorchQuantLinear
 

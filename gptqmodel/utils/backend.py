@@ -29,7 +29,7 @@ class BACKEND(str, Enum):
     EXLLAMA_EORA = "exllama_eora"
     MARLIN = "marlin" # FASTEST: marlin reduce ops in fp32 (higher precision -> more accurate, slightly slower)
     MARLIN_FP16 = "marlin_fp16" # FASTEST and then some: marlin reduce ops in fp16 (lower precision -> less accurate, slightly faster)
-    MACHETE ="machete"
+    MACHETE = "machete"
     BITBLAS = "bitblas" # EXTREMELY FAST: speed at the cost of 10+ minutes of AOT (ahead of time compilation with disk cache)
     IPEX = "ipex" # Best kernel for Intel XPU and Intel/AMD CPU with AVX512, AMX, # XMX
 

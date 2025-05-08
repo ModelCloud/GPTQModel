@@ -17,7 +17,7 @@
 import torch
 from functools import partial
 from ...adapter.adapter import Adapter
-from marlin import MarlinQuantLinear, replace_tensor
+from .marlin import MarlinQuantLinear, replace_tensor
 from ...utils.backend import BACKEND
 from ...utils.scalar_type import scalar_types, ScalarType
 
