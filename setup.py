@@ -202,6 +202,7 @@ if BUILD_CUDA_EXT == "1":
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "-D CUTLASS_DEBUG_TRACE_LEVEL=2",
         ],
     }
 

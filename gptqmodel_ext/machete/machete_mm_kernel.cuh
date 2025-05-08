@@ -317,7 +317,8 @@ struct MacheteKernelTemplate {
             cutlassStatusToString(status));
 
     status = gemm_op.run(stream);
-    TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed");
+    TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed Status: ",
+            cutlassStatusToString(status));
   }
 };
 
