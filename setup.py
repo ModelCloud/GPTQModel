@@ -281,6 +281,7 @@ if BUILD_CUDA_EXT == "1":
                             "gptqmodel_ext/machete/machete_mm_dispatch.cu",
                             "gptqmodel_ext/machete/machete_mm_impl.cu",
                             "gptqmodel_ext/machete/machete_prepack.cu",
+                            "gptqmodel_ext/machete/permute_cols.cu",
                         ],
                         extra_link_args=extra_link_args,
                         extra_compile_args=extra_compile_args,
