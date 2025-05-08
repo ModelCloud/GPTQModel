@@ -194,7 +194,10 @@ elif HAS_XPU:
 else:
     ALL_STREAMS = [contextlib.nullcontext()]
 
-NEXT_DEVICE_INDEX = 1 # start in 1 since device 0 (main) already does double duty as fwd so it has most memory pressure
+NEXT_DEVICE_INDEX = 0
+
+def device_next_reset():
+    NEXT_DEVICE_INDEX = 0
 
 def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> (torch.device, Union[torch.cuda.Stream, torch.xpu.Stream]):
     global NEXT_DEVICE_INDEX
