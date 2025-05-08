@@ -197,6 +197,7 @@ else:
 NEXT_DEVICE_INDEX = 0
 
 def device_next_reset():
+    global NEXT_DEVICE_INDEX
     NEXT_DEVICE_INDEX = 0
 
 def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> (torch.device, Union[torch.cuda.Stream, torch.xpu.Stream]):
