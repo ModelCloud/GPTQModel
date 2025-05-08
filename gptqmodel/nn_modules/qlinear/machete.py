@@ -103,7 +103,7 @@ def machete_prepack_B(
 
 class MacheteQuantLinear(MarlinQuantLinear):
     SUPPORTS_BITS = [4, 8]
-    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [-1, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
@@ -184,8 +184,6 @@ class MacheteQuantLinear(MarlinQuantLinear):
 
         replace_tensor(self, "scales", marlin_scales)
 
-        super().post_init()
-
     def forward(self, x: torch.Tensor):
         if x.shape[0] == 0:
             return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
@@ -202,10 +200,10 @@ class MacheteQuantLinear(MarlinQuantLinear):
         x_2d = self.act_perm(x_2d)
 
         output = machete_mm(a=x_2d,
-                                b_q=w_q,
+                                b_q=w_q.data,
                                 b_type=self.quant_type,
                                 b_group_zeros=None,
-                                b_group_scales=w_s,
+                                b_group_scales=w_s.data,
                                 b_group_size=self.group_size)
 
         if self.bias is not None:
