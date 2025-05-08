@@ -48,6 +48,8 @@ torch::Tensor run_impl(MMArgs args) {
   int N = args.B.size(1);
   int K = args.A.size(1);
 
+  std::cout << "M = " << M << ", N = " << N << ", K = " << K << std::endl;
+
   // Allocate output
   torch::Tensor D = torch::empty(
       {M, N},
@@ -64,6 +66,7 @@ torch::Tensor run_impl(MMArgs args) {
               "Machete kernel cannot be run with these arguments");
 
   size_t workspace_size = MacheteKernel::get_workspace_size(arguments);
+  std::cout << "Workspace size: " << workspace_size << " bytes" << std::endl;
   torch::Tensor workspace = torch::empty(
       workspace_size, torch::TensorOptions().dtype(torch::kU8).device(device));
 

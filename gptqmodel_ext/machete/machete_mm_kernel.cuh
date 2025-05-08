@@ -294,12 +294,27 @@ struct MacheteKernelTemplate {
     return Gemm::can_implement(args) == cutlass::Status::kSuccess;
   }
 
+  static const char* cutlassStatusToString(cutlass::Status status) {
+    switch (status) {
+        case cutlass::Status::kSuccess: return "Success";
+        case cutlass::Status::kErrorMisalignedOperand: return "ErrorMisalignedOperand";
+        case cutlass::Status::kErrorInvalidLayout: return "ErrorInvalidLayout";
+        case cutlass::Status::kErrorInvalidProblem: return "ErrorInvalidProblem";
+        case cutlass::Status::kErrorNotSupported: return "ErrorNotSupported";
+        case cutlass::Status::kErrorWorkspaceNull: return "ErrorWorkspaceNull";
+        case cutlass::Status::kErrorInternal: return "ErrorInternal";
+        case cutlass::Status::kInvalid: return "Invalid";
+        default: return "Unknown CUTLASS Status";
+    }
+  }
+
   static void run(Arguments const& args, void* workspace, cudaStream_t stream) {
     Gemm gemm_op;
 
     cutlass::Status status = gemm_op.initialize(args, workspace, stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess,
-                "Machete kernel failed to initialize workspace");
+            "Machete kernel failed to initialize workspace. Status: ",
+            cutlassStatusToString(status));
 
     status = gemm_op.run(stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed");
