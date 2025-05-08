@@ -226,8 +226,9 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
         # if auto_gc:
         #     torch_empty_cache()
-        with torch_streamCtx(DEVICE_0_STREAM):
-            wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        # with torch_streamCtx(DEVICE_0_STREAM):
+        #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        wq = wq.to(device=DEVICE_0, non_blocking=False)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
