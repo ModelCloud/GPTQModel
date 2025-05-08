@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import threading
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -29,9 +30,10 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, DEVICE_1, torch_streamCtx, torch_sync
 
 log = setup_logger()
+lock = threading.Lock()
 
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
@@ -115,7 +117,6 @@ class GPTQProcessor(LoopProcessor):
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-            # gptq is mutable.
             g = self.tasks[name]  # noqa: F821
             g.add_batch(inp[0].data, out.data)  # noqa: F821
             del inp, out
@@ -124,9 +125,10 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_streaming(self, module: NamedModule):
         g = self.tasks[module.name]
         with torch_streamCtx(module.target_device_stream):
+            # log.debug(f"streaming module `{g.name}` to device = `{module.target_device}`")
             if g.H is not None:
                 g.H = g.H.to(device=module.target_device, non_blocking=True)
-            module.weight.data = module.weight.data.to(device=module.target_device, non_blocking=True)
+            g.module.weight.data = g.module.weight.data.to(device=module.target_device, non_blocking=True)
 
     def process(self, module: NamedModule, auto_gc: bool = True):
         # Reset peak memory stats
@@ -138,8 +140,18 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             g = self.tasks[module.name]
 
-        # TODO FIX ME, quantize does NOT need to pass any args! Check HF compat!
         wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+
+        with self.lock:
+            self.result_save(module.full_name, {
+                "scale": scale,
+                "zero": zero,
+                "g_idx": g_idx,
+            })
+
+            self.durations.append(duration)
+            self.avg_losses.append(avg_loss)
+            self.module_names.append(f"layer-{module.layer_index}-{module.name}")
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -160,9 +172,6 @@ class GPTQProcessor(LoopProcessor):
         #         value=duration,
         #         iteration=name_index,
         #     )
-        self.durations.append(duration)
-        self.avg_losses.append(avg_loss)
-        self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
         stats_0 = torch.cuda.memory_stats(DEVICE_0)
         active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
@@ -198,21 +207,6 @@ class GPTQProcessor(LoopProcessor):
         # Log the new row
         self.log_new_row(stat)
 
-        #log.info(stat)
-
-        # self.result_save(module.full_name, {
-        #     "scale": move_to(scale, device=CPU, stream=self.stream),
-        #     "zero": move_to(zero, device=CPU, stream=self.stream),
-        #     "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
-        # })
-
-        with self.lock:
-            self.result_save(module.full_name, {
-                "scale": scale,
-                "zero": zero,
-                "g_idx": g_idx,
-            })
-
         if self.calculate_w_wq_diff:
             if module.weight.data.dtype == torch.float16:
                 # diff in float16
@@ -232,8 +226,9 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
         # if auto_gc:
         #     torch_empty_cache()
-        with torch_streamCtx(module.target_device_stream):
-            wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        # with torch_streamCtx(DEVICE_0_STREAM):
+        #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        wq = wq.to(device=DEVICE_0, non_blocking=False)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 

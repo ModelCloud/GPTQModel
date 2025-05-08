@@ -34,8 +34,9 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replac
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA,
-                           BalanceStrategy, torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
+                           HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
+                           torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
 
 log = setup_logger()
 
@@ -290,7 +291,11 @@ class ModuleLooper():
 
                     handle = []
                     # log.info(f"Subset = {subset}")
+                    device_next_reset()
+
                     for name in subset:
+                        m = subset[name]
+                        m.module.target_device, m.module.target_device_stream = device_next()
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = processor.pre_process_fwd_hook(name)
@@ -387,11 +392,12 @@ class ModuleLooper():
                             processor.process(module=m, auto_gc=auto_gc)
                             processed_subset[name] = m
                     else:
-                        for name in subset:
-                            m = subset[name]
-                            processor.pre_process_streaming(module=m)
-
-                        torch_sync()
+                        # TODO: there are threading/sync issues with streaming transfers
+                        # for name in subset:
+                        #     m = subset[name]
+                        #     processor.pre_process_streaming(module=m)
+                        #
+                        # torch_sync()
 
                         # set to number of devices
                         max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
