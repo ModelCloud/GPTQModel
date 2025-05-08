@@ -76,6 +76,18 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
     return res.permute(inv_perm)
 
 
+def permute_cols_python(A: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    A = A.contiguous()
+
+    A_2d = A.view(-1, A.shape[-1])  # [rows, cols]
+
+    A_permuted = A_2d[:, perm]
+
+    new_shape = list(A.shape)
+    new_shape[-1] = perm.shape[0]
+    return A_permuted.view(*new_shape)
+
+
 class MacheteQuantLinear(MarlinQuantLinear):
     def __init__(
         self, bits: int,
@@ -116,7 +128,7 @@ class MacheteQuantLinear(MarlinQuantLinear):
         self.act_perm = lambda x: x[:, perm]
         if self.qweight.dtype in [torch.float16, torch.bfloat16] \
                 and self.in_features % 8 == 0:
-            self.act_perm = partial(gptqmodel_machete_kernels.permute_cols, perm=perm)
+            self.act_perm = partial(permute_cols_python, perm=perm)
 
         # TODO: permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
         x_unpacked = unpack_quantized_values_into_int32(self.qweight,

@@ -29,6 +29,7 @@ from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.machete import MacheteQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
@@ -51,7 +52,7 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
     BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
     BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
-
+    BACKEND.MACHETE: MacheteQuantLinear, # machete kernel
     BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
 })
 

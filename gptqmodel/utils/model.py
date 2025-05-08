@@ -37,6 +37,7 @@ import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.machete import MacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
@@ -371,7 +372,7 @@ def hf_convert_gptq_v1_to_v2_format(
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
         # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+        if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, MacheteQuantLinear, ExllamaEoraQuantLinear]:
             return model, False
 
         cfg = QuantizeConfig(bits=bits)
@@ -470,7 +471,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, MacheteQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -547,7 +548,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
+    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, MacheteQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
