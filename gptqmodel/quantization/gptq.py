@@ -136,8 +136,9 @@ class GPTQ:
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
-            with torch_streamCtx(self.module.target_device_stream):
-                self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=True))
+            # with torch_streamCtx(self.module.target_device_stream):
+            #     self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=True))
+            self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=False))
         else:
             self.process_batch(inp)
 
