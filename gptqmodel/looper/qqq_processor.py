@@ -189,8 +189,9 @@ class QQQProcessor(LoopProcessor):
                 "w_wq_diff": w_wq_diff,
             })
 
-        with torch_streamCtx(DEVICE_0_STREAM):
-            wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        # with torch_streamCtx(DEVICE_0_STREAM):
+        #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        wq = wq.to(device=DEVICE_0, non_blocking=False)
 
         # prepare for module.forward post generate
         module.weight.data = wq
