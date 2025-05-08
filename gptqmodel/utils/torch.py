@@ -182,6 +182,7 @@ def torch_devices() -> List[torch.device]:
 
 CPU = torch.device("cpu")
 DEVICE_0 = auto_select_torch_device(index=0)
+
 # device_1 may be same as device_0 if there is only 1 visible/active device
 DEVICE_1 = auto_select_torch_device(index=1)
 
@@ -193,6 +194,8 @@ elif HAS_XPU:
     ALL_STREAMS = [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
 else:
     ALL_STREAMS = [contextlib.nullcontext()]
+
+DEVICE_0_STREAM = ALL_STREAMS[0]
 
 NEXT_DEVICE_INDEX = 0
 
