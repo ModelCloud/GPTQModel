@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import torch
+from typing import Optional
 from functools import partial
 from ...models._const import DEVICE, PLATFORM
 from ...adapter.adapter import Adapter, Lora
@@ -76,17 +77,28 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
 
     return res.permute(inv_perm)
 
+def machete_mm(
+        a: torch.Tensor,
+        # b_q Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
+        b_type: ScalarType,
+        out_type: Optional[torch.dtype] = None,
+        b_group_scales: Optional[torch.Tensor] = None,
+        b_group_zeros: Optional[torch.Tensor] = None,
+        b_group_size: Optional[int] = None,
+        b_channel_scales: Optional[torch.Tensor] = None,
+        a_token_scales: Optional[torch.Tensor] = None,
+        schedule: Optional[str] = None) -> torch.Tensor:
+    return gptqmodel_machete_kernels.machete_mm(a, b_q, b_type.id, out_type, b_group_scales,
+                                   b_group_zeros, b_group_size,
+                                   b_channel_scales, a_token_scales, schedule)
 
-def permute_cols_python(A: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
-    A = A.contiguous()
 
-    A_2d = A.view(-1, A.shape[-1])  # [rows, cols]
-
-    A_permuted = A_2d[:, perm]
-
-    new_shape = list(A.shape)
-    new_shape[-1] = perm.shape[0]
-    return A_permuted.view(*new_shape)
+def machete_prepack_B(
+        b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
+        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
+    return gptqmodel_machete_kernels.machete_prepack_B(b_q_weight, a_type, b_type.id,
+                                          group_scales_type)
 
 
 class MacheteQuantLinear(MarlinQuantLinear):
@@ -148,7 +160,7 @@ class MacheteQuantLinear(MarlinQuantLinear):
         self.act_perm = lambda x: x[:, perm]
         if self.qweight.dtype in [torch.float16, torch.bfloat16] \
                 and self.in_features % 8 == 0:
-            self.act_perm = partial(permute_cols_python, perm=perm)
+            self.act_perm = partial(gptqmodel_machete_kernels.permute_cols, perm=perm)
 
         # TODO: permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
         x_unpacked = unpack_quantized_values_into_int32(self.qweight,
@@ -160,7 +172,7 @@ class MacheteQuantLinear(MarlinQuantLinear):
                                                   self.quant_type,
                                                   packed_dim=0)
 
-        machete_qweight = gptqmodel_machete_kernels.machete_prepack_B(self.qweight.t().contiguous().t(),
+        machete_qweight = machete_prepack_B(self.qweight.data.t().contiguous().t(),
                                        a_type=self.qweight.data.dtype,
                                        b_type=self.quant_type,
                                        group_scales_type=self.qweight.data.dtype)
@@ -189,7 +201,7 @@ class MacheteQuantLinear(MarlinQuantLinear):
 
         x_2d = self.act_perm(x_2d)
 
-        output = gptqmodel_machete_kernels.machete_mm(a=x_2d,
+        output = machete_mm(a=x_2d,
                                 b_q=w_q,
                                 b_type=self.quant_type,
                                 b_group_zeros=None,
