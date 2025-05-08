@@ -30,7 +30,7 @@ from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
@@ -189,7 +189,7 @@ class QQQProcessor(LoopProcessor):
                 "w_wq_diff": w_wq_diff,
             })
 
-        with torch_streamCtx(module.target_device_stream):
+        with torch_streamCtx(DEVICE_0_STREAM):
             wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
 
         # prepare for module.forward post generate
