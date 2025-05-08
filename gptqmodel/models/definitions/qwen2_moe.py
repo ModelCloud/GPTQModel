@@ -32,6 +32,7 @@ class Qwen2MoeGPTQ(BaseGPTQModel):
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
 
+        ["mlp.gate"],
         ["mlp.shared_expert.up_proj", "mlp.shared_expert.gate_proj"],
         ["mlp.shared_expert.down_proj"],
 
@@ -47,6 +48,7 @@ class Qwen2MoeGPTQ(BaseGPTQModel):
         {
             "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
             "mlp": {
+                "gate": ("gate",),
                 "shared_expert": ("up_proj", "gate_proj", "down_proj"),
                 "experts": {
                     "#": ("up_proj", "gate_proj", "down_proj"),
