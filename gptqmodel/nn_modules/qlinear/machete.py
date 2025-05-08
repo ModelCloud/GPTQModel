@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import torch
-from typing import Optional
+from typing import Optional, Tuple
 from functools import partial
 from ...models._const import DEVICE, PLATFORM
 from ...adapter.adapter import Adapter, Lora
@@ -34,6 +34,17 @@ TYPE_MAP = {
         (8, True): scalar_types.uint8b128,
     }
 
+MACHETE_PREPACKED_BLOCK_SHAPE = [64, 128]
+
+def check_machete_supports_shape(in_features: int, out_featrues: int) \
+    -> Tuple[bool, Optional[str]]:
+    if in_features % MACHETE_PREPACKED_BLOCK_SHAPE[0] != 0:
+        return False, "Input features size must be divisible by "\
+            f"{MACHETE_PREPACKED_BLOCK_SHAPE[0]}"
+    if out_featrues % MACHETE_PREPACKED_BLOCK_SHAPE[1] != 0:
+        return False, "Output features size must be divisible by "\
+            f"{MACHETE_PREPACKED_BLOCK_SHAPE[1]}"
+    return True, None
 
 def pack_quantized_values_into_int32(w_q: torch.Tensor,
                                      wtype: ScalarType,
@@ -101,6 +112,9 @@ def machete_prepack_B(
                                           group_scales_type)
 
 
+def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    return gptqmodel_machete_kernels.permute_cols(a, perm)
+
 class MacheteQuantLinear(MarlinQuantLinear):
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 128]
@@ -133,6 +147,7 @@ class MacheteQuantLinear(MarlinQuantLinear):
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
         **kwargs):
+
         if machete_import_exception is not None:
             raise ValueError(
                 f"Trying to use the machete backend, but could not import the C++/CUDA dependencies with the following error: {machete_import_exception}"
@@ -151,6 +166,12 @@ class MacheteQuantLinear(MarlinQuantLinear):
             adapter=adapter,
             **kwargs)
 
+        _, err = check_machete_supports_shape(self.in_features, self.out_features)
+        if err is not None:
+            raise ValueError(
+                f"check_machete_supports_shape failed, {err}"
+            )
+
         self.quant_type = TYPE_MAP.get((bits, sym), None)
 
     def post_init(self):
@@ -158,28 +179,25 @@ class MacheteQuantLinear(MarlinQuantLinear):
             .to(torch.int)
 
         self.act_perm = lambda x: x[:, perm]
-        if self.qweight.dtype in [torch.float16, torch.bfloat16] \
-                and self.in_features % 8 == 0:
-            self.act_perm = partial(gptqmodel_machete_kernels.permute_cols, perm=perm)
+        if self.in_features % 8 == 0:
+            self.act_perm = partial(permute_cols, perm=perm)
 
-        # TODO: permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
-        x_unpacked = unpack_quantized_values_into_int32(self.qweight,
+        x_unpacked = unpack_quantized_values_into_int32(self.qweight.data,
                                                         self.quant_type,
                                                         packed_dim=0)
 
         x_perm = x_unpacked[perm, :]
-        self.qweight = pack_quantized_values_into_int32(x_perm,
+        self.qweight.data = pack_quantized_values_into_int32(x_perm,
                                                   self.quant_type,
                                                   packed_dim=0)
 
         machete_qweight = machete_prepack_B(self.qweight.data.t().contiguous().t(),
-                                       a_type=self.qweight.data.dtype,
+                                       a_type=self.scales.dtype,
                                        b_type=self.quant_type,
-                                       group_scales_type=self.qweight.data.dtype)
+                                       group_scales_type=self.scales.dtype)
 
         replace_tensor(self, "qweight", machete_qweight)
 
-        # TODO: permute_param_layout_(x, input_dim=0, output_dim=1)
         marlin_scales = self.scales.data.contiguous()
 
         replace_tensor(self, "scales", marlin_scales)
@@ -192,18 +210,15 @@ class MacheteQuantLinear(MarlinQuantLinear):
         if x.dtype != self.scales.dtype:
             self.scales = self.scales.to(dtype=x.dtype)
 
-        w_q, w_s = self.qweight, self.scales
-
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (self.out_features,)
 
         x_2d = self.act_perm(x_2d)
-
         output = machete_mm(a=x_2d,
-                                b_q=w_q.data,
+                                b_q=self.qweight,
                                 b_type=self.quant_type,
                                 b_group_zeros=None,
-                                b_group_scales=w_s.data,
+                                b_group_scales=self.scales,
                                 b_group_size=self.group_size)
 
         if self.bias is not None:
