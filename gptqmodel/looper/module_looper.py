@@ -35,7 +35,8 @@ from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
 from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA,
-                           BalanceStrategy, torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+                           BalanceStrategy, torch_devices, torch_empty_cache, torch_streamCtx, torch_sync,
+                           device_next_reset, device_next)
 
 log = setup_logger()
 
@@ -290,7 +291,11 @@ class ModuleLooper():
 
                     handle = []
                     # log.info(f"Subset = {subset}")
+                    device_next_reset()
+
                     for name in subset:
+                        m = subset[name]
+                        m.module.target_device, m.module.target_device_stream = device_next()
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = processor.pre_process_fwd_hook(name)
