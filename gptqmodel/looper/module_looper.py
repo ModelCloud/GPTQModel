@@ -34,9 +34,9 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replac
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA,
-                           BalanceStrategy, torch_devices, torch_empty_cache, torch_streamCtx, torch_sync,
-                           device_next_reset, device_next)
+from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
+                           HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
+                           torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
 
 log = setup_logger()
 
