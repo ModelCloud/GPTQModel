@@ -60,14 +60,4 @@ torch::Tensor prepack_B(
        .maybe_group_scales_type = maybe_group_scales_type});
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("machete_prepack_B", &prepack_B);
-  m.impl("machete_mm", &mm);
-}
-
-// use CatchAll since supported_schedules has no tensor arguments
-TORCH_LIBRARY_IMPL(TORCH_EXTENSION_NAME, CatchAll, m) {
-  m.impl("machete_supported_schedules", &supported_schedules);
-}
-
 };  // namespace machete

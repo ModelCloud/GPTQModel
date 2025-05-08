@@ -86,7 +86,3 @@ torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm) {
       A_2d.size(0), A_2d.size(1), block_rows);
   return D;
 }
-
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("permute_cols", &permute_cols);
-}

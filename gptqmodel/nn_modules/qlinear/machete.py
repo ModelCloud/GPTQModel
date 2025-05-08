@@ -16,7 +16,8 @@
 
 import torch
 from functools import partial
-from ...adapter.adapter import Adapter
+from ...models._const import DEVICE, PLATFORM
+from ...adapter.adapter import Adapter, Lora
 from .marlin import MarlinQuantLinear, replace_tensor
 from ...utils.backend import BACKEND
 from ...utils.scalar_type import scalar_types, ScalarType
@@ -89,6 +90,26 @@ def permute_cols_python(A: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
 
 
 class MacheteQuantLinear(MarlinQuantLinear):
+    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "machete"
+
     def __init__(
         self, bits: int,
         group_size: int,
@@ -116,7 +137,6 @@ class MacheteQuantLinear(MarlinQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.MACHETE),
             adapter=adapter,
-            register_buffers=False,
             **kwargs)
 
         self.quant_type = TYPE_MAP.get((bits, sym), None)

@@ -276,6 +276,7 @@ if BUILD_CUDA_EXT == "1":
                     cpp_ext.CUDAExtension(
                         "gptqmodel_machete_kernels",
                         [
+                            "gptqmodel_ext/machete/machete.cpp",
                             "gptqmodel_ext/machete/machete_pytorch.cu",
                             "gptqmodel_ext/machete/machete_mm_dispatch.cu",
                             "gptqmodel_ext/machete/machete_mm_impl.cu",
