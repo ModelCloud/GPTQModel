@@ -57,7 +57,7 @@ class ModuleLooper():
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         # TODO HookLinear add register_forward_pre_hook()
-        def store_input_hook(_, args, kwargs):
+        def store_input_hook(module, args, kwargs):
             # Positional arguments.
             layer_input = []
             for inp in args:
@@ -71,7 +71,7 @@ class ModuleLooper():
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
-            if kwargs.get("attention_mask") is not None:
+            if kwargs.get("attention_mask") is not None and str(type(module)) != "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
@@ -105,7 +105,10 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_start()
         for example in calibration_data:
             for k, v in example.items():
-                data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
+                if self.gptq_model.__class__.__name__ == 'Qwen2_5_OmniGPTQ':
+                    data_device = self.gptq_model.quantize_config.device
+                else:
+                    data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
                     for index in range(len(v)):
                         if len(v[index].shape) == 1:
@@ -117,7 +120,10 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                self.gptq_model.model(**example)
+                if self.gptq_model.__class__.__name__ == 'Qwen2_5_OmniGPTQ':
+                    self.gptq_model.model.generate(**example, return_audio=False)
+                else:
+                    self.gptq_model.model(**example)
             except ValueError:
                 pass
         self.gptq_model.pre_quantize_generate_hook_end()
@@ -157,7 +163,6 @@ class ModuleLooper():
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
-
         layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
         for p_index, processor in enumerate(self.processors):
@@ -344,7 +349,6 @@ class ModuleLooper():
                         else:
                             layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                   **additional_layer_inputs)
-
                         # For Native processor, we can update processor input here
                         # if second forward is not required, this/first forward output is captured as input for next loop
                         if not processor.fwd_after_process:
