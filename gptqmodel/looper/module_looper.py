@@ -105,7 +105,7 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_start()
         for example in calibration_data:
             for k, v in example.items():
-                if self.gptq_model.__class__.__name__ == 'Qwen2_5_OmniGPTQ':
+                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                     data_device = self.gptq_model.quantize_config.device
                 else:
                     data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
@@ -120,7 +120,7 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if self.gptq_model.__class__.__name__ == 'Qwen2_5_OmniGPTQ':
+                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                     self.gptq_model.model.generate(**example, return_audio=False)
                 else:
                     self.gptq_model.model(**example)
