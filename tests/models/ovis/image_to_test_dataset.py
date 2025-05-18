@@ -16,6 +16,7 @@
 
 from gptqmodel.models import OvisGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
+from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ 
 
 
 def format_ovis_dataset(image, assistant):
@@ -46,6 +47,24 @@ def format_qwen2_vl_dataset(image, assistant):
         {"role": "assistant", "content": assistant},
     ]
 
+def format_qwen2_5_omni_dataset(image, assistant):
+    return [
+        {
+         "role": "system",
+         "content": [
+            {"type": "text",
+            "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+            ],
+        },  
+        {
+         "role": "user",
+         "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": "generate a caption for this image"},
+         ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
 
 def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
     from datasets import load_dataset
@@ -65,5 +84,8 @@ def get_calib_dataset(model):
 
     if isinstance(model, BaseQwen2VLGPTQ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
+
+    if isinstance(model, BaseQwen2_5_OmniGPTQ):
+        return prepare_dataset(format_qwen2_5_omni_dataset, n_sample=20)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")
