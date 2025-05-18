@@ -13,18 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import sys
-# 将本地路径插入到 sys.path 的最前面
-sys.path.insert(0, '/nas/yuehu/NEW/GPTQModel_Qwen')
-
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ 
 from model_test import ModelTest
 import soundfile as sf
 import os
 
 class TestQwen2_5_Omni(ModelTest):
-    #NATIVE_MODEL_ID = "/nas/yuehu/models/omni/Qwen2.5-Omni-3B-GPTQ"
     NATIVE_MODEL_ID = "/nas/yuehu/models/omni/Qwen2.5-Omni-3B"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     NATIVE_ARC_CHALLENGE_ACC = 0.2329
