@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
 * 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
 * 04/29/2025 3.1.0-dev (Now 4.) `main`: Xiaomi Mimo model support. Qwen 3 and 3 MoE model support. New arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
 * 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New ground-breaking `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
@@ -125,6 +126,7 @@ Native support support some of the most popular multi-modal models:
 
 | Multi-Modal              |   | 
 |-------------------|---|
+| Qwen 2.5 Omni     | ✅ | 
 | Qwen2 VL          | ✅ | 
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
@@ -165,10 +167,10 @@ Native support support some of the most popular multi-modal models:
 | Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen 1/2/3      | ✅ |           |   |
 | DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen 2/3 MoE  | ✅ |           |   |
 | Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen 2/2.5 VL   | ✅ |           |   |
-| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
-| DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
-| Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
-| EXAONE 3.0        | ✅ |             |   |  Nemotron Ultra              | ✅  |            |   |           |   |
+| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | Qwen 2.5 Omni | ✅ |           |   |
+| DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | RefinedWeb   | ✅ |           |   |
+| Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StableLM | ✅ |           |   |
+| EXAONE 3.0        | ✅ |             |   |  Nemotron Ultra              | ✅  |    StarCoder2        |  ✅ |           |   |
 
 ## Platform and HW Support 
 
