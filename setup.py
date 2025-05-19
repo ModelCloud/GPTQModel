@@ -164,13 +164,24 @@ if BUILD_CUDA_EXT == "1":
     from distutils.sysconfig import get_python_lib
 
     from torch.utils import cpp_extension as cpp_ext
+    project_root = os.path.dirname(os.path.abspath(__file__))
 
     conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
+    cutlass_include_dir = os.path.join(get_python_lib(), "cutlass_library/source/include")
+    vllm_csrc_dir = os.path.join(project_root, "gptqmodel_ext/vllm_csrc")
 
     print("conda_cuda_include_dir", conda_cuda_include_dir)
     if os.path.isdir(conda_cuda_include_dir):
         include_dirs.append(conda_cuda_include_dir)
         print(f"appending conda cuda include dir {conda_cuda_include_dir}")
+
+    if os.path.isdir(cutlass_include_dir):
+        include_dirs.append(cutlass_include_dir)
+        print(f"appending conda cuda include dir {cutlass_include_dir}")
+
+    if os.path.isdir(vllm_csrc_dir):
+        include_dirs.append(vllm_csrc_dir)
+        print(f"appending conda cuda include dir {vllm_csrc_dir}")
 
     extra_link_args = []
     extra_compile_args = {
@@ -191,6 +202,7 @@ if BUILD_CUDA_EXT == "1":
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            "-D CUTLASS_DEBUG_TRACE_LEVEL=2",
         ],
     }
 
@@ -258,6 +270,19 @@ if BUILD_CUDA_EXT == "1":
                             "gptqmodel_ext/marlin/marlin_cuda.cpp",
                             "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
                             "gptqmodel_ext/marlin/marlin_repack.cu",
+                        ],
+                        extra_link_args=extra_link_args,
+                        extra_compile_args=extra_compile_args,
+                    ),
+                    cpp_ext.CUDAExtension(
+                        "gptqmodel_machete_kernels",
+                        [
+                            "gptqmodel_ext/machete/machete.cpp",
+                            "gptqmodel_ext/machete/machete_pytorch.cu",
+                            "gptqmodel_ext/machete/machete_mm_dispatch.cu",
+                            "gptqmodel_ext/machete/machete_mm_impl.cu",
+                            "gptqmodel_ext/machete/machete_prepack.cu",
+                            "gptqmodel_ext/machete/permute_cols.cu",
                         ],
                         extra_link_args=extra_link_args,
                         extra_compile_args=extra_compile_args,
