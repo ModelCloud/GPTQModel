@@ -74,3 +74,4 @@ from .starcoder2 import Starcoder2GPTQ
 from .telechat2 import TeleChat2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
+from .falcon_h1 import FalconH1GPTQ

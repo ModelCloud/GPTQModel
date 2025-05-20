@@ -123,6 +123,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -194,6 +195,7 @@ MODEL_MAP = {
     "telechat": TeleChat2GPTQ,
     "instella": InstellaGPTQ,
     "mimo": MimoGPTQ,
+    "falcon_h1": FalconH1GPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
