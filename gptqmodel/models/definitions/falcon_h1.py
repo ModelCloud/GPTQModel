@@ -25,8 +25,7 @@ class FalconH1GPTQ(BaseGPTQModel):
     layers_node = "model.layers"
     layer_type = "FalconH1DecoderLayer"
     layer_modules = [
-        ["feed_forward.gate_proj"],
-        ["feed_forward.up_proj"],
+        ["feed_forward.gate_proj", "feed_forward.up_proj"],
         ["feed_forward.down_proj"],
     ]
 
