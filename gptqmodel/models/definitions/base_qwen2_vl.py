@@ -41,14 +41,19 @@ class BaseQwen2VLGPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
     ]
 
-    layers_modules_tree = [
-        "model",
-        "language_model",
-        "layers",
+    branch = [
         "#",
         {
             "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
             "mlp": ("up_proj", "gate_proj", "down_proj"),
+        }
+    ]
+
+    layers_modules_tree = [
+        "model",
+        {
+            "layers": branch,
+            "language_model": {"layers": branch},
         }
     ]
 
