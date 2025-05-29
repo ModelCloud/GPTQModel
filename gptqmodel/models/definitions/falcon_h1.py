@@ -18,13 +18,14 @@ from ..base import BaseGPTQModel
 
 
 class FalconH1GPTQ(BaseGPTQModel):
-
-    base_modules = ["model.embed_tokens", "model.norm_f"]
-    pre_lm_head_norm_module = "model.norm_f"
+    base_modules = ["model.embed_tokens"]
 
     layers_node = "model.layers"
     layer_type = "FalconH1DecoderLayer"
     layer_modules = [
+        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
+        ["self_attn.o_proj"],
+
         ["feed_forward.gate_proj", "feed_forward.up_proj"],
         ["feed_forward.down_proj"],
     ]
