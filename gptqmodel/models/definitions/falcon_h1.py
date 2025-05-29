@@ -26,10 +26,8 @@ class FalconH1GPTQ(BaseGPTQModel):
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],
 
-        ["mamba.conv1d"],
         ["mamba.in_proj", "mamba.out_proj"],
 
         ["feed_forward.gate_proj", "feed_forward.up_proj"],
         ["feed_forward.down_proj"],
     ]
-    
