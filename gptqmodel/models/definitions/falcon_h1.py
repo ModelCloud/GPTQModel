@@ -13,13 +13,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from transformers import AutoModel
 
-from . import LlamaGPTQ
+from ..base import BaseGPTQModel
 
 
-class DreamGPTQ(LlamaGPTQ):
-    loader = AutoModel
-    # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
-    support_batch_quantize = False
-    layer_type = "DreamDecoderLayer"
+class FalconH1GPTQ(BaseGPTQModel):
+    base_modules = ["model.embed_tokens"]
+
+    layers_node = "model.layers"
+    layer_type = "FalconH1DecoderLayer"
+    layer_modules = [
+        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
+        ["self_attn.o_proj"],
+
+        ["mamba.in_proj", "mamba.out_proj"],
+
+        ["feed_forward.gate_proj", "feed_forward.up_proj"],
+        ["feed_forward.down_proj"],
+    ]

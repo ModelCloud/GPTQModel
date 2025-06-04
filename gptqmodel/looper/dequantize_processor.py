@@ -16,6 +16,8 @@
 
 from typing import Dict
 
+import torch
+
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -41,13 +43,23 @@ class DequantizeProcessor(LoopProcessor):
         w = module.weight.data
 
         # TODO fix num_itr param..need to calculate this before dequant
-        m = self.quantized_modules.pop(module.full_name)
-        m.optimize()
+        with self.lock:
+            m = self.quantized_modules.pop(module.full_name)
+            m.optimize()
         log.info(f"Dequantize: `{m.name}`")
+
+        # TODO: we can optimize this and dequant + w - wq on cpu
         wq = m.dequantize_weight().T.to(device=device)
 
+        if module.weight.data.dtype == torch.float16:
+            # diff in float16
+            w_wq_diff = w - wq
+        else:
+            # diff in float32
+            w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+
         module.state.update({
-            "w": w,
+            "w_wq_diff": w_wq_diff,
             "wq": wq,
         })
 

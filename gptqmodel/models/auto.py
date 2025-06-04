@@ -21,9 +21,12 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
-from .definitions.dream import DreamGPTQ
 
 log = setup_logger()
+
+# if not os.environ.get("PYTHON_GIL", None):
+#     os.environ["PYTHON_GIL"] = '0'
+#     log.info("ENV: Auto disable GIL and use free-threading mode when applicable: Python 3.13t+. You must install the -t edition of Python.")
 
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
@@ -57,11 +60,10 @@ from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrain
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
-from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
-from ..utils.torch import torch_empty_cache  # noqa: E402
+from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -74,6 +76,7 @@ from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
+from .definitions.dream import DreamGPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
@@ -91,6 +94,7 @@ from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
+from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
 from .definitions.mistral import MistralGPTQ  # noqa: E402
@@ -108,6 +112,7 @@ from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
 from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
+from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
@@ -118,6 +123,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -173,6 +179,7 @@ MODEL_MAP = {
     "qwen3_moe": Qwen3MoeGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "qwen2_5_vl": Qwen2_5_VLGPTQ,
+    "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
@@ -187,6 +194,8 @@ MODEL_MAP = {
     "ovis": OvisGPTQ,
     "telechat": TeleChat2GPTQ,
     "instella": InstellaGPTQ,
+    "mimo": MimoGPTQ,
+    "falcon_h1": FalconH1GPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())

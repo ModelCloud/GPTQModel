@@ -41,6 +41,7 @@ class HookedConv1D(transformers.Conv1D):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -93,6 +94,7 @@ class HookedConv1d(torch.nn.Conv1d):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -146,6 +148,7 @@ class HookedConv2d(torch.nn.Conv2d):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -167,6 +170,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
         return custom
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -189,28 +193,43 @@ class HookedLinear(torch.nn.Linear):
         return custom_linear
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.to(device=self.weight.data.device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
         return output
+
+
+def _replace_module(module, child, name, level: int = 0, debug: bool = False) -> bool:
+    level_indent = "---" * level
+    instance_type = type(child)
+    if debug:
+        log.info(f"{level_indent} Hook: {instance_type.__name__}: {name}")
+
+    if isinstance(child, torch.nn.Linear):
+        setattr(module, name, HookedLinear.from_linear(child))
+    elif isinstance(child, transformers.Conv1D):
+        setattr(module, name, HookedTransformerConv1D.from_conv1d(child))
+    elif isinstance(child, nn.Conv1d):
+        setattr(module, name, HookedConv1d.from_conv1d(child))
+    elif isinstance(child, nn.Conv2d):
+        setattr(module, name, HookedConv2d.from_conv2d(child))
+    else:
+        if debug:
+            log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
+        return False
+
+    return True
+
 
 def replace_module_with_hooked_legacy(module, level: int = 0):
     if level == 0:
         log.info("Hooked Modules: Using legacy based config for targeting of modules")
 
     for name, child in module.named_children():
-        if isinstance(child, torch.nn.Linear):
-            setattr(module, name, HookedLinear.from_linear(child))
-        elif isinstance(child, nn.Conv1d):
-            setattr(module, name, HookedConv1d.from_conv1d(child))
-        elif isinstance(child, nn.Conv2d):
-            setattr(module, name, HookedConv2d.from_conv2d(child))
-        elif isinstance(child, transformers.Conv1D):
-            setattr(module, name, HookedConv1D.from_conv1d(child))
-        # elif isinstance(child, torch.nn.Conv2d):
-        #     setattr(module, name, HookedConv2d.from_conv2d(child))
-        else:
+        if not _replace_module(module, child, name, level):
             replace_module_with_hooked_legacy(child, level=level+1)
+
 
 def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: int = 0, debug: bool = False):
     if level == 0:
@@ -220,7 +239,6 @@ def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: 
 
     # tuple represents targeted modules
     execute_replace = isinstance(tree, Tuple)
-
     # level indent
     level_indent = "---" * level
 
@@ -229,35 +247,28 @@ def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: 
             log.info(f"{level_indent} child name: {name}")
         if execute_replace:
             if name in tree:
-                if isinstance(child, torch.nn.Linear):
-                    if debug:
-                        log.info(f"{level_indent} Hook: nn.Linear: {name}")
-                    setattr(module, name, HookedLinear.from_linear(child))
-                elif isinstance(child, transformers.Conv1D):
-                    if debug:
-                        log.info(f"{level_indent} Hook: transformers.Conv1D: {name}")
-                    setattr(module, name, HookedTransformerConv1D.from_conv1d(child))
-                elif isinstance(child, nn.Conv1d):
-                    if debug:
-                        log.info(f"{level_indent} Hook: nn.Conv1d: {name}")
-                    setattr(module, name, HookedConv1d.from_conv1d(child))
-                elif isinstance(child, nn.Conv2d):
-                    if debug:
-                        log.info(f"{level_indent} Hook: nn.Conv2d: {name}")
-                    setattr(module, name, HookedConv2d.from_conv2d(child))
-                else:
-                    if debug:
-                        log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
+                # do replace if name in tree and tree is a tuple
+                _replace_module(module, child, name, level, debug)
             else:
                 if debug:
                     log.warn(f"{level_indent} Hook: execute_replace but layer skipped due to not targeted: {name}")
         else:
             if isinstance(tree, Dict):
                 if name in tree:
-                    if debug:
-                        log.info(f"{level_indent} Hook: follow tree node: {name} -> nest into {name}")
-                    replace_module_with_hooked_tree(child, tree=tree[name],
-                                                    level=level+1, debug=debug)
+                    if isinstance(tree[name], Tuple) and name in tree[name]:
+                        # do replace if name in tree and tree is a tuple
+                        _replace_module(module, child, name, level, debug)
+                    elif isinstance(tree[name], (Dict, Tuple, List)):
+                        # follow tree node if name in tree and tree is a dict
+                        if debug:
+                            log.info(f"{level_indent} Hook: follow tree node: {name} -> nest into {name}")
+
+                        replace_module_with_hooked_tree(child, tree=tree[name],
+                                                        level=level+1, debug=debug)
+                    else:
+                        if debug:
+                            log.warn(f"{level_indent} Hook: skipped unknown tree node dict: {name} vs tree: {tree}")
+
                 elif "#" in tree and name.isdigit():
                     if debug:
                         log.info(f"{level_indent} Hook: follow tree node: {name} -> nest into {name}")

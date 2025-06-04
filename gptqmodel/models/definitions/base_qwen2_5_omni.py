@@ -17,7 +17,7 @@
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor, ProcessorMixin
+from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
@@ -26,13 +26,13 @@ from .._const import CPU
 from ..base import BaseGPTQModel
 
 
-class BaseQwen2VLGPTQ(BaseGPTQModel):
-    loader = AutoModelForVision2Seq
+class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
+    loader = AutoModelForTextToWaveform
 
-    base_modules = ["model.embed_tokens", "model.norm"]
-    pre_lm_head_norm_module = "model.norm"
+    base_modules = ["thinker.model.embed_tokens", "thinker.model.norm"]
+    pre_lm_head_norm_module = "thinker.model.norm"
 
-    layers_node = ["model.layers", "model.language_model.layers"]
+    layers_node = ["thinker.model.layers"]
 
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
@@ -41,19 +41,14 @@ class BaseQwen2VLGPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
     ]
 
-    branch = [
+    layers_modules_tree = [
+        "thinker",
+        "model",
+        "layers",
         "#",
         {
             "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
             "mlp": ("up_proj", "gate_proj", "down_proj"),
-        }
-    ]
-
-    layers_modules_tree = [
-        "model",
-        {
-            "layers": branch,
-            "language_model": {"layers": branch},
         }
     ]
 
@@ -62,11 +57,27 @@ class BaseQwen2VLGPTQ(BaseGPTQModel):
     require_load_processor = True
 
     def pre_quantize_generate_hook_start(self):
-        self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
+
+        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(self.quantize_config.device)
+        self.model.thinker.visual = self.model.thinker.visual.to(self.quantize_config.device)
+        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(self.quantize_config.device)
+        
+        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(self.quantize_config.device)
+        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(self.quantize_config.device)
+        
+        for layer in self.model.thinker.model.layers:
+            layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.model.visual = move_to(self.model.visual, device=CPU)
-
+        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
+        self.model.thinker.visual = self.model.thinker.visual.to(CPU)
+        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+        
+        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
+        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
+        
+        for layer in self.model.thinker.model.layers:
+            layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
     @staticmethod
     def process_vision_info(
             conversations: list[dict] | list[list[dict]],

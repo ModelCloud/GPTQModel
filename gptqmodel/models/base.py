@@ -200,6 +200,7 @@ class BaseGPTQModel(nn.Module):
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_dataset_concat_size: Optional[int] = None,
         batch_size: int = 1,
+        calibration_data_min_length: int = 10,
     ):
         if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
             if self.tokenizer is None:
@@ -234,9 +235,15 @@ class BaseGPTQModel(nn.Module):
             return [tensor]
 
         new_calibration_dataset = []
+        too_short_calibration_data_count = 0
         for example in calibration_dataset:
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
+
+            # filter if input_ids is too short
+            if len(input_ids[0]) <= calibration_data_min_length:
+                too_short_calibration_data_count += 1
+                continue
 
             new_calibration_dataset.append(
                 {
@@ -244,6 +251,10 @@ class BaseGPTQModel(nn.Module):
                     "attention_mask": attention_mask,
                 }
             )
+
+        if too_short_calibration_data_count > 0:
+            log.warn(f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+                     f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
 
         if calibration_dataset_concat_size:
             concatenated_data = []
@@ -341,6 +352,8 @@ class BaseGPTQModel(nn.Module):
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        # minimum length of calibration data, default is 10
+        calibration_data_min_length: int = 10,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -409,7 +422,7 @@ class BaseGPTQModel(nn.Module):
             "calibration_dataset_concat_size": calibration_dataset_concat_size,
             "batch_size": batch_size,
             "logger_board": logger_board,
-            "retain_w": needs_lora,  # lora needs original w
+            "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
 
         # rotate model
@@ -452,7 +465,9 @@ class BaseGPTQModel(nn.Module):
 
         if self.quantize_config.v2 is True:
             from ..looper.native_processor import NativeProcessor
-            quantize_processor.insert(0, NativeProcessor(**args))
+            args_clone = copy.deepcopy(args)
+            args_clone.pop("calculate_w_wq_diff", None)
+            quantize_processor.insert(0, NativeProcessor(**args_clone))
 
         processors = quantize_processor
         # Append EoRA processor for lora adapter

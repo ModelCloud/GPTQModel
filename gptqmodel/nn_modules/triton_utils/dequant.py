@@ -30,7 +30,7 @@ def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stage
     return configs
 
 # tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128
-DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([1024], 1, [1])
+DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([1024], [1], [1])
 #DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([128, 256, 512, 1024], [4, 8], [2]) <- slower
 @triton.autotune(DEFAULT_DEQUANT_CONFIGS, key=["numels"])
 @triton.jit

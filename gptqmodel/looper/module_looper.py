@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import torch
@@ -29,11 +31,12 @@ from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
-from ..quantization.gptq import CPU, DEVICE_0, DEVICE_1
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import torch_empty_cache
+from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
+                           HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
+                           torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
 
 log = setup_logger()
 
@@ -42,6 +45,7 @@ class ModuleLooper():
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
+        self.lock = threading.Lock()
 
     def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache):
         layer_inputs = []
@@ -53,7 +57,7 @@ class ModuleLooper():
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         # TODO HookLinear add register_forward_pre_hook()
-        def store_input_hook(_, args, kwargs):
+        def store_input_hook(module, args, kwargs):
             # Positional arguments.
             layer_input = []
             for inp in args:
@@ -67,7 +71,7 @@ class ModuleLooper():
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
-            if kwargs.get("attention_mask") is not None:
+            if kwargs.get("attention_mask") is not None and str(type(module)) != "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
@@ -101,7 +105,10 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_start()
         for example in calibration_data:
             for k, v in example.items():
-                data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
+                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                    data_device = self.gptq_model.quantize_config.device
+                else:
+                    data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
                 if isinstance(v, list):
                     for index in range(len(v)):
                         if len(v[index].shape) == 1:
@@ -113,7 +120,10 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                self.gptq_model.model(**example)
+                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                    self.gptq_model.model.generate(**example, return_audio=False)
+                else:
+                    self.gptq_model.model(**example)
             except ValueError:
                 pass
         self.gptq_model.pre_quantize_generate_hook_end()
@@ -153,7 +163,6 @@ class ModuleLooper():
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
-
         layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
 
         for p_index, processor in enumerate(self.processors):
@@ -287,35 +296,45 @@ class ModuleLooper():
 
                     handle = []
                     # log.info(f"Subset = {subset}")
+                    device_next_reset()
+
                     for name in subset:
+                        m = subset[name]
+                        m.module.target_device, m.module.target_device_stream = device_next()
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
-                            subset[name].forward_hook = processor.preprocess_fwd_hook(name)
+                            subset[name].forward_hook = processor.pre_process_fwd_hook(name)
                         else:
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
                             assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
-                            handle.append(subset[name].register_forward_hook(processor.preprocess_fwd_hook(name)))
+                            handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
 
+                    # ---- Start Pre-Quantized Forward ----
                     # logger.info(f"layer-{i}: Begin Forward() Pass")
                     fwd_start = time.time()
+
                     layer_outputs = []
                     for j in range(processor.num_batches):
                         layer_input = []
                         # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
                         for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
+                            layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=False))
 
                         mask = attention_masks[j]
-                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
+                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=False)
 
                         additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
                         layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
+                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
                         )
+
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids
                         for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
+                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
+
+                        # sync above stream copies
+                        #torch_sync(device=cur_layer_device)
 
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
@@ -330,7 +349,6 @@ class ModuleLooper():
                         else:
                             layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
                                                                                   **additional_layer_inputs)
-
                         # For Native processor, we can update processor input here
                         # if second forward is not required, this/first forward output is captured as input for next loop
                         if not processor.fwd_after_process:
@@ -357,6 +375,7 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = None
 
+
                     # TODO FIXME: MoE modules forward() may not trigger if dataset is too small
                     # and moe gating logic does not trigger some moes
                     if isinstance(processor, GPTQProcessor):
@@ -368,11 +387,44 @@ class ModuleLooper():
 
                         for name in moe_skip_modules:
                             subset.pop(name)
-                    
-                    for name_index, name in enumerate(subset):
-                        m = subset[name]
-                        processor.process(module=m, auto_gc=auto_gc)
-                        processed_subset[name] = m
+                    # ---- END Pre-Quantized Forward ----
+
+                    # ---- Start Proceess Hook ----
+                    if len(ALL_DEVICES) <= 1:
+                        for name_index, name in enumerate(subset):
+                            m = subset[name]
+                            processor.process(module=m, auto_gc=auto_gc)
+                            processed_subset[name] = m
+                    else:
+                        # TODO: there are threading/sync issues with streaming transfers
+                        # for name in subset:
+                        #     m = subset[name]
+                        #     processor.pre_process_streaming(module=m)
+                        #
+                        # torch_sync()
+
+                        # set to number of devices
+                        max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            futures = []
+                            def process_module(name, m):
+                                processor.process(module=m, auto_gc=auto_gc)
+                                return name, m
+
+                            for name in subset:
+                                m = subset[name]
+                                futures.append(executor.submit(
+                                    process_module,
+                                    name,
+                                    m
+                                ))
+
+                            for future in futures:
+                                name, m = future.result()
+                                processed_subset[name] = m
+
+                        torch_sync()
+                    # ---- End Process Hook ----
 
                     if index == len(modules) - 1:
                         if auto_gc:
@@ -401,9 +453,11 @@ class ModuleLooper():
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
                         additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
+
                         layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
                         if layer_position_ids is not None:
                             additional_layer_inputs["position_ids"] = layer_position_ids
+
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
 
@@ -416,7 +470,9 @@ class ModuleLooper():
                             module(*layer_input)[0] if is_lm_head_module else
                             module(*layer_input, **additional_layer_inputs)[0],
                             device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                            # stream=True,
                         )
+
                         layer_outputs.append([layer_output])
 
                         del layer_input
@@ -427,6 +483,8 @@ class ModuleLooper():
 
                 # TODO move to processor?
                 if p_index == len(self.processors) - 1:
+                    torch_sync()
+
                     if not is_lm_head_module:
                         layers[layer_index] = self.gptq_model.post_quantize(module)
                     else:
@@ -440,6 +498,8 @@ class ModuleLooper():
 
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
+                    torch_sync()
+
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
@@ -475,7 +535,6 @@ class ModuleLooper():
             reverse_p.finalize(model=self.gptq_model, **kwargs)
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
-
 
         if auto_gc:
             torch_empty_cache()

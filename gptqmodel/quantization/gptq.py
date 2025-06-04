@@ -32,20 +32,20 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import auto_select_torch_device, torch_compile, torch_sync
+from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_compile, torch_streamCtx, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
-
+lock = threading.Lock()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-CPU = torch.device("cpu")
-DEVICE_0 = auto_select_torch_device(index=0)
-# device_1 may be same as device_0 if there is only 1 visible/active device
-DEVICE_1 = auto_select_torch_device(index=1)
-
-lock = threading.Lock()
+# TODO: is there a threading init bug in torch.linalg?
+# bypass strange threading bug
+if HAS_CUDA or HAS_XPU:
+    tmp_eye = torch.eye(64, device="cuda" if HAS_CUDA else "xpu")
+    torch.linalg.cholesky(tmp_eye)
+    del tmp_eye
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -62,6 +62,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 class GPTQ:
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+        # self.lock = threading.Lock()
+
         # self.num_tied_handles = 0
         # if qcfg.tied_gptq_handle is not None:
         #     qcfg.tied_gptq_handle.num_tied_handles += 1
@@ -71,7 +73,7 @@ class GPTQ:
         # self.issue_nan_hessian = False
         # self.issue_non_invertible = False
 
-        self.W = module.weight
+        # self.W = module.weight
         self.rows, self.columns = get_number_of_rows_and_cols(module)
         if isinstance(module, NamedModule):
             self.module = module.module
@@ -79,11 +81,12 @@ class GPTQ:
         else:
             self.name = HF_OPTIMUM
             self.module = module
+            # emulate NamedModule properties
+            self.module.target_device, self.module.target_device_stream = device_next()
 
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
-        self.device = self.module.weight.device
 
         self.module_copy = None
 
@@ -129,124 +132,28 @@ class GPTQ:
 
         return clone.float()
 
-    @torch.inference_mode()
-    def block_cholesky_inverse(self, L: torch.Tensor, upper=False, block_size=512):
-        """
-        Optimized Cholesky inverse with O(block_size^2) memory usage.
-        Args:
-            L (torch.Tensor): Cholesky factor (lower triangular)
-            upper (bool): If True, L is upper triangular
-            block_size (int): Processing block size (tunes memory/performance)
-        Returns:
-            torch.Tensor: The inverse matrix
-        """
-        assert L.dim() == 2 and L.size(0) == L.size(1), "Input must be square"
-        n = L.size(0)
-        device = L.device
-        dtype = L.dtype
-
-        if upper:
-            L = L.t()
-
-        invA = torch.zeros_like(L)
-        num_blocks = math.ceil(n / block_size)
-
-        # Cache for invL blocks to avoid recomputation
-        invL_cache = {}
-
-        for k in reversed(range(num_blocks)):
-            k_start = k * block_size
-            k_end = min((k + 1) * block_size, n)
-            k_size = k_end - k_start
-
-            # Diagonal block inversion
-            L_block = L[k_start:k_end, k_start:k_end]
-            invL_block = torch.linalg.solve_triangular(
-                L_block,
-                torch.eye(k_size, device=device, dtype=dtype),
-                upper=False
-            )
-            invL_cache[k] = invL_block
-
-            # Diagonal block contribution
-            invA[k_start:k_end, k_start:k_end] = invL_block.t() @ invL_block
-
-            # Process off-diagonal blocks in parallel where possible
-            for j in range(k):
-                j_start = j * block_size
-                j_end = min((j + 1) * block_size, n)
-                j_size = j_end - j_start
-
-                # Compute all required invL_ik blocks first
-                invL_ik_blocks = []
-                for i in range(k, num_blocks):
-                    i_start = i * block_size
-                    i_end = min((i + 1) * block_size, n)
-
-                    if i == k:
-                        invL_ik = invL_block
-                    else:
-                        if i in invL_cache:
-                            invL_ii = invL_cache[i]
-                        else:
-                            L_ii = L[i_start:i_end, i_start:i_end]
-                            invL_ii = torch.linalg.solve_triangular(
-                                L_ii,
-                                torch.eye(i_end - i_start, device=device, dtype=dtype),
-                                upper=False
-                            )
-                            invL_cache[i] = invL_ii
-
-                        L_ik = L[i_start:i_end, k_start:k_end]
-                        invL_ik = -invL_ii @ (L_ik @ invL_block)
-                        del invL_ii
-
-                    invL_ik_blocks.append(invL_ik)
-                    del invL_ik
-
-                # Stack blocks for batched operations
-                L_jk = L[j_start:j_end, k_start:k_end]
-
-                # Compute contributions in a more vectorized way
-                temp_col = torch.cat([
-                    (invL_ik.t() @ L_jk.t()) for invL_ik in invL_ik_blocks
-                ], dim=0)
-
-                del invL_ik_blocks
-
-                # Accumulate to output
-                invA[j_start:j_end, k_start:k_end] = temp_col[:j_size].t()
-                invA[k_start:k_end, j_start:j_end] = temp_col[:j_size]
-
-                del temp_col
-
-        del invL_cache
-        return invA
-
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
         self.fwd_counter += 1
 
         if self.fwd_inputs_buffered:
-            if DEVICE_0.index != DEVICE_1.index:
-                self.fwd_inputs_buffered_data.append(inp.to(device=DEVICE_1, non_blocking=True))
-            else:
-                self.fwd_inputs_buffered_data.append(inp.to(device=CPU))
+            # with torch_streamCtx(self.module.target_device_stream):
+            #     self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=True))
+            self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=False))
         else:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        reshaped_inp = inp.to(device=DEVICE_1, dtype=torch.float32)
-        del inp
+        inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            reshaped_inp = reshaped_inp.reshape(-1, reshaped_inp.shape[-1])
+            reshaped_inp = inp.reshape(-1, inp.shape[-1])
         else:
             if isinstance(self.module, nn.Conv1d):
-                reshaped_inp = reshaped_inp.reshape(
-                    reshaped_inp.size(0) * self.module.groups,
-                    reshaped_inp.size(1) // self.module.groups,
-                    reshaped_inp.shape[2],
+                reshaped_inp = inp.reshape(
+                    inp.size(0) * self.module.groups,
+                    inp.size(1) // self.module.groups,
+                    inp.shape[2],
                     1,
                 )
                 unfold = nn.Unfold(
@@ -258,11 +165,11 @@ class GPTQ:
                 # output size (batch_size, channels * \prod kernel_size, num_patches)
                 reshaped_inp = unfold(reshaped_inp)
             else:
-                reshaped_inp = reshaped_inp.reshape(
-                    reshaped_inp.size(0) * self.module.groups,
-                    reshaped_inp.size(1) // self.module.groups,
-                    reshaped_inp.shape[2],
-                    reshaped_inp.shape[3],
+                reshaped_inp = inp.reshape(
+                    inp.size(0) * self.module.groups,
+                    inp.size(1) // self.module.groups,
+                    inp.shape[2],
+                    inp.shape[3],
                 )
                 unfold = nn.Unfold(
                     self.module.kernel_size,
@@ -279,17 +186,23 @@ class GPTQ:
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
-                                 device=DEVICE_1)
+                                 device=reshaped_inp.device)
+
+        # moe model may receive an empty batch, return early
+        if batch_token_size == 0:
+            return batch_token_size, reshaped_inp, 0, 0
 
         beta = self.nsamples / (self.nsamples + batch_token_size)
         alpha = 2.0 / (self.nsamples + batch_token_size)
+
         self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
 
         # update number of collected samples
         self.nsamples += batch_token_size
 
         # inp returned here is flattened/reshaped original inp
-        return batch_token_size, reshaped_inp, alpha, beta
+        #return batch_token_size, reshaped_inp, alpha, beta
+        del batch_token_size, reshaped_inp, alpha, beta
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -325,39 +238,31 @@ class GPTQ:
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
         damp = self.qcfg.damp_percent
-        while 1 > damp > 0:
+        diag = torch.arange(self.columns, device=H.device)
+        mean = torch.mean(torch.diag(H))
+        while 0 < damp < 1:
             try:
-                diag = torch.arange(self.columns, device=DEVICE_1)
-                H[diag, diag] += damp * torch.mean(torch.diag(H))
-
-                with lock:
-                    # print(f"H SHAPE: {H.shape}")
-                    H = torch.linalg.cholesky(H)
-
-                    try:
-                        # H = self.block_cholesky_inverse(H, block_size=H.shape[0])
-                        H = torch.cholesky_inverse(H)
-                    except torch.OutOfMemoryError:
-                        # half the block size will use ~18% less memory but at higher accuracy loss: 1^-2 vs 1^-8
-                        # worth the tradeoff since it's either oom or slightly higher accuracy loss
-                        H = self.block_cholesky_inverse(H, block_size=self.columns // 2)
-                        log.warn(
-                            "Quantization: OOM bypassed via low memory math at a cost of lower accuracy: `cholesky_inverse`")
-
-                    Hinv = torch.linalg.cholesky(H, upper=True)
+                H2 = H.clone()
+                H2[diag, diag] += damp * mean
+                # TODO call to torch.linalg is not threadsafe? Porque no? Esta muy mal.
+                H2 = torch.linalg.cholesky(H2)
+                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                del H, H2
                 break
             except torch._C._LinAlgError as e:
                 if self.qcfg.damp_auto_increment != 0:
                     log.warn(
-                        f"Quantization: Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
+                        f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
                     damp += self.qcfg.damp_auto_increment
                 else:
                     log.warn(
-                        "Quantization: Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
+                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
                     raise e
 
         if not (0 < damp < 1):
-            raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
+            log.error(f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
+            #raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
+            return None, 1.0
 
         return Hinv, damp
 
@@ -366,7 +271,6 @@ class GPTQ:
         self,
         blocksize=128,
     ):
-
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
@@ -375,7 +279,7 @@ class GPTQ:
 
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
-            torch.cuda.synchronize()
+            torch_sync(device=self.module.target_device)
 
             for inp in self.fwd_inputs_buffered_data:
                 self.process_batch(inp)
@@ -392,14 +296,14 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=DEVICE_1)
+            W = self._clone_module(device=self.module.target_device)
         else:
-            W = self.module_copy
-            self.module_copy = None
+            W = self.module_copy.to(device=self.module.target_device)
+            del self.module_copy
 
         self.quantizer.find_params(W, weight=True)
 
-        H = self.H
+        H = self.H.to(device=self.module.target_device)
         del self.H
 
         dead = torch.diag(H) == 0
@@ -442,11 +346,14 @@ class GPTQ:
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+
+            if Hinv is not None:
+                Hinv1 = Hinv[i1:i2, i1:i2]
 
             for i in range(count):
                 w = W1[:, i]
-                d = Hinv1[i, i]
+                if Hinv is not None:
+                    d = Hinv1[i, i]
 
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
@@ -466,25 +373,33 @@ class GPTQ:
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
-
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                if Hinv is not None:
+                    Losses1[:, i] = (w - q) ** 2 / d**2
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+            if Hinv is not None:
+                Losses[:, i1:i2] = Losses1 / 2
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+        # TODO: why is there a torch_sync here? There are no streaming ops here?
+        # torch_sync(device=self.module.target_device)
 
-        del Hinv
-        torch_sync()
+        if Hinv is not None:
+            del Hinv
+            if self.nsamples != 0:
+                avg_loss = torch.sum(Losses).item() / self.nsamples
 
-        avg_loss = torch.sum(Losses).item() / self.nsamples
-
-        if math.isnan(avg_loss):
-            print("Losses sum item:", torch.sum(Losses).item())
-            raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+                if math.isnan(avg_loss):
+                    print("Losses sum item:", torch.sum(Losses).item())
+                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+            else:
+                log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
+                avg_loss = 999999999
+        else:
+            avg_loss = 999999999
 
         del Losses
 
@@ -509,7 +424,7 @@ class GPTQ:
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        Q = Q.to(device=DEVICE_1)
+        #Q = Q.to(device=use_device)
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -526,7 +441,8 @@ class GPTQ:
         if hasattr(self, "H"):
             del self.H
         del self.quantizer
-        del self.module_copy
+        if hasattr(self, "module_copy"):
+            del self.module_copy
         del self.module
 
         # torch_empty_cache(self.device)

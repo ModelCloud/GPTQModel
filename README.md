@@ -1,6 +1,6 @@
 <p align=center>
 <div align=center>
-<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=75%>
+<img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=500>
 </div>
 <h1 align="center">GPTQModel</h1>
 </p>
@@ -17,6 +17,10 @@
 </p>
 
 ## Latest News
+* 05/29/2025 4.0.0-dev `main`: Falcon H1 model support. Fixed Transformers `4.52+` compat with Qwen 2.5 VL models.
+* 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
+* 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
+* 04/29/2025 3.1.0-dev (Now 4.) `main`: Xiaomi Mimo model support. Qwen 3 and 3 MoE model support. New arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
 * 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New ground-breaking `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
@@ -103,17 +107,19 @@ GPTQModel is a production ready LLM model compression/quantization toolkit with 
 
 Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
-GPTQModel not only supports GPTQ but also QQQ with more quantization methods support planned. 
+GPTQModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
-GPTQModel is an expandable/modular design supporting multiple quantization methods.
+GPTQModel is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization              |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
-|-------------------|---|---|---|---|---|
-| GPTQ          | ✅ | ✅ | ✅ | ✅ | ✅ | 
-| GPTQ v2         | ✅ | ✅ | ✅ | ✅ | ✅ | 
-| QQQ + Rotation         | ✅ | x | x | x | x | 
+| Quantization Feature |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
+|----------------------|---|---|---|---|---------------|
+| GPTQ                 | ✅ | ✅ | ✅ | ✅ | ✅             | 
+| EoRA                 | ✅ | ✅ | ✅ | ✅ | x             | 
+| GPTQ v2              | ✅ | ✅ | ✅ | ✅ | ✅             | 
+| QQQ                  | ✅ | x | x | x | x             | 
+| Rotation             | ✅ | x | x | x | x             |  
 
 ## Multi-Modal
 
@@ -121,6 +127,7 @@ Native support support some of the most popular multi-modal models:
 
 | Multi-Modal              |   | 
 |-------------------|---|
+| Qwen 2.5 Omni     | ✅ | 
 | Qwen2 VL          | ✅ | 
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
@@ -128,7 +135,7 @@ Native support support some of the most popular multi-modal models:
 ## GPTQ v2 quantization unlocks useful utral-low bit quantization
 
 <div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9>
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=350>
 </div>
 
 ## Features
@@ -154,17 +161,17 @@ Native support support some of the most popular multi-modal models:
 ## Model Support  
 | Model             |   |             |   |                |   |            |   |           |   |
 |-------------------|---|-------------|---|----------------|---|------------|---|-----------|---|
-| Baichuan          | ✅ | Falcon      | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
+| Baichuan          | ✅ | Falcon (H1)    | ✅ | InternLM 1/2.5 | ✅ | OPT        | ✅ | TeleChat2 | ✅ |
 | Bloom             | ✅ | Gemma 1/2/3 | ✅ | Llama 1-3.3    | ✅ | OLMo2      | ✅ | Yi        | ✅ |
 | ChatGLM           | ✅ | GPTBigCod   | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2 | ✅ | XVERSE    | ✅ |
 | CodeGen           | ✅ | GPTNeoX     | ✅ | LongLLaMA      | ✅ | Phi 1-4    | ✅ |           |   |
-| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen       | ✅ |           |   |
-| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen2/3 MoE  | ✅ |           |   |
-| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen2/2.5 VL   | ✅ |           |   |
-| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | RefinedWeb | ✅ |           |   |
-| DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | StableLM   | ✅ |           |   |
-| Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StarCoder2 | ✅ |           |   |
-| EXAONE 3.0        | ✅ |             |   |  Nemotron Ultra              | ✅  |            |   |           |   |
+| Cohere 1-2        | ✅ | GPT-2       | ✅ | MiniCPM3       | ✅ | Qwen 1/2/3      | ✅ |           |   |
+| DBRX Converted    | ✅ | GPT-J       | ✅ | Mistral        | ✅ | Qwen 2/3 MoE  | ✅ |           |   |
+| Deci              | ✅ | Granite     | ✅ | Mixtral        | ✅ | Qwen 2/2.5 VL   | ✅ |           |   |
+| DeepSeek-V2/V3/R1 | ✅ | GRIN-MoE    | ✅ | MobileLLM      | ✅ | Qwen 2.5 Omni | ✅ |           |   |
+| DeepSeek-V2-Lite  | ✅ | Hymba       | ✅ | MOSS           | ✅ | RefinedWeb   | ✅ |           |   |
+| Dream             | ✅ | Instella    | ✅ | MPT            | ✅ | StableLM | ✅ |           |   |
+| EXAONE 3.0        | ✅ |             |   |  Nemotron Ultra              | ✅  |    StarCoder2        |  ✅ |           |   |
 
 ## Platform and HW Support 
 
@@ -253,7 +260,7 @@ quant_config = QuantizeConfig(bits=4, group_size=128)
 model = GPTQModel.load(model_id, quant_config)
 
 # increase `batch_size` to match gpu/vram specs to speed up quantization
-model.quantize(calibration_dataset, batch_size=2)
+model.quantize(calibration_dataset, batch_size=1)
 
 model.save(quant_path)
 ```

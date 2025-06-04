@@ -1,5 +1,5 @@
 accelerate>=1.6.0
-datasets>=3.5.0
+# datasets>=3.5.0
 numpy>=1.26.4
 torch>=2.4.1
 safetensors>=0.5.3
@@ -14,3 +14,5 @@ huggingface_hub>=0.30.1
 random_word==1.0.13
 tokenicer==0.0.4
 logbar==0.0.4
+# for Qwen-Omni model
+soundfile==0.13.1

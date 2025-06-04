@@ -13,13 +13,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from transformers import AutoModel
 
-from . import LlamaGPTQ
+from model_test import ModelTest
 
 
-class DreamGPTQ(LlamaGPTQ):
-    loader = AutoModel
-    # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
-    support_batch_quantize = False
-    layer_type = "DreamDecoderLayer"
+class TestMimo(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/MiMo-7B-RL"
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    NATIVE_ARC_CHALLENGE_ACC = 0.2739
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
+    TRUST_REMOTE_CODE = True
+    APPLY_CHAT_TEMPLATE = True
+    EVAL_BATCH_SIZE = 6
+
+    def test_mimo(self):
+        self.quant_lm_eval()

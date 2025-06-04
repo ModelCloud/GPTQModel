@@ -35,6 +35,8 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# global level lock
+PROCESSOR_GLOBAL_LOCK = threading.Lock()
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
@@ -50,6 +52,8 @@ class LoopProcessor:
             fwd_after_process: bool = True,
             fwd_all_modules_in_single_pass: bool = False,
     ):
+        # process level lock
+        self.lock = threading.Lock()
 
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
@@ -290,11 +294,16 @@ class LoopProcessor:
         self.tasks = {}
         self.inputs_cache.layer_inputs = []
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        pass
+
+    # only called when more than 1 gpu devices are active
+    # do work right before process starts and after all fwd_hook ends where stream async/weight copies may happen
+    def pre_process_streaming(self, module: NamedModule):
         pass
 
     # do work and return processor.self state which will updated/merged
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, device: torch.device = None):
         pass
 
     # last step, after all loop processor is called

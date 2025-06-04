@@ -13,13 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from transformers import AutoModel
 
 from . import LlamaGPTQ
 
 
-class DreamGPTQ(LlamaGPTQ):
-    loader = AutoModel
-    # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
-    support_batch_quantize = False
-    layer_type = "DreamDecoderLayer"
+# MiMo is based on Qwen2
+# https://huggingface.co/XiaomiMiMo/MiMo-7B-RL/blob/main/modeling_mimo.py
+class MimoGPTQ(LlamaGPTQ):
+    require_trust_remote_code = True
+    layer_type = "MiMoMTPLayers"

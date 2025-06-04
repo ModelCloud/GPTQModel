@@ -13,7 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 # -- do not touch
 import os
 import sys
@@ -72,6 +71,7 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
+    BUFFERED_FWD = False
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -143,9 +143,13 @@ class ModelTest(unittest.TestCase):
     @classmethod
     def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-
+        # Load data directly from gzipped JSON file
+        # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
+        #     traindata = [json.loads(line) for line in f]
+        #
         if not tokenizer:
             return traindata.select(range(rows))
+        #     return traindata[:rows]
 
         datas = []
         for index, sample in enumerate(traindata):
@@ -211,7 +215,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
