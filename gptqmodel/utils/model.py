@@ -1105,3 +1105,14 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     accelerate.load_checkpoint_in_model(model, *args, **kwargs)
     model.tie_weights()
+
+
+def find_config_seq_len(config_dict, target_keys):
+    for k, v in config_dict.items():
+        if k in target_keys:
+            return v
+        if isinstance(v, dict):
+            found = find_config_seq_len(v, target_keys)
+            if found is not None:
+                return found
+    return None
