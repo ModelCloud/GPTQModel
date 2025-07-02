@@ -22,6 +22,7 @@ class Gemma3GPTQ(LlamaGPTQ):
     layer_type = "Gemma3DecoderLayer"
 
 class Gemma3ForConditionalGenerationGPTQ(BaseGPTQModel):
+    support_batch_quantize = False
     base_modules = ["model.language_model.embed_tokens", "model.language_model.norm"]
     pre_lm_head_norm_module = "model.language_model.norm"
 
