@@ -49,7 +49,8 @@ from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
-                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes,
+                           find_config_seq_len)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -223,11 +224,9 @@ def ModelLoader(cls):
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
-        if any(k in model_config for k in seq_len_keys):
-            for key in seq_len_keys:
-                if key in model_config:
-                    model.seqlen = model_config[key]
-                    break
+        config_seq_len = find_config_seq_len(model_config, seq_len_keys)
+        if config_seq_len is not None:
+            model.seqlen = config_seq_len
         else:
             log.warn("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
@@ -600,11 +599,9 @@ def ModelLoader(cls):
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
-        if any(k in model_config for k in seq_len_keys):
-            for key in seq_len_keys:
-                if key in model_config:
-                    model.seqlen = model_config[key]
-                    break
+        config_seq_len = find_config_seq_len(model_config, seq_len_keys)
+        if config_seq_len is not None:
+            model.seqlen = config_seq_len
         else:
             log.warn("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
