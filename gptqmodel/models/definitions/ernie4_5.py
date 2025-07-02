@@ -19,4 +19,5 @@ from . import LlamaGPTQ
 
 
 class ERNIE4_5GPTQ(LlamaGPTQ):
+    require_trust_remote_code = True
     layer_type = "Ernie4_5_DecoderLayer"
