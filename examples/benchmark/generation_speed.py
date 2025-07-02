@@ -217,12 +217,6 @@ def benchmark_generation_speed(model, tokenizer, examples, generation_config):
             )
         num_generated_tokens_list.append(num_generated_tokens)
 
-        pb.set_postfix(
-            num_tokens=num_generated_tokens_list[-1],
-            time=generation_time_list[-1],
-            speed=f"{num_generated_tokens_list[-1] / generation_time_list[-1]:.3f} tokens/s",
-        )
-
     total_tokens = sum(num_generated_tokens_list)
     total_seconds = sum(generation_time_list)
     logger.info(
@@ -238,7 +232,7 @@ def main():
     parser.add_argument("--model_basename", type=str, default=None)
     parser.add_argument("--quantize_config_save_dir", type=str, default=None)
     parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX'])
+    parser.add_argument("--backend", choices=['AUTO', 'TRITON', 'EXLLAMA_V2', 'MARLIN', 'CUDA', 'BITBLAS', 'IPEX'], default='AUTO')
     parser.add_argument("--use_fast_tokenizer", action="store_true")
     parser.add_argument("--num_samples", type=int, default=10)
     parser.add_argument("--max_new_tokens", type=int, default=512)
