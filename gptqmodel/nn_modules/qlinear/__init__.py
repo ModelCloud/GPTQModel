@@ -423,11 +423,8 @@ class PackableQuantLinear(BaseQuantLinear):
                 dtype=t.int32,
             ).reshape(1, 3, 12).to(device=self.g_idx.device)
 
-        # self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device))
-        # self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device))
-        #
-        self.wf_unsqueeze_zero = wf.unsqueeze(0).to(device=self.g_idx.device)
-        self.wf_unsqueeze_neg_one = wf.unsqueeze(-1).to(device=self.g_idx.device)
+        self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device))
+        self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device))
 
         super().post_init(**kwargs)
 
