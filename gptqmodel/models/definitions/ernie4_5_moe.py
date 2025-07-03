@@ -19,6 +19,9 @@ from ..base import BaseGPTQModel
 
 
 class ERNIE4_5_MOEGPTQ(BaseGPTQModel):
+    require_trust_remote_code = True
+    support_batch_quantize = False
+    
     dynamic_expert_index = "moe_num_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]
