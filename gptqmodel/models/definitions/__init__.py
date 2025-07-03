@@ -33,6 +33,7 @@ from .deepseek_v3 import DeepSeekV3GPTQ
 from .dream import DreamGPTQ
 from .exaone import ExaoneGPTQ
 from .ernie4_5 import ERNIE4_5GPTQ
+from .ernie4_5_moe import ERNIE4_5_MOEGPTQ
 from .gemma import GemmaGPTQ
 from .gemma2 import Gemma2GPTQ
 from .gemma3 import Gemma3GPTQ
