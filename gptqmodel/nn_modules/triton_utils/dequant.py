@@ -21,6 +21,7 @@ import torch
 import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
+from ...utils.torch import HAS_XPU
 
 
 def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stages: List[int]):
@@ -173,7 +174,7 @@ def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, t
 
 class QuantLinearFunction(torch.autograd.Function):
     @staticmethod
-    @custom_fwd(device_type="cuda")
+    @custom_fwd(device_type="xpu" if HAS_XPU else "cuda")
     def forward(ctx, input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
         output = quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)
         ctx.save_for_backward(qweight, scales, qzeros, g_idx)
@@ -181,7 +182,7 @@ class QuantLinearFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    @custom_bwd(device_type="xpu" if HAS_XPU else "cuda")
     def backward(ctx, grad_output):
         qweight, scales, qzeros, g_idx = ctx.saved_tensors
         bits, maxq, pack_bits = ctx.bits, ctx.maxq, ctx.pack_bits

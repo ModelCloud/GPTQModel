@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compat fix.
 * 05/29/2025 4.0.0-dev `main`: Falcon H1 model support. Fixed Transformers `4.52+` compat with Qwen 2.5 VL models.
 * 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
 * 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
