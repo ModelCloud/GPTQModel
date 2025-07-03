@@ -78,6 +78,8 @@ from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
 from .definitions.dream import DreamGPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
+from .definitions.ernie4_5 import ERNIE4_5GPTQ  # noqa: E402
+from .definitions.ernie4_5_moe import ERNIE4_5_MOEGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3GPTQ  # noqa: E402
@@ -199,6 +201,8 @@ MODEL_MAP = {
     "mimo": MimoGPTQ,
     "falcon_h1": FalconH1GPTQ,
     "gpt_pangu": PanguAlphaGPTQ,
+    "ernie4_5": ERNIE4_5GPTQ,
+    "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
