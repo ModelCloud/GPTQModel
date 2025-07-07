@@ -570,7 +570,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS, BACKEND.MACHETE]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,
