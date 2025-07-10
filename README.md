@@ -396,6 +396,23 @@ dynamic = {
 * Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
 * Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
 
+#### Group Aware Reordering (GAR)
+
+Group Aware Reordering (GAR) is an enhanced activation reordering scheme designed to significantly improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
+
+How to enable GAR:
+
+Set the `hyb_act` parameter to `True` and disable the default activation reordering by setting `desc_act` to `False` in your `QuantizeConfig`. For example:
+
+```python
+quant_config = QuantizeConfig(bits=4, group_size=128, desc_act=False, hyb_act=True)
+```
+
+This feature is based on the method introduced in:
+
+[T Gafni, A Karnieli, Y Hanani, "Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference," CVPR Workshop, 2025.](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
+
+
 
 ### Attribution of Quantization Methods:
 

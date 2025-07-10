@@ -333,6 +333,14 @@ class GPTQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
+        if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
+            from .gar import compute_local_perms, compute_global_perm, compose_final_perm
+            local_perms = compute_local_perms(torch.diag(H), self.qcfg.group_size)
+            global_perm = compute_global_perm(torch.diag(H), self.qcfg.group_size)
+            final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
+            W = W[:, final_perm]
+            H = H[final_perm][:, final_perm]
+
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
@@ -415,6 +423,17 @@ class GPTQ:
         if self.qcfg.desc_act:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
+
+        if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
+            from .gar import invert_perm
+            inv_final = invert_perm(final_perm)
+            Q = Q[:, inv_final]
+            inv_global_perm = invert_perm(global_perm)
+            inv_global_perm_list = inv_global_perm.tolist()
+            temp_scale = [ scale[i] for i in inv_global_perm_list ]
+            scale = temp_scale
+            temp_zero = [ zero[i] for i in inv_global_perm_list ]
+            zero = temp_zero
 
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()

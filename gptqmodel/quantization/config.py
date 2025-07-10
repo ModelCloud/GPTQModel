@@ -170,6 +170,7 @@ class QuantizeConfig():
     damp_auto_increment: float = field(default=0.01)
 
     desc_act: bool = field(default=True)
+    hyb_act: bool = field(default=False)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
@@ -461,6 +462,7 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
+            "hyb_act": self.hyb_act,
             "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
