@@ -122,7 +122,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         return super().train(mode=mode)
     
-    def transform(self, num_itr):
+    def transform(self, dtype):
         zeros = torch.bitwise_right_shift(
             torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
             self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
@@ -157,7 +157,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         self.qweight = packed.contiguous()
         self.qzeros = zeros.contiguous()
-        self.scales = self.scales.contiguous()
+        self.scales = self.scales.clone().to(dtype).contiguous()
 
     def forward(self, x: torch.Tensor):
         # if x.size(-1) != self.padded_infeatures:
@@ -172,7 +172,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
 
         if not self.training and not self.transformed:
-            self.transform(num_itr)
+            self.transform(x.dtype)
             self.transformed = True
 
         if not self.transformed:
