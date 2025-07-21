@@ -135,7 +135,8 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
             ).to(self.dequant_dtype),
             self.maxq
-        ).reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+        )
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
         self.ret_idx = torch.zeros(self.g_idx.shape[0], dtype=torch.int32).to(self.g_idx.device)
         groups = self.g_idx.shape[0] // self.group_size
         remainder = self.g_idx.shape[0] % self.group_size
