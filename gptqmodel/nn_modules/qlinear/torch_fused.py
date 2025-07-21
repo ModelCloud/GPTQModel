@@ -141,17 +141,17 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         remainder = self.g_idx.shape[0] % self.group_size
         g_idx_2 = self.g_idx * self.group_size
         if remainder > 0:
-            g_idx_2[self.g_idx == groups] += torch.arange(remainder).to(self.g_idx.device)
-        arange_tensor = torch.arange(self.group_size).to(self.g_idx.device)
+            g_idx_2[self.g_idx == groups] += torch.arange(remainder).to(self.g_idx_2.device).to(self.g_idx_2.dtype)
+        arange_tensor = torch.arange(self.group_size).to(self.g_idx.device).to(self.g_idx.dtype)
         for i in range(groups):
             g_idx_2[self.g_idx == i] += arange_tensor
-        self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.g_idx.device)
+        self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.ret_idx.device).to(self.ret_idx.dtype)
         weight = weight[:, self.ret_idx]
 
         packed = torch.zeros(weight.shape[0], weight.shape[1] // self.pack_factor, dtype=torch.int32, device=weight.device)
         for col in range(weight.shape[1] // self.pack_factor):
             for i in range(self.pack_factor):
-                packed_col = weight[:, col * self.i].to(torch.int32)
+                packed_col = weight[:, col * i].to(torch.int32)
                 packed[:, col] |= packed_col << (i * self.bits)
 
         self.qweight = packed.contiguous()
