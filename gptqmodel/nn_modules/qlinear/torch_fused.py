@@ -96,10 +96,6 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         from ...utils.model import convert_gptq_v1_to_v2_format_module
 
-        # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
-        # If the kernel inherits Torch kernel only for training and can do its own inference in v1 (IPEX, Marlin) then
-        # we can support training for all these v1 kernels by enabling this flag. We need to switch qzero states
-        # by overriding module train() and swapping qzero back between v1 and v2 (Torch kernel requires v2)
         if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
             # training starts
             if mode:
@@ -121,7 +117,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                     self.qzero_format(format=1)
 
         return super().train(mode=mode)
-    
+
     def transform(self, dtype):
         self.scales = self.scales.clone().to(dtype).contiguous()
         # Unpack qzeros
@@ -160,9 +156,6 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         self.qzeros = zeros.contiguous()
 
     def forward(self, x: torch.Tensor):
-        # if x.size(-1) != self.padded_infeatures:
-        #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
-
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         out = self._forward(x, out_shape)
@@ -203,13 +196,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedQuantLinear):
             raise ValueError(
-                "Only models loaded using TorchQuantLinear are supported for dequantization. "
+                "Only models loaded using TorchFusedQuantLinear are supported for dequantization. "
                 "Please load model using backend=BACKEND.TORCH."
             )
 
-        if isinstance(module, TorchQuantLinear):
+        if isinstance(module, TorchFusedQuantLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
@@ -229,4 +222,4 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchQuantLinear", "dequantize_model"]
+__all__ = ["TorchFusedQuantLinear", "dequantize_model"]
