@@ -156,7 +156,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 packed[:, col] |= packed_col << (i * self.bits)
 
         self.qweight = packed.contiguous()
-        self.qzeros = zeros.coniguous()
+        self.qzeros = zeros.contiguous()
         self.scales = self.scales.contiguous()
 
     def forward(self, x: torch.Tensor):
