@@ -78,7 +78,6 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         self.transformed = False
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
-        self.ret_idx = torch.zeros(self.g_idx.shape[0], dtype=int).to(self.g_idx.device)
 
     def post_init(self):
         super().post_init()
@@ -137,12 +136,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             ).to(self.dequant_dtype),
             self.maxq
         )
-        groups = self.g_idx.shape[0] // self.block_size
-        remainder = self.g_idx.shape[0] % self.blocksize
-        g_idx_2 = self.g_idx * self.blocksize
+        self.ret_idx = torch.zeros(self.g_idx.shape[0], dtype=torch.int32).to(self.g_idx.device)
+        groups = self.g_idx.shape[0] // self.group_size
+        remainder = self.g_idx.shape[0] % self.group_size
+        g_idx_2 = self.g_idx * self.group_size
         if remainder > 0:
             g_idx_2[self.g_idx == groups] += torch.arange(remainder).to(self.g_idx.device)
-        arange_tensor = torch.arange(self.blocksize).to(self.g_idx.device)
+        arange_tensor = torch.arange(self.group_size).to(self.g_idx.device)
         for i in range(groups):
             g_idx_2[self.g_idx == i] += arange_tensor
         self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.g_idx.device)
