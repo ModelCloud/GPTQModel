@@ -183,7 +183,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             x = x[:, self.ret_idx].contiguous()
             out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
                 x, self.qweight, self.group_size, self.scales, self.qzeros
-            )
+            ).reshape(out_shape)
 
         if self.bias is not None:
             out.add_(self.bias)
