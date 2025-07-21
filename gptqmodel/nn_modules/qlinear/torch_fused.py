@@ -123,13 +123,14 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         return super().train(mode=mode)
     
     def transform(self, dtype):
-        # self.scales = self.scales.clone().to(dtype).contiguous()
+        self.scales = self.scales.clone().to(dtype).contiguous()
+        # Unpack qzeros
         zeros = torch.bitwise_right_shift(
             torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
             self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
         ).to(self.dequant_dtype)
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(zeros.shape[0], -1)
-
+        # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
                 torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
@@ -147,12 +148,12 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         for i in range(groups):
             g_idx_2[self.g_idx == i] += arange_tensor
         self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.ret_idx.device).to(self.ret_idx.dtype)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])[:, self.ret_idx]
-
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, self.ret_idx).t()
+        # Pack qweight
         packed = torch.zeros(weight.shape[0], weight.shape[1] // self.pack_factor, dtype=torch.int32, device=weight.device)
         for col in range(weight.shape[1] // self.pack_factor):
             for i in range(self.pack_factor):
-                packed_col = weight[:, col * i].to(torch.int32)
+                packed_col = weight[:, col * self.pack_factor + i].to(torch.int32)
                 packed[:, col] |= packed_col << (i * self.bits)
 
         self.qweight = packed.contiguous()
