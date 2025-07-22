@@ -31,6 +31,7 @@ from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
@@ -46,6 +47,7 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
     BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
+    BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
     BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
     # BACKEND.CUDA: DynamicCudaQuantLinear,
     BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
@@ -56,8 +58,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
