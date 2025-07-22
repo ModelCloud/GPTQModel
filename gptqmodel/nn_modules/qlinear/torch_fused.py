@@ -17,6 +17,8 @@
 
 import torch
 import torch.nn as nn
+from packaging import version
+from torch import __version__ as torch_version
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
@@ -38,7 +40,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -164,7 +166,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def _forward(self, x, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
 
-        if not self.training and not self.transformed:
+        if not self.training and not self.transformed and version.parse(torch_version).release >= version.parse("2.8").release:
             self.transform(x.dtype)
             self.transformed = True
 
