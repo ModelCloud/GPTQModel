@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 07/31/2025 4.0.0-dev `main`: New Group Aware Reordering (GAR) support and prelim Pytorch 2.8 fused-ops for Intel XPU for up to 50% speedup. 
 * 07/03/2025 4.0.0-dev `main`: New Baidu Ernie and Huawei PanGu model support.
 * 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compat fix.
 * 05/29/2025 4.0.0-dev `main`: Falcon H1 model support. Fixed Transformers `4.52+` compat with Qwen 2.5 VL models.
