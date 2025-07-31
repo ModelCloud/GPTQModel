@@ -134,7 +134,7 @@ Native support support some of the most popular multi-modal models:
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
 
-## GPTQ v2 quantization unlocks useful utral-low bit quantization
+## GPTQ v2 quantization unlocks useful ultra-low bit quantization
 
 <div align=center>
 <img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=350>
