@@ -1,0 +1,250 @@
+[build-system]
+requires = ["setuptools>=61.0", "torch>=2.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gptqmodel"
+version = "4.0.0-dev"
+description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "ModelCloud", email = "qubitium@modelcloud.ai"},
+]
+maintainers = [
+    {name = "ModelCloud", email = "qubitium@modelcloud.ai"},
+]
+keywords = [
+    "gptq",
+    "quantization", 
+    "large-language-models",
+    "transformers",
+    "4bit",
+    "llm",
+    "dual-stream",
+    "roformer",
+    "3d-generation"
+]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+]
+requires-python = ">=3.9.0"
+dependencies = [
+    "accelerate>=1.6.0",
+    "numpy>=1.26.4",
+    "torch>=2.8.0",
+    "safetensors>=0.6.1",
+    "transformers>=4.55.0",
+    "threadpoolctl>=3.6.0",
+    "packaging>=24.2",
+    "device-smi==0.4.1",
+    "protobuf>=5.29.3",
+    "pillow>=11.1.0",
+    "hf_transfer>=0.1.9",
+    "huggingface_hub>=0.30.1",
+    "random_word==1.0.13",
+    "tokenicer==0.0.4",
+    "logbar==0.0.4",
+    "soundfile==0.13.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.2.2",
+    "parameterized",
+]
+quality = [
+    "ruff==0.9.6",
+    "isort==6.0.0",
+]
+# Temporarily disabled due to version conflicts with transformers>=4.55.0
+# vllm = [
+#     "vllm>=0.8.5,!=0.9.0",
+#     "flashinfer-python>=0.2.1",
+# ]
+# sglang = [
+#     "sglang[srt]>=0.4.7",
+#     "flashinfer-python>=0.2.1",
+# ]
+bitblas = [
+    "bitblas==0.0.1-dev13",
+]
+hf = [
+    "optimum>=1.21.2",
+]
+ipex = [
+    "intel_extension_for_pytorch>=2.7.0",
+]
+auto_round = [
+    "auto_round>=0.3",
+]
+logger = [
+    "clearml",
+    "random_word",
+    "plotly",
+]
+eval = [
+    "lm_eval>=0.4.7",
+    "evalplus>=0.3.1",
+]
+triton = [
+    "triton>=3.0.0",
+]
+openai = [
+    "uvicorn",
+    "fastapi",
+    "pydantic",
+]
+mlx = [
+    "mlx_lm>=0.24.0",
+]
+dev = [
+    "gptqmodel[test,quality,hf,auto_round,logger,eval]",
+]
+core = [
+    "gptqmodel[hf,auto_round]",
+]
+# Temporarily disabled due to version conflicts with transformers>=4.55.0
+# inference-vllm = [
+#     "gptqmodel[vllm]",
+# ]
+# inference-sglang = [
+#     "gptqmodel[sglang]",
+# ]
+backends = [
+    "gptqmodel[bitblas,ipex,mlx,triton]",
+]
+all-core = [
+    "gptqmodel[test,quality,hf,auto_round,logger,eval,openai]",
+]
+
+[project.urls]
+Homepage = "https://github.com/ModelCloud/GPTQModel"
+Repository = "https://github.com/ModelCloud/GPTQModel"
+Documentation = "https://github.com/ModelCloud/GPTQModel/blob/main/README.md"
+"Bug Tracker" = "https://github.com/ModelCloud/GPTQModel/issues"
+Changelog = "https://github.com/ModelCloud/GPTQModel/releases"
+
+[project.scripts]
+gptqmodel-quantize = "gptqmodel.cli:quantize_cli"
+gptqmodel-eval = "gptqmodel.cli:eval_cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gptqmodel*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+gptqmodel = ["py.typed"]
+
+# Ruff configuration
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+    "gptqmodel_ext",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+    "B904",  # Exception must be raised within an except block
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["E501"]
+
+# isort configuration
+[tool.isort]
+profile = "black"
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+skip_glob = ["gptqmodel_ext/*"]
+
+# pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--disable-warnings",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests as requiring GPU",
+    "integration: marks tests as integration tests",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["gptqmodel"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "setup.py",
+    "gptqmodel_ext/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
