@@ -30,7 +30,7 @@ from ..looper.named_module import NamedModule
 from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree, HookedLinear
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
@@ -217,13 +217,22 @@ class ModuleLooper():
         else:
             replace_module_with_hooked_legacy(self.gptq_model.model)
 
+        if self.gptq_model.quantize_config.lm_head:
+            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
+                hooked_lm_head = HookedLinear.from_linear(lm_head_module)
+                module_path = self.gptq_model.lm_head.split('.')
+                parent = self.gptq_model.model
+                for part in module_path[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, module_path[-1], hooked_lm_head)
+
         for layer_index in quant_modules_pb:
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
                 quant_modules_pb.title("Quantizing lm_head").draw()
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-                layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
                 quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
                 module = layers[layer_index]
@@ -242,6 +251,8 @@ class ModuleLooper():
                 processor.collect_memory_info(layer_index)
 
                 layer_inputs = processor.inputs_cache.layer_inputs
+                if is_lm_head_module:
+                    layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
                 layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
                 position_ids = processor.inputs_cache.position_ids
                 attention_masks = processor.inputs_cache.attention_masks
