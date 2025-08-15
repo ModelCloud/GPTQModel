@@ -30,7 +30,7 @@ exllama_v2_import_exception = None
 try:
     from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
 except ImportError as e:
-    exllama_v2_import_exception = e
+    exllama_v2_import_exception = str(e)
 
 log = setup_logger()
 
@@ -195,7 +195,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if exllama_v2_import_exception is not None:
-            return False, exllama_v2_import_exception
+            return False, ImportError(exllama_v2_import_exception)
         return cls._validate(**args)
 
     def post_init(self, temp_dq):

@@ -33,7 +33,7 @@ marlin_import_exception = None
 try:
     import gptqmodel_marlin_kernels
 except ImportError as e:
-    marlin_import_exception = e
+    marlin_import_exception = str(e)
 
 log = setup_logger()
 
@@ -345,7 +345,7 @@ class MarlinQuantLinear(BaseQuantLinear):
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
-            return False, marlin_import_exception
+            return False, ImportError(marlin_import_exception)
         return cls._validate(**args)
 
     @classmethod
