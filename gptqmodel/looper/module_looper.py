@@ -30,7 +30,7 @@ from ..looper.named_module import NamedModule
 from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree, HookedLinear
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
@@ -216,6 +216,17 @@ class ModuleLooper():
             replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree, debug=False)
         else:
             replace_module_with_hooked_legacy(self.gptq_model.model)
+
+        if self.gptq_model.quantize_config.lm_head:
+            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
+                hooked_lm_head = HookedLinear.from_linear(lm_head_module)
+                module_path = self.gptq_model.lm_head.split('.')
+                parent = self.gptq_model.model
+                for part in module_path[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, module_path[-1], hooked_lm_head)
+                # log.info(f"Hook: Linear: {self.gptq_model.lm_head}")
 
         for layer_index in quant_modules_pb:
             is_lm_head_module = layer_index >= layer_count
