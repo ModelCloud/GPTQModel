@@ -118,7 +118,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -210,7 +210,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -311,7 +311,7 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.transformers-files) }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.event.inputs.repo }}
           ref: ${{ github.event.inputs.ref }}
@@ -349,7 +349,7 @@ jobs:
 
       # - name: Download source from github
       #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v4
+      #   uses: actions/download-artifact@v5
       #   with:
       #     name: source
       #     path: dist
@@ -381,7 +381,7 @@ jobs:
 
       - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: whl
           path: dist
@@ -475,7 +475,7 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -514,7 +514,7 @@ jobs:
 
       # - name: Download source from github
       #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v4
+      #   uses: actions/download-artifact@v5
       #   with:
       #     name: source
       #     path: dist
@@ -546,7 +546,7 @@ jobs:
 
       - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: whl
           path: dist
@@ -709,7 +709,7 @@ jobs:
           ls -ahl .
 
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
