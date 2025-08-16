@@ -40,6 +40,7 @@ from .gemma3 import Gemma3GPTQ
 from .glm import GLM
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
+from .gpt_neo import GPTNeoGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
 from .granite import GraniteGPTQ
