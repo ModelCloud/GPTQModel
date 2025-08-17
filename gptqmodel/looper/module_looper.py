@@ -227,6 +227,7 @@ class ModuleLooper():
                     parent = getattr(parent, part)
                 setattr(parent, module_path[-1], hooked_lm_head)
 
+
         for layer_index in quant_modules_pb:
             is_lm_head_module = layer_index >= layer_count
 

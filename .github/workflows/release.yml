@@ -78,7 +78,7 @@ jobs:
     if: github.event.inputs.github_vm == 'false'
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -323,7 +323,7 @@ jobs:
         - /home/ci/models/pyenv:/opt/pyenv
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -408,7 +408,7 @@ jobs:
       RELEASE_MODE: 0
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -501,7 +501,7 @@ jobs:
     if: github.event.inputs.github_vm == 'true'
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}

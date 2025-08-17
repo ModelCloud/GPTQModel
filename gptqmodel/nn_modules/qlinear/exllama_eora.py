@@ -30,7 +30,7 @@ exllama_eora_import_exception = None
 try:
     import gptqmodel_exllama_eora
 except ImportError as e:
-    exllama_eora_import_exception = e
+    exllama_eora_import_exception = str(e)
 
 log = setup_logger()
 
@@ -122,7 +122,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if exllama_eora_import_exception is not None:
-            return False, exllama_eora_import_exception
+            return False, ImportError(exllama_eora_import_exception)
         return cls._validate(**args)
 
     def post_init(self):

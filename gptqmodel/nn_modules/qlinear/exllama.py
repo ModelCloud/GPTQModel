@@ -30,7 +30,7 @@ exllama_import_exception = None
 try:
     from gptqmodel_exllama_kernels import make_q4, q4_matmul
 except ImportError as e:
-    exllama_import_exception = e
+    exllama_import_exception = str(e)
 
 log = setup_logger()
 
@@ -112,7 +112,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if exllama_import_exception is not None:
-            return False, exllama_import_exception
+            return False, ImportError(exllama_import_exception)
         return cls._validate(**args)
 
     def post_init(self):
