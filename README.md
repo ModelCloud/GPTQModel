@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 08/18/2025 4.0.0-dev `main`: GPT-Neo model support. Memory leak fix in error capture (stacktrace) and fixed `lm_head` quantization compatibility for many models.
 * 07/31/2025 4.0.0-dev `main`: New Group Aware Reordering (GAR) support and prelim Pytorch 2.8 fused-ops for Intel XPU for up to 50% speedup. 
 * 07/03/2025 4.0.0-dev `main`: New Baidu Ernie and Huawei PanGu model support.
 * 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compat fix.
@@ -135,11 +136,7 @@ Native support support some of the most popular multi-modal models:
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
 
-## GPTQ v2 quantization unlocks useful ultra-low bit quantization
 
-<div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=350>
-</div>
 
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
@@ -161,6 +158,12 @@ Native support support some of the most popular multi-modal models:
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
+## Experimental GPTQ v2 quantization: Users have reported this mode of quantization may or may not match original GPTQ v1 implementation in terms of quality recovery. 
+
+<div align=center>
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=300>
+</div>
+
 ## Model Support  
 | Model             |   |             |   |                |   |               |   |            |   |
 |-------------------|---|-------------|---|----------------|---|---------------|---|------------|---|
@@ -168,7 +171,7 @@ Native support support some of the most popular multi-modal models:
 | Bloom             | ✅ | Falcon (H1) | ✅ | Llama 1-3.3    | ✅ | OLMo2         | ✅ | TeleChat2  | ✅ |
 | ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2    | ✅ | Yi         | ✅ |
 | CodeGen           | ✅ | GPTBigCod   | ✅ | LongLLaMA      | ✅ | Phi 1-4       | ✅ | XVERSE     | ✅ |
-| Cohere 1-2        | ✅ | GPTNeoX     | ✅ | MiniCPM3       | ✅ | PanGu-α       | ✅ |            |   |
+| Cohere 1-2        | ✅ | GPTQ-Neo/GPT-NeoX     | ✅ | MiniCPM3       | ✅ | PanGu-α       | ✅ |            |   |
 | DBRX Converted    | ✅ | GPT-2       | ✅ | Mistral        | ✅ | Qwen 1/2/3    | ✅ |            |   |
 | Deci              | ✅ | GPT-J       | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE  | ✅ |            |   |
 | DeepSeek-V2/V3/R1 | ✅ | Granite     | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL | ✅ |            |   |
@@ -444,20 +447,20 @@ This feature is based on the method introduced in:
   
 }
 
-# GPTQ v2
-@article{li2025gptqv2,
-  title={GPTQv2: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
-  author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
-  journal={arXiv preprint arXiv:2504.02692},
-  year={2025}
-}
-
 # EoRA
 @article{liu2024eora,
   title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
   author={Liu, Shih-Yang and Yang, Huck and Wang, Chien-Yi and Fung, Nai Chit and Yin, Hongxu and Sakr, Charbel and Muralidharan, Saurav and Cheng, Kwang-Ting and Kautz, Jan and Wang, Yu-Chiang Frank and others},
   journal={arXiv preprint arXiv:2410.21271},
   year={2024}
+}
+
+# Group Aware Reordering (GAR)
+@article{gar,
+  title={Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference, CVPRW 2025.},
+  author={T. Gafni, A. Karnieli, Y. Hanani},
+  journal={arXiv preprint arXiv:2505.14638},
+  year={2025}
 }
 
 # GPTQ Marlin Kernel
@@ -474,5 +477,13 @@ This feature is based on the method introduced in:
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# GPTQ v2
+@article{li2025gptqv2,
+  title={GPTQv2: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
+  author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
+  journal={arXiv preprint arXiv:2504.02692},
+  year={2025}
 }
 ```
