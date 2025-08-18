@@ -226,7 +226,7 @@ class ModuleLooper():
                 for part in module_path[:-1]:
                     parent = getattr(parent, part)
                 setattr(parent, module_path[-1], hooked_lm_head)
-                # log.info(f"Hook: Linear: {self.gptq_model.lm_head}")
+
 
         for layer_index in quant_modules_pb:
             is_lm_head_module = layer_index >= layer_count
@@ -234,7 +234,6 @@ class ModuleLooper():
             if is_lm_head_module:
                 quant_modules_pb.title("Quantizing lm_head").draw()
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-                layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             else:
                 quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
                 module = layers[layer_index]
@@ -253,6 +252,8 @@ class ModuleLooper():
                 processor.collect_memory_info(layer_index)
 
                 layer_inputs = processor.inputs_cache.layer_inputs
+                if is_lm_head_module:
+                    layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
                 layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
                 position_ids = processor.inputs_cache.position_ids
                 attention_masks = processor.inputs_cache.attention_masks
