@@ -86,6 +86,7 @@ from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3GPTQ  
 from .definitions.glm import GLM  # noqa: E402
 from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
+from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
 from .definitions.gptj import GPTJGPTQ  # noqa: E402
 from .definitions.granite import GraniteGPTQ  # noqa: E402
@@ -136,6 +137,7 @@ numpy.random.seed(787)
 MODEL_MAP = {
     "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
+    "gpt_neo": GPTNeoGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
