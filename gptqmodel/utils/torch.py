@@ -25,6 +25,8 @@ from torch.cpu import StreamContext
 from ..utils.logger import setup_logger
 from . import has_gil, log_gil_required
 
+PYTORCH_MIN_VERSION_WITH_MPS_COMPILE = Version('2.8.0')
+
 HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False
@@ -74,6 +76,12 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
     from ..models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
 
     if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
+        return module
+    if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_MPS_COMPILE and HAS_MPS:
+        if not torch._dynamo.config.suppress_errors:
+            log.warn(f"To use compile() with MPS, you need to have torch version >= {PYTORCH_MIN_VERSION_WITH_MPS_COMPILE}, "
+                     f"please upgrade it by `pip install -U torch torchaudio torchvision`")
+            torch._dynamo.config.suppress_errors = True
         return module
     try:
         return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
