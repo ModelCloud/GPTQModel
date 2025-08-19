@@ -47,7 +47,7 @@ class ModuleLooper():
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
 
-    def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache):
+    def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache, use_cache):
         layer_inputs = []
         attention_masks = []
         position_ids = []
@@ -123,7 +123,7 @@ class ModuleLooper():
                 if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                     self.gptq_model.model.generate(**example, return_audio=False)
                 else:
-                    self.gptq_model.model(**example)
+                    self.gptq_model.model(**example, use_cache=use_cache)
             except ValueError:
                 pass
         self.gptq_model.pre_quantize_generate_hook_end()
@@ -182,7 +182,8 @@ class ModuleLooper():
 
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
                                             calibration_data=processor.calibration_dataset,
-                                            calibration_enable_gpu_cache=calibration_enable_gpu_cache)
+                                            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
+                                            use_cache=False)
             processor.receive_input_cache(input_cache)
 
         # release calibration_dataset
