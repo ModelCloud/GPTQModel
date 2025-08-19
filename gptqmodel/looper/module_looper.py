@@ -479,13 +479,23 @@ class ModuleLooper():
                                 additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
                         # log.info(f"MODULE Last forward: {module}")
+                        module_output = None
+                        if is_lm_head_module:
+                            module_output = module(*layer_input)
+                        else:
+                            module_output = module(*layer_input, **additional_layer_inputs)
+                        
+                        if isinstance(module_output, tuple):
+                            layer_output = module_output[0]
+                        else:
+                            layer_output = module_output
+                            
                         layer_output = move_to(
-                            module(*layer_input)[0] if is_lm_head_module else
-                            module(*layer_input, **additional_layer_inputs)[0],
+                            layer_output,
                             device=cur_layer_device if calibration_enable_gpu_cache else CPU,
                             # stream=True,
                         )
-
+                        
                         layer_outputs.append([layer_output])
 
                         del layer_input
