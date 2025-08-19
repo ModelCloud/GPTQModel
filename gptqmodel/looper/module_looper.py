@@ -484,7 +484,8 @@ class ModuleLooper():
                             module_output = module(*layer_input)
                         else:
                             module_output = module(*layer_input, **additional_layer_inputs)
-                        
+
+                        # after transformers 4.54, some model's DecodeLayer.forward() no longer returns tuple
                         if isinstance(module_output, tuple):
                             layer_output = module_output[0]
                         else:
