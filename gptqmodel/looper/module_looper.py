@@ -365,7 +365,12 @@ class ModuleLooper():
                         # For Native processor, we can update processor input here
                         # if second forward is not required, this/first forward output is captured as input for next loop
                         if not processor.fwd_after_process:
-                            layer_outputs.append([layer_output[0]])
+                            # after transformers 4.54, some model's DecodeLayer.forward() no longer returns tuple
+                            if isinstance(layer_output, tuple):
+                                layer_outputs.append([layer_output[0]])
+                            else:
+                                layer_outputs.append([layer_output])
+
 
                         del layer_input
                         del additional_layer_inputs
