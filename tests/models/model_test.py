@@ -186,7 +186,8 @@ class ModelTest(unittest.TestCase):
             has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
             if has_attn_implementation:
                 args["attn_implementation"] = "eager"
-            args["use_flash_attention_2"] = False
+        else:
+            args["use_flash_attention_2"] = True
 
         log.info(f"args: {args}")
         model = GPTQModel.load(
