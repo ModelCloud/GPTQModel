@@ -24,7 +24,7 @@ import tempfile  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
-from gptqmodel.utils import Perplexity  # noqa: E402
+from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
