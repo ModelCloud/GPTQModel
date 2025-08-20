@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to incorrect application of `config.user_cache` for some models. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
+* 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
 * 08/18/2025 4.0.0-dev `main`: GPT-Neo model support. Memory leak fix in error capture (stacktrace) and fixed `lm_head` quantization compatibility for many models.
 * 07/31/2025 4.0.0-dev `main`: New Group Aware Reordering (GAR) support and prelim Pytorch 2.8 fused-ops for Intel XPU for up to 50% speedup. 
 * 07/03/2025 4.0.0-dev `main`: New Baidu Ernie and Huawei PanGu model support.
