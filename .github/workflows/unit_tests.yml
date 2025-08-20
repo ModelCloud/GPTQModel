@@ -355,12 +355,12 @@ jobs:
       #     path: dist
       #     run-id: ${{ github.run_id }}
 
-#      - name: Uncompress source
- #       continue-on-error: true
-  #      run: |
-   #       find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-    #      ls -ahl .
-     #     tar -zxf gptqmodel_source.tar.gz
+      #      - name: Uncompress source
+      #       continue-on-error: true
+      #      run: |
+      #       find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+      #      ls -ahl .
+      #     tar -zxf gptqmodel_source.tar.gz
 
       - name: Download wheel from local
         continue-on-error: true
@@ -407,7 +407,9 @@ jobs:
             echo "===== install auto_round ====="
             uv pip install auto_round -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           fi
-          uv pip uninstall torchao
+
+          echo "== pip list =="
+          pip list
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
@@ -520,11 +522,11 @@ jobs:
       #     path: dist
       #     run-id: ${{ github.run_id }}
 
- #     - name: Uncompress source
-  #      continue-on-error: true
-   #     run: |
-    #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-     #     ls -ahl .
+      #     - name: Uncompress source
+      #      continue-on-error: true
+      #     run: |
+      #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+      #     ls -ahl .
       #    tar -zxf gptqmodel_source.tar.gz
 
       - name: Download wheel from local
@@ -620,8 +622,18 @@ jobs:
             uv pip install transformers==4.48.3
             uv pip install numpy==1.26.3
           fi
+
+          echo "===== uninstall torchvision ====="
+          uv pip uninstall  torchvision
+
+          echo "===== install -r requirements.txt ====="
           uv pip install -r requirements.txt
+
+          echo "===== uninstall torchao ====="
           uv pip uninstall torchao
+
+          echo "== pip list =="
+          pip list
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
