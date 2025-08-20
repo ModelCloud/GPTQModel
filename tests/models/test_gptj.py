@@ -25,6 +25,7 @@ class TestGptJ(ModelTest):
     TORCH_DTYPE = torch.float16
     INPUTS_MAX_LENGTH = 1024
     DISABLE_FLASH_ATTN = True
+    ACCEPT_USE_FLASH_ATTEN2_ARG = False
 
     def test_gptj(self):
         self.quant_lm_eval()
