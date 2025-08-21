@@ -275,7 +275,10 @@ class GPTQ:
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        self.hessian_inverse = torch_compile(self.hessian_inverse)
+        # Temporarily disable torch.compile due to compatibility issues with torch 2.8
+        # Will re-enable once the issue is fixed
+        # self.hessian_inverse = torch_compile(self.hessian_inverse)
+        self.hessian_inverse = self.hessian_inverse
 
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
