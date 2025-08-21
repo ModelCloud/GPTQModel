@@ -233,7 +233,7 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
-          uv pip install torch -U
+          uv pip install http://10.0.13.31/files/pytorch/torch-2.8.0+cu126-cp312-cp312-manylinux_2_28_x86_64.whl -U
           pip show torch
           echo "##### pip list #####"
           pip list
@@ -335,6 +335,7 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
+          uv pip install http://10.0.13.31/files/pytorch/torch-2.8.0+cu126-cp312-cp312-manylinux_2_28_x86_64.whl -U
           pip show torch
           echo "== pip list =="
           pip list
@@ -499,6 +500,7 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
+          uv pip install http://10.0.13.31/files/pytorch/torch-2.8.0+cu126-cp312-cp312-manylinux_2_28_x86_64.whl -U
           pip show torch
           echo "== pip list =="
           pip list
