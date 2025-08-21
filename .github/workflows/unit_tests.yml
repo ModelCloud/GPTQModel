@@ -233,6 +233,7 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
+          uv pip install torch -U
           pip show torch
           echo "##### pip list #####"
           pip list
@@ -389,8 +390,6 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install tokenicer==0.0.4 -U
-          uv pip install logbar==0.0.3 -U
           uv pip install -r requirements.txt
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
