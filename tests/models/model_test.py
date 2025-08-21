@@ -81,8 +81,7 @@ class ModelTest(unittest.TestCase):
     DESC_ACT = True
     SYM = True
 
-    DISABLE_FLASH_ATTN = False
-    ACCEPT_USE_FLASH_ATTEN2_ARG = True
+    USE_FLASH_ATTN = True
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
@@ -183,12 +182,12 @@ class ModelTest(unittest.TestCase):
 
         args = kwargs if kwargs else {}
 
-        if self.DISABLE_FLASH_ATTN:
-            has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-            if has_attn_implementation:
-                args["attn_implementation"] = "eager"
-            if self.ACCEPT_USE_FLASH_ATTEN2_ARG:
-                args["use_flash_attention_2"] = False
+        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
+        if has_attn_implementation:
+            if self.USE_FLASH_ATTN:
+                args["attn_implementation"] = "flash_attention_2"
+        else:
+            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
 
         log.info(f"args: {args}")
         model = GPTQModel.load(
@@ -258,11 +257,12 @@ class ModelTest(unittest.TestCase):
 
         kargs = args if args else {}
 
-        if self.DISABLE_FLASH_ATTN:
-            has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-            if has_attn_implementation:
-                kargs["attn_implementation"] = None
-            kargs["use_flash_attention_2"] = False
+        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
+        if has_attn_implementation:
+            if self.USE_FLASH_ATTN:
+                args["attn_implementation"] = "flash_attention_2"
+        else:
+            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
 
         model = GPTQModel.load(
             model_id_or_path,
