@@ -55,6 +55,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
 
     BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
+
+    BACKEND.AWQ: QQQQuantLinear, # TODO change this
 })
 
 FORMAT_DICT = {
@@ -64,6 +66,7 @@ FORMAT_DICT = {
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
     FORMAT.QQQ: [BACKEND.QQQ],
+    FORMAT.AWQ: [BACKEND.AWQ],
 }
 
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
