@@ -48,10 +48,7 @@ class TestQuantWithTrustRemoteTrue(ModelTest):
             format=FORMAT.GPTQ,
         )
         args = {}
-        # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
-        # but device map is cpu, it will trow non-supported device error
-        if Version(transformers.__version__) >= Version("4.46.0"):
-            args["_attn_implementation_autoset"] = True
+
         model = GPTQModel.load(
             self.MODEL_ID,
             quantize_config=quantize_config,
