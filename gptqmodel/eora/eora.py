@@ -25,8 +25,8 @@ from ..utils.rocm import IS_ROCM
 
 log = setup_logger()
 
-def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.dtype], sample_size: int):
-    inp = input[0].to(dtype=torch.float32)
+def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.dtype], sample_size: int, device: torch.device):
+    inp = input[0].to(device=device, dtype=torch.float32)
     if inp.dim() == 2:
         inp = inp.unsqueeze(0)
 
@@ -41,18 +41,18 @@ def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict
     del inp, tmp, adds, adds_sum
 
 def eora_compute_lora(
-        device: torch.device,
         w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
         module: NamedModule,
         eigen_scaling_diag_matrix: torch.dtype,
         rank: int,
-        dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype,
+        device: torch.device,
 ) -> Tuple[Tensor, Tensor]:
 
     assert w_wq_delta.dtype == torch.float32
 
     # save this later for SVD
-    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(dtype=torch.float64, device=device)
+    raw_scaling_diag_matrix = eigen_scaling_diag_matrix.to(device=device, dtype=torch.float64)
 
     if IS_ROCM:
         # hip cannot resolve linalg ops

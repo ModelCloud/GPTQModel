@@ -35,12 +35,25 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# global level lock
+PROCESSOR_GLOBAL_LOCK = threading.Lock()
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
-                 calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True):
+    def __init__(
+            self,
+            tokenizer, qcfg: QuantizeConfig,
+            calibration_dataset,
+            prepare_dataset_func,
+            calibration_dataset_concat_size: Optional[int],
+            batch_size: int = 1,
+            logger_board: str = "",
+            require_fwd: bool = True,
+            fwd_after_process: bool = True,
+            fwd_all_modules_in_single_pass: bool = False,
+    ):
+        # process level lock
+        self.lock = threading.Lock()
 
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
@@ -50,10 +63,22 @@ class LoopProcessor:
 
         self.tokenizer = tokenizer
         self.qcfg = qcfg
+        self.qcfg_dynamic = None # cloned and dynamic filtered
 
+        # TODO FIX ME: dequantize processor sets this to False but it is nver acted on!
         # if processor require fwd generate and hooks, set this to true
         # looper should bypass generate + hooks if this is false
-        self.require_fwd = require_fwd
+        self.require_fwd = require_fwd # default True
+
+        # after process(), do we need to forward again? paried with require_fwd == True
+        # if true, forward output is captured post process() and saved for next loop as input
+        # if false, forward output before process() call is saved for next loop as input
+        self.fwd_after_process = fwd_after_process # default True
+
+        # native processor does not need to forward N times due to module depend segmentation
+        # if true, fwd is repeated based on module dep sub-groups
+        # if false, sub-module groups are merged as one and fwd happens in one pass
+        self.fwd_all_modules_in_single_pass = fwd_all_modules_in_single_pass # default False
 
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}
@@ -269,11 +294,16 @@ class LoopProcessor:
         self.tasks = {}
         self.inputs_cache.layer_inputs = []
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        pass
+
+    # only called when more than 1 gpu devices are active
+    # do work right before process starts and after all fwd_hook ends where stream async/weight copies may happen
+    def pre_process_streaming(self, module: NamedModule):
         pass
 
     # do work and return processor.self state which will updated/merged
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, device: torch.device = None):
         pass
 
     # last step, after all loop processor is called
@@ -303,6 +333,5 @@ class LoopProcessor:
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         pass
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         pass

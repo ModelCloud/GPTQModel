@@ -16,6 +16,8 @@
 
 from typing import Dict
 
+import torch
+
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -27,7 +29,7 @@ class DequantizeProcessor(LoopProcessor):
     def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
         super().__init__(tokenizer=None, qcfg=None, calibration_dataset=None, calibration_dataset_concat_size=None,
                          prepare_dataset_func=None, batch_size=1,
-                         logger_board="", require_fwd=True)
+                         logger_board="", require_fwd=False)
 
         self.quantized_modules = quantized_modules
 
@@ -36,18 +38,28 @@ class DequantizeProcessor(LoopProcessor):
         self.num_batches = 0
 
     # de-quantize weights
-    def process(self, module: NamedModule):
+    def process(self, module: NamedModule, auto_gc: bool = True):
         device = module.weight.device
         w = module.weight.data
 
         # TODO fix num_itr param..need to calculate this before dequant
-        m = self.quantized_modules.pop(module.full_name)
-        m.optimize()
+        with self.lock:
+            m = self.quantized_modules.pop(module.full_name)
+            m.optimize()
         log.info(f"Dequantize: `{m.name}`")
+
+        # TODO: we can optimize this and dequant + w - wq on cpu
         wq = m.dequantize_weight().T.to(device=device)
 
+        if module.weight.data.dtype == torch.float16:
+            # diff in float16
+            w_wq_diff = w - wq
+        else:
+            # diff in float32
+            w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+
         module.state.update({
-            "w": w,
+            "w_wq_diff": w_wq_diff,
             "wq": wq,
         })
 
@@ -58,6 +70,5 @@ class DequantizeProcessor(LoopProcessor):
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         return False
 
-    @classmethod
-    def name(cls) -> str:
+    def name(self) -> str:
         return "de-quantize"

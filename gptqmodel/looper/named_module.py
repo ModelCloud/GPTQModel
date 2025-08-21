@@ -18,7 +18,9 @@ from typing import Any, Dict
 
 import torch
 import transformers
+from gptqmodel.utils.torch import device_next
 from torch import nn
+from torch.nn.modules.conv import _ConvNd
 
 
 class NamedModule(torch.nn.Module):
@@ -31,6 +33,10 @@ class NamedModule(torch.nn.Module):
         self.full_name = full_name # module full name (path) within model
         self.layer_index = layer_index # layerid in a repeating layer, if in outside layer, this info may be fake
 
+        # some processing will move this module to target_device gptq, eora, etc
+        # self.target_device, self.target_device_stream = device_next()
+        self.target_device, self.target_device_stream = None, None
+
         # persistent work state forLoopProcessors
         # store all `processed()` work state/data/result here
         self.state = {}
@@ -41,9 +47,15 @@ class NamedModule(torch.nn.Module):
         if isinstance(module, nn.Linear):
             in_features = module.in_features
             out_features = module.out_features
-        elif isinstance(module, nn.Conv2d):
+        elif isinstance(module, _ConvNd):
             in_features = module.in_channels
             out_features = module.out_channels
+        # elif isinstance(module, nn.Conv2d):
+        #     in_features = module.in_channels
+        #     out_features = module.out_channels
+        # elif isinstance(module, nn.Conv2d):
+        #     in_features = module.in_channels
+        #     out_features = module.out_channels
         elif isinstance(module, transformers.pytorch_utils.Conv1D):
             in_features = module.weight.shape[0]
             out_features = module.weight.shape[1]

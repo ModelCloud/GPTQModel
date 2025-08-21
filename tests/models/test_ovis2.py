@@ -26,7 +26,7 @@ class Test(ModelTest):
 
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = False
-    BATCH_SIZE = 1
+    EVAL_BATCH_SIZE = 1
 
     def test_ovis(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,

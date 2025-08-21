@@ -16,24 +16,15 @@
 
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
-from ..base import BaseGPTQModel
+from . import LlamaGPTQ
 
 log = setup_logger()
 
 SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly inference a quantized Gemma2-27B model. Pre-quantized model with sample vLLM code: https://huggingface.co/ModelCloud/gemma-2-27b-it-gptq-4bit ."
 
-class Gemma2GPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "model.norm"]
-    pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
+class Gemma2GPTQ(LlamaGPTQ):
     layer_type = "Gemma2DecoderLayer"
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

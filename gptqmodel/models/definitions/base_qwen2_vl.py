@@ -17,7 +17,7 @@
 from typing import Dict, Optional
 
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor, ProcessorMixin
+from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
@@ -27,18 +27,34 @@ from ..base import BaseGPTQModel
 
 
 class BaseQwen2VLGPTQ(BaseGPTQModel):
-    loader = AutoModelForVision2Seq
+    loader = AutoModelForImageTextToText
 
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
+    layers_node = ["model.layers", "model.language_model.layers"]
 
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],
         ["mlp.up_proj", "mlp.gate_proj"],
         ["mlp.down_proj"],
+    ]
+
+    branch = [
+        "#",
+        {
+            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "mlp": ("up_proj", "gate_proj", "down_proj"),
+        }
+    ]
+
+    layers_modules_tree = [
+        "model",
+        {
+            "layers": branch,
+            "language_model": {"layers": branch},
+        }
     ]
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]

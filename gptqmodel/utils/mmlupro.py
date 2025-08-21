@@ -252,6 +252,11 @@ def mmlupro(model: PreTrainedModel,
         val_df = select_by_category(full_val_df, subject)
         output_path = os.path.join(save_result_dir, "{}.json".format(subject))
 
+        # FIXME: mmlu_pro doesn't have auto-batch, must be integer
+        if batch_size == "auto":
+            batch_size = 4 # if you oom, reduce batch
+            log.warn("MMLU_PRO: batch size `auto` detected. Fixed to static: batch_size = 4. If you oom, reduce this value in mmlupro.py")
+
         acc, corr_count, wrong_count = eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size)
 
         log.info(f"subject: {subject}, acc: {acc}, corr_count: {corr_count}, wrong_count: {wrong_count}")

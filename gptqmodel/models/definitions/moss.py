@@ -21,7 +21,7 @@ class MOSSGPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = "transformer.h"
+    layers_node = ["transformer.h"]
     layer_type = "MossBlock"
     layer_modules = [
         ["attn.qkv_proj"],

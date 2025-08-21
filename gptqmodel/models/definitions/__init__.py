@@ -1,3 +1,4 @@
+# isort: off
 # Copyright 2024-2025 ModelCloud.ai
 # Copyright 2024-2025 qubitium@modelcloud.ai
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
@@ -14,6 +15,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Many model architectures inherit from LlamaGPTQ, so it’s necessary to import llama first to avoid circular imports.
+from .llama import LlamaGPTQ
+
+# other model
 from .baichuan import BaiChuanGPTQ
 from .bloom import BloomGPTQ
 from .chatglm import ChatGLM
@@ -25,13 +30,17 @@ from .dbrx_converted import DbrxConvertedGPTQ
 from .decilm import DeciLMGPTQ
 from .deepseek_v2 import DeepSeekV2GPTQ
 from .deepseek_v3 import DeepSeekV3GPTQ
+from .dream import DreamGPTQ
 from .exaone import ExaoneGPTQ
+from .ernie4_5 import ERNIE4_5GPTQ
+from .ernie4_5_moe import ERNIE4_5_MOEGPTQ
 from .gemma import GemmaGPTQ
 from .gemma2 import Gemma2GPTQ
 from .gemma3 import Gemma3GPTQ
 from .glm import GLM
 from .gpt2 import GPT2GPTQ
 from .gpt_bigcode import GPTBigCodeGPTQ
+from .gpt_neo import GPTNeoGPTQ
 from .gpt_neox import GPTNeoXGPTQ
 from .gptj import GPTJGPTQ
 from .granite import GraniteGPTQ
@@ -43,6 +52,7 @@ from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
 from .llama4 import Llama4GPTQ
 from .longllama import LongLlamaGPTQ
+from .mimo import MimoGPTQ
 from .minicpm3 import MiniCPM3GPTQ
 from .mistral import MistralGPTQ
 from .mixtral import MixtralGPTQ
@@ -68,3 +78,5 @@ from .starcoder2 import Starcoder2GPTQ
 from .telechat2 import TeleChat2GPTQ
 from .xverse import XverseGPTQ
 from .yi import YiGPTQ
+from .falcon_h1 import FalconH1GPTQ
+from .pangu_alpha import PanguAlphaGPTQ

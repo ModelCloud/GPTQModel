@@ -22,7 +22,7 @@ class GPTNeoXGPTQ(BaseGPTQModel):
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"
 
-    layers_node = "gpt_neox.layers"
+    layers_node = ["gpt_neox.layers"]
     layer_type = "GPTNeoXLayer"
     layer_modules = [
         ["attention.query_key_value"],

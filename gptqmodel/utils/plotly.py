@@ -18,11 +18,11 @@ import plotly.graph_objects as go
 
 
 def create_plotly(
-        x,
-        y,
-        xaxis_title,
-        yaxis_title,
-):
+        x: object,
+        y: object,
+        xaxis_title: object,
+        yaxis_title: object,
+) -> object:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=y, mode='lines+markers'))
     fig.update_layout(

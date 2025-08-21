@@ -21,7 +21,7 @@ class GPTJGPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = "transformer.h"
+    layers_node = ["transformer.h"]
     layer_type = "GPTJBlock"
     layer_modules = [
         ["attn.k_proj", "attn.v_proj", "attn.q_proj"],

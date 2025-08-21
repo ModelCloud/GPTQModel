@@ -22,8 +22,9 @@ class TestCohere2(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.4680
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4693
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15
-    BATCH_SIZE = 4
+    EVAL_BATCH_SIZE = 4
     DISABLE_FLASH_ATTN = True
+    ACCEPT_USE_FLASH_ATTEN2_ARG = False
 
     def test_cohere2(self):
         self.quant_lm_eval()

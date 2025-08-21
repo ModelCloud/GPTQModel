@@ -24,7 +24,7 @@ class DbrxConvertedGPTQ(BaseGPTQModel):
     base_modules = ["transformer.wte", "transformer.norm_f"]
     pre_lm_head_norm_module = "transformer.norm_f"
 
-    layers_node = "transformer.blocks"
+    layers_node = ["transformer.blocks"]
     layer_type = "DbrxBlock"
     layer_modules = [
         ["norm_attn_norm.attn.q_proj", "norm_attn_norm.attn.k_proj", "norm_attn_norm.attn.v_proj"],

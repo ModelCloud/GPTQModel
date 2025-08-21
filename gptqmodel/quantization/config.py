@@ -19,6 +19,7 @@ import json
 import os.path
 import re
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from importlib.metadata import version as pkg_version
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -58,13 +59,18 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
 
+META_FIELD_V2_ENABLED = "v2"
+META_FIELD_V2_ALPHA = "v2_alpha"
+META_FIELD_V2_MEMORY_DEVICE = "v2_memory_device"
+
 ADAPTER_FIELD = "adapter"
+
 
 # pkg names
 PKG_AUTO_ROUND = "auto-round"
 
 # saved formats
-class FORMAT:
+class FORMAT(str, Enum):
     GPTQ = "gptq"
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
@@ -75,7 +81,7 @@ class FORMAT:
 
 
 # quant methods
-class QUANT_METHOD:
+class QUANT_METHOD(str, Enum):
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
     QQQ = "qqq"
@@ -159,11 +165,12 @@ class QuantizeConfig():
     # use 32 for highest quality with slower inference and higher vram usage
     group_size: int = field(default=128)
 
-    # increase damp if NaN is encountred during `.quantize()` and/or increase calib dataset size
-    damp_percent: float = field(default=0.01)
-    damp_auto_increment: float = field(default=0.0025)
+    # increase damp if NaN is encountered during `.quantize()` and/or increase calib dataset size
+    damp_percent: float = field(default=0.05)
+    damp_auto_increment: float = field(default=0.01)
 
     desc_act: bool = field(default=True)
+    hyb_act: bool = field(default=False)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
@@ -175,6 +182,11 @@ class QuantizeConfig():
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
     format: FORMAT = field(default=FORMAT.GPTQ)
+
+    # quantization_order: str = "activate",
+    # quantization_scale: str = "mse", # or absmax
+    # is_distributed: bool = False,
+    # tied_gptq_handle: Optional["GPTQ"] = None
 
     # mean square error calculation: may reduce error loss for some models
     mse: float = field(default=0.0)
@@ -201,6 +213,10 @@ class QuantizeConfig():
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
     is_marlin_format: bool = False
+
+    v2: bool = False
+    v2_alpha: float = 0.25
+    v2_memory_device: str = "auto" #
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -446,6 +462,7 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
+            "hyb_act": self.hyb_act,
             "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,

@@ -49,7 +49,8 @@ from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
                            get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
-                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes,
+                           find_config_seq_len)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -106,9 +107,12 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     if is_local:
         return pretrained_model_id_or_path
     else:
-        # hf_transfer does not accept max_memory arg
-        kwargs.pop('max_memory', None)
-        return snapshot_download(pretrained_model_id_or_path, **kwargs)
+        # Clone kwargs before modifying
+        download_kwargs = kwargs.copy()
+        download_kwargs.pop("max_memory", None)
+        download_kwargs.pop("attn_implementation", None)
+        download_kwargs.pop("use_flash_attention_2", None)
+        return snapshot_download(pretrained_model_id_or_path, **download_kwargs)
 
 
 def ModelLoader(cls):
@@ -159,6 +163,12 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
+        atten_impl = model_init_kwargs.get("attn_implementation", None)
+
+        if atten_impl is not None and atten_impl != "auto":
+            log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
+            config._attn_implementation = atten_impl
+
         # normalize and auto select quantization device is not passed
         if quantize_config.device is None:
             quantize_config.device = auto_select_device(None, None)
@@ -177,16 +187,46 @@ def ModelLoader(cls):
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["torch_dtype"] = torch_dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
+        # model_init_kwargs["low_cpu_mem_usage"] = True
 
-        model = cls.loader.from_pretrained(model_local_path, **model_init_kwargs)
+        model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+
+        # from concurrent.futures import ThreadPoolExecutor
+        #
+        # def fast_pin_model(model):
+        #     # Get total size needed in bytes
+        #     total_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        #
+        #     # Create pinned memory buffer (byte tensor)
+        #     pinned_buffer = torch.ByteTensor(total_bytes).pin_memory()
+        #
+        #     # Copy all parameters into the buffer
+        #     offset = 0
+        #     for param in model.parameters():
+        #         num_bytes = param.numel() * param.element_size()
+        #
+        #         # Create view into buffer
+        #         param_bytes = pinned_buffer[offset:offset + num_bytes].view(param.dtype)
+        #         param_bytes.copy_(param.data.view(-1))
+        #
+        #         # Replace parameter data with pinned version
+        #         param.data = param_bytes.view_as(param.data)
+        #         offset += num_bytes
+        #
+        #     return model
+
+        # model = fast_pin_model(model)  # 10-100x faster than per-tensor pinning
+
+        # log.info("Model: pinned memory to cpu")
+        # model = fast_pin_model(model)
+
+        # log.info(f"pinned memory == {next(model.parameters()).is_pinned()}")  # Should return `True`
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
-        if any(k in model_config for k in seq_len_keys):
-            for key in seq_len_keys:
-                if key in model_config:
-                    model.seqlen = model_config[key]
-                    break
+        config_seq_len = find_config_seq_len(model_config, seq_len_keys)
+        if config_seq_len is not None:
+            model.seqlen = config_seq_len
         else:
             log.warn("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
@@ -223,7 +263,7 @@ def ModelLoader(cls):
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
-            backend = BACKEND(backend)
+            backend =  (backend)
         device = auto_select_device(device, backend)
         device_map = device.to_device_map()
 
@@ -446,7 +486,7 @@ def ModelLoader(cls):
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if not name.startswith(cls.layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                if not any(name.startswith(prefix) for prefix in cls.layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
                         not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only
@@ -559,11 +599,9 @@ def ModelLoader(cls):
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
-        if any(k in model_config for k in seq_len_keys):
-            for key in seq_len_keys:
-                if key in model_config:
-                    model.seqlen = model_config[key]
-                    break
+        config_seq_len = find_config_seq_len(model_config, seq_len_keys)
+        if config_seq_len is not None:
+            model.seqlen = config_seq_len
         else:
             log.warn("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096

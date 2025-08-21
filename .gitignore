@@ -167,3 +167,5 @@ debug
 
 # .vscode
 .vscode/
+
+example.py

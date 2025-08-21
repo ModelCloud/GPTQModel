@@ -42,7 +42,7 @@ def reset_ln(ln):
 
 
 def fuse_layer_norms(model: PreTrainedModel, pre_lm_head_norm_module_name: str, layers_node: str, lm_head_name: str):
-    layers = get_module_by_name_prefix(model, layers_node)
+    layers , _ = get_module_by_name_prefix(model, layers_node)
 
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
     for layer in layers:
@@ -61,8 +61,8 @@ def fuse_layer_norms(model: PreTrainedModel, pre_lm_head_norm_module_name: str, 
         reset_ln(layer.post_attention_layernorm)
         reset_ln(layer.input_layernorm)
 
-    pre_head_layernorm = get_module_by_name_prefix(model, pre_lm_head_norm_module_name)
-    lm_head = get_module_by_name_prefix(model, lm_head_name)
+    pre_head_layernorm, _ = get_module_by_name_prefix(model, pre_lm_head_norm_module_name)
+    lm_head, _ = get_module_by_name_prefix(model, lm_head_name)
 
     fuse_ln_linear(pre_head_layernorm, [lm_head])
     reset_ln(pre_head_layernorm)
@@ -152,7 +152,7 @@ def rotate_mlp_output(layer, Q, device):
 
 def rotate_head(model, Q, device, lm_head_name) -> None:
     # Rotate the head.
-    W = get_module_by_name_prefix(model, lm_head_name)
+    W, _ = get_module_by_name_prefix(model, lm_head_name)
     dtype = W.weight.data.dtype
     W_ = W.weight.data.to(device=device, dtype=torch.float64)
     W.weight.data = torch.matmul(W_, Q).to(device="cpu", dtype=dtype)
@@ -184,7 +184,7 @@ def rotate_model(model: PreTrainedModel, rotate_mode: str, device: torch.device,
     rotate_embeddings(model, Q, device)
     rotate_head(model, Q, device, lm_head_name)
     torch_empty_cache()
-    layers = get_module_by_name_prefix(model, layers_node)
+    layers , _ = get_module_by_name_prefix(model, layers_node)
     for idx, layer in enumerate(log.pb(layers).title("Rotating")):
         rotate_attention_inputs(layer, Q, device)
         rotate_attention_output(layer, Q, device)

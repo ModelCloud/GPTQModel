@@ -24,6 +24,10 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# if not os.environ.get("PYTHON_GIL", None):
+#     os.environ["PYTHON_GIL"] = '0'
+#     log.info("ENV: Auto disable GIL and use free-threading mode when applicable: Python 3.13t+. You must install the -t edition of Python.")
+
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None):
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
     log.info("ENV: Auto setting PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' for memory saving.")
@@ -56,11 +60,10 @@ from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrain
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
-from ..quantization.gptq import CPU  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
-from ..utils.torch import torch_empty_cache  # noqa: E402
+from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -73,13 +76,17 @@ from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
+from .definitions.dream import DreamGPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
+from .definitions.ernie4_5 import ERNIE4_5GPTQ  # noqa: E402
+from .definitions.ernie4_5_moe import ERNIE4_5_MOEGPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
-from .definitions.gemma3 import Gemma3GPTQ  # noqa: E402
+from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3GPTQ  # noqa: E402
 from .definitions.glm import GLM  # noqa: E402
 from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
+from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
 from .definitions.gptj import GPTJGPTQ  # noqa: E402
 from .definitions.granite import GraniteGPTQ  # noqa: E402
@@ -91,6 +98,7 @@ from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.llama4 import Llama4GPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
+from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
 from .definitions.mistral import MistralGPTQ  # noqa: E402
@@ -104,19 +112,24 @@ from .definitions.opt import OPTGPTQ  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
 from .definitions.phi import PhiGPTQ  # noqa: E402
 from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
+from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
 from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
+from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
+from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
 from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
+from .definitions.pangu_alpha import PanguAlphaGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -124,7 +137,9 @@ random.seed(787)
 numpy.random.seed(787)
 
 MODEL_MAP = {
+    "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
+    "gpt_neo": GPTNeoGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
@@ -134,6 +149,7 @@ MODEL_MAP = {
     "moss": MOSSGPTQ,
     "chatglm": ChatGLM,
     "glm": GLM,
+    "glm4": GLM,
     "gpt_bigcode": GPTBigCodeGPTQ,
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
@@ -149,6 +165,7 @@ MODEL_MAP = {
     "Yi": YiGPTQ,
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
+    "nemotron-nas": DeciLMGPTQ,
     "stablelm_epoch": StableLMEpochGPTQ,
     "stablelm": StableLMEpochGPTQ,
     "starcoder2": Starcoder2GPTQ,
@@ -159,8 +176,10 @@ MODEL_MAP = {
     "gemma": GemmaGPTQ,
     "gemma2": Gemma2GPTQ,
     "gemma3_text": Gemma3GPTQ,
+    "gemma3": Gemma3ForConditionalGenerationGPTQ,
     "phi": PhiGPTQ,
     "phi3": Phi3GPTQ,
+    "phi4mm": Phi4MMGPTQ,
     "phimoe": PhiMoEGPTQForCausalLM,
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
@@ -169,6 +188,7 @@ MODEL_MAP = {
     "qwen3_moe": Qwen3MoeGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "qwen2_5_vl": Qwen2_5_VLGPTQ,
+    "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "dbrx": DbrxGPTQ,
     "dbrx_converted": DbrxConvertedGPTQ,
     "deepseek_v2": DeepSeekV2GPTQ,
@@ -183,6 +203,12 @@ MODEL_MAP = {
     "ovis": OvisGPTQ,
     "telechat": TeleChat2GPTQ,
     "instella": InstellaGPTQ,
+    "mimo": MimoGPTQ,
+    "falcon_h1": FalconH1GPTQ,
+    "gpt_pangu": PanguAlphaGPTQ,
+    "ernie4_5": ERNIE4_5GPTQ,
+    "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
+    "seed_oss": SeedOSSGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
@@ -190,10 +216,10 @@ SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
-    if config.model_type not in SUPPORTED_MODELS:
+    if config.model_type.lower() not in SUPPORTED_MODELS:
         raise TypeError(f"{config.model_type} isn't supported yet.")
     model_type = config.model_type
-    return model_type
+    return model_type.lower()
 
 class GPTQModel:
     def __init__(self):
@@ -330,8 +356,8 @@ class GPTQModel:
             cls,
             model_or_id_or_path: str=None,
             tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
-            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLUPRO, List[EVAL.MMLUPRO]] = None, # set to None to fix mutable warning
-            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLUPRO]] = EVAL.LM_EVAL,
+            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLU_PRO, List[EVAL.MMLU_PRO]] = None, # set to None to fix mutable warning
+            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLU_PRO]] = EVAL.LM_EVAL,
             batch_size: Union[int, str] = 1,
             trust_remote_code: bool = False,
             output_path: Optional[str] = None,
@@ -348,8 +374,8 @@ class GPTQModel:
         if tasks is None:
             if framework == EVAL.LM_EVAL:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
-            if framework == EVAL.MMLUPRO:
-                tasks = [EVAL.MMLUPRO.MATH]
+            if framework == EVAL.MMLU_PRO:
+                tasks = [EVAL.MMLU_PRO.MATH]
             else:
                 tasks = [EVAL.EVALPLUS.HUMAN]
 
@@ -366,6 +392,7 @@ class GPTQModel:
             raise ValueError('Eval framework support llm_backend: [gptqmodel, vllm]')
 
         if isinstance(model_or_id_or_path, str):
+            log.info(f"Eval: loading using backend = `{backend}`")
             model = GPTQModel.load(model_id_or_path=model_or_id_or_path, backend=backend)
             model_id_or_path = model_or_id_or_path
         elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
@@ -482,7 +509,7 @@ class GPTQModel:
             evalplus_make_table(results)
             print('--------evalplus Result End---------')
             return results
-        elif framework == EVAL.MMLUPRO:
+        elif framework == EVAL.MMLU_PRO:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")

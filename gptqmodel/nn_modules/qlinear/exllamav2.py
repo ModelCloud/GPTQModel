@@ -30,7 +30,7 @@ exllama_v2_import_exception = None
 try:
     from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
 except ImportError as e:
-    exllama_v2_import_exception = e
+    exllama_v2_import_exception = str(e)
 
 log = setup_logger()
 
@@ -121,7 +121,9 @@ def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
 
 class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
+    # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
@@ -193,7 +195,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if exllama_v2_import_exception is not None:
-            return False, exllama_v2_import_exception
+            return False, ImportError(exllama_v2_import_exception)
         return cls._validate(**args)
 
     def post_init(self, temp_dq):

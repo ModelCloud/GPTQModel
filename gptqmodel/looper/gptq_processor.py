@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import threading
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -25,26 +26,26 @@ from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTQ
+from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
-from ..quantization.gptq import CPU, CUDA_0, CUDA_1
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import torch_empty_cache, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, DEVICE_1, torch_streamCtx, torch_sync
 
 log = setup_logger()
+lock = threading.Lock()
 
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True, retain_w: bool = False):
+                 logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
                          calibration_dataset_concat_size=calibration_dataset_concat_size,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          logger_board=logger_board, require_fwd=require_fwd)
 
-        self.retain_w = retain_w
+        self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
 
     def log_plotly(self):
@@ -81,16 +82,24 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", qcfg_clone.desc_act)
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
+            qcfg_clone.v2 = self.qcfg.dynamic_get(module.full_name, "v2", qcfg_clone.v2)
+            qcfg_clone.v2_alpha = self.qcfg.dynamic_get(module.full_name, "v2_alpha", qcfg_clone.v2_alpha)
 
-        tmp = GPTQ(module=module, qcfg=qcfg_clone)
+        # store last used qcfg_dynamic
+        self.qcfg_dynamic = qcfg_clone
+
+        if qcfg_clone.v2 is True:
+            tmp = GPTQv2(module=module, qcfg=qcfg_clone)
+        else:
+            tmp = GPTQ(module=module, qcfg=qcfg_clone)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
         # all sub-modules within a single layer needs to store all the inputs.
         # deepseek has massive # of sub-modules per layer, causing vram pressure
         # buffered mode is slower due to gpu<->cpu movement
-        if buffered_fwd:  # TODO tweak this number for masive MoE
-            log.info(f"Experimental: enabling fwd buffered mode for: `{module.name}`")
+        if buffered_fwd:
+            log.info.once(f"Quantize: Enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
@@ -106,27 +115,43 @@ class GPTQProcessor(LoopProcessor):
         else:
             return False
 
-    def preprocess_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
-        def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-            # gptq is mutable.
+    def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             g = self.tasks[name]  # noqa: F821
             g.add_batch(inp[0].data, out.data)  # noqa: F821
+            del inp, out
         return tmp
 
-    def process(self, module: NamedModule, auto_gc: bool = True):
-        # need to sync stream copies
-        if torch.cuda.device_count() > 1:
-            torch.cuda.synchronize()
+    def pre_process_streaming(self, module: NamedModule):
+        g = self.tasks[module.name]
+        with torch_streamCtx(module.target_device_stream):
+            # log.debug(f"streaming module `{g.name}` to device = `{module.target_device}`")
+            if g.H is not None:
+                g.H = g.H.to(device=module.target_device, non_blocking=True)
+            g.module.weight.data = g.module.weight.data.to(device=module.target_device, non_blocking=True)
 
+    def process(self, module: NamedModule, auto_gc: bool = True):
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
-        g = self.tasks[module.name]
-        # TODO FIX ME, quantize does NOT need to pass any args! Check HF compat!
+        with self.lock:
+            g = self.tasks[module.name]
+
         wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+
+        with self.lock:
+            self.result_save(module.full_name, {
+                "scale": scale,
+                "zero": zero,
+                "g_idx": g_idx,
+            })
+
+            self.durations.append(duration)
+            self.avg_losses.append(avg_loss)
+            self.module_names.append(f"layer-{module.layer_index}-{module.name}")
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -147,16 +172,13 @@ class GPTQProcessor(LoopProcessor):
         #         value=duration,
         #         iteration=name_index,
         #     )
-        self.durations.append(duration)
-        self.avg_losses.append(avg_loss)
-        self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stats_0 = torch.cuda.memory_stats(CUDA_0)
+        stats_0 = torch.cuda.memory_stats(DEVICE_0)
         active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
         peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         if torch.cuda.device_count() > 1:
-            stats_1 = torch.cuda.memory_stats(CUDA_1)
+            stats_1 = torch.cuda.memory_stats(DEVICE_1)
             active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
             peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
@@ -168,7 +190,7 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
-            QUANT_LOG_LOSS: f"{avg_loss:.8f}",
+            QUANT_LOG_LOSS: f"{avg_loss:.10f}",
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
@@ -179,45 +201,45 @@ class GPTQProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
-        self.log.append(stat)
+        with self.lock:
+            self.log.append(stat)
 
         # Log the new row
         self.log_new_row(stat)
 
-        #log.info(stat)
+        if self.calculate_w_wq_diff:
+            if module.weight.data.dtype == torch.float16:
+                # diff in float16
+                w_wq_diff = module.weight.data - wq
+            else:
+                # diff in float32
+                w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
 
-        self.result_save(module.full_name, {
-            "scale": move_to(scale, device=CPU, stream=self.stream),
-            "zero": move_to(zero, device=CPU, stream=self.stream),
-            "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
-        })
-
-        if self.retain_w:
-            # original weights
-            w = module.weight.data
             module.state.update({
-                "w": w,  # bf16/fp16, non-quantized native weight
+                "w_wq_diff": w_wq_diff,
             })
 
-        self.tasks[module.name].free()
-
-
+        with self.lock:
+            self.tasks[module.name].free()
 
         # prepare for module.forward post generate
         # module.weight.data = torch.empty(1,1) # hack to remove weight.data
         # if auto_gc:
         #     torch_empty_cache()
-        wq = wq.to(device=CUDA_0)
+        # with torch_streamCtx(DEVICE_0_STREAM):
+        #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
+        wq = wq.to(device=DEVICE_0, non_blocking=False)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+
         module.state.update({
             "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
         })
 
         module.weight.data = wq
 
-        if auto_gc:
-            torch_empty_cache()
+        # if auto_gc:
+        #     torch_empty_cache()
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
@@ -259,6 +281,7 @@ class GPTQProcessor(LoopProcessor):
         else:
             return True
 
-    @classmethod
-    def name(cls) -> str:
-        return "gptq"
+    def name(self) -> str:
+        # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
+        qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
+        return "gptq v2" if qcfg.v2 else "gptq"

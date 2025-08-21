@@ -24,10 +24,11 @@ import operator
 import os
 import re
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import threadpoolctl as tctl
@@ -39,6 +40,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
+from torch.nn.modules.conv import _ConvNd
 from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
@@ -53,6 +55,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
+from . import has_gil
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -89,8 +92,13 @@ def recurse_setattr(module, name, value):
 def get_device(obj: torch.Tensor | nn.Module):
     if isinstance(obj, torch.Tensor):
         return obj.device
-    return next(obj.parameters()).device
 
+    params = list(obj.parameters())  # Convert generator to list
+    if len(params) > 0:
+        return params[0].device
+    else:
+        log.warn(f"Quantize: Unable to determine device of `{obj}`. default to `cpu`")
+        return torch.device('cpu')  # or raise an exception
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
@@ -135,9 +143,8 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
-    for layer in layers:
-        if isinstance(module, layer):
-            return {name: module}
+    if isinstance(module, tuple(layers)):
+       return {name: module}
 
     res = {}
     for name1, child in module.named_children():
@@ -145,10 +152,14 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     return res
 
 
-def get_module_by_name_prefix(model, module_name: str):
+def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
+    module_name_list = module_name if isinstance(module_name, list) else [module_name]
     for name, module in model.named_modules():
-        if name.startswith(module_name):
-            return module
+        for prefix in module_name_list:
+            if name.startswith(prefix):
+                return module, prefix
+
+    return None, ""
 
 
 def get_module_by_name_suffix(model, module_name: str):
@@ -277,10 +288,10 @@ def create_quant_layer(
         elif isinstance(submodule, nn.Linear):
             in_features = submodule.in_features
             out_features = submodule.out_features
-        elif isinstance(submodule, nn.Conv2d):
+        elif isinstance(submodule, _ConvNd):
             in_features = submodule.in_channels
             out_features = submodule.out_channels
-        elif isinstance(submodule, transformers.pytorch_utils.Conv1D):
+        elif isinstance(submodule, transformers.Conv1D):
             in_features = submodule.weight.shape[0]
             out_features = submodule.weight.shape[1]
         elif isinstance(submodule, BaseQuantLinear):
@@ -549,26 +560,38 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers, quant_linear_cls):
+def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers, quant_linear_cls, lock: threading.Lock):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
-        r = quant_result[name]
-        scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
-        layer_device = qModules[name].device
-        qModules[name].to(CPU)
-        layers[name], scale, zero, g_idx = (
-            layers[name].to(CPU),
-            scale.to(CPU),
-            zero.to(CPU),
-            g_idx.to(CPU) if g_idx is not None else None,
-        )
-        if quant_linear_cls.QUANT_TYPE == "qqq":
-            scale_extra = r["scale_extra"].to(CPU)
-            qModules[name].pack(linear=layers[name], scales=scale, s_extra=scale_extra)
-        else:
-            qModules[name].pack(linear=layers[name], scales=scale, zeros=zero, g_idx=g_idx)
-        qModules[name].to(layer_device)
+        with lock:
+            r = quant_result[name]
+            scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
+            module = qModules[name]
+            layer = layers[name]
 
+        module = module.to(CPU)
+
+        layer = layer.to(CPU)
+        scale = scale.to(CPU)
+        zero = zero.to(CPU)
+        g_idx = g_idx.to(CPU) if g_idx is not None else None
+
+        with lock:
+            qModules[name] = module
+            layers[name] = layer
+
+        if quant_linear_cls.QUANT_TYPE == "qqq":
+            with lock:
+                scale_extra = r["scale_extra"]
+            scale_extra = scale_extra.to(CPU)
+            module.pack(linear=layer, scales=scale, s_extra=scale_extra)
+        else:
+            module.pack(linear=layer, scales=scale, zeros=zero, g_idx=g_idx)
+
+        # TODO: why move it back to gpu?
+        # start = time.time()
+        # qModules[name].to(layer_device)
+        # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
 
 def pack_model(
     model,
@@ -617,20 +640,23 @@ def pack_model(
     assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
 
     names = list(qModules.keys())
+    lock = threading.Lock()
 
-    if parallel_packing:
-        max_workers = 2
+    if not has_gil():
+        from device_smi import Device
+        cpu = Device("cpu")
+        max_packers = cpu.count * cpu.cores
     else:
-        max_workers = 1
+        max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_packers) as executor:
         with log.pb(names).manual() as pb:
             def wrapper(name):
                 # TODO FIX, thread pool executor does not advance iterator
                 pb.next()
                 pb.title(f"Packing {name}").draw()
                 pack_module(name=name, qModules=qModules, quant_result=quant_result, layers=modules,
-                            quant_linear_cls=quant_linear_cls)
+                            quant_linear_cls=quant_linear_cls, lock=lock)
 
             for _ in executor.map(wrapper, names):
                 pass
@@ -1079,3 +1105,14 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     accelerate.load_checkpoint_in_model(model, *args, **kwargs)
     model.tie_weights()
+
+
+def find_config_seq_len(config_dict, target_keys):
+    for k, v in config_dict.items():
+        if k in target_keys:
+            return v
+        if isinstance(v, dict):
+            found = find_config_seq_len(v, target_keys)
+            if found is not None:
+                return found
+    return None

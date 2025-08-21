@@ -31,9 +31,35 @@ class OvisGPTQ(BaseGPTQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
     pre_lm_head_norm_module = "llm.model.norm"
 
-    layers_node = "llm.model.layers"
+    layers_node = ["llm.model.layers"] #, "visual_tokenizer.backbone.trunk.blocks"]
     layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer", "Qwen2DecoderLayer"]
+
+    layers_modules_tree = {
+        # "visual_tokenizer": [
+        #     "backbone",
+        #     "trunk",
+        #     "blocks",
+        #     "#",
+        #     {
+        #         "attn": ("qkv", "proj"),
+        #         "mlp": ("fc1", "fc2", "fc3"),
+        #     },
+        # ],
+        "llm": [
+            "model",
+            "layers",
+            "#",
+            {
+                "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+                "mlp": ("up_proj", "gate_proj", "down_proj"),
+            }
+        ],
+    }
+
+    layer_modules_strict = False # the layer modules are in different decode layers
     layer_modules = [
+        ["qkv", "proj"],
+        ["fc1", "fc2", "fc3"],
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],
         ["mlp.up_proj", "mlp.gate_proj"],

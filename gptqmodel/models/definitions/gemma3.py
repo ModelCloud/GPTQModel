@@ -15,13 +15,18 @@
 # limitations under the License.
 
 from ..base import BaseGPTQModel
+from . import LlamaGPTQ
 
 
-class Gemma3GPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "model.norm"]
-    pre_lm_head_norm_module = "model.norm"
+class Gemma3GPTQ(LlamaGPTQ):
+    layer_type = "Gemma3DecoderLayer"
 
-    layers_node = "model.layers"
+class Gemma3ForConditionalGenerationGPTQ(BaseGPTQModel):
+    support_batch_quantize = False
+    base_modules = ["model.language_model.embed_tokens", "model.language_model.norm"]
+    pre_lm_head_norm_module = "model.language_model.norm"
+
+    layers_node = "model.language_model.layers"
     layer_type = "Gemma3DecoderLayer"
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
@@ -29,3 +34,5 @@ class Gemma3GPTQ(BaseGPTQModel):
         ["mlp.up_proj", "mlp.gate_proj"],
         ["mlp.down_proj"],
     ]
+
+    lm_head_module = "model.lm_head"

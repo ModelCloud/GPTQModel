@@ -13,15 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 # -- do not touch
 import os
 import sys
-from typing import Dict, List
-
-from device_smi import Device
-from gptqmodel.models._const import CUDA_0
-from logbar import LogBar
 
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -30,7 +24,11 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # -- end do not touch
+
 from pathlib import Path  # noqa: E402
+from typing import Dict, List  # noqa: E402
+
+from logbar import LogBar  # noqa: E402
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402
@@ -64,7 +62,8 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
-    BATCH_SIZE = "auto"
+    EVAL_BATCH_SIZE = "auto"
+    QUANT_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.AUTO
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
@@ -72,6 +71,7 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
+    BUFFERED_FWD = False
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -82,8 +82,7 @@ class ModelTest(unittest.TestCase):
     SYM = True
 
     DISABLE_FLASH_ATTN = False
-    LOAD_QUANTIZED_MODEL = None  # loading from a quantized dir instead of using native model id/dir
-    SAVE_QUANTIZED_MODEL = None  # if quantize a model, save it to this dir
+    ACCEPT_USE_FLASH_ATTEN2_ARG = True
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
@@ -94,6 +93,10 @@ class ModelTest(unittest.TestCase):
     EXPECT_LM_HEAD_LOSS = None
 
     QUANTIZE_CONFIG_BITS = 4
+    QUANTIZE_CONFIG_GROUP_SIZE = 128
+
+    V2 = False
+    QUANT_SAVE_PATH = None # default is temp folder
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -141,9 +144,13 @@ class ModelTest(unittest.TestCase):
     @classmethod
     def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-
+        # Load data directly from gzipped JSON file
+        # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
+        #     traindata = [json.loads(line) for line in f]
+        #
         if not tokenizer:
             return traindata.select(range(rows))
+        #     return traindata[:rows]
 
         datas = []
         for index, sample in enumerate(traindata):
@@ -161,28 +168,34 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = 4, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
             bits=self.QUANTIZE_CONFIG_BITS,
-            group_size=128,
+            group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT,
             sym=self.SYM,
+            v2=self.V2
         )
+
+        log.info(f"Quant config: {quantize_config}")
+        log.info(f"Quant batch_size: {batch_size}")
+
         args = kwargs if kwargs else {}
 
         if self.DISABLE_FLASH_ATTN:
             has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
             if has_attn_implementation:
-                args["attn_implementation"] = None
-            args["use_flash_attention_2"] = False
+                args["attn_implementation"] = "eager"
+            if self.ACCEPT_USE_FLASH_ATTEN2_ARG:
+                args["use_flash_attention_2"] = False
 
+        log.info(f"args: {args}")
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             torch_dtype=torch_dtype,
-            backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
             **args,
         )
@@ -204,19 +217,22 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
-            with (contextlib.nullcontext(self.SAVE_QUANTIZED_MODEL) if self.SAVE_QUANTIZED_MODEL else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as tmpdirname:
-                os.makedirs(tmpdirname, exist_ok=True)
-                self.clear_directory(tmpdirname)
+            # TODO: make into shared method
+            with (contextlib.nullcontext(self.QUANT_SAVE_PATH) if self.QUANT_SAVE_PATH else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as path:
+                os.makedirs(path, exist_ok=True)
+                self.clear_directory(path)
 
-                model.save(tmpdirname)
-                tokenizer.save_pretrained(tmpdirname)
-                q_model, q_tokenizer = self.loadQuantModel(tmpdirname, trust_remote_code=trust_remote_code)
+                model.save(path)
+                tokenizer.save_pretrained(path)
+                log.info(f"Quantized Model saved to tmp dir: {path}")
+                q_model, q_tokenizer = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
                 if need_create_processor:
-                    processor = AutoProcessor.from_pretrained(tmpdirname)
+                    processor = AutoProcessor.from_pretrained(path)
+
         else:
             if need_create_processor:
                 processor = AutoProcessor.from_pretrained(model_id_or_path)
@@ -251,6 +267,7 @@ class ModelTest(unittest.TestCase):
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
             **kargs
         )
@@ -263,7 +280,7 @@ class ModelTest(unittest.TestCase):
                 if self.USE_VLLM:
                     model_args = {
                         "pretrained": model.model_local_path,
-                        "dtype": "auto",
+                        "dtype": "auto", #"float16",
                         "gpu_memory_utilization": 0.8,
                         "tensor_parallel_size": 1,
                         "trust_remote_code": trust_remote_code,
@@ -273,55 +290,65 @@ class ModelTest(unittest.TestCase):
                     model_args = {}
                 if extra_args:
                     model_args.update(extra_args)
+
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
-                results = GPTQModel.eval(
-                    model_or_id_or_path=model,
-                    llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
-                    model_args=model_args,
-                    output_path=tmp_dir,
-                    framework=EVAL.LM_EVAL,
-                    tasks=[self.TASK_NAME],
-                    apply_chat_template=apply_chat_template,
-                    trust_remote_code=trust_remote_code,
-                    batch_size=self.BATCH_SIZE,
-                    gen_kwargs="temperature=0.0,top_k=50",
-                    random_seed=RAND_SEED,
-                    task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
-                )
 
-                print('--------Eval Result---------')
-                print(make_table(results))
-                if "groups" in results:
-                    print(make_table(results, "groups"))
-                print('--------Eval Result End---------')
-                task_results = {
-                    metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
-                    if metric != 'alias' and 'stderr' not in metric
-                }
-                print(task_results)
-                if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(model.model_local_path):
+                task_groups = EVAL.get_task_groups_from_tasks(self.TASK_NAME)
+
+                for framework, tasks in task_groups.items():
+                    log.info(f"TEST: EVAL starting: backend = {self.LOAD_BACKEND}")
+                    results = GPTQModel.eval(
+                        model_or_id_or_path=model,
+                        llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
+                        model_args=model_args,
+                        output_path=tmp_dir,
+                        framework=framework,
+                        tasks=tasks,
+                        apply_chat_template=apply_chat_template,
+                        trust_remote_code=trust_remote_code,
+                        batch_size=self.EVAL_BATCH_SIZE,
+                        gen_kwargs="temperature=0.0,top_k=50",
+                        random_seed=RAND_SEED,
+                        task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
+                    )
+
+                    print('--------Eval Result---------')
+                    print(make_table(results))
+                    if "groups" in results:
+                        print(make_table(results, "groups"))
+                    print('--------Eval Result End---------')
+                    task_results = {
+                        metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
+                        if metric != 'alias' and 'stderr' not in metric
+                    }
+                    print(task_results)
+
+                # only delete tmp folders
+                if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(
+                        model.model_local_path):
+                    log.info(f"Deleting temp model: {model.model_local_path}")
                     shutil.rmtree(model.model_local_path)
                 return task_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):
-                old_batch = self.BATCH_SIZE
-                if self.BATCH_SIZE == "auto":
-                    self.BATCH_SIZE = "8"
+                old_batch = self.EVAL_BATCH_SIZE
+                if self.EVAL_BATCH_SIZE == "auto":
+                    self.EVAL_BATCH_SIZE = "8"
                 else:
-                    self.BATCH_SIZE = f"{int(int(self.BATCH_SIZE) / 2)}"
+                    self.EVAL_BATCH_SIZE = f"{int(int(self.EVAL_BATCH_SIZE) / 2)}"
                     self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
 
-                print(f"batch {old_batch} OOM, retrying with batch {self.BATCH_SIZE}")
+                print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
-                if int(self.BATCH_SIZE) > 0:
+                if int(self.EVAL_BATCH_SIZE) > 0:
                     self.lm_eval(model=model,
                                  apply_chat_template=apply_chat_template,
                                  trust_remote_code=trust_remote_code,
                                  delete_quantized_model=delete_quantized_model)
-                    print(f"set batch size to {self.BATCH_SIZE}, passed")
+                    print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
                 else:
-                    print(f"set batch size to {self.BATCH_SIZE}, failed")
+                    print(f"set batch size to {self.EVAL_BATCH_SIZE}, failed")
                     raise e
             else:
                 raise e
@@ -339,17 +366,16 @@ class ModelTest(unittest.TestCase):
 
     def quant_lm_eval(self):
         self.model = None
-        if self.LOAD_QUANTIZED_MODEL:
-            try:
-                self.model, _ = self.quantModel(self.SAVE_QUANTIZED_MODEL, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
-            except BaseException as e:
-                print(f"LOAD_QUANTIZED_MODEL: {self.LOAD_QUANTIZED_MODEL} has something wrong {e}\n use NATIVE_MODEL_ID: {self.NATIVE_MODEL_ID} instead")
+        # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
+        #if self.QUANT_SAVE_PATH:
+        #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+
         if not self.model:
-            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=self.model,
+        task_results = self.lm_eval(model=self.QUANT_SAVE_PATH if self.QUANT_SAVE_PATH else self.model ,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                                     trust_remote_code=self.TRUST_REMOTE_CODE,
                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
@@ -382,6 +408,3 @@ class ModelTest(unittest.TestCase):
                 os.unlink(item_path)
             elif os.path.isdir(item_path):
                 shutil.rmtree(item_path)
-
-    def get_batch_size(self):
-        return 8 if Device(CUDA_0).memory_total / 1024 / 1024 / 1024 > 24 else 2

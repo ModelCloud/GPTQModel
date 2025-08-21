@@ -62,7 +62,9 @@ BASE_WHEEL_URL = (
     "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
 )
 
-BUILD_CUDA_EXT = sys.platform != "darwin"
+BUILD_CUDA_EXT = os.environ.get("BUILD_CUDA_EXT")
+if BUILD_CUDA_EXT is None:
+    BUILD_CUDA_EXT = "1" if sys.platform != "darwin" else "0"
 
 if os.environ.get("GPTQMODEL_FORCE_BUILD", None):
     FORCE_BUILD = True
@@ -103,7 +105,7 @@ common_setup_kwargs = {
 }
 
 def get_version_tag() -> str:
-    if not BUILD_CUDA_EXT:
+    if BUILD_CUDA_EXT != "1":
         return "cpu"
 
     if ROCM_VERSION:
@@ -137,13 +139,13 @@ if TORCH_CUDA_ARCH_LIST is None:
 
     # not validated for compute < 6
     if not got_cuda_v6 and not torch.version.hip:
-        BUILD_CUDA_EXT = False
+        BUILD_CUDA_EXT = "0"
 
         if sys.platform == "win32" and 'cu+' not in torch.__version__:
             print("No CUDA device detected: avoid installing torch from PyPi which may not have bundle CUDA support for Windows.\nInstall via PyTorch: `https://pytorch.org/get-started/locally/`")
 
     # if cuda compute is < 8.0, always force build since we only compile cached wheels for >= 8.0
-    if BUILD_CUDA_EXT and not FORCE_BUILD:
+    if BUILD_CUDA_EXT == "1" and not FORCE_BUILD:
         if got_cuda_between_v6_and_v8:
             FORCE_BUILD = True
 else:
@@ -158,7 +160,7 @@ include_dirs = ["gptqmodel_cuda"]
 
 extensions = []
 
-if BUILD_CUDA_EXT:
+if BUILD_CUDA_EXT == "1":
     from distutils.sysconfig import get_python_lib
 
     from torch.utils import cpp_extension as cpp_ext
@@ -347,22 +349,22 @@ setup(
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.9.6", "isort==6.0.0"],
-        'vllm': ["vllm>=0.7.3",  "flashinfer-python>=0.2.1"],
-        'sglang': ["sglang[srt]>=0.3.2",  "flashinfer-python>=0.2.1"],
+        'vllm': ["vllm>=0.8.5",  "flashinfer-python>=0.2.1"],
+        'sglang': ["sglang[srt]>=0.4.6",  "flashinfer-python>=0.2.1"],
         'bitblas': ["bitblas==0.0.1-dev13"],
         'hf': ["optimum>=1.21.2"],
-        'ipex': ["intel_extension_for_pytorch>=2.6.0"],
+        'ipex': ["intel_extension_for_pytorch>=2.7.0"],
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        'triton': ["triton>=2.0.0"],
+        'triton': ["triton>=3.0.0"],
         'openai': ["uvicorn", "fastapi", "pydantic"],
-        'mlx': ["mlx_lm>=0.20.6"]
+        'mlx': ["mlx_lm>=0.24.0"]
     },
     include_dirs=include_dirs,
     python_requires=">=3.9.0",
     cmdclass={"bdist_wheel": CachedWheelsCommand, "build_ext": cpp_ext.BuildExtension}
-    if BUILD_CUDA_EXT
+    if BUILD_CUDA_EXT == "1"
     else {
         "bdist_wheel": CachedWheelsCommand,
     },

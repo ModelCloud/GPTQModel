@@ -100,7 +100,6 @@ class TestQuantization(ModelTest):
         )
         model.quantize(
             calibration_dataset=self.calibration_dataset,
-            batch_size=self.get_batch_size(),
             calibration_dataset_concat_size=0,
             auto_gc=False,
         )
