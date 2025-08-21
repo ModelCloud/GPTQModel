@@ -571,6 +571,10 @@ jobs:
             uv pip install auto_round
           fi
 
+          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
+            uv pip install intel_extension_for_pytorch -U
+          fi
+
           if [[ "${{ matrix.test_script }}" == "models/test_pangu_alpha" ]]; then
             uv pip install jieba
           fi
