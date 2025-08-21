@@ -121,6 +121,7 @@ from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
+from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
 from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
@@ -205,6 +206,7 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaGPTQ,
     "ernie4_5": ERNIE4_5GPTQ,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
+    "seed_oss": SeedOSSGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
