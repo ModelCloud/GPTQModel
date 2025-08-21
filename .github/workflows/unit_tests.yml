@@ -62,6 +62,9 @@ env:
   MAX_JOBS: 8
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.248
+  CUDA_VERSION: 128
+  TORCH_VERSION: 2.8.0
+  PYTHON_VERSION: 312
   LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
   GPTQMODEL_FORCE_BUILD: 1
@@ -79,6 +82,7 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
+      cuda_version: ${{ env.CUDA_VERSION }}
     steps:
       - name: Print env
         run: |
@@ -201,10 +205,11 @@ jobs:
       - list-test-files
     if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
+        - /home/ci/models/pyenv:/opt/pyenv
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
 
@@ -226,6 +231,29 @@ jobs:
 
       - name: Print Env
         run: |
+          python_version=${{ env.PYTHON_VERSION }}
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
+
+          echo "env name: $env_name"
+
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -233,8 +261,7 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
-          uv pip install http://10.0.13.31/files/pytorch/torch-2.8.0+cu126-cp312-cp312-manylinux_2_28_x86_64.whl -U
-          pip show torch
+          pip show torch || true
           echo "##### pip list #####"
           pip list
 
@@ -260,7 +287,7 @@ jobs:
 
       - name: Compile
         if: github.event.inputs.artifact_id == '' && !cancelled()
-        timeout-minutes: 35
+        timeout-minutes: 45
         run: python setup.py bdist_wheel
 
       - name: Test install
@@ -291,7 +318,7 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
+        run: rm -rf ./* .[^.] .??* # pip cache purge && uv cache clean &&
 
   legacy:
     needs:
@@ -301,10 +328,11 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04
       volumes:
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
+        - /home/ci/models/pyenv:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
@@ -328,6 +356,29 @@ jobs:
 
       - name: Print Env
         run: |
+          python_version=${{ env.PYTHON_VERSION }}
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
+
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+          
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -335,10 +386,13 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
-          uv pip install http://10.0.13.31/files/pytorch/torch-2.8.0+cu126-cp312-cp312-manylinux_2_28_x86_64.whl -U
-          pip show torch
+          pip show torch || true
           echo "== pip list =="
           pip list
+
+#      - name: Install requirements
+#        run: |
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Download source from local
         continue-on-error: true
@@ -391,6 +445,7 @@ jobs:
 
       - name: Install wheel
         run: |
+          pip install uv -U
           uv pip install -r requirements.txt
           echo "===== install optimum bitblas parameterized uvicorn ====="
           uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
@@ -454,7 +509,7 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
+        run: rm -rf ./* .[^.] .??* #pip cache purge && uv cache clean &&
 
   torch:
     needs:
@@ -464,12 +519,13 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
+        - /home/ci/models/pyenv:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
@@ -493,6 +549,29 @@ jobs:
 
       - name: Print Env
         run: |
+          python_version=${{ env.PYTHON_VERSION }}
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
+         
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -500,11 +579,13 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
-          uv pip install http://10.0.13.31/files/pytorch/torch-2.8.0+cu126-cp312-cp312-manylinux_2_28_x86_64.whl -U
           pip show torch
           echo "== pip list =="
           pip list
 
+#      - name: Install requirements
+#        run: |
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Download source from local
         continue-on-error: true
@@ -698,7 +779,8 @@ jobs:
         if: always()
         run: |
           # rm ~/.cache/evalplus/*pkl || true
-          pip cache purge && uv cache clean && rm -rf ./* ./.*
+          # pip cache purge && uv cache clean
+          rm -rf rm -rf ./* .[^.] .??*
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
