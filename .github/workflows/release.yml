@@ -110,66 +110,66 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         include:
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 39
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 310
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 311
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 312
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 313
           - cuda: 128
-            torch: 2.8.0
-            python: 39
-          - cuda: 128
-            torch: 2.8.0
-            python: 310
-          - cuda: 128
-            torch: 2.8.0
-            python: 311
-          - cuda: 128
-            torch: 2.8.0
-            python: 312
-          - cuda: 128
-            torch: 2.8.0
+            torch: 2.7.0
             python: 313
-          - cuda: 128
-            torch: 2.7.0
-            python: 313
-          - cuda: 128
-            torch: 2.6.0
-            python: 313
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 313
           - cuda: 128
             torch: 2.7.0
             python: 312
-          - cuda: 128
-            torch: 2.6.0
-            python: 312
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 312
           - cuda: 128
             torch: 2.7.0
             python: 311
-          - cuda: 128
-            torch: 2.6.0
-            python: 311
-          - cuda: 128
-            torch: 2.7.0
-            python: 310
-          - cuda: 128
-            torch: 2.6.0
-            python: 310
-          - cuda: 128
-            torch: 2.7.0
-            python: 39
-          - cuda: 128
-            torch: 2.6.0
-            python: 39
-          - cuda: 126
-            torch: 2.8.0
-            python: 39
-          - cuda: 126
-            torch: 2.8.0
-            python: 310
-          - cuda: 126
-            torch: 2.8.0
-            python: 311
-          - cuda: 126
-            torch: 2.8.0
-            python: 312
-          - cuda: 126
-            torch: 2.8.0
-            python: 313
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 311
+          # - cuda: 128
+          #   torch: 2.7.0
+          #   python: 310
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 310
+          # - cuda: 128
+          #   torch: 2.7.0
+          #   python: 39
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 39
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 39
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 310
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 311
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 312
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 313
           - cuda: 126
             torch: 2.7.0
             python: 313
@@ -370,7 +370,7 @@ jobs:
       - name: Print Env
         run: |
           if [ "${{ matrix.cuda }}" -lt 128 ]; then # CUDA >= 12.8 supports 12.0 (5090)
-            echo "TORCH_CUDA_ARCH_LIST='8.0 8.6 8.9 9.0'" >> $GITHUB_ENV
+            echo "TORCH_CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
           fi
 
           python_version=${{ matrix.python }}
@@ -378,8 +378,19 @@ jobs:
             python_version="${python_version/3/3.}"
           fi
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py$python_version"
-          pyenv local $env_name
-          pyenv activate $env_name
+
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ {{ matrix.cuda }} ${{ matrix.torch }} $python_version
+          fi
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
