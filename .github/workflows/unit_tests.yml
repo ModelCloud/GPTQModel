@@ -231,14 +231,11 @@ jobs:
 
       - name: Print Env
         run: |
-          echo "1 python_version=${{ env.PYTHON_VERSION }}"
           python_version=${{ env.PYTHON_VERSION }}
-          echo "2 python_version=$python_version"
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          echo "3 python_version=$python_version"
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py$python_version_build"
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
 
           echo "env name: $env_name"
 
@@ -358,7 +355,7 @@ jobs:
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py$python_version_test_${{ matrix.test_script }}"
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             : # ignore
           else
@@ -538,7 +535,7 @@ jobs:
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py$python_version_test_${{ matrix.test_script }}"
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             : # ignore
           else
