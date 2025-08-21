@@ -509,7 +509,7 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* .[^.] .??*
+        run: rm -rf ./* .[^.] .??* #pip cache purge && uv cache clean &&
 
   torch:
     needs:
