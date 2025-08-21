@@ -236,6 +236,9 @@ jobs:
             python_version="${python_version/3/3.}"
           fi
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py$python_version_build"
+
+          echo "env name: $env_name"
+
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             : # ignore
           else
