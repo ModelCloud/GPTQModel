@@ -110,29 +110,29 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         include:
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 39
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 310
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 311
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 312
+          # - cuda: 128
+          #   torch: 2.8.0
+          #   python: 313
           - cuda: 128
-            torch: 2.8.0
-            python: 39
+            torch: 2.7.0
+            python: 313
           - cuda: 128
-            torch: 2.8.0
-            python: 310
-          - cuda: 128
-            torch: 2.8.0
-            python: 311
-          - cuda: 128
-            torch: 2.8.0
-            python: 312
-          - cuda: 128
-            torch: 2.8.0
+            torch: 2.6.0
             python: 313
           - cuda: 128
             torch: 2.7.0
-            python: 313
-          - cuda: 128
-            torch: 2.6.0
-            python: 313
-          - cuda: 128
-            torch: 2.7.0
             python: 312
           - cuda: 128
             torch: 2.6.0
@@ -140,36 +140,36 @@ jobs:
           - cuda: 128
             torch: 2.7.0
             python: 311
-          - cuda: 128
-            torch: 2.6.0
-            python: 311
-          - cuda: 128
-            torch: 2.7.0
-            python: 310
-          - cuda: 128
-            torch: 2.6.0
-            python: 310
-          - cuda: 128
-            torch: 2.7.0
-            python: 39
-          - cuda: 128
-            torch: 2.6.0
-            python: 39
-          - cuda: 126
-            torch: 2.8.0
-            python: 39
-          - cuda: 126
-            torch: 2.8.0
-            python: 310
-          - cuda: 126
-            torch: 2.8.0
-            python: 311
-          - cuda: 126
-            torch: 2.8.0
-            python: 312
-          - cuda: 126
-            torch: 2.8.0
-            python: 313
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 311
+          # - cuda: 128
+          #   torch: 2.7.0
+          #   python: 310
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 310
+          # - cuda: 128
+          #   torch: 2.7.0
+          #   python: 39
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 39
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 39
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 310
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 311
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 312
+          # - cuda: 126
+          #   torch: 2.8.0
+          #   python: 313
           - cuda: 126
             torch: 2.7.0
             python: 313
