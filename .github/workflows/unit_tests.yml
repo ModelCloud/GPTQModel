@@ -231,7 +231,7 @@ jobs:
 
       - name: Print Env
         run: |
-          python_version=${{ matrix.python }}
+          python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
@@ -348,7 +348,7 @@ jobs:
 
       - name: Print Env
         run: |
-          python_version=${{ matrix.python }}
+          python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
@@ -528,7 +528,7 @@ jobs:
 
       - name: Print Env
         run: |
-          python_version=${{ matrix.python }}
+          python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
