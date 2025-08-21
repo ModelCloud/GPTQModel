@@ -3,7 +3,7 @@ import warnings
 import torch.nn as nn
 from gptqmodel.quantization.awq.utils.module import try_import
 
-awq_ext, msg = try_import("awq_ext")
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 def make_divisible(c, divisor):
     return (c + divisor - 1) // divisor

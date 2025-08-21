@@ -3,7 +3,7 @@ import torch.nn as nn
 from gptqmodel.quantization.awq.utils.module import try_import
 from gptqmodel.quantization.awq.utils.packing_utils import unpack_reorder_pack
 
-exl_ext, msg = try_import("exl_ext")
+exl_ext, msg = try_import("gptqmodel_exl_kernels")
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")

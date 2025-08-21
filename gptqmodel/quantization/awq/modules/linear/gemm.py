@@ -8,7 +8,7 @@ from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 
 # NOTE: We check if awq_ext or triton is available. awq_ext will be preferred if both are installed.
 
-awq_ext, msg = try_import("awq_ext")
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
 user_has_been_warned = False
 
 try:
