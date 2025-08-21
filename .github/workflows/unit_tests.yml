@@ -537,8 +537,9 @@ jobs:
           fi
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            : # ignore
+            echo "env exists, skip"
           else
+            echo "creating venv..."
             pyenv virtualenv "$python_version" "$env_name"
           fi
 
