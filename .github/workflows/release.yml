@@ -128,15 +128,15 @@ jobs:
           - cuda: 128
             torch: 2.7.0
             python: 313
-          - cuda: 128
-            torch: 2.6.0
-            python: 313
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 313
           - cuda: 128
             torch: 2.7.0
             python: 312
-          - cuda: 128
-            torch: 2.6.0
-            python: 312
+          # - cuda: 128
+          #   torch: 2.6.0
+          #   python: 312
           - cuda: 128
             torch: 2.7.0
             python: 311
