@@ -240,8 +240,9 @@ jobs:
           echo "env name: $env_name"
 
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            : # ignore
+            echo "env exists, skip"
           else
+            echo "creating venv..."
             pyenv virtualenv "$python_version" "$env_name"
           fi
 
