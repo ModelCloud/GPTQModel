@@ -28,9 +28,5 @@ class TestMiniCpm(ModelTest):
 
     def test_minicpm(self):
         args = {}
-        # if flash_attn was installed and _attn_implementation_autoset was None, flash attention would be loaded
-        # but device map is cpu, it will trow non-supported device error
-        if Version(transformers.__version__) >= Version("4.46.0"):
-            args["_attn_implementation_autoset"] = True
 
         self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE, **args)

@@ -19,7 +19,7 @@ import soundfile as sf
 import os
 
 class TestQwen2_5_Omni(ModelTest):
-    NATIVE_MODEL_ID = "/nas/yuehu/models/omni/Qwen2.5-Omni-3B"
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     NATIVE_ARC_CHALLENGE_ACC = 0.2329
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2765

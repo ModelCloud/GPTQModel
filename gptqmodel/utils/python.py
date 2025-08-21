@@ -10,7 +10,7 @@ def has_gil():
     if hasattr(sys, '_is_gil_enabled'):
         return sys._is_gil_enabled()
 
-    return False
+    return True
 
 def log_gil_required(feature: str):
     log.warn.once(f"Feature `{feature}` requires python GIL. Feature is currently skipped/disabled.")

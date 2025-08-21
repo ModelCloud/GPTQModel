@@ -60,14 +60,13 @@ class ModuleLooper():
         def store_input_hook(module, args, kwargs):
             # Positional arguments.
             layer_input = []
-            for inp in args:
-                layer_input.append(move_to(inp, device=data_device))
-            if len(layer_input) == 0:
-                # Some models put hidden_states in kwargs instead of args.
-                # For example, gptj ...
-                if kwargs.get("hidden_states") is not None:
-                    layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
-
+            if kwargs.get("hidden_states") is not None:
+                layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
+            else:
+                # If hidden_states is not in kwargs, get it from the first positional argument
+                # If error occurs here, check the model's modeling code
+                layer_input.append(move_to(args[0], device=data_device))
+                
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
