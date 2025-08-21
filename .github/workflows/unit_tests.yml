@@ -260,6 +260,10 @@ jobs:
           echo "##### pip list #####"
           pip list
 
+      - name: Install requirements
+        run: |
+          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+
       - name: Compress dir
         run: |
           mkdir dist || true
@@ -555,10 +559,6 @@ jobs:
           pip show torch
           echo "== pip list =="
           pip list
-
-      - name: Install requirements
-        run: |
-          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Download source from local
         continue-on-error: true
