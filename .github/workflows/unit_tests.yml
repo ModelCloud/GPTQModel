@@ -248,7 +248,7 @@ jobs:
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
           pyenv local $env_name
@@ -373,7 +373,7 @@ jobs:
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
           pyenv local $env_name
@@ -392,7 +392,7 @@ jobs:
 
 #      - name: Install requirements
 #        run: |
-#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Download source from local
         continue-on-error: true
@@ -566,7 +566,7 @@ jobs:
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_unit_tests_docker.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
           pyenv local $env_name
@@ -585,7 +585,7 @@ jobs:
 
 #      - name: Install requirements
 #        run: |
-#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Download source from local
         continue-on-error: true
