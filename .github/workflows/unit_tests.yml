@@ -376,9 +376,9 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Install requirements
-        run: |
-          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+#      - name: Install requirements
+#        run: |
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
 
       - name: Download source from local
         continue-on-error: true
@@ -560,9 +560,9 @@ jobs:
           echo "== pip list =="
           pip list
 
-      - name: Install requirements
-        run: |
-          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
+#      - name: Install requirements
+#        run: |
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $${{ env.TORCH_VERSION }}
 
       - name: Download source from local
         continue-on-error: true
