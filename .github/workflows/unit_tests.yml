@@ -355,7 +355,9 @@ jobs:
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             : # ignore
           else
@@ -538,7 +540,9 @@ jobs:
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env exists, skip"
           else
