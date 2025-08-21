@@ -570,6 +570,10 @@ jobs:
             uv pip install auto_round
           fi
 
+          if [[ "${{ matrix.test_script }}" == "models/test_pangu_alpha" ]]; then
+            uv pip install jieba
+          fi
+
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
             uv pip install -U transformers -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
