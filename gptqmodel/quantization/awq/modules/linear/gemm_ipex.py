@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .gemm import WQLinear_GEMM
-from awq.utils.packing_utils import dequantize_gemm
+from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 
 try:
     from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear

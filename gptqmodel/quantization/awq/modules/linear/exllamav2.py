@@ -2,8 +2,8 @@ import torch
 import warnings
 import torch.nn as nn
 from typing import Dict
-from awq.utils.module import try_import
-from awq.utils.packing_utils import unpack_reorder_pack
+from gptqmodel.quantization.awq.utils.module import try_import
+from gptqmodel.quantization.awq.utils.packing_utils import unpack_reorder_pack
 
 exlv2_ext, msg = try_import("exlv2_ext")
 

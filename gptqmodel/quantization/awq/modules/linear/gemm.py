@@ -2,9 +2,9 @@ import torch
 import warnings
 import torch.nn as nn
 from torch.autograd import Function
-from awq.utils.module import try_import
-from awq.utils.utils import get_best_device
-from awq.utils.packing_utils import dequantize_gemm
+from gptqmodel.quantization.awq.utils.module import try_import
+from gptqmodel.quantization.awq.utils.utils import get_best_device
+from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 
 # NOTE: We check if awq_ext or triton is available. awq_ext will be preferred if both are installed.
 
@@ -12,7 +12,7 @@ awq_ext, msg = try_import("awq_ext")
 user_has_been_warned = False
 
 try:
-    from awq.modules.triton.gemm import awq_gemm_triton, awq_dequantize_triton
+    from gptqmodel.quantization.awq.modules.triton.gemm import awq_gemm_triton, awq_dequantize_triton
 
     # covers CUDA, ROCm and XPU. If we can import triton, then we can use it.
     TRITON_AVAILABLE = True

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from awq.utils.module import try_import
+from gptqmodel.quantization.awq.utils.module import try_import
 
 marlin_cuda, msg = try_import("marlin_cuda")
 

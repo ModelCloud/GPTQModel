@@ -1,6 +1,6 @@
 import torch
 import warnings
-from awq.utils.module import try_import
+from gptqmodel.quantization.awq.utils.module import try_import
 
 awq_v2_ext, msg = try_import("awq_v2_ext")
 
