@@ -388,7 +388,7 @@ jobs:
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ {{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
 
           echo "== pyenv =="
