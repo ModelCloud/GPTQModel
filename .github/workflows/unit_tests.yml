@@ -231,10 +231,13 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "1 python_version=${{ env.PYTHON_VERSION }}"
           python_version=${{ env.PYTHON_VERSION }}
+          echo "2 python_version=$python_version"
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
+          echo "3 python_version=$python_version"
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py$python_version_build"
 
           echo "env name: $env_name"
