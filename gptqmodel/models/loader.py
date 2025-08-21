@@ -298,6 +298,7 @@ def ModelLoader(cls):
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
+        attn_implementation = kwargs.pop("attn_implementation", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -310,6 +311,7 @@ def ModelLoader(cls):
             "subfolder": subfolder,
             "_raise_exceptions_for_missing_entries": False,
             "_commit_hash": commit_hash,
+            "attn_implementation": attn_implementation,
         }
 
         # == step1: prepare configs and file names == #
