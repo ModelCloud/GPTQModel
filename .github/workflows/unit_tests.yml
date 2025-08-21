@@ -62,6 +62,9 @@ env:
   MAX_JOBS: 8
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.248
+  CUDA_VERSION: 12.6
+  TORCH_VERSION: 2.5.1
+  PYTHON_VERSION: 3.12
   LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
   GPTQMODEL_FORCE_BUILD: 1
@@ -201,10 +204,11 @@ jobs:
       - list-test-files
     if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ env.CUDA_VERSION }}-ubuntu22.04
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
+        - /home/ci/models/pyenv:/opt/pyenv
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
 
@@ -226,6 +230,16 @@ jobs:
 
       - name: Print Env
         run: |
+          env_name="cu${{ env.CUDA_VERSION }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_build"
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            : # ignore
+          else
+            pyenv virtualenv "$python_version" "$env_name"
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -301,10 +315,11 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ env.CUDA_VERSION }}-ubuntu22.04
       volumes:
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
+        - /home/ci/models/pyenv:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
@@ -328,6 +343,16 @@ jobs:
 
       - name: Print Env
         run: |
+          env_name="cu${{ env.CUDA_VERSION }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_test_${{ matrix.test_script }}"
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            : # ignore
+          else
+            pyenv virtualenv "$python_version" "$env_name"
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+          
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -464,12 +489,13 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ env.CUDA_VERSION }}-ubuntu22.04
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
+        - /home/ci/models/pyenv:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
@@ -493,6 +519,16 @@ jobs:
 
       - name: Print Env
         run: |
+          env_name="cu${{ env.CUDA_VERSION }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_test_${{ matrix.test_script }}"
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            : # ignore
+          else
+            pyenv virtualenv "$python_version" "$env_name"
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
