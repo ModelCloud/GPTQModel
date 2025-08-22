@@ -24,6 +24,7 @@ class TestLongLlama(ModelTest):
     TRUST_REMOTE_CODE = True
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.5
     USE_VLLM = False
+    USE_FLASH_ATTN = False
 
     def test_longllama(self):
         self.quant_lm_eval()
