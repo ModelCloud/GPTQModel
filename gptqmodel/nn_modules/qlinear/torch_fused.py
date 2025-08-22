@@ -174,6 +174,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             self.transform(x.dtype)
             self.transformed = True
 
+        if self.transformed:
             x = x[:, self.ret_idx].contiguous()
             out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
                 x, self.qweight, self.group_size, self.scales, self.qzeros
