@@ -714,7 +714,7 @@ jobs:
           fi
 
           echo "===== uninstall torchvision ====="
-          uv pip uninstall  torchvision
+          uv pip uninstall  torchvision || true
 
           echo "===== install -r requirements.txt ====="
           uv pip install -r requirements.txt
