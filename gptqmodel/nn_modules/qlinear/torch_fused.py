@@ -42,7 +42,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     # optimized for XPU but should run on all
-    SUPPORTS_DEVICES = [DEVICE.ALL] # change this to XPU to limit to Intel XPU
+    SUPPORTS_DEVICES = [DEVICE.XPU] # change this to XPU to limit to Intel XPU
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -178,6 +178,11 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
                 x, self.qweight, self.group_size, self.scales, self.qzeros
             ).reshape(out_shape)
+            # TODO: torch aten has fused aten op for int4 quantized matmul but we need to transform
+            # scales + zeros and pass as one tensor
+            # out = torch.ops.aten._weight_int4pack_mm(
+            #     x, self.qweight, self.group_size, self.scales, self.qzeros
+            # ).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
