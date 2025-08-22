@@ -26,6 +26,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.torch import TORCH_HAS_ATEN_XPU
 
 log = setup_logger()
 
@@ -166,19 +167,19 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def _forward(self, x, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
 
-        if not self.training and not self.transformed and version.parse(torch_version).release >= version.parse("2.8").release:
+        if not self.training and not self.transformed and TORCH_HAS_ATEN_XPU:
+            # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype)
             self.transformed = True
 
-        if not self.transformed:
-            # make sure dequant dtype matches input x
-            weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
-            out = torch.matmul(x, weights).reshape(out_shape)
-        else:
             x = x[:, self.ret_idx].contiguous()
             out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
                 x, self.qweight, self.group_size, self.scales, self.qzeros
             ).reshape(out_shape)
+        else:
+            # make sure dequant dtype matches input x
+            weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
+            out = torch.matmul(x, weights).reshape(out_shape)
 
         if self.bias is not None:
             out.add_(self.bias)
@@ -195,13 +196,12 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchFusedQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH."
+                "Please load model using backend=BACKEND.TORCH_FUSED"
             )
 
         if isinstance(module, TorchFusedQuantLinear):
