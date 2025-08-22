@@ -25,6 +25,7 @@ class TestChatGlm(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.3319
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3729
     TRUST_REMOTE_CODE = True
+    USE_FLASH_ATTN = False
 
     def test_chatglm(self):
         self.quant_lm_eval()
