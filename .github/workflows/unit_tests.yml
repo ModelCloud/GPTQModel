@@ -599,7 +599,6 @@ jobs:
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
-      - legacy
       - torch
     steps:
       - name: Print statistics
