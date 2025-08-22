@@ -107,7 +107,7 @@ class TestKernelOutput(unittest.TestCase):
 
         assert result is not None
 
-        del module
+        #del module
         del model
         torch.cuda.empty_cache()
 
