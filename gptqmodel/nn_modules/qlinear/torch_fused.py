@@ -30,6 +30,22 @@ from ...utils.torch import TORCH_HAS_ATEN_XPU
 
 log = setup_logger()
 
+def pack_scales_and_zeros(scales, zeros):
+    assert scales.shape == zeros.shape
+    # assert scales.dtype == torch.bfloat16
+    # assert zeros.dtype == torch.bfloat16
+    return (
+        torch.cat(
+            [
+                scales.reshape(scales.size(0), scales.size(1), 1),
+                zeros.reshape(zeros.size(0), zeros.size(1), 1),
+            ],
+            2,
+        )
+        .transpose(0, 1)
+        .contiguous()
+    )
+
 class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -176,14 +192,15 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         if self.transformed:
             x = x[:, self.ret_idx].contiguous()
-            out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
-                x, self.qweight, self.group_size, self.scales, self.qzeros
-            ).reshape(out_shape)
-            # TODO: torch aten has fused aten op for int4 quantized matmul but we need to transform
-            # scales + zeros and pass as one tensor
-            # out = torch.ops.aten._weight_int4pack_mm(
+            # out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
             #     x, self.qweight, self.group_size, self.scales, self.qzeros
             # ).reshape(out_shape)
+            # TODO: torch aten has fused aten op for int4 quantized matmul but we need to transform
+            # scales + zeros and pass as one tensor
+            scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+            out = torch.ops.aten._weight_int4pack_mm(
+                x, self.qweight, self.group_size, scales_and_zeros
+            ).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
