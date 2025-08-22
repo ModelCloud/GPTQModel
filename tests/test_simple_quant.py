@@ -13,7 +13,7 @@ CFG_BITS = 4
 CFG_GROUPSIZE = 128
 CFG_V2 = True
 INPUTS_MAX_LENGTH = 2048 # in tokens
-QUANT_SAVE_PATH = f"/monster/data/xl/gptq_v2_{CFG_V2}_bit_{CFG_BITS}_gpsize_{CFG_GROUPSIZE}_llama_3.1_8B_Instruct"
+QUANT_SAVE_PATH = f"/monster/data/model/gptq_v2_{CFG_V2}_bit_{CFG_BITS}_gpsize_{CFG_GROUPSIZE}_llama_3.1_8B_Instruct"
 
 RAND_SEED = 898
 
