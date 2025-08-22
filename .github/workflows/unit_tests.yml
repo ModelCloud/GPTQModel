@@ -639,7 +639,6 @@ jobs:
       - name: Install wheel
         run: |
           uv pip install -U transformers 
-          uv pip install -U logbar==0.0.3
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
              [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
              [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
@@ -668,7 +667,7 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install -U logbar==0.0.3
+            uv pip install -U logbar==0.0.4
           fi
 
           if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
@@ -713,8 +712,11 @@ jobs:
             uv pip install numpy==1.26.3
           fi
 
-          echo "===== uninstall torchvision ====="
-          uv pip uninstall  torchvision || true
+
+          if [[ "${{ matrix.test_script }}" != "models/test_qwen2_vl" ]]; then
+            echo "===== uninstall torchvision ====="
+            uv pip uninstall torchvision || true
+          fi
 
           echo "===== install -r requirements.txt ====="
           uv pip install -r requirements.txt
