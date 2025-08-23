@@ -28,7 +28,7 @@ from . import has_gil, log_gil_required
 # pytorch 2.6.0 fixes many compilation errors
 TORCH_HAS_COMPILE = version.parse(torch.__version__).release >= version.Version('2.6').release
 TORCH_HAS_COMPILE_FOR_MPS = version.parse(torch.__version__).release >= version.Version('2.8').release
-TORCH_HAS_ATEN_XPU = version.parse(torch.__version__).release >= version.Version('2.8').release
+TORCH_HAS_XPU_FUSED_OPS = version.parse(torch.__version__).release >= version.Version('2.8').release
 
 HAS_CUDA = False
 HAS_XPU = False
