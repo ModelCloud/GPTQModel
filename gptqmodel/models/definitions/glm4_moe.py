@@ -19,12 +19,21 @@ from ..base import BaseGPTQModel
 
 
 class GLM4MoEGPTQ(BaseGPTQModel):
+    # GLM-4.5-Air MoE Model Structure:
+    # Layer 0: Standard MLP (no MoE experts) - handled by ["mlp.down_proj"], ["mlp.gate_proj"], ["mlp.up_proj"]
+    # Layers 1-46: MoE with shared_experts and individual experts (128 experts total) - handled by MoE components
+    # Layer 46: Additional special structure with expanded parameters (embed_tokens, shared_head, eh_proj, etc.)
+    #   This is handled dynamically through layer_modules_strict = False
+    #
     # allow dynamic expert index for layer_modules so we don't need to write out 128 layers here
     # config.n_routed_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
+    
+    # Set to False since GLM-4.5-Air may have dynamic module structures
+    layer_modules_strict = False
 
     layers_node = ["model.layers"]
     layer_type = "GLM4MoEDecoderLayer"
@@ -32,14 +41,14 @@ class GLM4MoEGPTQ(BaseGPTQModel):
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],
 
-        # MoE components for layers 1-46 (46 layers total with experts)
+        # MoE components for layers 1-46 (all have shared_experts and individual experts)
         ["mlp.shared_experts.up_proj", "mlp.shared_experts.gate_proj"],
         ["mlp.shared_experts.down_proj"],
         ["mlp.gate"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
         
-        # Standard MLP for first layer (layer 0)
+        # Standard MLP components for layer 0 (no experts)
         ["mlp.down_proj"],
         ["mlp.gate_proj"],
         ["mlp.up_proj"],
@@ -57,7 +66,7 @@ class GLM4MoEGPTQ(BaseGPTQModel):
                 "experts": {
                     "#": ("up_proj", "gate_proj", "down_proj"),
                 },
-                # Standard MLP components for first layer
+                # Standard MLP components for layer 0 (no experts)
                 "down_proj": ("down_proj",),
                 "gate_proj": ("gate_proj",),
                 "up_proj": ("up_proj",),
