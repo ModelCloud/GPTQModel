@@ -78,6 +78,7 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     IPEX = "ipex"
     QQQ = "qqq"
+    AWQ = "awq"
 
 
 # quant methods
@@ -85,6 +86,7 @@ class QUANT_METHOD(str, Enum):
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
     QQQ = "qqq"
+    AWQ = "awq"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -103,6 +105,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     QUANT_METHOD.QQQ: {
         FORMAT.QQQ,
+    },
+    QUANT_METHOD.AWQ: {
+        FORMAT.AWQ,
     },
 }
 
@@ -217,6 +222,8 @@ class QuantizeConfig():
     v2: bool = False
     v2_alpha: float = 0.25
     v2_memory_device: str = "auto" #
+
+    zero_point: bool = field(default=True) # awq config
 
     def __post_init__(self):
         fields_info = fields(self)
