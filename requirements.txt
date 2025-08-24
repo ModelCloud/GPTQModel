@@ -16,4 +16,7 @@ tokenicer==0.0.4
 logbar==0.0.4
 # for Qwen-Omni model
 soundfile==0.13.1
+# try to resolve some pip install issues
 wheel>=0.45.1
+# python 3.l3t may need this package
+maturin>=1.9.3

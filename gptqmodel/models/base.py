@@ -46,15 +46,13 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
                            get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
-from ..utils.torch import torch_compile, torch_empty_cache
+from ..utils.torch import torch_compile, torch_empty_cache, TORCH_HAS_COMPILE
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_TIME,
                      QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
 
-# pytorch 2.6.0 fixes many compilation errors
-TORCH_MIN_VERSION_STR = '2.6.0'
-PYTORCH_MIN_VERSION_WITH_COMPILE = Version(TORCH_MIN_VERSION_STR)
+
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -1284,9 +1282,9 @@ class BaseGPTQModel(nn.Module):
             log.warn("model is not quantized, skip compiling...")
             return self
 
-        if Version(torch.__version__) < PYTORCH_MIN_VERSION_WITH_COMPILE:
+        if TORCH_HAS_COMPILE:
             self.compiled = False
-            log.warn(f"To use compile(), you need to have torch version >= {TORCH_MIN_VERSION_STR}, please "
+            log.warn(f"To use compile(), you need to have torch version >= 2.6.0, please "
                            f"upgrade it by `pip install -U torch torchaudio torchvision`")
             return self
 
