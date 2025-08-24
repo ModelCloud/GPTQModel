@@ -70,9 +70,6 @@ except BaseException:
     pass
 
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
-    log.warn(f"Compilation Disabled for `{module}`")
-    return module
-
     # requires torch >2.8 for proper torch.compile
     # torch compile broken for free threading
     if not has_gil():
