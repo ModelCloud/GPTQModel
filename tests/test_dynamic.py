@@ -29,8 +29,8 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
-from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from gptqmodel.utils import safetensor  # noqa: E402
+from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 

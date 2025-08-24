@@ -17,6 +17,7 @@
 import torch  # noqa: E402
 from model_test import ModelTest
 
+
 class TestGpt2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/pangu_alpha_2_6B" # "ModelCloud/pangu_alpha_2_6B"
     NATIVE_ARC_CHALLENGE_ACC = 0.1655

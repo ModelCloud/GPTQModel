@@ -29,11 +29,11 @@ import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
-from .quantizer import HF_OPTIMUM, Quantizer
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_compile, torch_sync, TORCH_GTE_28
+from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
+from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
 lock = threading.Lock()
@@ -341,7 +341,7 @@ class GPTQ:
             invperm = torch.argsort(perm)
 
         if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import compute_local_perms, compute_global_perm, compose_final_perm
+            from .gar import compose_final_perm, compute_global_perm, compute_local_perms
             local_perms = compute_local_perms(torch.diag(H), self.qcfg.group_size)
             global_perm = compute_global_perm(torch.diag(H), self.qcfg.group_size)
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)

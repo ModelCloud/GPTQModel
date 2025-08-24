@@ -2,7 +2,7 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear, HAS_IPEX
+from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.model import find_modules
 from logbar import LogBar

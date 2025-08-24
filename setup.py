@@ -4,9 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
+
 from setuptools import find_packages, setup
 
 try:
@@ -248,6 +249,7 @@ if BUILD_CUDA_EXT == "1":
         # No torch -> we will still register bdist_wheel to attempt prebuilt fetch
     else:
         from distutils.sysconfig import get_python_lib
+
         from torch.utils import cpp_extension as cpp_ext  # noqa: F401
 
         conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
@@ -391,7 +393,8 @@ class CachedWheelsCommand(_bdist_wheel):
         print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
-            import urllib.request, urllib.error  # noqa: F401
+            import urllib.error  # noqa: F401
+            import urllib.request
             urllib.request.urlretrieve(wheel_url, wheel_filename)
 
             if not os.path.exists(self.dist_dir):
