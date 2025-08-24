@@ -27,7 +27,7 @@ from . import has_gil, log_gil_required
 
 # pytorch 2.6.0 fixes many compilation errors
 TORCH_HAS_COMPILE = version.parse(torch.__version__).release >= version.Version('2.6').release
-TORCH_HAS_COMPILE_FOR_MPS = version.parse(torch.__version__).release >= version.Version('2.8').release
+TORCH_GTE_28 = version.parse(torch.__version__).release >= version.Version('2.8').release
 TORCH_HAS_XPU_FUSED_OPS = version.parse(torch.__version__).release >= version.Version('2.8').release
 
 HAS_CUDA = False
@@ -80,7 +80,7 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
 
     if not TORCH_HAS_COMPILE:
         return module
-    if HAS_MPS and not TORCH_HAS_COMPILE_FOR_MPS:
+    if HAS_MPS and not TORCH_GTE_28:
         if not torch._dynamo.config.suppress_errors:
             log.warn(f"To use compile() with MPS, you need to have torch version >= {PYTORCH_MIN_VERSION_WITH_MPS_COMPILE}, "
                      f"please upgrade it by `pip install -U torch torchaudio torchvision`")
