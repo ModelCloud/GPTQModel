@@ -26,6 +26,7 @@ import torch
 import torch._dynamo
 import torch.nn as nn
 from tokenicer import Tokenicer
+from torch import LongTensor
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
@@ -122,6 +123,8 @@ class BaseGPTQModel(nn.Module):
     quant_override_files: Dict[str, Union[str | Dict[str, Any]]] = {}
 
     server = None
+
+    support_batch_quantize = True
 
     def __init__(
         self,
@@ -369,6 +372,10 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
+
+        if self.support_batch_quantize is False:
+            batch_size = 1
+            log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(

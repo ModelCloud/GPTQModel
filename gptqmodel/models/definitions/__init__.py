@@ -50,6 +50,7 @@ from .instella import InstellaGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
+from .llama4 import Llama4GPTQ
 from .longllama import LongLlamaGPTQ
 from .mimo import MimoGPTQ
 from .minicpm3 import MiniCPM3GPTQ
