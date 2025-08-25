@@ -31,7 +31,7 @@ class GLM4MoEGPTQ(BaseGPTQModel):
 
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-    
+
     # Set to False since GLM-4.5-Air may have dynamic module structures
     layer_modules_strict = False
 
@@ -47,7 +47,7 @@ class GLM4MoEGPTQ(BaseGPTQModel):
         ["mlp.gate"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-        
+
         # Standard MLP components for layer 0 (no experts)
         ["mlp.down_proj"],
         ["mlp.gate_proj"],

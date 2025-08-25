@@ -17,8 +17,6 @@
 
 import torch
 import torch.nn as nn
-from packaging import version
-from torch import __version__ as torch_version
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora

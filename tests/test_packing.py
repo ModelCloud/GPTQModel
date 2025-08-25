@@ -27,7 +27,7 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 from gptqmodel import BACKEND  # noqa: E402
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear, HAS_IPEX  # noqa: E402
+from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: E402
