@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 08/25/2025 4.1.0-dev `main`: GLM-4.5-Air model support. New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
 * 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 * 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
 * 08/18/2025 4.0.0-dev `main`: GPT-Neo model support. Memory leak fix in error capture (stacktrace) and fixed `lm_head` quantization compatibility for many models.
