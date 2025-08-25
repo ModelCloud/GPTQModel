@@ -2,7 +2,7 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear
+from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.utils.model import find_modules
 from logbar import LogBar
@@ -61,6 +61,8 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.IPEX,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
+        if not HAS_IPEX and backend == BACKEND.IPEX:
+            self.skipTest("IPEX is not available")
         model = GPTQModel.load(self.model_path, backend=backend, device_map=self.device_map, torch_dtype=self.torch_dtype)
         log.info(f"device_map: {self.device_map} ")
         log.info(f"backend: {backend} ")

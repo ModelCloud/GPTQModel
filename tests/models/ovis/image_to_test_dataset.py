@@ -15,8 +15,8 @@
 # limitations under the License.
 
 from gptqmodel.models import OvisGPTQ
+from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
-from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ 
 
 
 def format_ovis_dataset(image, assistant):
@@ -55,7 +55,7 @@ def format_qwen2_5_omni_dataset(image, assistant):
             {"type": "text",
             "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
             ],
-        },  
+        },
         {
          "role": "user",
          "content": [

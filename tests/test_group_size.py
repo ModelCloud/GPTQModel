@@ -28,7 +28,7 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
@@ -55,8 +55,9 @@ class TestGroupSize(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS,
-                             BACKEND.IPEX]
+        cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS]
+        if HAS_IPEX:
+            cls.pack_backends.append(BACKEND.IPEX)
         cls.backends = list(cls.pack_backends)
         cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])
 

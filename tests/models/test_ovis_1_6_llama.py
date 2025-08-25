@@ -27,6 +27,7 @@ class TestOvis1_6_Llama(ModelTest):
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = False
     EVAL_BATCH_SIZE = 1
+    USE_FLASH_ATTN = False
 
     def test_ovis_1_6(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,

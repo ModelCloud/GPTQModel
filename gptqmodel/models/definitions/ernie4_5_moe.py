@@ -67,13 +67,14 @@ class ERNIE4_5_MOEGPTQ(BaseGPTQModel):
     ]
 
     def monkey_patch(self):
-        import torch
         from dataclasses import dataclass
-        from typing import Callable, Optional, Tuple, Union
         from functools import partial
-        from transformers.modeling_outputs import ModelOutput
+        from typing import Optional
+
+        import torch
         from transformers.cache_utils import Cache, DynamicCache
         from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+        from transformers.modeling_outputs import ModelOutput
         from transformers.processing_utils import Unpack
 
         @dataclass

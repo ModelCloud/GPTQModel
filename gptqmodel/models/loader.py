@@ -47,10 +47,10 @@ from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
-from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
-                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes,
-                           find_config_seq_len)
+from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
+                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init,
+                           load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model,
+                           verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -298,6 +298,7 @@ def ModelLoader(cls):
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
+        attn_implementation = kwargs.pop("attn_implementation", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -310,6 +311,7 @@ def ModelLoader(cls):
             "subfolder": subfolder,
             "_raise_exceptions_for_missing_entries": False,
             "_commit_hash": commit_hash,
+            "attn_implementation": attn_implementation,
         }
 
         # == step1: prepare configs and file names == #

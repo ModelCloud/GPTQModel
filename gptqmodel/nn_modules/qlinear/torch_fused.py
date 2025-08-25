@@ -17,8 +17,6 @@
 
 import torch
 import torch.nn as nn
-from packaging import version
-from torch import __version__ as torch_version
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
@@ -26,8 +24,26 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.torch import TORCH_HAS_XPU_FUSED_OPS
 
 log = setup_logger()
+
+# TODO: not yet working for cuda/cpu fused int4 ops
+# def pack_scales_and_zeros(scales, zeros):
+#     assert scales.shape == zeros.shape
+#     # assert scales.dtype == torch.bfloat16
+#     # assert zeros.dtype == torch.bfloat16
+#     return (
+#         torch.cat(
+#             [
+#                 scales.reshape(scales.size(0), scales.size(1), 1),
+#                 zeros.reshape(zeros.size(0), zeros.size(1), 1),
+#             ],
+#             2,
+#         )
+#         .transpose(0, 1)
+#         .contiguous()
+#     )
 
 class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
@@ -40,7 +56,8 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.XPU]
+    # optimized for XPU but should run on all
+    SUPPORTS_DEVICES = [DEVICE.XPU] # change this to XPU to limit to Intel XPU
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -166,19 +183,29 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def _forward(self, x, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
 
-        if not self.training and not self.transformed and version.parse(torch_version).release >= version.parse("2.8").release:
+        if not self.training and not self.transformed and TORCH_HAS_XPU_FUSED_OPS:
+            # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype)
             self.transformed = True
 
-        if not self.transformed:
-            # make sure dequant dtype matches input x
-            weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
-            out = torch.matmul(x, weights).reshape(out_shape)
-        else:
+        if self.transformed:
             x = x[:, self.ret_idx].contiguous()
+            # fused ops optimized for xpu using torch.ops
+            # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
             out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
                 x, self.qweight, self.group_size, self.scales, self.qzeros
             ).reshape(out_shape)
+
+            # TODO: torch.ops _weight_int4pack_mm has fused aten op for int4 matmul but we need to transform and align format
+            # scales + zeros and pass as one tensor
+            # scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+            # out = torch.ops.aten._weight_int4pack_mm(
+            #     x, self.qweight, self.group_size, scales_and_zeros
+            # ).reshape(out_shape)
+        else:
+            # make sure dequant dtype matches input x
+            weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
+            out = torch.matmul(x, weights).reshape(out_shape)
 
         if self.bias is not None:
             out.add_(self.bias)
@@ -195,13 +222,12 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchFusedQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH."
+                "Please load model using backend=BACKEND.TORCH_FUSED"
             )
 
         if isinstance(module, TorchFusedQuantLinear):

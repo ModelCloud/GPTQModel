@@ -14,9 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import transformers
 from model_test import ModelTest
-from packaging.version import Version
 
 
 class TestMiniCpm(ModelTest):
