@@ -25,44 +25,6 @@ except BaseException:
 # Helpers (no torch required)
 # ---------------------------
 
-def _detect_cuda_arch_list():
-    # Step 1: check env override
-    env_arch = _read_env("CUDA_ARCH_LIST")
-    if env_arch:
-        return env_arch
-
-    # Step 2: try nvcc
-    nvcc_out = _probe_cmd(["nvcc", "--list-gpu-arch"])
-    if nvcc_out:
-        # output lines like: "    sm_35" / "    sm_80"
-        archs = []
-        for line in nvcc_out.splitlines():
-            line = line.strip()
-            if line.startswith("sm_") or line.startswith("compute_"):
-                try:
-                    major = int(line.split("_")[1][0])
-                    if major >= 6:  # only keep >= 6.0
-                        archs.append(line.replace("compute_", "").replace("sm_", ""))
-                except Exception:
-                    continue
-        if archs:
-            return " ".join(sorted(set(a.replace("sm_", "") for a in archs)))
-
-    # Step 3: try nvidia-smi (compute capability query)
-    smi_out = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
-    if smi_out:
-        caps = []
-        for line in smi_out.splitlines():
-            line = line.strip()
-            if line:
-                caps.append(line)
-        if caps:
-            return " ".join(caps)
-
-    # Step 4: fallback
-    print("⚠️  Could not auto-detect CUDA arch list. Defaulting to 6.0+PTX")
-    return "6.0+PTX"
-
 def _read_env(name, default=None):
     v = os.environ.get(name)
     return v if (v is not None and str(v).strip() != "") else default
@@ -74,6 +36,12 @@ def _probe_cmd(args):
     except Exception:
         return None
 
+def _bool_env(name, default=False):
+    v = _read_env(name)
+    if v is None:
+        return default
+    return str(v).lower() in ("1", "true", "yes", "y", "on")
+
 def _probe_cuda_version():
     # Prefer env override
     v = _read_env("CUDA_VERSION")
@@ -82,14 +50,12 @@ def _probe_cuda_version():
     # Try nvcc
     nvcc = _probe_cmd(["nvcc", "--version"])
     if nvcc:
-        # Extract like "release 12.1"
         for tok in nvcc.replace(",", " ").split():
             if tok.count(".") == 1 and tok.replace(".", "").isdigit():
                 return tok
     # Try nvidia-smi
     smi = _probe_cmd(["nvidia-smi"])
     if smi and "CUDA Version" in smi:
-        # e.g. "CUDA Version: 12.2"
         import re
         m = re.search(r"CUDA Version:\s*([0-9]+\.[0-9]+)", smi)
         if m:
@@ -100,15 +66,12 @@ def _probe_rocm_version():
     v = _read_env("ROCM_VERSION")
     if v:
         return v
-    # Try hipcc --version
     hip = _probe_cmd(["hipcc", "--version"])
     if hip:
-        # Grab first x.y looking token
         import re
         m = re.search(r"\b([0-9]+\.[0-9]+)\b", hip)
         if m:
             return m.group(1)
-    # Try /opt/rocm/.info/version
     try:
         p = Path("/opt/rocm/.info/version")
         if p.exists():
@@ -117,14 +80,49 @@ def _probe_rocm_version():
         pass
     return None
 
-def _bool_env(name, default=False):
-    v = _read_env(name)
-    if v is None:
-        return default
-    return str(v).lower() in ("1", "true", "yes", "y", "on")
+def _detect_cuda_arch_list():
+    # Public knob: CUDA_ARCH_LIST
+    env_arch = _read_env("CUDA_ARCH_LIST")
+    if env_arch:
+        return env_arch
+
+    # Try nvcc --list-gpu-arch
+    nvcc_out = _probe_cmd(["nvcc", "--list-gpu-arch"])
+    if nvcc_out:
+        archs = []
+        for line in nvcc_out.splitlines():
+            line = line.strip()
+            if line.startswith("sm_") or line.startswith("compute_"):
+                try:
+                    # normalize to "major.minor"
+                    num = line.split("_")[1]
+                    if num.isdigit():  # e.g. "80"
+                        maj, mn = num[0], num[1] if len(num) > 1 else "0"
+                        cap = f"{maj}.{mn}"
+                    else:  # compute_80
+                        cap = f"{num[0]}.{num[1] if len(num) > 1 else '0'}"
+                    if float(cap) >= 6.0:
+                        archs.append(cap)
+                except Exception:
+                    continue
+        if archs:
+            return " ".join(sorted(set(archs)))
+
+    # Try nvidia-smi
+    smi_out = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
+    if smi_out:
+        caps = []
+        for line in smi_out.splitlines():
+            line = line.strip()
+            if line:
+                caps.append(line)
+        if caps:
+            return " ".join(caps)
+
+    print("⚠️  Could not auto-detect CUDA arch list. Defaulting to 6.0+PTX")
+    return "6.0+PTX"
 
 def _parse_arch_list(s):
-    # "8.0 8.6+PTX 9.0" -> ["8.0", "8.6+PTX", "9.0"]
     return [tok for tok in s.split() if tok.strip()]
 
 def _has_cuda_v8_from_arch_list(arch_list):
@@ -134,52 +132,42 @@ def _has_cuda_v8_from_arch_list(arch_list):
         return False
 
 def _detect_cxx11_abi():
-    # Prefer env override to avoid torch dependency
     v = _read_env("CXX11_ABI")
     if v in ("0", "1"):
         return int(v)
-    # Fallback default (modern distros): 1
     return 1
 
-def _torch_version_for_tag(torch_mod):
-    # Return "major.minor" string for tag
-    if torch_mod is None:
-        v = _read_env("TORCH_VERSION")
-        if v:
-            return ".".join(v.split(".")[:2])
-        return None
-    try:
-        return ".".join(torch_mod.__version__.split(".")[:2])
-    except Exception:
-        return None
+def _torch_version_for_tag():
+    # No torch import; allow env override
+    v = _read_env("TORCH_VERSION")
+    if v:
+        parts = v.split(".")
+        return ".".join(parts[:2])
+    return None
 
-def _cuda_version_for_tag(torch_mod):
-    if torch_mod is None:
-        v = _probe_cuda_version()
-        return v
-    try:
-        return torch_mod.version.cuda  # e.g. "12.1"
-    except Exception:
-        return None
+def _cuda_version_for_tag():
+    return _probe_cuda_version()
 
-def _is_rocm(torch_mod):
-    if torch_mod is None:
-        return _probe_rocm_version() is not None
-    try:
-        return bool(torch_mod.version.hip)
-    except Exception:
-        return False
+def _is_rocm_available():
+    return _probe_rocm_version() is not None
 
 # ---------------------------
 # Env and versioning
 # ---------------------------
 
 RELEASE_MODE = _read_env("RELEASE_MODE")
-TORCH_CUDA_ARCH_LIST = _read_env("TORCH_CUDA_ARCH_LIST")
 ROCM_VERSION = _probe_rocm_version()
 SKIP_ROCM_VERSION_CHECK = _read_env("SKIP_ROCM_VERSION_CHECK")
-BUILD_CUDA_EXT = _read_env("BUILD_CUDA_EXT", "1" if sys.platform != "darwin" else "0")
 FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
+
+# BUILD_CUDA_EXT:
+# - If user sets explicitly, respect it.
+# - Otherwise auto: enable only if CUDA or ROCm detected.
+_build_env = _read_env("BUILD_CUDA_EXT")
+if _build_env is None:
+    BUILD_CUDA_EXT = "1" if (_probe_cuda_version() or ROCM_VERSION) else "0"
+else:
+    BUILD_CUDA_EXT = _build_env
 
 if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     try:
@@ -191,9 +179,11 @@ if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     except Exception:
         pass
 
-if TORCH_CUDA_ARCH_LIST:
-    # sanitize list to >= sm_60
-    archs = _parse_arch_list(TORCH_CUDA_ARCH_LIST)
+# Handle CUDA_ARCH_LIST (public) and set TORCH_CUDA_ARCH_LIST for build toolchains
+CUDA_ARCH_LIST = _detect_cuda_arch_list() if (BUILD_CUDA_EXT == "1" and not ROCM_VERSION) else None
+if CUDA_ARCH_LIST:
+    # sanitize list to >= 6.0
+    archs = _parse_arch_list(CUDA_ARCH_LIST)
     kept = []
     for arch in archs:
         try:
@@ -203,10 +193,9 @@ if TORCH_CUDA_ARCH_LIST:
                 print(f"we do not support this compute arch: {arch}, skipped.")
         except Exception:
             kept.append(arch)
-    new_list = " ".join(kept)
-    if new_list != TORCH_CUDA_ARCH_LIST:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = new_list
-        print(f"TORCH_CUDA_ARCH_LIST has been updated to '{new_list}'")
+    CUDA_ARCH_LIST = " ".join(kept)
+    # Many build systems still read TORCH_CUDA_ARCH_LIST; set it from CUDA_ARCH_LIST
+    os.environ["TORCH_CUDA_ARCH_LIST"] = CUDA_ARCH_LIST
 
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
@@ -219,22 +208,18 @@ BASE_WHEEL_URL = (
 def get_version_tag() -> str:
     if BUILD_CUDA_EXT != "1":
         return "cpu"
-
     if ROCM_VERSION:
         return f"rocm{'.'.join(str(ROCM_VERSION).split('.')[:2])}"
-
-    cuda_version = _cuda_version_for_tag(torch_mod) or _probe_cuda_version()
+    cuda_version = _cuda_version_for_tag()
     if not cuda_version:
         print(
             "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
             "Set CUDA_VERSION env (e.g. 12.1)."
         )
         sys.exit(1)
-
-    CUDA_VERSION = "".join(cuda_version.split("."))  # e.g. 12.1 -> "121"
-    tv = _torch_version_for_tag(torch_mod)
+    CUDA_VERSION = "".join(cuda_version.split("."))  # e.g. "12.1" -> "121"
+    tv = _torch_version_for_tag()
     torch_tag = f"torch{tv}" if tv else "torchNA"
-
     return f"cu{CUDA_VERSION[:3]}{torch_tag}"
 
 requirements = []
@@ -242,12 +227,11 @@ if not os.getenv("CI"):
     with open("requirements.txt", encoding="utf-8") as f:
         requirements = [line.strip() for line in f if line.strip()]
 
-# Decide HAS_CUDA_V8 without torch if possible
+# Decide HAS_CUDA_V8 without torch
 HAS_CUDA_V8 = False
-if TORCH_CUDA_ARCH_LIST:
-    HAS_CUDA_V8 = not ROCM_VERSION and _has_cuda_v8_from_arch_list(_parse_arch_list(TORCH_CUDA_ARCH_LIST))
+if CUDA_ARCH_LIST:
+    HAS_CUDA_V8 = not ROCM_VERSION and _has_cuda_v8_from_arch_list(_parse_arch_list(CUDA_ARCH_LIST))
 else:
-    # Soft probe via nvidia-smi
     smi = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
     if smi:
         try:
@@ -264,23 +248,24 @@ extensions = []
 additional_setup_kwargs = {}
 
 # ---------------------------
-# Build CUDA extensions (optional, torch only if present)
+# Build CUDA/ROCm extensions (only when enabled)
 # ---------------------------
 if BUILD_CUDA_EXT == "1":
-    # We need torch headers for PyTorch extensions. Only proceed if torch import works.
-    if torch_mod is None:
+    # Import torch's cpp_extension only if we're truly building GPU extensions
+    try:
+        from distutils.sysconfig import get_python_lib
+        from torch.utils import cpp_extension as cpp_ext  # type: ignore
+    except Exception:
         if FORCE_BUILD:
             sys.exit(
-                "FORCE_BUILD is set but PyTorch is not importable. "
-                "Install torch build deps first (see https://pytorch.org/) "
-                "or unset GPTQMODEL_FORCE_BUILD to use prebuilt wheels."
+                "FORCE_BUILD is set but PyTorch C++ extension headers are unavailable. "
+                "Install torch build deps first (see https://pytorch.org/) or unset GPTQMODEL_FORCE_BUILD."
             )
-        # No torch -> we will still register bdist_wheel to attempt prebuilt fetch
-    else:
-        from distutils.sysconfig import get_python_lib
+        # If we can't import cpp_extension, fall back to prebuilt wheel path
+        cpp_ext = None
 
-        from torch.utils import cpp_extension as cpp_ext  # noqa: F401
-
+    if cpp_ext is not None:
+        # Optional conda CUDA runtime headers
         conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
         if os.path.isdir(conda_cuda_include_dir):
             include_dirs.append(conda_cuda_include_dir)
@@ -301,6 +286,10 @@ if BUILD_CUDA_EXT == "1":
                 "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
             ],
         }
+
+        # Windows/OpenMP note: adjust flags as needed for MSVC if you add native Windows wheels
+        if sys.platform == "win32":
+            extra_compile_args["cxx"] = ["/O2", "/std:c++17", "/openmp", "/DNDEBUG", "/DENABLE_BF16"]
 
         CXX11_ABI = _detect_cxx11_abi()
         extra_compile_args["cxx"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
@@ -336,7 +325,7 @@ if BUILD_CUDA_EXT == "1":
                 return modified_flags
             extra_compile_args["nvcc"] = _hipify_compile_flags(extra_compile_args["nvcc"])
 
-        # Extensions (same as before, gated by ROCm / sm_80 availability)
+        # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 extensions += [
@@ -407,7 +396,7 @@ if BUILD_CUDA_EXT == "1":
 
 class CachedWheelsCommand(_bdist_wheel):
     def run(self):
-        # Do not import torch here; allow explicit override via env
+        # No implicit torch checks; allow explicit override via env
         xpu_avail = _bool_env("XPU_AVAILABLE", False)
         if FORCE_BUILD or xpu_avail:
             return super().run()
@@ -499,7 +488,7 @@ setup(
     python_requires=">=3.9.0",
     cmdclass=(
         {"bdist_wheel": CachedWheelsCommand, "build_ext": additional_setup_kwargs.get("cmdclass", {}).get("build_ext")}
-        if BUILD_CUDA_EXT == "1" and additional_setup_kwargs
+        if (BUILD_CUDA_EXT == "1" and additional_setup_kwargs)
         else {"bdist_wheel": CachedWheelsCommand}
     ),
     ext_modules=additional_setup_kwargs.get("ext_modules", []),
