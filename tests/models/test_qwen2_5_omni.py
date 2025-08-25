@@ -13,10 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ 
-from model_test import ModelTest
-import soundfile as sf
 import os
+
+import soundfile as sf
+from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
+from model_test import ModelTest
+
 
 class TestQwen2_5_Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
@@ -38,7 +40,7 @@ class TestQwen2_5_Omni(ModelTest):
                 {
                     "role": "system",
                     "content": [
-                        {   "type": "text", 
+                        {   "type": "text",
                             "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
                     ],
                 },
@@ -58,7 +60,7 @@ class TestQwen2_5_Omni(ModelTest):
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-       
+
         image_inputs = Qwen2_5_OmniGPTQ.process_vision_info(messages)
         inputs = processor(
             text=text,
@@ -67,14 +69,14 @@ class TestQwen2_5_Omni(ModelTest):
             padding=True,
             return_tensors="pt",
         )
-        
+
         inputs = inputs.to("cuda")
 
         # Inference: Generation of the output (text and audio)
         audio_file_name = 'output_gptq.wav'
         generated_ids, audio = model.generate(**inputs, max_new_tokens=128, return_audio = True)
         sf.write(
-            audio_file_name, 
+            audio_file_name,
             audio.reshape(-1).detach().cpu().numpy(),
             samplerate=24000,
         )
@@ -91,7 +93,7 @@ class TestQwen2_5_Omni(ModelTest):
         self.assertTrue(os.path.exists(audio_file_name))
 
         self.check_kernel(model, self.KERNEL_INFERENCE)
-        
+
         # delete audio file
         os.remove(audio_file_name)
 

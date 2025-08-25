@@ -21,7 +21,7 @@ from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMix
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY
 from .._const import CPU
 from ..base import BaseGPTQModel
 
@@ -61,10 +61,10 @@ class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(self.quantize_config.device)
         self.model.thinker.visual = self.model.thinker.visual.to(self.quantize_config.device)
         self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(self.quantize_config.device)
-        
+
         self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(self.quantize_config.device)
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(self.quantize_config.device)
-        
+
         for layer in self.model.thinker.model.layers:
             layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(self.quantize_config.device)
 
@@ -72,10 +72,10 @@ class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
         self.model.thinker.visual = self.model.thinker.visual.to(CPU)
         self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
-        
+
         self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
-        
+
         for layer in self.model.thinker.model.layers:
             layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
     @staticmethod

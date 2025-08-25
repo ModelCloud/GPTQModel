@@ -82,8 +82,8 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
         return module
     if HAS_MPS and not TORCH_GTE_28:
         if not torch._dynamo.config.suppress_errors:
-            log.warn(f"To use compile() with MPS, you need to have torch version >= {PYTORCH_MIN_VERSION_WITH_MPS_COMPILE}, "
-                     f"please upgrade it by `pip install -U torch torchaudio torchvision`")
+            log.warn("To use compile() with MPS, you need to have torch version >= 2.8.0, "
+                     "please upgrade it by `pip install -U torch torchaudio torchvision`")
             torch._dynamo.config.suppress_errors = True
         return module
     try:

@@ -27,10 +27,10 @@ import torch
 import torch.nn as nn
 import transformers
 
-from .gptq import GPTQ
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.torch import torch_compile, torch_sync, TORCH_GTE_28
+from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
+from .gptq import GPTQ
 
 
 class GPTQv2(GPTQ):

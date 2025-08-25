@@ -29,11 +29,11 @@ import torch.nn as nn
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
-from .quantizer import HF_OPTIMUM, Quantizer
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_compile, torch_sync, TORCH_GTE_28
+from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
+from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
 lock = threading.Lock()
@@ -246,7 +246,7 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
-        
+
         damp = self.qcfg.damp_percent
         diag = torch.arange(self.columns, device=H.device)
         mean = torch.mean(torch.diag(H))
@@ -295,7 +295,7 @@ class GPTQ:
         if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
             self.hessian_inverse = self._mock_hessian_inverse
-            
+
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
             torch_sync(device=self.module.target_device)
@@ -354,7 +354,7 @@ class GPTQ:
             invperm = torch.argsort(perm)
 
         if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import compute_local_perms, compute_global_perm, compose_final_perm
+            from .gar import compose_final_perm, compute_global_perm, compute_local_perms
             local_perms = compute_local_perms(torch.diag(H), self.qcfg.group_size)
             global_perm = compute_global_perm(torch.diag(H), self.qcfg.group_size)
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
@@ -365,7 +365,7 @@ class GPTQ:
         Q = torch.zeros_like(W)
 
         Hinv, damp = self.hessian_inverse(H)
-        
+
         # Use simplified loop when mock_quantization is active
         if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
             for i1 in range(0, self.columns, blocksize):
@@ -380,7 +380,7 @@ class GPTQ:
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
                         # Find parameters for entire groups at once (optimized)
-                        group_start_cols = [i for i in range(i1, i2, self.qcfg.group_size)]
+                        group_start_cols = list(range(i1, i2, self.qcfg.group_size))
                         for group_start in group_start_cols:
                             group_end = min(group_start + self.qcfg.group_size, self.columns)
                             if group_start < group_end:
@@ -401,14 +401,14 @@ class GPTQ:
                         # Use latest scale and zero for the entire block
                         latest_scale = scale[-1]
                         latest_zero = zero[-1]
-                        
+
                         # Vectorized quantization using broadcasting
                         # Reshape scales and zeros to match block dimensions
                         if latest_scale.dim() == 1:
                             latest_scale = latest_scale.view(-1, 1)
                         if latest_zero.dim() == 1:
                             latest_zero = latest_zero.view(-1, 1)
-                        
+
                         # Apply quantization formula using the cloned weights W1
                         maxq_val = 2 ** self.qcfg.bits - 1
                         if self.qcfg.sym:
@@ -438,12 +438,12 @@ class GPTQ:
                     if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
                         latest_scale = self.quantizer.scale
                         latest_zero = self.quantizer.zero
-                        
+
                         if latest_scale.dim() == 1:
                             latest_scale = latest_scale.view(-1, 1)
                         if latest_zero.dim() == 1:
                             latest_zero = latest_zero.view(-1, 1)
-                        
+
                         if self.qcfg.sym:
                             Q1 = latest_scale * torch.clamp(
                                 torch.round(W1 / latest_scale),
@@ -512,7 +512,7 @@ class GPTQ:
                 if Hinv is not None:
                     Losses[:, i1:i2] = Losses1 / 2
                     W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-        
+
         # TODO: why is there a torch_sync here? There are no streaming ops here?
         # torch_sync(device=self.module.target_device)
 
