@@ -25,12 +25,43 @@ except BaseException:
 # Helpers (no torch required)
 # ---------------------------
 
-def _maybe_import_torch():
-    try:
-        import torch  # noqa: F401
-        return sys.modules["torch"]
-    except Exception:
-        return None
+def _detect_cuda_arch_list():
+    # Step 1: check env override
+    env_arch = _read_env("CUDA_ARCH_LIST")
+    if env_arch:
+        return env_arch
+
+    # Step 2: try nvcc
+    nvcc_out = _probe_cmd(["nvcc", "--list-gpu-arch"])
+    if nvcc_out:
+        # output lines like: "    sm_35" / "    sm_80"
+        archs = []
+        for line in nvcc_out.splitlines():
+            line = line.strip()
+            if line.startswith("sm_") or line.startswith("compute_"):
+                try:
+                    major = int(line.split("_")[1][0])
+                    if major >= 6:  # only keep >= 6.0
+                        archs.append(line.replace("compute_", "").replace("sm_", ""))
+                except Exception:
+                    continue
+        if archs:
+            return " ".join(sorted(set(a.replace("sm_", "") for a in archs)))
+
+    # Step 3: try nvidia-smi (compute capability query)
+    smi_out = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
+    if smi_out:
+        caps = []
+        for line in smi_out.splitlines():
+            line = line.strip()
+            if line:
+                caps.append(line)
+        if caps:
+            return " ".join(caps)
+
+    # Step 4: fallback
+    print("⚠️  Could not auto-detect CUDA arch list. Defaulting to 6.0+PTX")
+    return "6.0+PTX"
 
 def _read_env(name, default=None):
     v = os.environ.get(name)
@@ -149,8 +180,6 @@ ROCM_VERSION = _probe_rocm_version()
 SKIP_ROCM_VERSION_CHECK = _read_env("SKIP_ROCM_VERSION_CHECK")
 BUILD_CUDA_EXT = _read_env("BUILD_CUDA_EXT", "1" if sys.platform != "darwin" else "0")
 FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
-
-torch_mod = _maybe_import_torch()
 
 if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     try:
