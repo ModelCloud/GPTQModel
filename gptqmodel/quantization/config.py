@@ -218,6 +218,9 @@ class QuantizeConfig():
     v2_alpha: float = 0.25
     v2_memory_device: str = "auto" #
 
+    # Skip all heavy computations for testing model loading
+    mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
+
     def __post_init__(self):
         fields_info = fields(self)
 
