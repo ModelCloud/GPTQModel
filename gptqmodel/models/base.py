@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 import torch._dynamo
 import torch.nn as nn
-from packaging import version
 from tokenicer import Tokenicer
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
@@ -35,7 +34,7 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_tree
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import GPTQ, QuantizeConfig
-from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST, AutoRoundQuantizeConfig
+from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
@@ -43,8 +42,8 @@ from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, check_to_quantized, find_modules, get_device, get_module,
-                           get_module_by_name_prefix, get_moe_layer_modules, move_to, nested_move_to, pack_model)
+from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
+                           get_moe_layer_modules, move_to, nested_move_to, pack_model)
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -666,97 +665,6 @@ class BaseGPTQModel(nn.Module):
         if avg < min_calibration_dataset_input_ids_avg_length:
             log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                            f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
-
-        if isinstance(self.quantize_config, AutoRoundQuantizeConfig):
-            from auto_round import AutoRound
-            from auto_round import __version__ as auto_round_version
-
-            if version.parse(auto_round_version) < version.parse("0.3.0"):
-                raise ValueError(f"AutoRound version must be >= 0.3.0: actual = {auto_round_version}")
-
-            if self.quantize_config.lm_head:
-                self.quantize_config.layer_config[self.lm_head] = {"data_type": "int"}
-
-            import torch.nn.functional as F
-            from torch.utils.data import DataLoader
-
-            # set the nsamples/seqlen according to the actual size of the calibration_dataset.
-            nsamples = len(calibration_dataset)
-            seqlen = max_input_id_length
-
-            @torch.no_grad()
-            def collate_batch(batch):
-                input_ids_new = []
-                attention_mask_new = []
-                for text in batch:
-                    input_ids, attention_mask = text["input_ids"][0], text["attention_mask"][0]
-
-                    input_ids = input_ids[:seqlen]
-                    input_ids_new.append(input_ids)
-
-                    if batch_size > 1:
-                        attention_mask = attention_mask[:seqlen]
-                        attention_mask_new.append(attention_mask)
-
-                if len(input_ids_new) == 0:
-                    return None
-
-                input_ids_new = [F.pad(t, (0, seqlen - t.size(0))) for t in input_ids_new]
-
-                if batch_size > 1:
-                    attention_mask_new = [F.pad(t, (0, seqlen - t.size(0))) for t in attention_mask_new]
-                    attention_mask_new = torch.vstack(attention_mask_new)
-
-                input_ids_new = torch.vstack(input_ids_new)
-
-                res = {"input_ids": input_ids_new, "attention_mask": attention_mask_new if batch_size > 1 else None}
-                return res
-
-            dataloader = DataLoader(calibration_dataset, collate_fn=collate_batch, shuffle=False, batch_size=nsamples)
-
-            self.autoround = AutoRound(self.model,
-                                       tokenizer=None,
-                                       bits=self.quantize_config.bits,
-                                       group_size=self.quantize_config.group_size,
-                                       sym=self.quantize_config.sym, batch_size=batch_size, n_samples=nsamples,
-                                       dataset=dataloader, seqlen=seqlen, nblocks=self.quantize_config.nblocks,
-                                       iters=self.quantize_config.iters, lr=self.quantize_config.lr,
-                                       minmax_lr=self.quantize_config.minmax_lr,
-                                       enable_quanted_input=self.quantize_config.enable_quanted_input,
-                                       device=self.device,
-                                       amp=self.quantize_config.amp,
-                                       low_gpu_mem_usage=self.quantize_config.low_gpu_mem_usage,
-                                       seed=self.quantize_config.seed,
-                                       gradient_accumulate_steps=self.quantize_config.gradient_accumulate_steps,
-                                       scale_dtype=self.quantize_config.scale_dtype, layer_config=self.quantize_config.layer_config,
-                                       enable_minmax_tuning=self.quantize_config.enable_minmax_tuning)
-
-            model, _ = self.autoround.quantize()
-
-            quantizers = {}
-            for key in self.autoround.layer_config:
-                info = self.autoround.layer_config[key]
-                if not check_to_quantized(info):
-                    continue
-                quantizers[key] = (None, info["scale"], info["zp"].to(torch.float32), None)
-
-            self.qlinear_kernel = pack_model(
-                model=self.model,
-                quant_result=quantizers,
-                bits=self.quantize_config.bits,
-                dynamic=self.quantize_config.dynamic,
-                group_size=self.quantize_config.group_size,
-                backend=backend,
-                desc_act=self.quantize_config.desc_act,
-                format=self.quantize_config.format,
-                quant_method=self.quantize_config.quant_method,
-                lm_head_name=self.lm_head,
-                parallel_packing=self.quantize_config.parallel_packing,
-            )
-
-            self.model = model
-            self.quantized = True
-            return
 
         if self.quantize_config.lm_head:
             if self.model.config.tie_word_embeddings and hasattr(self.model, "_tied_weights_keys"):
