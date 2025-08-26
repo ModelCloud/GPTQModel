@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -401,10 +402,12 @@ class CachedWheelsCommand(_bdist_wheel):
         if FORCE_BUILD or xpu_avail:
             return super().run()
 
+        system_name = platform.system().lower()
+
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
         wheel_filename = (
             f"{common_setup_kwargs['name']}-{gptqmodel_version}-"
-            f"{python_version}-{python_version}-linux_x86_64.whl"
+            f"{python_version}-{python_version}-{system_name}_x86_64.whl"
         )
 
         wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{version_vars['version']}", wheel_name=wheel_filename)
