@@ -51,6 +51,9 @@ class GPTOSSGPTQ(BaseGPTQModel):
     ]
 
     def before_model_load(self):
+        import torch
+        from torch import nn
+
         class GptOssExperts(nn.Module):
             def __init__(self, config):
                 super().__init__()
