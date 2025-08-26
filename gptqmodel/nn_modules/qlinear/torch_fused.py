@@ -29,21 +29,46 @@ from ...utils.torch import TORCH_HAS_XPU_FUSED_OPS
 log = setup_logger()
 
 # TODO: not yet working for cuda/cpu fused int4 ops
-# def pack_scales_and_zeros(scales, zeros):
-#     assert scales.shape == zeros.shape
-#     # assert scales.dtype == torch.bfloat16
-#     # assert zeros.dtype == torch.bfloat16
-#     return (
-#         torch.cat(
-#             [
-#                 scales.reshape(scales.size(0), scales.size(1), 1),
-#                 zeros.reshape(zeros.size(0), zeros.size(1), 1),
-#             ],
-#             2,
-#         )
-#         .transpose(0, 1)
-#         .contiguous()
-#     )
+def pack_scales_and_zeros(scales, zeros):
+    print("scales", scales.shape, zeros.shape)
+    # assert scales.shape == zeros.shape
+    # assert scales.dtype == torch.bfloat16
+    # assert zeros.dtype == torch.bfloat16
+    return (
+        torch.cat(
+            [
+                scales.reshape(scales.size(0), scales.size(1), 1),
+                zeros.reshape(zeros.size(0), zeros.size(1), 1),
+            ],
+            2,
+        )
+        .transpose(0, 1)
+        .contiguous()
+    )
+
+def gptq_int32_to_uint8(qweight: torch.Tensor) -> torch.Tensor:
+    """
+    Convert GPTQ qweight (int32, each element packs 8 int4 values)
+    into (uint8, each element packs 2 int4 values).
+
+    Input:  [n, k_int32] int32
+    Output: [n, k_int32 * 4] uint8   # since each int32 becomes 4 uint8
+    """
+    assert qweight.dtype == torch.int32
+
+    # Unpack into 8 int4 values
+    q_unpack = torch.stack([
+        (qweight >> (4 * i)) & 0xF for i in range(8)
+    ], dim=-1)   # shape: [n, k_int32, 8]
+
+    # Repack into uint8 (each uint8 holds two int4 values)
+    q_even = q_unpack[..., 0::2]  # [n, k_int32, 4]
+    q_odd  = q_unpack[..., 1::2]  # [n, k_int32, 4]
+    q_uint8 = (q_even | (q_odd << 4)).to(torch.uint8)
+
+    # Reshape to [n, k_uint8], where k_uint8 = k_int32 * 4
+    q_uint8 = q_uint8.reshape(qweight.shape[0], -1)
+    return q_uint8
 
 class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
@@ -57,7 +82,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     # optimized for XPU but should run on all
-    SUPPORTS_DEVICES = [DEVICE.XPU] # change this to XPU to limit to Intel XPU
+    SUPPORTS_DEVICES = [DEVICE.XPU, DEVICE.CUDA] # change this to XPU to limit to Intel XPU
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -146,13 +171,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         ).to(self.dequant_dtype)
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(zeros.shape[0], -1)
         # Unpack and reorder qweight
-        weight = torch.bitwise_and(
-            torch.bitwise_right_shift(
-                torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
-                self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
-            ).to(self.dequant_dtype),
-            self.maxq
-        )
+        # weight = torch.bitwise_and(
+        #     torch.bitwise_right_shift(
+        #         torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
+        #         self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
+        #     ).to(self.dequant_dtype),
+        #     self.maxq
+        # )
         self.ret_idx = torch.zeros(self.g_idx.shape[0], dtype=torch.int32).to(self.g_idx.device)
         groups = self.g_idx.shape[0] // self.group_size
         remainder = self.g_idx.shape[0] % self.group_size
@@ -163,15 +188,15 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         for i in range(groups):
             g_idx_2[self.g_idx == i] += arange_tensor
         self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.ret_idx.device).to(self.ret_idx.dtype)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, self.ret_idx).t()
+        # weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, self.ret_idx).t()
         # Pack qweight
-        packed = torch.zeros(weight.shape[0], weight.shape[1] // self.pack_factor, dtype=torch.int32, device=weight.device)
-        for col in range(weight.shape[1] // self.pack_factor):
-            for i in range(self.pack_factor):
-                packed_col = weight[:, col * self.pack_factor + i].to(torch.int32)
-                packed[:, col] |= packed_col << (i * self.bits)
+        # packed = torch.zeros(weight.shape[0], weight.shape[1] // self.pack_factor, dtype=torch.int32, device=weight.device)
+        # for col in range(weight.shape[1] // self.pack_factor):
+        #     for i in range(self.pack_factor):
+        #         packed_col = weight[:, col * self.pack_factor + i].to(torch.int32)
+        #         packed[:, col] |= packed_col << (i * self.bits)
 
-        self.qweight = packed.contiguous()
+        # self.qweight = packed.contiguous()
         self.qzeros = zeros.contiguous()
 
     def forward(self, x: torch.Tensor):
@@ -185,23 +210,36 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         if not self.training and not self.transformed and TORCH_HAS_XPU_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
+            print("ssss 1", self.qweight.shape, self.scales.shape, self.qzeros.shape)
             self.transform(x.dtype)
+            print("ssss 2", self.qweight.shape, self.scales.shape, self.qzeros.shape)
+            # raise Exception("Test")
             self.transformed = True
 
         if self.transformed:
-            x = x[:, self.ret_idx].contiguous()
+            # x = x[:, self.ret_idx].contiguous()
             # fused ops optimized for xpu using torch.ops
             # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
-            out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
-                x, self.qweight, self.group_size, self.scales, self.qzeros
-            ).reshape(out_shape)
+            # out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
+            #     x, self.qweight, self.group_size, self.scales, self.qzeros
+            # ).reshape(out_shape)
 
             # TODO: torch.ops _weight_int4pack_mm has fused aten op for int4 matmul but we need to transform and align format
             # scales + zeros and pass as one tensor
-            # scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
-            # out = torch.ops.aten._weight_int4pack_mm(
-            #     x, self.qweight, self.group_size, scales_and_zeros
-            # ).reshape(out_shape)
+            scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+            q_uint8 = gptq_int32_to_uint8(self.qweight)
+            weight_int4pack = torch.ops.aten._convert_weight_to_int4pack(
+                q_uint8, 8
+            )
+            print("q_uint8", self.qweight.shape, q_uint8.shape, weight_int4pack.shape)
+            B_innerKTiles = weight_int4pack.size(3) * 2
+            kKTileSize = 16
+            k = x.size(1)
+            print("weight_int4pack",weight_int4pack.shape, weight_int4pack.size(1), k / (B_innerKTiles * kKTileSize))
+            print("B_innerKTiles",k , B_innerKTiles, kKTileSize)
+            out = torch.ops.aten._weight_int4pack_mm(
+                x.to(torch.bfloat16), weight_int4pack, self.group_size, scales_and_zeros
+            ).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
