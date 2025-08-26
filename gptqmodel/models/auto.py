@@ -130,7 +130,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
-from .definitions.gpt_oss import GptOssGPTQ  # noqa: E402
+from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
