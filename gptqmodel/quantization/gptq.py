@@ -434,45 +434,17 @@ class GPTQ:
                         q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                         Q1[:, i] = q
 
-                # Vectorized error computation if Hinv is available
+                # Error computation if Hinv is available
                 if Hinv is not None:
-                    if self.qcfg.group_size != -1 and len(scale) > 0 and len(zero) > 0:
-                        # Vectorized error computation for grouped quantization
-                        maxq_val = 2 ** self.qcfg.bits - 1
-                        if self.qcfg.sym:
-                            quantized = torch.clamp(
-                                torch.round(W1 / scale[-1].view(-1, 1)),
-                                -(maxq_val // 2),
-                                maxq_val // 2
-                            )
-                        else:
-                            quantized = torch.clamp(
-                                torch.round(W1 / scale[-1].view(-1, 1)) + zero[-1].view(-1, 1),
-                                0,
-                                maxq_val
-                            )
-                        Q1 = scale[-1].view(-1, 1) * quantized
-                        if not self.qcfg.sym:
-                            Q1 = scale[-1].view(-1, 1) * (quantized - zero[-1].view(-1, 1))
+                    for i in range(count):
+                        w = W1[:, i]
+                        q = Q1[:, i]
+                        d = Hinv1[i, i]
                         
-                        errors = (W1 - Q1).unsqueeze(2)  # Shape: (columns, count, 1)
-                        
-                        # Use only the diagonal elements for error propagation
-                        Hinv_diag = torch.diagonal(Hinv1, dim1=-2, dim2=-1).view(1, -1, 1) # Shape: (1, count, 1)
-                        W1 -= (errors * Hinv_diag).squeeze(2)
-                        Err1 = (W1 - Q1) / torch.diagonal(Hinv1)
-                        Losses1 = (W1 - Q1) ** 2 / (torch.diagonal(Hinv1) ** 2)
-                    else:
-                        # Fallback to individual error computation
-                        for i in range(count):
-                            w = W1[:, i]
-                            q = Q1[:, i]
-                            d = Hinv1[i, i]
-                            
-                            Losses1[:, i] = (w - q) ** 2 / d**2
-                            err1 = (w - q) / d
-                            W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                            Err1[:, i] = err1
+                        Losses1[:, i] = (w - q) ** 2 / d**2
+                        err1 = (w - q) / d
+                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                        Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
                 if Hinv is not None:
