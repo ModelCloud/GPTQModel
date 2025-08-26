@@ -130,6 +130,7 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.gpt_oss import GptOssGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -209,6 +210,7 @@ MODEL_MAP = {
     "ernie4_5": ERNIE4_5GPTQ,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
     "seed_oss": SeedOSSGPTQ,
+    "gpt_oss": GptOssGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())

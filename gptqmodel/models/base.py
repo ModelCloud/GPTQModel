@@ -1237,6 +1237,9 @@ class BaseGPTQModel(nn.Module):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
+    def before_model_load(self):
+        pass
+
     def pre_quantize_generate_hook_start(self):
         pass
 
