@@ -210,7 +210,7 @@ MODEL_MAP = {
     "ernie4_5": ERNIE4_5GPTQ,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
     "seed_oss": SeedOSSGPTQ,
-    "gpt_oss": GptOssGPTQ,
+    "gpt_oss": GPTOSSGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
