@@ -19,7 +19,6 @@ from ..base import BaseGPTQModel
 
 
 class GPTOSSGPTQ(BaseGPTQModel):
-    require_monkeypatch = True
     dynamic_expert_index = "num_local_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]
@@ -32,22 +31,8 @@ class GPTOSSGPTQ(BaseGPTQModel):
         ["self_attn.o_proj"],
 
         # uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-    ]
-
-    layers_modules_tree = [
-        "model",
-        "layers",
-        "#",
-        {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-            "mlp": {
-                "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
-                },
-            },
-        }
+        [f"mlp.experts.gate_up_projs.{EXPERT_INDEX_PLACEHOLDER}"],
+        [f"mlp.experts.down_projs.{EXPERT_INDEX_PLACEHOLDER}"],
     ]
 
     def before_model_load(self):
