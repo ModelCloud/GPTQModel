@@ -216,8 +216,10 @@ class QuantizeConfig():
     v2_alpha: float = 0.25
     v2_memory_device: str = "auto" #
 
-    # Skip all heavy computations for testing model loading
-    mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
+    # Intended to skip complex computational code paths during quantization to accelerate model quant testing
+    # can produce quants of slighlty less quality but much faster (at least in 8 bit)
+    mock_hessian_inverse: bool = field(default=False, metadata={"help": "Use simplified hessian inverse (identity matrix), v1, experimental, use with fast_loop for MoE models in case of skipped expert modules"})
+    fast_loop: bool = field(default=False, metadata={"help": "Fast version of quantization loop with different losses propogation and outcome, v1, experimental"})
 
     def __post_init__(self):
         fields_info = fields(self)

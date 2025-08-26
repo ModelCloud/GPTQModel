@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
+from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, DEVICE_0, device_next, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -246,7 +246,6 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
-
         damp = self.qcfg.damp_percent
         diag = torch.arange(self.columns, device=H.device)
         mean = torch.mean(torch.diag(H))
@@ -291,11 +290,10 @@ class GPTQ:
         if not TORCH_GTE_28:
             self.hessian_inverse = torch_compile(self.hessian_inverse)
 
-        # Mock heavy computations
-        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
-            # Use simplified hessian inverse (identity matrix)
+        # Use simplified hessian inverse (identity matrix)
+        if self.qcfg.mock_hessian_inverse:
             self.hessian_inverse = self._mock_hessian_inverse
-
+            
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
             torch_sync(device=self.module.target_device)
@@ -365,22 +363,26 @@ class GPTQ:
         Q = torch.zeros_like(W)
 
         Hinv, damp = self.hessian_inverse(H)
-
-        # Use simplified loop when mock_quantization is active
-        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+        
+        if self.qcfg.fast_loop:
+            # Optimized fast loop implementation
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
 
-                # Clone the weights like the original code to maintain device/dtype consistency
                 W1 = W[:, i1:i2].clone()
                 Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1) if Hinv is not None else None
+                Losses1 = torch.zeros_like(W1) if Hinv is not None else None
 
-                # Handle group quantization parameters efficiently (similar to original)
+                if Hinv is not None:
+                    Hinv1 = Hinv[i1:i2, i1:i2]
+
+                # Handle group quantization parameters efficiently
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
                         # Find parameters for entire groups at once (optimized)
-                        group_start_cols = list(range(i1, i2, self.qcfg.group_size))
+                        group_start_cols = [i for i in range(i1, i2, self.qcfg.group_size)]
                         for group_start in group_start_cols:
                             group_end = min(group_start + self.qcfg.group_size, self.columns)
                             if group_start < group_end:
@@ -396,75 +398,86 @@ class GPTQ:
                                 idx = perm[idx]
                             self.quantizer = groups[idx // self.qcfg.group_size]
 
-                    # Vectorized quantization for the entire block (major optimization)
-                    if len(scale) > 0 and len(zero) > 0:
-                        # Use latest scale and zero for the entire block
-                        latest_scale = scale[-1]
-                        latest_zero = zero[-1]
+                # Vectorized quantization for the entire block (major optimization)
+                if self.qcfg.group_size != -1 and len(scale) > 0 and len(zero) > 0:
+                    # Use latest scale and zero for the entire block
+                    latest_scale = scale[-1]
+                    latest_zero = zero[-1]
+                    
+                    # Reshape scales and zeros to match block dimensions
+                    if latest_scale.dim() == 1:
+                        latest_scale = latest_scale.view(-1, 1)
+                    if latest_zero.dim() == 1:
+                        latest_zero = latest_zero.view(-1, 1)
+                    
+                    # Apply quantization formula using broadcasting
+                    maxq_val = 2 ** self.qcfg.bits - 1
+                    if self.qcfg.sym:
+                        # Symmetric quantization: Q = scale * clamp(round(x/scale), -maxq/2, maxq/2)
+                        Q1 = latest_scale * torch.clamp(
+                            torch.round(W1 / latest_scale),
+                            -(maxq_val // 2),
+                            maxq_val // 2
+                        )
+                    else:
+                        # Asymmetric quantization: Q = scale * (clamp(round(x/scale) + zero, 0, maxq) - zero)
+                        quantized = torch.clamp(
+                            torch.round(W1 / latest_scale) + latest_zero,
+                            0,
+                            maxq_val
+                        )
+                        Q1 = latest_scale * (quantized - latest_zero)
+                else:
+                    # No grouping or no scale/zero available - fallback to individual quantization
+                    for i in range(count):
+                        w = W1[:, i]
+                        q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                        Q1[:, i] = q
 
-                        # Vectorized quantization using broadcasting
-                        # Reshape scales and zeros to match block dimensions
-                        if latest_scale.dim() == 1:
-                            latest_scale = latest_scale.view(-1, 1)
-                        if latest_zero.dim() == 1:
-                            latest_zero = latest_zero.view(-1, 1)
-
-                        # Apply quantization formula using the cloned weights W1
+                # Vectorized error computation if Hinv is available
+                if Hinv is not None:
+                    if self.qcfg.group_size != -1 and len(scale) > 0 and len(zero) > 0:
+                        # Vectorized error computation for grouped quantization
                         maxq_val = 2 ** self.qcfg.bits - 1
                         if self.qcfg.sym:
-                            # Symmetric quantization: Q = scale * clamp(round(x/scale), -maxq/2, maxq/2)
-                            Q1 = latest_scale * torch.clamp(
-                                torch.round(W1 / latest_scale),
-                                -(maxq_val // 2),
-                                maxq_val // 2
-                            )
-                        else:
-                            # Asymmetric quantization: Q = scale * (clamp(round(x/scale) + zero, 0, maxq) - zero)
                             quantized = torch.clamp(
-                                torch.round(W1 / latest_scale) + latest_zero,
-                                0,
-                                maxq_val
-                            )
-                            Q1 = latest_scale * (quantized - latest_zero)
-                    else:
-                        # Fallback to individual quantization if no scale/zero available
-                        for i in range(count):
-                            w = W1[:, i]
-                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                            Q1[:, i] = q
-                else:
-                    # No grouping - vectorized quantization for entire block
-                    maxq_val = 2 ** self.qcfg.bits - 1
-                    if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
-                        latest_scale = self.quantizer.scale
-                        latest_zero = self.quantizer.zero
-
-                        if latest_scale.dim() == 1:
-                            latest_scale = latest_scale.view(-1, 1)
-                        if latest_zero.dim() == 1:
-                            latest_zero = latest_zero.view(-1, 1)
-
-                        if self.qcfg.sym:
-                            Q1 = latest_scale * torch.clamp(
-                                torch.round(W1 / latest_scale),
+                                torch.round(W1 / scale[-1].view(-1, 1)),
                                 -(maxq_val // 2),
                                 maxq_val // 2
                             )
                         else:
                             quantized = torch.clamp(
-                                torch.round(W1 / latest_scale) + latest_zero,
+                                torch.round(W1 / scale[-1].view(-1, 1)) + zero[-1].view(-1, 1),
                                 0,
                                 maxq_val
                             )
-                            Q1 = latest_scale * (quantized - latest_zero)
+                        Q1 = scale[-1].view(-1, 1) * quantized
+                        if not self.qcfg.sym:
+                            Q1 = scale[-1].view(-1, 1) * (quantized - zero[-1].view(-1, 1))
+                        
+                        errors = (W1 - Q1).unsqueeze(2)  # Shape: (columns, count, 1)
+                        
+                        # Use only the diagonal elements for error propagation
+                        Hinv_diag = torch.diagonal(Hinv1, dim1=-2, dim2=-1).view(1, -1, 1) # Shape: (1, count, 1)
+                        W1 -= (errors * Hinv_diag).squeeze(2)
+                        Err1 = (W1 - Q1) / torch.diagonal(Hinv1)
+                        Losses1 = (W1 - Q1) ** 2 / (torch.diagonal(Hinv1) ** 2)
                     else:
-                        # Fallback to individual quantization
+                        # Fallback to individual error computation
                         for i in range(count):
                             w = W1[:, i]
-                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                            Q1[:, i] = q
+                            q = Q1[:, i]
+                            d = Hinv1[i, i]
+                            
+                            Losses1[:, i] = (w - q) ** 2 / d**2
+                            err1 = (w - q) / d
+                            W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                            Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
+                if Hinv is not None:
+                    Losses[:, i1:i2] = Losses1 / 2
+                    W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
         else:
             # Original heavy loop for normal quantization
             for i1 in range(0, self.columns, blocksize):
@@ -560,8 +573,17 @@ class GPTQ:
             Q = Q.t()
 
         # Ensure Q is on the same device as the original module weight before type conversion
-        if Q.device != self.module.weight.data.device:
-            Q = Q.to(device=self.module.weight.data.device)
+        if Q.device != DEVICE_0:
+            try:
+                Q = Q.to(device=DEVICE_0)
+            except Exception as e:
+                log.warn(f"Failed to move Q from {Q.device.type}:{Q.device.index} to {DEVICE_0.type}:{DEVICE_0.index}, {e}")
+                if Q.device != DEVICE_0:
+                    try:
+                        Q = Q.to(device=DEVICE_0)
+                    except Exception as e2:
+                        log.error(f"Failed to move Q from {Q.device.type}:{Q.device.index} to {DEVICE_0.type}:{DEVICE_0.index}, {e2} (second attempt)")
+                        raise
 
         if Q.shape != self.module.weight.shape:
             Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
