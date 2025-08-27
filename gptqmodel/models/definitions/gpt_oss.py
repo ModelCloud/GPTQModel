@@ -46,19 +46,59 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 self.num_experts = config.num_local_experts
                 self.hidden_size = config.hidden_size
                 self.expert_dim = self.intermediate_size
-
-                self.gate_up_projs = nn.ModuleList([
-                    nn.Linear(self.hidden_size, 2 * self.expert_dim)
-                    for _ in range(self.num_experts)
-                ])
-
-                self.down_projs = nn.ModuleList([
-                    nn.Linear(self.expert_dim, self.hidden_size)
-                    for _ in range(self.num_experts)
-                ])
+                self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_size, 2 * self.expert_dim))
+                self.gate_up_proj_bias = nn.Parameter(torch.empty(self.num_experts, 2 * self.expert_dim))
+                self.down_proj = nn.Parameter(torch.empty((self.num_experts, self.expert_dim, self.hidden_size)))
+                self.down_proj_bias = nn.Parameter(torch.empty(self.num_experts, self.hidden_size))
 
                 self.alpha = 1.702
                 self.limit = 7.0
+
+                self.register_load_state_dict_post_hook(self._after_load)
+                
+            @torch.no_grad()
+            def _after_load(self, module, incompatible_keys):
+                # skip if already built (hook may be triggered multiple times)
+                if not hasattr(self, "gate_up_projs") or len(getattr(self, "gate_up_projs", [])) != self.num_experts:
+                    # Create empty linear layers
+                    self.gate_up_projs = nn.ModuleList([
+                        nn.Linear(self.hidden_size, 2 * self.expert_dim, bias=True)
+                        for _ in range(self.num_experts)
+                    ])
+                    self.down_projs = nn.ModuleList([
+                        nn.Linear(self.expert_dim, self.hidden_size, bias=True)
+                        for _ in range(self.num_experts)
+                    ])
+
+                # align and copy for each expert
+                for i in range(self.num_experts):
+                    # source tensors
+                    gate_up_w = self.gate_up_proj[i]         # Expected: [2*expert_dim, hidden_size]
+                    gate_up_b = self.gate_up_proj_bias[i]    # Expected: [2*expert_dim]
+                    down_w    = self.down_proj[i]            # Expected: [hidden_size, expert_dim]
+                    down_b    = self.down_proj_bias[i]       # Expected: [expert_dim]
+
+                    # target parameters
+                    tgt_gu_w = self.gate_up_projs[i].weight  # Expected: [2*expert_dim, hidden_size]
+                    tgt_gu_b = self.gate_up_projs[i].bias    # Expected: [2*expert_dim]
+                    tgt_d_w  = self.down_projs[i].weight     # Expected: [hidden_size, expert_dim]
+                    tgt_d_b  = self.down_projs[i].bias       # Expected: [expert_dim]
+
+                    # transpose and check shapes
+                    gu_w_src_T = gate_up_w.t().contiguous()
+                    d_w_src_T  = down_w.t().contiguous()
+
+                    assert gu_w_src_T.shape == tgt_gu_w.shape, f"gate_up weight shape mismatch: src {gu_w_src_T.shape} vs tgt {tgt_gu_w.shape}"
+                    assert gate_up_b.shape  == tgt_gu_b.shape, f"gate_up bias shape mismatch: src {gate_up_b.shape} vs tgt {tgt_gu_b.shape}"
+                    assert d_w_src_T.shape  == tgt_d_w.shape,  f"down weight shape mismatch: src {d_w_src_T.shape} vs tgt {tgt_d_w.shape}"
+                    assert down_b.shape     == tgt_d_b.shape,  f"down bias shape mismatch: src {down_b.shape} vs tgt {tgt_d_b.shape}"
+
+                    # copy data to target parameters
+                    with torch.no_grad():
+                        self.gate_up_projs[i].weight = nn.Parameter(gu_w_src_T)
+                        self.gate_up_projs[i].bias = nn.Parameter(gate_up_b)
+                        self.down_projs[i].weight = nn.Parameter(d_w_src_T)
+                        self.down_projs[i].bias = nn.Parameter(down_b)
 
             def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
                 batch_size = hidden_states.shape[0]
