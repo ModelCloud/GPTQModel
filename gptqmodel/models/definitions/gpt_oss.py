@@ -61,11 +61,11 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 # skip if already built (hook may be triggered multiple times)
                 if not hasattr(self, "gate_up_projs") or len(getattr(self, "gate_up_projs", [])) != self.num_experts:
                     # Create empty linear layers
-                    self.gate_up_projs = nn.ModuleList([
+                    self.gate_up = nn.ModuleList([
                         nn.Linear(self.hidden_size, 2 * self.expert_dim, bias=True)
                         for _ in range(self.num_experts)
                     ])
-                    self.down_projs = nn.ModuleList([
+                    self.down = nn.ModuleList([
                         nn.Linear(self.expert_dim, self.hidden_size, bias=True)
                         for _ in range(self.num_experts)
                     ])
@@ -79,10 +79,10 @@ class GPTOSSGPTQ(BaseGPTQModel):
                     down_b    = self.down_proj_bias[i]       # Expected: [expert_dim]
 
                     # target parameters
-                    tgt_gu_w = self.gate_up_projs[i].weight  # Expected: [2*expert_dim, hidden_size]
-                    tgt_gu_b = self.gate_up_projs[i].bias    # Expected: [2*expert_dim]
-                    tgt_d_w  = self.down_projs[i].weight     # Expected: [hidden_size, expert_dim]
-                    tgt_d_b  = self.down_projs[i].bias       # Expected: [expert_dim]
+                    tgt_gu_w = self.gate_up[i].weight  # Expected: [2*expert_dim, hidden_size]
+                    tgt_gu_b = self.gate_up[i].bias    # Expected: [2*expert_dim]
+                    tgt_d_w  = self.down[i].weight     # Expected: [hidden_size, expert_dim]
+                    tgt_d_b  = self.down[i].bias       # Expected: [expert_dim]
 
                     # transpose and check shapes
                     gu_w_src_T = gate_up_w.t().contiguous()
@@ -95,10 +95,10 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
                     # copy data to target parameters
                     with torch.no_grad():
-                        self.gate_up_projs[i].weight = nn.Parameter(gu_w_src_T)
-                        self.gate_up_projs[i].bias = nn.Parameter(gate_up_b)
-                        self.down_projs[i].weight = nn.Parameter(d_w_src_T)
-                        self.down_projs[i].bias = nn.Parameter(down_b)
+                        self.gate_up[i].weight = nn.Parameter(gu_w_src_T)
+                        self.gate_up[i].bias = nn.Parameter(gate_up_b)
+                        self.down[i].weight = nn.Parameter(d_w_src_T)
+                        self.down[i].bias = nn.Parameter(down_b)
 
             def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
                 batch_size = hidden_states.shape[0]
@@ -107,12 +107,12 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
                 hidden_states = hidden_states.repeat(num_experts, 1)
                 hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
-                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up_projs)])
+                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up)])
                 gate, up = gate_up[..., ::2], gate_up[..., 1::2]
                 gate = gate.clamp(min=None, max=self.limit)
                 up = up.clamp(min=-self.limit, max=self.limit)
                 glu = gate * torch.sigmoid(gate * self.alpha)
-                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down_projs)])
+                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down)])
                 next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
                 next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
                 next_states = next_states.sum(dim=0)
