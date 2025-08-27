@@ -46,30 +46,6 @@ def pack_scales_and_zeros(scales, zeros):
         .contiguous()
     )
 
-def gptq_int32_to_uint8(qweight: torch.Tensor) -> torch.Tensor:
-    """
-    Convert GPTQ qweight (int32, each element packs 8 int4 values)
-    into (uint8, each element packs 2 int4 values).
-
-    Input:  [n, k_int32] int32
-    Output: [n, k_int32 * 4] uint8   # since each int32 becomes 4 uint8
-    """
-    assert qweight.dtype == torch.int32
-
-    # Unpack into 8 int4 values
-    q_unpack = torch.stack([
-        (qweight >> (4 * i)) & 0xF for i in range(8)
-    ], dim=-1)   # shape: [n, k_int32, 8]
-
-    # Repack into uint8 (each uint8 holds two int4 values)
-    q_even = q_unpack[..., 0::2]  # [n, k_int32, 4]
-    q_odd  = q_unpack[..., 1::2]  # [n, k_int32, 4]
-    q_uint8 = (q_even | (q_odd << 4)).to(torch.uint8)
-
-    # Reshape to [n, k_uint8], where k_uint8 = k_int32 * 4
-    q_uint8 = q_uint8.reshape(qweight.shape[0], -1)
-    return q_uint8
-
 class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -227,16 +203,24 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             # TODO: torch.ops _weight_int4pack_mm has fused aten op for int4 matmul but we need to transform and align format
             # scales + zeros and pass as one tensor
             scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
-            q_uint8 = gptq_int32_to_uint8(self.qweight)
+
+            inner_ktiles = 2
+            # convert to uint8
+            # see https://github.com/huggingface/optimum-quanto/blob/main/optimum/quanto/tensor/weights/tinygemm/packed.py#L61
+            t = self.qweight
+            q_uint8 = (t[::, ::2] << 4 | t[::, 1::2]).to(torch.uint8)
+
+            print("qweight", self.qweight.shape, self.qweight.dtype)
             weight_int4pack = torch.ops.aten._convert_weight_to_int4pack(
-                q_uint8, 8
+                q_uint8, inner_ktiles
             )
             print("q_uint8", self.qweight.shape, q_uint8.shape, weight_int4pack.shape)
             B_innerKTiles = weight_int4pack.size(3) * 2
             kKTileSize = 16
             k = x.size(1)
-            print("weight_int4pack",weight_int4pack.shape, weight_int4pack.size(1), k / (B_innerKTiles * kKTileSize))
+            print("weight_int4pack",weight_int4pack.shape,weight_int4pack.dtype, weight_int4pack.size(1), k / (B_innerKTiles * kKTileSize))
             print("B_innerKTiles",k , B_innerKTiles, kKTileSize)
+            print("x",x.shape)
             out = torch.ops.aten._weight_int4pack_mm(
                 x.to(torch.bfloat16), weight_int4pack, self.group_size, scales_and_zeros
             ).reshape(out_shape)
