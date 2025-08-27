@@ -59,7 +59,7 @@ class GPTOSSGPTQ(BaseGPTQModel):
             @torch.no_grad()
             def _after_load(self, module, incompatible_keys):
                 # skip if already built (hook may be triggered multiple times)
-                if not hasattr(self, "gate_up_projs") or len(getattr(self, "gate_up_projs", [])) != self.num_experts:
+                if not hasattr(self, "gate_up") or len(getattr(self, "gate_up", [])) != self.num_experts:
                     # Create empty linear layers
                     self.gate_up = nn.ModuleList([
                         nn.Linear(self.hidden_size, 2 * self.expert_dim, bias=True)
