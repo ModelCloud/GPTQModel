@@ -28,6 +28,28 @@ from ...utils.torch import TORCH_HAS_XPU_FUSED_OPS
 
 log = setup_logger()
 
+
+def compress_scales(scales: torch.Tensor, pack_dtype_bits: int, bits: int) -> torch.Tensor:
+    """
+    Compress per-channel scales to match qzeros shape.
+
+    Args:
+        scales: [num_groups, out_features]
+        pack_dtype_bits: int, e.g., 32
+        bits: int, e.g., 4
+
+    Returns:
+        compressed_scales: [num_groups, out_features // (pack_dtype_bits // bits)]
+    """
+    num_groups, out_features = scales.shape
+    pack_ratio = pack_dtype_bits // bits
+    assert out_features % pack_ratio == 0, "out_features must be divisible by pack ratio"
+
+    # reshape [num_groups, out_features // pack_ratio, pack_ratio]
+    reshaped = scales.reshape(num_groups, out_features // pack_ratio, pack_ratio)
+    compressed = reshaped[..., 0]  # take first in each pack
+    return compressed
+
 # TODO: not yet working for cuda/cpu fused int4 ops
 def pack_scales_and_zeros(scales, zeros):
     print("scales", scales.shape, zeros.shape)
@@ -43,6 +65,22 @@ def pack_scales_and_zeros(scales, zeros):
             2,
         )
         .transpose(0, 1)
+        .contiguous()
+    )
+
+def pack_tinygemm_scales_and_zeros(scales, zeros, dtype=torch.bfloat16):
+    # _guard_dtype_size(scales, "scales", dtype=dtype, size=zeros.size())
+    # _guard_dtype_size(zeros, "zeros", dtype=dtype)
+    dim = scales.dim()
+    return (
+        torch.cat(
+            [
+                scales.unsqueeze(-1),
+                zeros.unsqueeze(-1),
+            ],
+            dim,
+        )
+        .transpose(-3, -2)
         .contiguous()
     )
 
@@ -187,7 +225,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         if not self.training and not self.transformed and TORCH_HAS_XPU_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             print("ssss 1", self.qweight.shape, self.scales.shape, self.qzeros.shape)
-            self.transform(x.dtype)
+            # self.transform(x.dtype)
             print("ssss 2", self.qweight.shape, self.scales.shape, self.qzeros.shape)
             # raise Exception("Test")
             self.transformed = True
@@ -202,7 +240,10 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
             # TODO: torch.ops _weight_int4pack_mm has fused aten op for int4 matmul but we need to transform and align format
             # scales + zeros and pass as one tensor
-            scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+            scales_compressed = compress_scales(self.scales, self.pack_dtype_bits, self.bits)
+            # scales_and_zeros = pack_scales_and_zeros(scales_compressed, self.qzeros)
+            scales_and_zeros = pack_tinygemm_scales_and_zeros(scales_compressed.transpose(0, 1).contiguous(), self.qzeros.transpose(0, 1).contiguous())
+
 
             inner_ktiles = 2
             # convert to uint8
@@ -221,9 +262,23 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             print("weight_int4pack",weight_int4pack.shape,weight_int4pack.dtype, weight_int4pack.size(1), k / (B_innerKTiles * kKTileSize))
             print("B_innerKTiles",k , B_innerKTiles, kKTileSize)
             print("x",x.shape)
-            out = torch.ops.aten._weight_int4pack_mm(
-                x.to(torch.bfloat16), weight_int4pack, self.group_size, scales_and_zeros
-            ).reshape(out_shape)
+
+            kMTileSize = 16
+            m = x.size(0)
+            # like c++ divUp
+            def div_up(a: int, b: int) -> int:
+                return (a + b - 1) // b
+            mTiles = div_up(m, kMTileSize)
+            kNTileSize = 8
+            kNTileSizeTensor = 8
+            nTileScaleFactor = (kNTileSize / kNTileSizeTensor)
+            nTiles = (weight_int4pack.size(0) / nTileScaleFactor)
+            n = nTiles * kNTileSize
+            print("qScaleAndZeros", scales_and_zeros.shape, n)
+            print(x.shape, weight_int4pack.shape, self.group_size, scales_and_zeros.shape)
+            out = torch.ops.aten._weight_int4pack_mm(x.to(torch.bfloat16), weight_int4pack, self.group_size, scales_and_zeros)
+            print("out", out.shape)
+            out = out.reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
