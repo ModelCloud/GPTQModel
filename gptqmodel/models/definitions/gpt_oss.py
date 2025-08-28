@@ -16,6 +16,9 @@
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseGPTQModel
+from logbar import LogBar
+
+logger = LogBar.shared()
 
 
 class GPTOSSGPTQ(BaseGPTQModel):
@@ -35,70 +38,50 @@ class GPTOSSGPTQ(BaseGPTQModel):
         [f"mlp.experts.down_projs.{EXPERT_INDEX_PLACEHOLDER}"],
     ]
 
-    def before_model_load(self):
+    def after_model_load(self, model, load_quantized_model):
         import torch
         from torch import nn
+        from torch.nn import functional as F
+        from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
+        import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
 
-        class GptOssExperts(nn.Module):
-            def __init__(self, config):
+        class GptOssExpertsNew(nn.Module):
+            def __init__(self, config, ori_experts=None):
                 super().__init__()
                 self.intermediate_size = config.intermediate_size
                 self.num_experts = config.num_local_experts
                 self.hidden_size = config.hidden_size
                 self.expert_dim = self.intermediate_size
-                self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_size, 2 * self.expert_dim))
-                self.gate_up_proj_bias = nn.Parameter(torch.empty(self.num_experts, 2 * self.expert_dim))
-                self.down_proj = nn.Parameter(torch.empty((self.num_experts, self.expert_dim, self.hidden_size)))
-                self.down_proj_bias = nn.Parameter(torch.empty(self.num_experts, self.hidden_size))
-
                 self.alpha = 1.702
                 self.limit = 7.0
 
-                self.register_load_state_dict_post_hook(self._after_load)
-                
-            @torch.no_grad()
-            def _after_load(self, module, incompatible_keys):
-                # skip if already built (hook may be triggered multiple times)
-                if not hasattr(self, "gate_up") or len(getattr(self, "gate_up", [])) != self.num_experts:
-                    # Create empty linear layers
-                    self.gate_up = nn.ModuleList([
-                        nn.Linear(self.hidden_size, 2 * self.expert_dim, bias=True)
-                        for _ in range(self.num_experts)
-                    ])
-                    self.down = nn.ModuleList([
-                        nn.Linear(self.expert_dim, self.hidden_size, bias=True)
-                        for _ in range(self.num_experts)
-                    ])
+                self.gate_up_projs = nn.ModuleList([
+                    nn.Linear(self.hidden_size, 2 * self.expert_dim, dtype=config.dtype)
+                    for _ in range(self.num_experts)
+                ])
 
-                # align and copy for each expert
-                for i in range(self.num_experts):
-                    # source tensors
-                    gate_up_w = self.gate_up_proj[i]         # Expected: [2*expert_dim, hidden_size]
-                    gate_up_b = self.gate_up_proj_bias[i]    # Expected: [2*expert_dim]
-                    down_w    = self.down_proj[i]            # Expected: [hidden_size, expert_dim]
-                    down_b    = self.down_proj_bias[i]       # Expected: [expert_dim]
+                self.down_projs = nn.ModuleList([
+                    nn.Linear(self.expert_dim, self.hidden_size, dtype=config.dtype)
+                    for _ in range(self.num_experts)
+                ])
 
-                    # target parameters
-                    tgt_gu_w = self.gate_up[i].weight  # Expected: [2*expert_dim, hidden_size]
-                    tgt_gu_b = self.gate_up[i].bias    # Expected: [2*expert_dim]
-                    tgt_d_w  = self.down[i].weight     # Expected: [hidden_size, expert_dim]
-                    tgt_d_b  = self.down[i].bias       # Expected: [expert_dim]
+                if ori_experts is not None:
+                    for i in range(self.num_experts):
+                        tgt_gu_w = self.gate_up_projs[i].weight   # [2E, H]
+                        tgt_gu_b = self.gate_up_projs[i].bias     # [2E]
+                        tgt_d_w  = self.down_projs[i].weight      # [H, E]
+                        tgt_d_b  = self.down_projs[i].bias        # [H]
 
-                    # transpose and check shapes
-                    gu_w_src_T = gate_up_w.t().contiguous()
-                    d_w_src_T  = down_w.t().contiguous()
+                        gu_w_src = ori_experts.gate_up_proj[i].detach().t().contiguous()
+                        gu_b_src = ori_experts.gate_up_proj_bias[i].detach()
+                        d_w_src  = ori_experts.down_proj[i].detach().t().contiguous()
+                        d_b_src  = ori_experts.down_proj_bias[i].detach()
 
-                    assert gu_w_src_T.shape == tgt_gu_w.shape, f"gate_up weight shape mismatch: src {gu_w_src_T.shape} vs tgt {tgt_gu_w.shape}"
-                    assert gate_up_b.shape  == tgt_gu_b.shape, f"gate_up bias shape mismatch: src {gate_up_b.shape} vs tgt {tgt_gu_b.shape}"
-                    assert d_w_src_T.shape  == tgt_d_w.shape,  f"down weight shape mismatch: src {d_w_src_T.shape} vs tgt {tgt_d_w.shape}"
-                    assert down_b.shape     == tgt_d_b.shape,  f"down bias shape mismatch: src {down_b.shape} vs tgt {tgt_d_b.shape}"
-
-                    # copy data to target parameters
-                    with torch.no_grad():
-                        self.gate_up[i].weight = nn.Parameter(gu_w_src_T)
-                        self.gate_up[i].bias = nn.Parameter(gate_up_b)
-                        self.down[i].weight = nn.Parameter(d_w_src_T)
-                        self.down[i].bias = nn.Parameter(down_b)
+                        with torch.no_grad():
+                            tgt_gu_w.copy_(gu_w_src)
+                            tgt_gu_b.copy_(gu_b_src)
+                            tgt_d_w.copy_(d_w_src)
+                            tgt_d_b.copy_(d_b_src)
 
             def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
                 batch_size = hidden_states.shape[0]
@@ -107,20 +90,57 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
                 hidden_states = hidden_states.repeat(num_experts, 1)
                 hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
-                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up)])
+                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up_projs)])
                 gate, up = gate_up[..., ::2], gate_up[..., 1::2]
                 gate = gate.clamp(min=None, max=self.limit)
                 up = up.clamp(min=-self.limit, max=self.limit)
                 glu = gate * torch.sigmoid(gate * self.alpha)
-                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down)])
+                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down_projs)])
                 next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
                 next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
                 next_states = next_states.sum(dim=0)
 
                 return next_states
 
-        # monkey patch GptOssExperts
-        import transformers.models.gpt_oss.modeling_gpt_oss as gptoss_modeling
-        gptoss_modeling.GptOssExperts = GptOssExperts
+        class GptOssTopKRouterNew(nn.Module):
+            def __init__(self, config):
+                super().__init__()
+                self.top_k = config.num_experts_per_tok
+                self.num_experts = config.num_local_experts
+                self.hidden_dim = config.hidden_size
+                self.weight = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim))
+                self.bias = nn.Parameter(torch.empty(self.num_experts))
+
+            def forward(self, hidden_states):
+                hidden_states = hidden_states.reshape(-1, self.hidden_dim)
+                router_logits = F.linear(hidden_states, self.weight.to(hidden_states.dtype), self.bias.to(hidden_states.dtype))  # (seq_len, num_experts)
+                router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)  # (seq_len, top_k)
+                router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
+                router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
+                return router_scores, router_indices
 
 
+        @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
+        class GptOssMLPNew(gpt_oss_modeling.GptOssMLP):
+            def __init__(self, config, ori_mlp):
+                super().__init__(config)
+                experts_new = GptOssExpertsNew(config, self.experts)
+                del self.experts
+                self.router = GptOssTopKRouterNew(config)
+                self.experts = experts_new
+
+        if load_quantized_model:
+            gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
+            gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
+
+        else:
+            model = model.to("cpu")
+            pb = logger.pb(list(model.named_modules()))
+            for name, module in pb:
+                if isinstance(module, gpt_oss_modeling.GptOssMLP):
+                    new_module = GptOssMLPNew(config=model.config, ori_mlp=module)
+                    parent, child = name.rsplit(".", maxsplit=1)
+                    parent = model.get_submodule(parent)
+                    setattr(parent, child, new_module)
+            
+        return model

@@ -189,7 +189,6 @@ def ModelLoader(cls):
         model_init_kwargs["_fast_init"] = cls.require_fast_init
         # model_init_kwargs["low_cpu_mem_usage"] = True
 
-        cls.before_model_load(cls)
         model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
         # from concurrent.futures import ThreadPoolExecutor
         #
@@ -313,8 +312,6 @@ def ModelLoader(cls):
             "_commit_hash": commit_hash,
             "attn_implementation": attn_implementation,
         }
-
-        cls.before_model_load()
 
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
