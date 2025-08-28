@@ -55,22 +55,22 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 self.alpha = 1.702
                 self.limit = 7.0
 
-                self.gate_up_projs = nn.ModuleList([
+                self.gate_up = nn.ModuleList([
                     nn.Linear(self.hidden_size, 2 * self.expert_dim, dtype=config.dtype)
                     for _ in range(self.num_experts)
                 ])
 
-                self.down_projs = nn.ModuleList([
+                self.down = nn.ModuleList([
                     nn.Linear(self.expert_dim, self.hidden_size, dtype=config.dtype)
                     for _ in range(self.num_experts)
                 ])
 
                 if ori_experts is not None:
                     for i in range(self.num_experts):
-                        tgt_gu_w = self.gate_up_projs[i].weight   # [2E, H]
-                        tgt_gu_b = self.gate_up_projs[i].bias     # [2E]
-                        tgt_d_w  = self.down_projs[i].weight      # [H, E]
-                        tgt_d_b  = self.down_projs[i].bias        # [H]
+                        tgt_gu_w = self.gate_up[i].weight   # [2E, H]
+                        tgt_gu_b = self.gate_up[i].bias     # [2E]
+                        tgt_d_w  = self.down[i].weight      # [H, E]
+                        tgt_d_b  = self.down[i].bias        # [H]
 
                         gu_w_src = ori_experts.gate_up_proj[i].detach().t().contiguous()
                         gu_b_src = ori_experts.gate_up_proj_bias[i].detach()
