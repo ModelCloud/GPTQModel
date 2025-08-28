@@ -91,12 +91,12 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
                 hidden_states = hidden_states.repeat(num_experts, 1)
                 hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
-                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up_projs)])
+                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up)])
                 gate, up = gate_up[..., ::2], gate_up[..., 1::2]
                 gate = gate.clamp(min=None, max=self.limit)
                 up = up.clamp(min=-self.limit, max=self.limit)
                 glu = gate * torch.sigmoid(gate * self.alpha)
-                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down_projs)])
+                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down)])
                 next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
                 next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
                 next_states = next_states.sum(dim=0)
