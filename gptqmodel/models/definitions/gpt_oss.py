@@ -31,8 +31,8 @@ class GPTOSSGPTQ(BaseGPTQModel):
         ["self_attn.o_proj"],
 
         # uses dynamic_expert_index
-        [f"mlp.experts.gate_up_projs.{EXPERT_INDEX_PLACEHOLDER}"],
-        [f"mlp.experts.down_projs.{EXPERT_INDEX_PLACEHOLDER}"],
+        [f"mlp.experts.gate_up.{EXPERT_INDEX_PLACEHOLDER}"],
+        [f"mlp.experts.down.{EXPERT_INDEX_PLACEHOLDER}"],
     ]
 
     def after_model_load(self, model, load_quantized_model):
