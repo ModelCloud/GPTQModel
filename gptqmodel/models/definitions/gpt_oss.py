@@ -16,9 +16,6 @@
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseGPTQModel
-from logbar import LogBar
-
-logger = LogBar.shared()
 
 
 class GPTOSSGPTQ(BaseGPTQModel):
@@ -39,10 +36,13 @@ class GPTOSSGPTQ(BaseGPTQModel):
     ]
 
     def after_model_load(self, model, load_quantized_model):
+        import os
         import torch
         from torch import nn
         from torch.nn import functional as F
         from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
+        from concurrent.futures import ThreadPoolExecutor
+        from functools import partial
         import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
 
         class GptOssExpertsNew(nn.Module):
@@ -83,6 +83,7 @@ class GPTOSSGPTQ(BaseGPTQModel):
                             tgt_d_w.copy_(d_w_src)
                             tgt_d_b.copy_(d_b_src)
 
+
             def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
                 batch_size = hidden_states.shape[0]
                 hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
@@ -121,13 +122,17 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
 
         @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
-        class GptOssMLPNew(gpt_oss_modeling.GptOssMLP):
+        class GptOssMLPNew(nn.Module):
             def __init__(self, config, ori_mlp):
-                super().__init__(config)
-                experts_new = GptOssExpertsNew(config, self.experts)
-                del self.experts
+                super().__init__()
                 self.router = GptOssTopKRouterNew(config)
+                experts_new = GptOssExpertsNew(config, ori_mlp.experts)
                 self.experts = experts_new
+
+            def forward(self, hidden_states):
+                router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
+                routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
+                return routed_out, router_scores
 
         if load_quantized_model:
             gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
@@ -135,12 +140,16 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
         else:
             model = model.to("cpu")
-            pb = logger.pb(list(model.named_modules()))
-            for name, module in pb:
+            
+            def process_module(name, module, model, config):
                 if isinstance(module, gpt_oss_modeling.GptOssMLP):
-                    new_module = GptOssMLPNew(config=model.config, ori_mlp=module)
+                    new_module = GptOssMLPNew(config=config, ori_mlp=module)
                     parent, child = name.rsplit(".", maxsplit=1)
                     parent = model.get_submodule(parent)
                     setattr(parent, child, new_module)
             
+            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                process_fn = partial(process_module, model=model, config=model.config)
+                list(executor.map(lambda x: process_fn(x[0], x[1]), model.named_modules()))
+
         return model
