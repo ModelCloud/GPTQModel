@@ -190,7 +190,6 @@ def ModelLoader(cls):
         # model_init_kwargs["low_cpu_mem_usage"] = True
 
         model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-
         # from concurrent.futures import ThreadPoolExecutor
         #
         # def fast_pin_model(model):
