@@ -104,13 +104,18 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 return next_states
 
         class GptOssTopKRouterNew(nn.Module):
-            def __init__(self, config):
+            def __init__(self, config, ori_router=None):
                 super().__init__()
                 self.top_k = config.num_experts_per_tok
                 self.num_experts = config.num_local_experts
                 self.hidden_dim = config.hidden_size
                 self.weight = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim))
                 self.bias = nn.Parameter(torch.empty(self.num_experts))
+        
+                if ori_router is not None:
+                    with torch.no_grad():
+                        self.weight.copy_(ori_router.weight.detach())
+                        self.bias.copy_(ori_router.bias.detach())
 
             def forward(self, hidden_states):
                 hidden_states = hidden_states.reshape(-1, self.hidden_dim)
@@ -120,14 +125,17 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
                 return router_scores, router_indices
 
-
         @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
         class GptOssMLPNew(nn.Module):
-            def __init__(self, config, ori_mlp):
+            def __init__(self, config, ori_mlp=None):
                 super().__init__()
-                self.router = GptOssTopKRouterNew(config)
-                experts_new = GptOssExpertsNew(config, ori_mlp.experts)
-                self.experts = experts_new
+                if ori_mlp is not None:
+                    self.router = GptOssTopKRouterNew(config, ori_mlp.router)
+                    experts_new = GptOssExpertsNew(config, ori_mlp.experts)
+                    self.experts = experts_new
+                else:
+                    self.router = GptOssTopKRouterNew(config)
+                    self.experts = GptOssExpertsNew(config)
 
             def forward(self, hidden_states):
                 router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
@@ -135,9 +143,7 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 return routed_out, router_scores
 
         if load_quantized_model:
-            gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
-            gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
-
+            gpt_oss_modeling.GptOssMLP = GptOssMLP
         else:
             model = model.to("cpu")
             
