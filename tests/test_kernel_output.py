@@ -13,8 +13,6 @@ from logbar import LogBar
 from parameterized import parameterized
 from torch import Tensor
 
-from gptqmodel.utils.torch import HAS_XPU
-
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
