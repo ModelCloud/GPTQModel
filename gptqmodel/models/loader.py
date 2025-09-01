@@ -189,7 +189,7 @@ def ModelLoader(cls):
         model_init_kwargs["_fast_init"] = cls.require_fast_init
         # model_init_kwargs["low_cpu_mem_usage"] = True
 
-        cls.before_model_load(cls)
+        cls.before_model_load(cls, load_quantized_model=False)
         model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
         # from concurrent.futures import ThreadPoolExecutor
         #
@@ -446,7 +446,7 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
-            cls.before_model_load(cls)
+            cls.before_model_load(cls, load_quantized_model=True)
 
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)

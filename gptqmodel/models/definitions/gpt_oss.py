@@ -129,13 +129,13 @@ class GPTOSSGPTQ(BaseGPTQModel):
         [f"mlp.experts.down.{EXPERT_INDEX_PLACEHOLDER}"],
     ]
 
-    def before_model_load(self):
+    def before_model_load(self, load_quantized_model=False):
         import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
 
         gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
         gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
 
-    def after_model_load(self, model, quantized_model=False):
+    def after_model_load(self, model, load_quantized_model=False):
         if quantized_model:
             return model
 
