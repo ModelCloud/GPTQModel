@@ -28,6 +28,7 @@ class GptOssExpertsNew(nn.Module):
         self.expert_dim = self.intermediate_size
         self.alpha = 1.702
         self.limit = 7.0
+        self.quantizing = False
     
         self.gate_up = nn.ModuleList([
             nn.Linear(self.hidden_size, 2 * self.expert_dim, dtype=config.dtype)
@@ -40,6 +41,7 @@ class GptOssExpertsNew(nn.Module):
         ])
 
         if ori_experts is not None:
+            self.quantizing = True
             for i in range(self.num_experts):
                 tgt_gu_w = self.gate_up[i].weight   # [2E, H]
                 tgt_gu_b = self.gate_up[i].bias     # [2E]
@@ -58,6 +60,27 @@ class GptOssExpertsNew(nn.Module):
                     tgt_d_b.copy_(d_b_src)
 
     def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
+        if self.quantizing:
+            # For quantization, we need to trigger computation of all experts
+            batch_size = hidden_states.shape[0]
+            hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
+            num_experts = routing_weights.shape[1]
+
+            hidden_states = hidden_states.repeat(num_experts, 1)
+            hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
+            gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up)])
+            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+            gate = gate.clamp(min=None, max=self.limit)
+            up = up.clamp(min=-self.limit, max=self.limit)
+            glu = gate * torch.sigmoid(gate * self.alpha)
+            next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down)])
+            next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
+            next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
+            next_states = next_states.sum(dim=0)
+
+            return next_states
+
+        # For non-quantization forward pass, reduce forward pass time by only computing active experts
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1] if len(hidden_states.shape) > 2 else 1
         hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
 
