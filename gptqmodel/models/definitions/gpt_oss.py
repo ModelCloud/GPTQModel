@@ -85,23 +85,37 @@ class GPTOSSGPTQ(BaseGPTQModel):
 
 
             def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
-                batch_size = hidden_states.shape[0]
+                batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1] if len(hidden_states.shape) > 2 else 1
                 hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
-                num_experts = routing_weights.shape[1]
-
-                hidden_states = hidden_states.repeat(num_experts, 1)
-                hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
-                gate_up = torch.stack([proj(hidden_states[i]) for i, proj in enumerate(self.gate_up)])
-                gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-                gate = gate.clamp(min=None, max=self.limit)
-                up = up.clamp(min=-self.limit, max=self.limit)
-                glu = gate * torch.sigmoid(gate * self.alpha)
-                next_states = torch.stack([proj((up[i] + 1) * glu[i]) for i, proj in enumerate(self.down)])
-                next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
-                next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
-                next_states = next_states.sum(dim=0)
-
-                return next_states
+                
+                active_experts = torch.unique(router_indices.flatten())
+                final_output = torch.zeros_like(hidden_states)
+                for expert_idx in active_experts:
+                    expert_mask = (router_indices == expert_idx).any(dim=-1)  # (num_tokens,)
+                    if not expert_mask.any():
+                        continue
+                        
+                    expert_tokens = hidden_states[expert_mask]  # (selected_tokens, hidden_size)
+                    
+                    gate_up_output = self.gate_up[expert_idx](expert_tokens)  # (selected_tokens, 2*expert_dim)
+                    gate, up = gate_up_output[..., ::2], gate_up_output[..., 1::2]
+                    
+                    gate = gate.clamp(min=None, max=self.limit)
+                    up = up.clamp(min=-self.limit, max=self.limit)
+                    glu = gate * torch.sigmoid(gate * self.alpha)
+                    
+                    expert_output = self.down[expert_idx]((up + 1) * glu)  # (selected_tokens, hidden_size)
+                    
+                    expert_weights = routing_weights[expert_mask, expert_idx].unsqueeze(-1)  # (selected_tokens, 1)
+                    
+                    final_output[expert_mask] += expert_output * expert_weights
+                
+                if seq_len > 1:
+                    final_output = final_output.view(batch_size, seq_len, self.hidden_size)
+                else:
+                    final_output = final_output.view(batch_size, self.hidden_size)
+                    
+                return final_output
 
         class GptOssTopKRouterNew(nn.Module):
             def __init__(self, config, ori_router=None):
@@ -143,7 +157,7 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 return routed_out, router_scores
 
         if load_quantized_model:
-            gpt_oss_modeling.GptOssMLP = GptOssMLP
+            gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
         else:
             model = model.to("cpu")
             
