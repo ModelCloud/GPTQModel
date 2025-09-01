@@ -17,8 +17,7 @@ from gptqmodel.utils.torch import HAS_XPU
 
 log = LogBar.shared()
 
-DEVICE = torch.device("xpu:0" if HAS_XPU else "cuda:0")
-print("if HAS_XPU",DEVICE)
+DEVICE = torch.device("cuda:0")
 
 class Data:
     def __init__(self):
