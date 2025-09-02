@@ -74,17 +74,23 @@ def _a100_quantized_matmul(a_ptr, b_ptr, c_ptr, scales_ptr, zeros_ptr,
 
 
 class a100_qlinear(torch.autograd.Function):
-    def forward(ctx, a, b, scales, zeros):
+    def forward(ctx, a, b, scales, zeros, group_size, block_size_m, ):
         m, k = a.shape
         _, n = b.shape
 
-        quant_groupsize = 128
-        block_size_m = 16
-        block_size_n = 32  # [N = 4096 // 32] = 128 blocks
-        block_size_k = 256
+        # quant_groupsize = 128
+        # block_size_m = 16
+        # block_size_n = 32  # [N = 4096 // 32] = 128 blocks
+        # block_size_k = 256
+        # group_size_m = 8
+        # num_warps = 4
+        # num_stages = 8
+        block_size_n = b.shape[1] // group_size
+        block_size_k = b.shape[0] // group_size
         group_size_m = 8
         num_warps = 4
         num_stages = 8
+
         total_blocks_m = triton.cdiv(m, block_size_m)
         total_blocks_n = triton.cdiv(n, block_size_n)
         total_programs = total_blocks_m * total_blocks_n
@@ -98,7 +104,7 @@ class a100_qlinear(torch.autograd.Function):
             c.stride(0), c.stride(1),
             scales.stride(0), scales.stride(1),
             zeros.stride(0), zeros.stride(1),
-            quant_groupsize,
+            group_size,
             m, n, k,
             block_size_m, block_size_n, block_size_k, group_size_m,
             num_warps=num_warps, num_stages=num_stages,
