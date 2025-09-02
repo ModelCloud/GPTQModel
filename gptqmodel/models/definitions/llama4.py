@@ -52,7 +52,7 @@ class Llama4GPTQ(BaseGPTQModel):
         from transformers.modeling_utils import no_init_weights
         from transformers.models.llama4.modeling_llama4 import Llama4TextMLP, Llama4TextMoe
 
-        # https://github.com/vllm-project/llm-compressor/blob/main/src/llmcompressor/modeling/llama4.py
+        # adapted/modified from https://github.com/vllm-project/llm-compressor/blob/main/src/llmcompressor/modeling/llama4.py
         class SequentialLlama4TextExperts(torch.nn.ModuleList):
             def __init__(self, config, original):
                 self.num_experts = original.gate_up_proj.shape[0]
