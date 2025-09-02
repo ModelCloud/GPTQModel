@@ -478,7 +478,10 @@ def ModelLoader(cls):
             model.checkpoint_file_name = model_save_name
 
             if cls.dynamic_expert_index is not None:
-                num_experts = getattr(config, cls.dynamic_expert_index)
+                if hasattr(config, "text_config"):
+                    num_experts = getattr(config.text_config, cls.dynamic_expert_index)
+                else:
+                    num_experts = getattr(config, cls.dynamic_expert_index)
                 cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 

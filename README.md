@@ -174,18 +174,17 @@ Native support support some of the most popular multi-modal models:
 ## Model Support  
 | Model             |   |                   |   |                |   |                |   |            |   |
 |-------------------|---|-------------------|---|----------------|---|----------------|---|------------|---|
-| Baichuan          | ✅ | EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | OPT            | ✅ | StableLM   | ✅ |
-| Bloom             | ✅ | Falcon (H1)       | ✅ | Llama 1-3.3    | ✅ | OLMo2          | ✅ | StarCoder2 | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3       | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2     | ✅ | TeleChat2  | ✅ |
-| CodeGen           | ✅ | GPTBigCod         | ✅ | LongLLaMA      | ✅ | Phi 1-4        | ✅ | Yi         | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo/GPT-NeoX | ✅ | Instella       | ✅ | Nemotron Ultra | ✅ | Seed-OSS   | ✅ |
-| DBRX Converted    | ✅ | GPT-2             | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE     | ✅ |
-| Deci              | ✅ | GPT-J             | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |            |   |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE   | ✅ |            |   |
-| DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL  | ✅ |            |   |
-| Dream             | ✅ | GRIN-MoE          | ✅ | MOSS           | ✅ | Qwen 2.5 Omni  | ✅ |            |   |
-| ERNIE 4.5         | ✅ | Hymba             | ✅ | MPT            | ✅ | RefinedWeb     | ✅ |            |   |
-
+| Baichuan          | ✅ | EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | MPT            | ✅ | RefinedWeb | ✅ |
+| Bloom             | ✅ | Falcon (H1)       | ✅ | Llama 1-3.3    | ✅ | OPT            | ✅ | StableLM   | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3       | ✅ | Llama 3.2 VL   | ✅ | OLMo2          | ✅ | StarCoder2 | ✅ |
+| CodeGen           | ✅ | GPTBigCod         | ✅ | Llama 4        | ✅ | Ovis 1.6/2     | ✅ | TeleChat2  | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo/GPT-NeoX | ✅ | LongLLaMA      | ✅ | Phi 1-4        | ✅ | Yi         | ✅ |
+| DBRX Converted    | ✅ | GPT-2             | ✅ | Instella       | ✅ | Nemotron Ultra | ✅ | Seed-OSS   | ✅ |
+| Deci              | ✅ | GPT-J             | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE     | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |            |   |
+| DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE   | ✅ |            |   |
+| Dream             | ✅ | GRIN-MoE          | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL  | ✅ |            |   |
+| ERNIE 4.5         | ✅ | Hymba             | ✅ | MOSS           | ✅ | Qwen 2.5 Omni  | ✅ |            |   |
 
 ## Platform and HW Support 
 
