@@ -110,14 +110,14 @@ class a100_qlinear(torch.autograd.Function):
             num_warps=num_warps, num_stages=num_stages,
         )
 
-        print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared / 1000} kB shared memory\n")
-
-        with open('dequant_simple.txt', 'w') as f:
-            print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared / 1000} kB shared memory\n", file=f)
-            print("IR", k.asm['ttir'], file=f)
-            print("TTGIR", k.asm['ttgir'], file=f)
-            print("PTX", k.asm['ptx'], file=f)
-            print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared / 1000} kB shared memory\n", file=f)
-
-            print(f"{total_blocks_m=} x {total_blocks_n=} = {total_programs=}")
+        # print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared / 1000} kB shared memory\n")
+        #
+        # with open('dequant_simple.txt', 'w') as f:
+        #     print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared / 1000} kB shared memory\n", file=f)
+        #     print("IR", k.asm['ttir'], file=f)
+        #     print("TTGIR", k.asm['ttgir'], file=f)
+        #     print("PTX", k.asm['ptx'], file=f)
+        #     print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared / 1000} kB shared memory\n", file=f)
+        #
+        #     print(f"{total_blocks_m=} x {total_blocks_n=} = {total_programs=}")
         return c
