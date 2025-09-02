@@ -1,6 +1,7 @@
 import sys
-from packaging.version import Version
+
 from gptqmodel.utils.logger import setup_logger
+from packaging.version import Version
 
 log = setup_logger()
 

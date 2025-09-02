@@ -16,7 +16,7 @@
 
 from .backend import BACKEND
 from .logger import setup_logger
-from .python import has_gil_control, has_gil_disabled, log_gil_requirements_for, gt_python_3_13_3
+from .python import gt_python_3_13_3, has_gil_control, has_gil_disabled, log_gil_requirements_for
 
 log = setup_logger()
 

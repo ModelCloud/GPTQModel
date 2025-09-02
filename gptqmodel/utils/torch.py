@@ -23,7 +23,7 @@ from packaging import version
 from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
-from . import has_gil_control, log_gil_requirements_for, gt_python_3_13_3
+from . import gt_python_3_13_3, log_gil_requirements_for
 
 # pytorch 2.6.0 fixes many compilation errors
 TORCH_HAS_COMPILE = version.parse(torch.__version__).release >= version.Version('2.6').release

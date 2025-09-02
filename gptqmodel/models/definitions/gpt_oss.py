@@ -13,11 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+from .._const import EXPERT_INDEX_PLACEHOLDER
+from ..base import BaseGPTQModel
+
 
 class GptOssExpertsNew(nn.Module):
     def __init__(self, config, ori_experts=None):
@@ -29,7 +31,7 @@ class GptOssExpertsNew(nn.Module):
         self.alpha = 1.702
         self.limit = 7.0
         self.quantizing = False
-    
+
         self.gate_up = nn.ModuleList([
             nn.Linear(self.hidden_size, 2 * self.expert_dim, dtype=config.dtype)
             for _ in range(self.num_experts)
@@ -90,27 +92,27 @@ class GptOssExpertsNew(nn.Module):
             expert_mask = (router_indices == expert_idx).any(dim=-1)  # (num_tokens,)
             if not expert_mask.any():
                 continue
-                
+
             expert_tokens = hidden_states[expert_mask]  # (selected_tokens, hidden_size)
-            
+
             gate_up_output = self.gate_up[expert_idx](expert_tokens)  # (selected_tokens, 2*expert_dim)
             gate, up = gate_up_output[..., ::2], gate_up_output[..., 1::2]
-            
+
             gate = gate.clamp(min=None, max=self.limit)
             up = up.clamp(min=-self.limit, max=self.limit)
             glu = gate * torch.sigmoid(gate * self.alpha)
-            
+
             expert_output = self.down[expert_idx]((up + 1) * glu)  # (selected_tokens, hidden_size)
-            
+
             expert_weights = routing_weights[expert_mask, expert_idx].unsqueeze(-1)  # (selected_tokens, 1)
-            
+
             final_output[expert_mask] += expert_output * expert_weights
-        
+
         if seq_len > 1:
             final_output = final_output.view(batch_size, seq_len, self.hidden_size)
         else:
             final_output = final_output.view(batch_size, self.hidden_size)
-            
+
         return final_output
 
 class GptOssTopKRouterNew(nn.Module):
@@ -164,10 +166,11 @@ class GPTOSSGPTQ(BaseGPTQModel):
             return model
 
         import os
-        from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
         from concurrent.futures import ThreadPoolExecutor
         from functools import partial
+
         import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
+        from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
 
         @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
         class GptOssMLPNew(nn.Module):
@@ -189,7 +192,7 @@ class GPTOSSGPTQ(BaseGPTQModel):
                 parent, child = name.rsplit(".", maxsplit=1)
                 parent = model.get_submodule(parent)
                 setattr(parent, child, new_module)
-        
+
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             process_fn = partial(process_module, model=model, config=model.config)
             list(executor.map(lambda x: process_fn(x[0], x[1]), model.named_modules()))
