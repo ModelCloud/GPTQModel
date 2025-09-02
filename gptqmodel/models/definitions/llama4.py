@@ -40,8 +40,14 @@ class Llama4GPTQ(BaseGPTQModel):
         if load_quantized_model:
             return model
 
-        from transformers.models.llama4.modeling_llama4 import Llama4TextMLP
+        import os
+        import torch
+        from concurrent.futures import ThreadPoolExecutor
+        from functools import partial
+        from transformers.modeling_utils import no_init_weights
+        from transformers.models.llama4.modeling_llama4 import Llama4TextMLP, Llama4TextMoe
 
+        # https://github.com/vllm-project/llm-compressor/blob/main/src/llmcompressor/modeling/llama4.py
         class SequentialLlama4TextExperts(torch.nn.ModuleList):
             def __init__(self, config, original):
                 self.num_experts = original.gate_up_proj.shape[0]
@@ -49,16 +55,22 @@ class Llama4GPTQ(BaseGPTQModel):
                     super().__init__([Llama4TextMLP(config) for _ in range(self.num_experts)])
                 intermediate_size = original.down_proj.shape[1]
 
-                for i in range(self.num_experts):
-                    gate_up = original.gate_up_proj[i]
-                    down = original.down_proj[i]
-                    gate_proj = gate_up[:, :intermediate_size]
-                    up_proj = gate_up[:, intermediate_size:]
+                with torch.no_grad():
+                    # Batch process all expert parameters to avoid loops
+                    gate_up_batch = torch.stack([original.gate_up_proj[i] for i in range(self.num_experts)])
+                    down_batch = torch.stack([original.down_proj[i] for i in range(self.num_experts)])
 
-                    self[i].gate_proj.weight.data = gate_proj.t().contiguous()
-                    self[i].up_proj.weight.data = up_proj.t().contiguous()
-                    self[i].down_proj.weight.data = down.t().contiguous()
+                    # Batch split and transpose
+                    gate_batch = gate_up_batch[:, :, :intermediate_size].transpose(-2, -1).contiguous()
+                    up_batch = gate_up_batch[:, :, intermediate_size:].transpose(-2, -1).contiguous()
+                    down_batch = down_batch.transpose(-2, -1).contiguous()
 
+                    # Batch assignment
+                    for i in range(self.num_experts):
+                        self[i].gate_proj.weight.data = gate_batch[i]
+                        self[i].up_proj.weight.data = up_batch[i]
+                        self[i].down_proj.weight.data = down_batch[i]
+                        
         class SequentialLlama4TextMoe(torch.nn.Module):
             def __init__(self, config, original):
                 super().__init__()
@@ -95,12 +107,13 @@ class Llama4GPTQ(BaseGPTQModel):
         model = model.to("cpu")
         def process_module(name, module, model, config):
             if isinstance(module, Llama4TextMoe):
-                new_module = SequentialLlama4TextMoe(config=config, ori_mlp=module)
+                new_module = SequentialLlama4TextMoe(config=config, original=module)
                 parent, child = name.rsplit(".", maxsplit=1)
+                print("replace moe" + name + child)
                 parent = model.get_submodule(parent)
                 setattr(parent, child, new_module)
-        
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        print("cpu count", os.cpu_count())
+        with ThreadPoolExecutor(max_workers=8) as executor:
             process_fn = partial(process_module, model=model, config=model.config.get_text_config())
             list(executor.map(lambda x: process_fn(x[0], x[1]), model.named_modules()))
 
