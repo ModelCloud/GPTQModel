@@ -29,6 +29,7 @@
 <details>
 
 <summary>Archived News</summary>
+
 * 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compat fix.
 * 05/29/2025 4.0.0-dev `main`: Falcon H1 model support. Fixed Transformers `4.52+` compat with Qwen 2.5 VL models.
 * 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
@@ -44,7 +45,6 @@ Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
 Fixed `Peft` `bfloat16` training. 
-
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
 `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress.
@@ -52,7 +52,6 @@ Fixed `generation_config.json` save and load. Fixed Transformers v4.49.0 compat.
 Fixed Qwen 2.5 MoE regressions. 
 Added CI tests to track regression in kernel inference quality and sweep all bits/group_sizes. Delegate loggin/progressbar to [LogBar](https://github.com/modelcloud/logbar) pkg.
 Fix ROCm version auto detection in `setup` install.
-
 * 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
   Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
