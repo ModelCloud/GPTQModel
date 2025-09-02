@@ -115,6 +115,3 @@ class a100_qlinear(torch.autograd.Function):
 
             print(f"{total_blocks_m=} x {total_blocks_n=} = {total_programs=}")
         return c
-
-
-a100_qlinear = a100_qlinear.apply
