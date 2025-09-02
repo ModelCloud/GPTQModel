@@ -117,7 +117,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0000),
+        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
@@ -145,7 +145,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0000),
+        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
@@ -173,7 +173,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0000),
+        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
@@ -198,7 +198,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0000),
+        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
