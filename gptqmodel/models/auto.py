@@ -90,6 +90,7 @@ from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
 from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
+from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GPTJGPTQ  # noqa: E402
 from .definitions.granite import GraniteGPTQ  # noqa: E402
 from .definitions.grinmoe import GrinMOEGPTQ  # noqa: E402
@@ -130,7 +131,6 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
-from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
