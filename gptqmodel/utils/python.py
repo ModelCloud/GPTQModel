@@ -17,7 +17,7 @@ def has_gil_disabled():
     return has_gil_control() and not sys._is_gil_enabled()
 
 # Check For Python > 3.13.3
-def gt_python_3_13_3():
+def gte_python_3_13_3():
     return Version(platform.python_version()) >= Version("3.13.3")
 
 # torch compile requires GIL=1 or python 3.13.3t with GIL=0

@@ -23,7 +23,7 @@ from packaging import version
 from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
-from . import gt_python_3_13_3, has_gil_disabled, log_gil_requirements_for
+from . import gte_python_3_13_3, has_gil_disabled, log_gil_requirements_for
 
 # pytorch 2.6.0 fixes many compilation errors
 TORCH_HAS_COMPILE = version.parse(torch.__version__).release >= version.Version('2.6').release
@@ -71,7 +71,7 @@ except BaseException:
 
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
     # requires torch >2.8 for proper torch.compile + Python 3.13.3t (freethreading)
-    if has_gil_disabled() and not gt_python_3_13_3():
+    if has_gil_disabled() and not gte_python_3_13_3():
         log_gil_requirements_for("Torch Compile")
         return module
 
