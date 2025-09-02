@@ -55,7 +55,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
-from . import has_gil
+from . import has_gil_control
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -642,7 +642,7 @@ def pack_model(
     names = list(qModules.keys())
     lock = threading.Lock()
 
-    if not has_gil():
+    if not has_gil_enabled():
         from device_smi import Device
         cpu = Device("cpu")
         max_packers = cpu.count * cpu.cores
