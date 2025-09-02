@@ -1,3 +1,4 @@
+import platform
 import sys
 
 from gptqmodel.utils.logger import setup_logger
