@@ -196,7 +196,10 @@ class ModuleLooper():
 
         # dynamic expert layer index for model defs
         if self.gptq_model.dynamic_expert_index is not None:
-            num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
+            if hasattr(self.gptq_model.model.config, "text_config"):
+                num_experts = getattr(self.gptq_model.model.config.text_config, self.gptq_model.dynamic_expert_index)
+            else:
+                num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
 

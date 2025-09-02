@@ -15,7 +15,7 @@
 # limitations under the License.
 
 from transformers import AutoModelForImageTextToText
-
+from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseGPTQModel
         
 class Llama4GPTQ(BaseGPTQModel):
@@ -30,8 +30,13 @@ class Llama4GPTQ(BaseGPTQModel):
     layers_node = "language_model.model.layers"
     layer_type = "Llama4TextDecoderLayer"
 
+    dynamic_expert_index = "num_local_experts"
+
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj", "self_attn.o_proj"],
+
+        [f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
+        [f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
 
         ["feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj", "feed_forward.shared_expert.down_proj"],
     ]
