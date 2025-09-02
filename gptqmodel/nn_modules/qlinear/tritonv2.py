@@ -23,12 +23,12 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.python import has_gil
+from ...utils.python import has_gil_disabled
 from .torch import TorchQuantLinear
 
 try:
     # TODO: triton is not compatible with free threading
-    if not has_gil():
+    if not has_gil_disabled():
         raise Exception("GIL is disabled so Triton is not (yet) compatible.")
 
     import triton

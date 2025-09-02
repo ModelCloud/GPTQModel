@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 09/01/2025 4.1.0-dev `main`: GPT-OSS (BF16 converted) quantization and GPTQ inference support.  
 * 08/25/2025 4.1.0-dev `main`: GLM-4.5-Air model support. New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
 * 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 * 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
@@ -28,14 +29,15 @@
 * 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
 * 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
 * 04/29/2025 3.1.0-dev (Now 4.) `main`: Xiaomi Mimo model support. Qwen 3 and 3 MoE model support. New arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
-* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New experimental `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
-* 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
+
 
 
 
 <details>
 
 <summary>Archived News</summary>
+* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New experimental `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
+* 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
 New Alibaba `Ovis 2` VL model support. 
