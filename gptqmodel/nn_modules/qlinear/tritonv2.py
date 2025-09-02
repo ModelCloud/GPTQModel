@@ -19,6 +19,7 @@ from typing import Optional, Tuple
 import torch
 from packaging import version
 
+from .a100_linear import a100_qlinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
@@ -148,15 +149,25 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
 
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        out = QuantLinearFunction.apply(
+        # out = QuantLinearFunction.apply(
+        #     x.reshape(-1, x.shape[-1]),
+        #     self.qweight,
+        #     self.scales,
+        #     self.qzeros,
+        #     self.g_idx,
+        #     self.bits,
+        #     self.pack_dtype_bits,
+        #     self.maxq,
+        # ).reshape(out_shape)
+
+        block_size_m = x.shape[0]
+        # TODO test a100_qlinear
+        out = a100_qlinear.apply(
             x.reshape(-1, x.shape[-1]),
             self.qweight,
             self.scales,
             self.qzeros,
-            self.g_idx,
-            self.bits,
-            self.pack_dtype_bits,
-            self.maxq,
+            block_size_m,
         ).reshape(out_shape)
 
         if self.bias is not None:
