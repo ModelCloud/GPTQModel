@@ -136,7 +136,7 @@ class BaseGPTQModel(nn.Module):
     ):
         super().__init__()
 
-        self.model = model
+        self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
 
         self.compiled = False # set to True while compile() is triggered successfully
         self.quantized = quantized
@@ -1236,6 +1236,12 @@ class BaseGPTQModel(nn.Module):
     def serve_wait_until_ready(self, timeout: int = 30, check_interval: float = 0.1):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
+
+    def befor_model_load(self, load_quantized_model):
+        pass
+
+    def after_model_load(self, model, load_quantized_model):
+        return model
 
     def pre_quantize_generate_hook_start(self):
         pass
