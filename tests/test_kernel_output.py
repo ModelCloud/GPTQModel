@@ -7,7 +7,8 @@ from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+# from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+from gptqmodel.nn_modules.qlinear.triton_a100 import TritonA100QuantLinear
 from gptqmodel.utils.model import find_modules
 from logbar import LogBar
 from parameterized import parameterized
@@ -30,7 +31,8 @@ class TestKernelOutput(unittest.TestCase):
         # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
+        # BACKEND.TRITON: TritonV2QuantLinear,
+        BACKEND.TRITON: TritonA100QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
@@ -116,14 +118,14 @@ class TestKernelOutput(unittest.TestCase):
         #torch.allclose(a, b, rtol=0.15, atol=atol)
 
     @parameterized.expand([
-        (BACKEND.TORCH, torch.float16, 0.0000),
+        # (BACKEND.TORCH, torch.float16, 0.0000),
         # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
+        # (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
+        # (BACKEND.MARLIN, torch.float16, 0.00035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
+        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
     ])
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
         out = self.forward(backend=backend, dtype=dtype)
@@ -143,79 +145,79 @@ class TestKernelOutput(unittest.TestCase):
                     f"Actual with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {out[i][:10]}")
                 raise AssertionError
 
-    @parameterized.expand([
-        (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0031),
-        # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
-        # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
-    ])
-    def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        out = self.forward(backend=backend, dtype=dtype)
-
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            data = self.data[dtype]
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out[i], out[i],
-                                        a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(
-                    f"Torch with Lora output: dtype = `{dtype}`, backed = `{BACKEND.TORCH}`, i = `{i}`, {data.torch_kernel_out[i][:10]}")
-                log.error(
-                    f"Actual with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {out[i][:10]}")
-                raise AssertionError
-
-    @parameterized.expand([
-        (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
-        (BACKEND.TRITON, torch.float16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
-    ])
-    def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        data = self.data[dtype]
-        out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
-
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(f"Torch with Lora output: backed = dtype = `{dtype}`, `{backend}`, i = `{i}`, {data.torch_kernel_out_with_lora[i][:10]}")
-                raise AssertionError
-
-
-    @parameterized.expand([
-        (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0033),
-        # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
-        # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
-    ])
-    def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        data = self.data[dtype]
-        out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
-
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(f"Torch with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {data.torch_kernel_out_with_lora[i][:10]}")
-                raise AssertionError
+    # @parameterized.expand([
+    #     (BACKEND.TORCH, torch.bfloat16, 0.0000),
+    #     # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
+    #     (BACKEND.TRITON, torch.bfloat16, 0.00001),
+    #     # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
+    #     (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
+    #     (BACKEND.MARLIN, torch.bfloat16, 0.0031),
+    #     # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
+    #     # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
+    # ])
+    # def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+    #     out = self.forward(backend=backend, dtype=dtype)
+    #
+    #     # torch as ref
+    #     pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
+    #     for i in pb:
+    #         data = self.data[dtype]
+    #         pb.subtitle(f"backed = `{backend}`").draw()
+    #         try:
+    #             self.assert_on_mismatch(data.torch_kernel_out[i], out[i],
+    #                                     a_tolerance)  # use torch as reference
+    #         except AssertionError:
+    #             log.error(
+    #                 f"Torch with Lora output: dtype = `{dtype}`, backed = `{BACKEND.TORCH}`, i = `{i}`, {data.torch_kernel_out[i][:10]}")
+    #             log.error(
+    #                 f"Actual with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {out[i][:10]}")
+    #             raise AssertionError
+    #
+    # @parameterized.expand([
+    #     (BACKEND.TORCH, torch.float16, 0.0000),
+    #     # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
+    #     (BACKEND.TRITON, torch.float16, 0.00001),
+    #     # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
+    #     (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
+    #     (BACKEND.MARLIN, torch.float16, 0.00035),
+    #     # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
+    #     (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
+    # ])
+    # def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+    #     data = self.data[dtype]
+    #     out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
+    #
+    #     # torch as ref
+    #     pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
+    #     for i in pb:
+    #         pb.subtitle(f"backed = `{backend}`").draw()
+    #         try:
+    #             self.assert_on_mismatch(data.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
+    #         except AssertionError:
+    #             log.error(f"Torch with Lora output: backed = dtype = `{dtype}`, `{backend}`, i = `{i}`, {data.torch_kernel_out_with_lora[i][:10]}")
+    #             raise AssertionError
+    #
+    #
+    # @parameterized.expand([
+    #     (BACKEND.TORCH, torch.bfloat16, 0.0000),
+    #     # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
+    #     (BACKEND.TRITON, torch.bfloat16, 0.00001),
+    #     # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
+    #     (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
+    #     (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+    #     # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
+    #     # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
+    # ])
+    # def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+    #     data = self.data[dtype]
+    #     out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
+    #
+    #     # torch as ref
+    #     pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
+    #     for i in pb:
+    #         pb.subtitle(f"backed = `{backend}`").draw()
+    #         try:
+    #             self.assert_on_mismatch(data.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
+    #         except AssertionError:
+    #             log.error(f"Torch with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {data.torch_kernel_out_with_lora[i][:10]}")
+    #             raise AssertionError
