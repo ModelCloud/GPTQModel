@@ -86,7 +86,7 @@ def dequant_kernel(
     scales = tl.load(
         scales_ptr + (col_idx + out_features * groups),
         mask=xmask,
-        cache_modifier=".cg",
+        eviction_policy="evict_last",
     )
     scales = tl.cast(scales, tl.float32)
 
@@ -98,11 +98,11 @@ def dequant_kernel(
         bit_off   = tl.cast(zero_bit_pos & 31, tl.int32)          # % 32
         word_idx1 = word_idx0 + 1
 
-        z0 = tl.load(qzeros_ptr + word_idx0, mask=xmask, cache_modifier=".cg")
-        z1 = tl.load(qzeros_ptr + word_idx1, mask=xmask & (bit_off != 0), cache_modifier=".cg")
-        # z0 = tl.cast(tl.load(qzeros_ptr + word_idx0, mask=xmask, cache_modifier=".cg"),
+        z0 = tl.load(qzeros_ptr + word_idx0, mask=xmask, eviction_policy="evict_last")
+        z1 = tl.load(qzeros_ptr + word_idx1, mask=xmask & (bit_off != 0), eviction_policy="evict_last")
+        # z0 = tl.cast(tl.load(qzeros_ptr + word_idx0, mask=xmask, eviction_policy="evict_last"),
         #              tl.uint32, bitcast=True)
-        z0 = tl.cast(tl.load(qzeros_ptr + word_idx0, mask=xmask, cache_modifier=".cg"),
+        z0 = tl.cast(tl.load(qzeros_ptr + word_idx0, mask=xmask, eviction_policy="evict_last"),
                      tl.uint32, bitcast=True)
 
         zeros_u32 = (z0 >> bit_off) | (z1 << (32 - bit_off))
@@ -114,8 +114,8 @@ def dequant_kernel(
         woff = tl.cast(w_bit_pos & 31, tl.int32)
         ww1  = ww0 + 1
 
-        w0 = tl.load(qweight_ptr + ww0, mask=xmask, cache_modifier=".cg")
-        w1 = tl.load(qweight_ptr + ww1, mask=xmask & (woff != 0), cache_modifier=".cg")
+        w0 = tl.load(qweight_ptr + ww0, mask=xmask, eviction_policy="evict_last")
+        w1 = tl.load(qweight_ptr + ww1, mask=xmask & (woff != 0), eviction_policy="evict_last")
         w0 = tl.cast(w0, tl.uint32, bitcast=True); w1 = tl.cast(w1, tl.uint32, bitcast=True)
 
         weights_u32 = (w0 >> woff) | (w1 << (32 - woff))
@@ -125,7 +125,7 @@ def dequant_kernel(
         qzeros = tl.load(
             qzeros_ptr + (qzero_ncols * groups + col_idx // pack_scale),
             mask=xmask,
-            cache_modifier=".cg",
+            eviction_policy="evict_last",
         )
         qzeros = tl.cast(qzeros, tl.uint32, bitcast=True)
         wf_zeros = (col_idx % pack_scale) * bits
@@ -135,7 +135,7 @@ def dequant_kernel(
         qweights = tl.load(
             qweight_ptr + (col_idx + out_features * (row_idx // pack_scale)),
             mask=xmask,
-            cache_modifier=".cg",
+            eviction_policy="evict_last",
         )
         qweights = tl.cast(qweights, tl.uint32, bitcast=True)
         wf_weights = (row_idx % pack_scale) * bits
@@ -144,7 +144,7 @@ def dequant_kernel(
     # dequant: fp32 math → cast on store
     w = (tl.cast(weights, tl.float32) - tl.cast(zeros, tl.float32)) * scales
     w = tl.cast(w, out_dtype)
-    tl.store(out_ptr + x_index, w, mask=xmask, cache_modifier=".wb")
+    tl.store(out_ptr + x_index, w, mask=xmask, eviction_policy="evict_last")
 
 def torch_dtype_to_triton(dtype):
     if dtype == torch.float32:

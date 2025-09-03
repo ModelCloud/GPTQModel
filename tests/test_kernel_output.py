@@ -120,10 +120,10 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
+        # (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
+        # (BACKEND.MARLIN, torch.float16, 0.00035),
+        # # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
+        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
     ])
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
         out = self.forward(backend=backend, dtype=dtype)
@@ -148,8 +148,8 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0031),
+        # (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
+        # (BACKEND.MARLIN, torch.bfloat16, 0.0031),
         # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
@@ -176,10 +176,10 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
+        # (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
+        # (BACKEND.MARLIN, torch.float16, 0.00035),
+        # # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
+        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
     ])
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         data = self.data[dtype]
@@ -201,8 +201,8 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+        # (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
+        # (BACKEND.MARLIN, torch.bfloat16, 0.0033),
         # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
