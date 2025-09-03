@@ -71,9 +71,10 @@ def dequant_kernel(
     row_idx = x_index // out_features
     col_idx = x_index % out_features
 
-    # helpful vectorization hints
-    tl.multiple_of(col_idx, 32)
-    tl.multiple_of(x_index, 128)
+    # FIXME: makes kernel run actually slower
+    # vectorization hints
+    # tl.multiple_of(col_idx, 32)
+    # tl.multiple_of(x_index, 128)
 
     pack_scale: tl.constexpr = pack_bits // bits
     qzero_ncols: tl.constexpr = out_features // pack_scale
@@ -83,12 +84,11 @@ def dequant_kernel(
     groups = tl.where(g_idx < 0, g_idx + num_groups, g_idx)
 
     # scales contiguous across columns for a fixed row / group
-    scales = tl.load(
+    scales = tl.cast(tl.load(
         scales_ptr + (col_idx + out_features * groups),
         mask=xmask,
         eviction_policy="evict_last",
-    )
-    scales = tl.cast(scales, tl.float32)
+    ), tl.float32)
 
     if bits == 3:
         # ---- branchless 3-bit zeros ----
@@ -114,9 +114,8 @@ def dequant_kernel(
         woff = tl.cast(w_bit_pos & 31, tl.int32)
         ww1  = ww0 + 1
 
-        w0 = tl.load(qweight_ptr + ww0, mask=xmask, eviction_policy="evict_last")
-        w1 = tl.load(qweight_ptr + ww1, mask=xmask & (woff != 0), eviction_policy="evict_last")
-        w0 = tl.cast(w0, tl.uint32, bitcast=True); w1 = tl.cast(w1, tl.uint32, bitcast=True)
+        w0 = tl.cast(tl.load(qweight_ptr + ww0, mask=xmask, eviction_policy="evict_last"), tl.uint32, bitcast=True)
+        w1 = tl.cast(tl.load(qweight_ptr + ww1, mask=xmask & (woff != 0), eviction_policy="evict_last"), tl.uint32, bitcast=True)
 
         weights_u32 = (w0 >> woff) | (w1 << (32 - woff))
         weights = tl.cast(weights_u32 & 0x7, tl.int32)
@@ -142,8 +141,7 @@ def dequant_kernel(
         weights = tl.cast((qweights >> wf_weights) & maxq, tl.int32)
 
     # dequant: fp32 math → cast on store
-    w = (tl.cast(weights, tl.float32) - tl.cast(zeros, tl.float32)) * scales
-    w = tl.cast(w, out_dtype)
+    w = tl.cast((weights - zeros) * scales, out_dtype)
     tl.store(out_ptr + x_index, w, mask=xmask, eviction_policy="evict_last")
 
 def torch_dtype_to_triton(dtype):
