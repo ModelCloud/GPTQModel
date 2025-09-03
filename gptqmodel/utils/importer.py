@@ -32,8 +32,8 @@ from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
-from ..nn_modules.qlinear.triton_a100 import TritonA100QuantLinear
-from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
+from ..nn_modules.qlinear.triton_a100 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonA100QuantLinear
+# from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT
 from ..utils.logger import setup_logger
 from . import BACKEND
@@ -49,7 +49,8 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
     BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
     BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
-    BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
+    # BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
+    BACKEND.TRITON: TritonA100QuantLinear, # good all around kernel that JIT compiles
     # BACKEND.CUDA: DynamicCudaQuantLinear,
     BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
     BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1

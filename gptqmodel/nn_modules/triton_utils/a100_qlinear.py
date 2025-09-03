@@ -96,6 +96,7 @@ class a100_qlinear(torch.autograd.Function):
         total_programs = total_blocks_m * total_blocks_n
         grid = (total_programs, 1)
 
+        print("aa bb", a.dtype, a.shape, b.dtype, b.shape)
         c = torch.zeros((m, n), device=b.device, dtype=torch.float16)
         k = _a100_quantized_matmul[grid](
             a, b, c, scales, zeros,
