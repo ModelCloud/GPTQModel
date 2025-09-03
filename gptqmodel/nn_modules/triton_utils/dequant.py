@@ -88,7 +88,7 @@ def dequant_kernel(
         scales_ptr + (col_idx + out_features * groups),
         mask=xmask,
         eviction_policy="evict_last",
-    ), tl.float16)
+    ), tl.float32)
 
     if bits == 3:
         # ---- branchless 3-bit zeros ----
@@ -141,7 +141,7 @@ def dequant_kernel(
         weights = tl.cast((qweights >> wf_weights) & maxq, tl.int32)
 
     # dequant: fp16 math → cast on store
-    w = tl.cast((weights - zeros).to(tl.float16) * scales, out_dtype)
+    w = tl.cast((weights - zeros).to(tl.float32) * scales, out_dtype)
     tl.store(out_ptr + x_index, w, mask=xmask, eviction_policy="evict_last")
 
 def torch_dtype_to_triton(dtype):
