@@ -38,9 +38,9 @@ def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stage
 
 def _arch_autotune_space():
     sm = _sm()
-    if sm >= 120:  # Blackwell (e.g., 5090)
+    if sm >= 1200:  # Blackwell (e.g., 5090)
         return make_dequant_configs([4096, 2048, 1024, 512], [8, 4], [2])
-    elif sm >= 89:  # Ada (e.g., 4090)
+    elif sm >= 890:  # Ada (e.g., 4090)
         return make_dequant_configs([2048, 1024, 512], [2, 4], [1, 2])
     else: # A100/3090
         return make_dequant_configs([1024], [1], [1])
@@ -88,7 +88,7 @@ def dequant_kernel(
         scales_ptr + (col_idx + out_features * groups),
         mask=xmask,
         eviction_policy="evict_last",
-    ), tl.float32)
+    ), tl.float16)
 
     if bits == 3:
         # ---- branchless 3-bit zeros ----
@@ -140,8 +140,8 @@ def dequant_kernel(
         wf_weights = (row_idx % pack_scale) * bits
         weights = tl.cast((qweights >> wf_weights) & maxq, tl.int32)
 
-    # dequant: fp32 math → cast on store
-    w = tl.cast((weights - zeros) * scales, out_dtype)
+    # dequant: fp16 math → cast on store
+    w = tl.cast((weights - zeros).to(tl.float16) * scales, out_dtype)
     tl.store(out_ptr + x_index, w, mask=xmask, eviction_policy="evict_last")
 
 def torch_dtype_to_triton(dtype):
