@@ -41,9 +41,9 @@ def _arch_autotune_space():
     if sm >= 120:  # Blackwell (e.g., 5090)
         return make_dequant_configs([4096, 2048, 1024, 512], [8, 4], [2])
     elif sm >= 89:  # Ada (e.g., 4090)
-        return make_dequant_configs([2048, 1024, 512], [2, 4, 8], [1, 2])
+        return make_dequant_configs([2048, 1024, 512], [2, 4], [1, 2])
     else: # A100/3090
-        return make_dequant_configs([1024, 512, 256], [1, 2, 4], [1])
+        return make_dequant_configs([1024], [1], [1])
 
 DEQUANT_CONFIGS = _arch_autotune_space()
 
