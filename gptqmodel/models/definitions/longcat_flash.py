@@ -19,7 +19,7 @@ from ..base import BaseGPTQModel
 
 
 class LongCatFlashGPTQ(BaseGPTQModel):
-    dynamic_expert_index = "num_experts"
+    dynamic_expert_index = "n_routed_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
