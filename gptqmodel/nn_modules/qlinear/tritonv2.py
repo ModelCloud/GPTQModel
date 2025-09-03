@@ -13,12 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from typing import Optional, Tuple
 
 import torch
 from packaging import version
 
-from ..triton_utils.a100_qlinear import a100_qlinear
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
@@ -28,15 +28,15 @@ from .torch import TorchQuantLinear
 
 try:
     # TODO: triton is not compatible with free threading
-    # if not has_gil_disabled():
-    #     raise Exception("GIL is disabled so Triton is not (yet) compatible.")
+    if not has_gil_disabled():
+        raise Exception("GIL is disabled so Triton is not (yet) compatible.")
 
     import triton
     import triton.language as tl
     from triton import __version__ as triton_version
 
-    # from ..triton_utils.dequant import QuantLinearFunction
-    # from ..triton_utils.mixin import TritonModuleMixin
+    from ..triton_utils.dequant import QuantLinearFunction
+    from ..triton_utils.mixin import TritonModuleMixin
     if version.parse(triton_version) < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
     TRITON_AVAILABLE = True
@@ -51,7 +51,7 @@ TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but 
 log = setup_logger()
 
 
-class TritonV2QuantLinear(TorchQuantLinear):
+class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -148,26 +148,15 @@ class TritonV2QuantLinear(TorchQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        # out = QuantLinearFunction.apply(
-        #     x.reshape(-1, x.shape[-1]),
-        #     self.qweight,
-        #     self.scales,
-        #     self.qzeros,
-        #     self.g_idx,
-        #     self.bits,
-        #     self.pack_dtype_bits,
-        #     self.maxq,
-        # ).reshape(out_shape)
-
-        block_size_m = x.shape[0]
-        # TODO test a100_qlinear
-        out = a100_qlinear.apply(
+        out = QuantLinearFunction.apply(
             x.reshape(-1, x.shape[-1]),
             self.qweight,
             self.scales,
             self.qzeros,
-            self.group_size,
-            block_size_m,
+            self.g_idx,
+            self.bits,
+            self.pack_dtype_bits,
+            self.maxq,
         ).reshape(out_shape)
 
         if self.bias is not None:
@@ -218,5 +207,4 @@ def triton_xpu_available():
         return True
     except Exception:
         return False
-
 
