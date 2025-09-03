@@ -17,6 +17,7 @@
 import itertools
 from typing import List
 
+import itertools
 import torch
 import triton
 import triton.language as tl
@@ -24,6 +25,10 @@ from torch.amp import custom_bwd, custom_fwd
 
 from ...utils.torch import HAS_XPU
 
+def _sm() -> int:
+    # returns 89 for sm_89, 120 for sm_120, etc.
+    major, minor = torch.cuda.get_device_capability()
+    return major * 10 + minor
 
 def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stages: List[int]):
     configs = []
@@ -31,10 +36,18 @@ def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stage
         configs.append(triton.Config({"X_BLOCK": bs}, num_warps=ws, num_stages=ns))
     return configs
 
-# tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128
-DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([1024], [1], [1])
-#DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([128, 256, 512, 1024], [4, 8], [2]) <- slower
-@triton.autotune(DEFAULT_DEQUANT_CONFIGS, key=["numels"])
+def _arch_autotune_space():
+    sm = _sm()
+    if sm >= 120:  # Blackwell (e.g., 5090)
+        return make_dequant_configs([4096, 2048, 1024, 512], [8, 4], [2])
+    elif sm >= 89:  # Ada (e.g., 4090)
+        return make_dequant_configs([2048, 1024, 512], [2, 4, 8], [1, 2])
+    else: # A100/3090
+        return make_dequant_configs([1024, 512, 256], [1, 2, 4], [1])
+
+DEQUANT_CONFIGS = _arch_autotune_space()
+
+@triton.autotune(DEQUANT_CONFIGS, key=["numels"])
 @triton.jit
 def dequant_kernel(
     g_idx_ptr,
@@ -51,76 +64,87 @@ def dequant_kernel(
     num_groups: tl.constexpr,
     X_BLOCK: tl.constexpr,
 ):
-    # Block indexing
     xoffset = tl.program_id(0) * X_BLOCK
     x_index = xoffset + tl.arange(0, X_BLOCK)
     xmask = x_index < numels
+
     row_idx = x_index // out_features
     col_idx = x_index % out_features
+
+    # helpful vectorization hints
+    tl.multiple_of(col_idx, 32)
+    tl.multiple_of(x_index, 128)
 
     pack_scale: tl.constexpr = pack_bits // bits
     qzero_ncols: tl.constexpr = out_features // pack_scale
 
-    # Load group indices
-    g_idx = tl.load(g_idx_ptr + row_idx, mask=xmask, eviction_policy="evict_last")
+    # g_idx small & reused: default cache; others: stream via L2 (.cg)
+    g_idx = tl.load(g_idx_ptr + row_idx, mask=xmask)
     groups = tl.where(g_idx < 0, g_idx + num_groups, g_idx)
 
-    # Load scales
-    scales = tl.cast(
-        tl.load(scales_ptr + (col_idx + out_features * groups), mask=xmask, eviction_policy="evict_last"),
-        tl.float32)
+    # scales contiguous across columns for a fixed row / group
+    scales = tl.load(
+        scales_ptr + (col_idx + out_features * groups),
+        mask=xmask,
+        cache_modifier=".cg",
+    )
+    scales = tl.cast(scales, tl.float32)
 
-    # Load zeros
     if bits == 3:
-        # For 3-bit, we need to calculate the correct position in the packed zeros
+        # ---- branchless 3-bit zeros ----
+        # bit position for each element
         zero_bit_pos = (groups * out_features + col_idx) * 3
-        zero_word_idx = zero_bit_pos // 32
-        zero_bit_offset = zero_bit_pos % 32
+        word_idx0 = tl.cast(zero_bit_pos >> 5, tl.int32)          # // 32
+        bit_off   = tl.cast(zero_bit_pos & 31, tl.int32)          # % 32
+        word_idx1 = word_idx0 + 1
 
-        zero_word = tl.load(qzeros_ptr + zero_word_idx, mask=xmask, eviction_policy="evict_last")
+        z0 = tl.load(qzeros_ptr + word_idx0, mask=xmask, cache_modifier=".cg")
+        z1 = tl.load(qzeros_ptr + word_idx1, mask=xmask & (bit_off != 0), cache_modifier=".cg")
+        # z0 = tl.cast(tl.load(qzeros_ptr + word_idx0, mask=xmask, cache_modifier=".cg"),
+        #              tl.uint32, bitcast=True)
+        z0 = tl.cast(tl.load(qzeros_ptr + word_idx0, mask=xmask, cache_modifier=".cg"),
+                     tl.uint32, bitcast=True)
 
-        # Handle case where 3-bit value is fully within current 32-bit word
-        if zero_bit_offset <= 29:
-            zeros = (zero_word >> zero_bit_offset) & 0b111
-        else:
-            # 3-bit value spans two 32-bit words
-            next_zero_word = tl.load(qzeros_ptr + zero_word_idx + 1, mask=xmask, eviction_policy="evict_last")
-            combined = (zero_word >> zero_bit_offset) | (next_zero_word << (32 - zero_bit_offset))
-            zeros = combined & 0b111
+        zeros_u32 = (z0 >> bit_off) | (z1 << (32 - bit_off))
+        zeros = tl.cast(zeros_u32 & 0x7, tl.int32)
+
+        # ---- branchless 3-bit weights ----
+        w_bit_pos = (row_idx * out_features + col_idx) * 3
+        ww0 = tl.cast(w_bit_pos >> 5, tl.int32)
+        woff = tl.cast(w_bit_pos & 31, tl.int32)
+        ww1  = ww0 + 1
+
+        w0 = tl.load(qweight_ptr + ww0, mask=xmask, cache_modifier=".cg")
+        w1 = tl.load(qweight_ptr + ww1, mask=xmask & (woff != 0), cache_modifier=".cg")
+        w0 = tl.cast(w0, tl.uint32, bitcast=True); w1 = tl.cast(w1, tl.uint32, bitcast=True)
+
+        weights_u32 = (w0 >> woff) | (w1 << (32 - woff))
+        weights = tl.cast(weights_u32 & 0x7, tl.int32)
     else:
-        qzeros = tl.load(qzeros_ptr + (qzero_ncols * groups + col_idx // pack_scale), mask=xmask,
-                         eviction_policy="evict_last")
+        # zeros: many columns will hit same 32-bit lane; still load via .cg
+        qzeros = tl.load(
+            qzeros_ptr + (qzero_ncols * groups + col_idx // pack_scale),
+            mask=xmask,
+            cache_modifier=".cg",
+        )
+        qzeros = tl.cast(qzeros, tl.uint32, bitcast=True)
         wf_zeros = (col_idx % pack_scale) * bits
-        zeros = (qzeros >> wf_zeros) & maxq
+        zeros = tl.cast((qzeros >> wf_zeros) & maxq, tl.int32)
 
-    # Load weights
-    if bits == 3:
-        # For 3-bit, we need to calculate the correct position in the packed weights
-        weight_bit_pos = (row_idx * out_features + col_idx) * 3
-        weight_word_idx = weight_bit_pos // 32
-        weight_bit_offset = weight_bit_pos % 32
-
-        weight_word = tl.load(qweight_ptr + weight_word_idx, mask=xmask, eviction_policy="evict_last")
-
-        # Handle case where 3-bit value is fully within current 32-bit word
-        if weight_bit_offset <= 29:
-            weights = (weight_word >> weight_bit_offset) & 0b111
-        else:
-            # 3-bit value spans two 32-bit words
-            next_weight_word = tl.load(qweight_ptr + weight_word_idx + 1, mask=xmask, eviction_policy="evict_last")
-            combined = (weight_word >> weight_bit_offset) | (next_weight_word << (32 - weight_bit_offset))
-            weights = combined & 0b111
-    else:
-        qweights = tl.load(qweight_ptr + (col_idx + out_features * (row_idx // pack_scale)), mask=xmask,
-                           eviction_policy="evict_last")
+        # weights: contiguous across columns for a fixed row-tile
+        qweights = tl.load(
+            qweight_ptr + (col_idx + out_features * (row_idx // pack_scale)),
+            mask=xmask,
+            cache_modifier=".cg",
+        )
+        qweights = tl.cast(qweights, tl.uint32, bitcast=True)
         wf_weights = (row_idx % pack_scale) * bits
-        weights = (qweights >> wf_weights) & maxq
+        weights = tl.cast((qweights >> wf_weights) & maxq, tl.int32)
 
-    # Dequantize
-    weights = (weights - zeros).to(tl.float32) * scales
-    weights = tl.cast(weights, out_dtype)
-    tl.store(out_ptr + x_index, weights, mask=xmask)
-
+    # dequant: fp32 math → cast on store
+    w = (tl.cast(weights, tl.float32) - tl.cast(zeros, tl.float32)) * scales
+    w = tl.cast(w, out_dtype)
+    tl.store(out_ptr + x_index, w, mask=xmask, cache_modifier=".wb")
 
 def torch_dtype_to_triton(dtype):
     if dtype == torch.float32:
@@ -165,7 +189,6 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
         num_groups=num_groups,
     )
     return out
-
 
 def quant_matmul(input, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq, transpose=False):
     W = dequant(input.dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq)

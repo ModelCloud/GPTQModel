@@ -27,18 +27,22 @@ from ...utils.python import has_gil_disabled
 from .torch import TorchQuantLinear
 
 try:
-    # TODO: triton is not compatible with free threading
-    if not has_gil_disabled():
-        raise Exception("GIL is disabled so Triton is not (yet) compatible.")
-
     import triton
     import triton.language as tl
     from triton import __version__ as triton_version
 
     from ..triton_utils.dequant import QuantLinearFunction
     from ..triton_utils.mixin import TritonModuleMixin
-    if version.parse(triton_version) < version.parse("2.0.0"):
+
+    triton_v = version.parse(triton_version)
+
+    if triton_v < version.parse("2.0.0"):
         raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+
+    # GIL=0 is tested with Triton 3.4.0 and it works
+    if has_gil_disabled() and triton_v < version.parse("3.4.0"):
+        raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton 3.4")
+
     TRITON_AVAILABLE = True
 except BaseException:
     TRITON_AVAILABLE = False
