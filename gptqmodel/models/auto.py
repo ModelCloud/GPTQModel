@@ -100,6 +100,7 @@ from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.llama4 import Llama4GPTQ  # noqa: E402
+from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
 from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
@@ -213,6 +214,7 @@ MODEL_MAP = {
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
     "seed_oss": SeedOSSGPTQ,
     "gpt_oss": GPTOSSGPTQ,
+    "longcat_flash": LongCatFlashGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
