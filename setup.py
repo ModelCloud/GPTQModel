@@ -345,7 +345,7 @@ setup(
         'auto_round': ["auto_round>=0.3"],
         'logger': ["clearml", "random_word", "plotly"],
         'eval': ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        'triton': ["triton>=3.0.0"],
+        'triton': ["triton>=3.4.0"],
         'openai': ["uvicorn", "fastapi", "pydantic"],
         'mlx': ["mlx_lm>=0.24.0"]
     },

@@ -26,7 +26,6 @@ import torch
 import torch._dynamo
 import torch.nn as nn
 from tokenicer import Tokenicer
-from torch import LongTensor
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 

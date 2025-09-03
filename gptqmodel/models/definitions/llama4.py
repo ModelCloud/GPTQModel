@@ -15,9 +15,11 @@
 # limitations under the License.
 
 from transformers import AutoModelForImageTextToText
+
 from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseGPTQModel
-        
+
+
 class Llama4GPTQ(BaseGPTQModel):
     # some bug in the attention_mask of transformers.modeling_llama4,
     # so batch quantization for Llama4 is temporarily not supported.
@@ -60,7 +62,7 @@ class Llama4GPTQ(BaseGPTQModel):
                         [llama4_modeling.Llama4TextMLP(config) for _ in range(self.num_experts)]
                     )
                     self.router = llama4_modeling.Llama4Router(config)
-                    self.shared_expert = llama4_modeling.Llama4TextMLP(config)  
+                    self.shared_expert = llama4_modeling.Llama4TextMLP(config)
 
                 def forward(self, hidden_states: torch.Tensor):
                     hidden_states = hidden_states.reshape(-1, self.hidden_dim)
@@ -93,9 +95,10 @@ class Llama4GPTQ(BaseGPTQModel):
             return model
 
         import os
-        import torch
         from concurrent.futures import ThreadPoolExecutor
         from functools import partial
+
+        import torch
         from transformers.modeling_utils import no_init_weights
         from transformers.models.llama4.modeling_llama4 import Llama4TextMLP, Llama4TextMoe
 
@@ -122,7 +125,7 @@ class Llama4GPTQ(BaseGPTQModel):
                         self[i].gate_proj.weight.data = gate_batch[i]
                         self[i].up_proj.weight.data = up_batch[i]
                         self[i].down_proj.weight.data = down_batch[i]
-                        
+
         class SequentialLlama4TextMoe(torch.nn.Module):
             def __init__(self, config, original):
                 super().__init__()
