@@ -14,13 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import json
 import os.path
 import re
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from importlib.metadata import version as pkg_version
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -224,6 +222,9 @@ class QuantizeConfig():
     v2_memory_device: str = "auto" #
 
     zero_point: bool = field(default=True) # awq config
+
+    # Skip all heavy computations for testing model loading
+    mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -515,65 +516,6 @@ class QuantizeConfig():
             # there is only one scale int32 + one qzero int32 per entire module so overall it contributes to close to 0 bpw
             bpw = self.bits
         log.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
-
-@dataclass
-class AutoRoundQuantizeConfig(QuantizeConfig):
-    layer_config: dict = field(default_factory=dict)
-    enable_full_range: bool = False  ##for symmetric, TODO support later
-    batch_size: int = 1
-    amp: bool = True
-    lr_scheduler = None
-    enable_quanted_input: bool = True
-    enable_minmax_tuning: bool = True
-    lr: float = None
-    minmax_lr: float = None
-    low_gpu_mem_usage: bool = False
-    iters: int = 200
-    sampler: str = "rand"
-    seed: int = 42
-    nblocks: int = 1
-    gradient_accumulate_steps: int = 1
-    not_use_best_mse: bool = False
-    dynamic_max_gap: int = -1
-    data_type: str = "int"  ##only support int for now
-    scale_dtype: str = "fp16"
-    quant_method: str = QUANT_METHOD.AUTO_ROUND
-
-    def to_dict(self):
-        # inject auto-round specific meta data
-        self.meta_set("auto_round", pkg_version(PKG_AUTO_ROUND))
-        self.meta_set("enable_full_range", self.enable_full_range)
-        layer_config = copy.deepcopy(self.layer_config)
-        for key in layer_config:
-            info = layer_config[key]
-            # layer_config will store "scale" and "zp" Tensors, which cannot be serialized by json.
-            # see AutoRound.dump_qinfo_to_layer_config()
-            info.pop("scale", None)
-            info.pop("zp", None)
-        self.meta_set("layer_config", layer_config)
-        self.meta_set("batch_size", self.batch_size)
-        self.meta_set("amp", self.amp)
-        self.meta_set("lr_scheduler", self.lr_scheduler)
-        self.meta_set("enable_quanted_input", self.enable_quanted_input)
-        self.meta_set("enable_minmax_tuning", self.enable_minmax_tuning)
-        self.meta_set("lr", self.lr)
-        self.meta_set("minmax_lr", self.minmax_lr)
-        self.meta_set("low_gpu_mem_usage", self.low_gpu_mem_usage)
-        self.meta_set("iters", self.iters)
-        self.meta_set("sampler", self.sampler)
-        self.meta_set("seed", self.seed)
-        self.meta_set("nblocks", self.nblocks)
-        self.meta_set("gradient_accumulate_steps", self.gradient_accumulate_steps)
-        self.meta_set("not_use_best_mse", self.not_use_best_mse)
-        self.meta_set("dynamic_max_gap", self.dynamic_max_gap)
-        self.meta_set("data_type", self.data_type)
-        self.meta_set("scale_dtype", self.scale_dtype)
-
-        r = super().to_dict()
-
-        # override quant_method from AUTO_ROUND to GPTQ in json output for max compat with vllm/sglang
-        r[QUANT_METHOD_FIELD] = QUANT_METHOD.GPTQ
-        return r
 
 # deprecated: will be removed in future update
 @dataclass

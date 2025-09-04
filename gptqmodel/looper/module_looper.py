@@ -30,7 +30,7 @@ from ..looper.named_module import NamedModule
 from ..looper.native_processor import NativeProcessor
 from ..models import BaseGPTQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy, replace_module_with_hooked_tree, HookedLinear
+from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy, replace_module_with_hooked_tree
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
@@ -196,7 +196,10 @@ class ModuleLooper():
 
         # dynamic expert layer index for model defs
         if self.gptq_model.dynamic_expert_index is not None:
-            num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
+            if hasattr(self.gptq_model.model.config, "text_config"):
+                num_experts = getattr(self.gptq_model.model.config.text_config, self.gptq_model.dynamic_expert_index)
+            else:
+                num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
 

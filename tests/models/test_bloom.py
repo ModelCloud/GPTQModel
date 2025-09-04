@@ -23,6 +23,7 @@ class TestBloom(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC = 0.2201
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2440
     TORCH_DTYPE = torch.float16
+    USE_FLASH_ATTN = False
 
     def test_bloom(self):
         self.quant_lm_eval()

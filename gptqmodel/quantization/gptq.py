@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_compile, torch_streamCtx, torch_sync
+from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -46,6 +46,7 @@ if HAS_CUDA or HAS_XPU:
     tmp_eye = torch.eye(64, device="cuda" if HAS_CUDA else "xpu")
     torch.linalg.cholesky(tmp_eye)
     del tmp_eye
+
 
 def get_number_of_rows_and_cols(layer: nn.Module):
     # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -61,7 +62,7 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 
 class GPTQ:
-    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig]=None):
+    def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None):
         # self.lock = threading.Lock()
 
         # self.num_tied_handles = 0
@@ -86,7 +87,7 @@ class GPTQ:
 
         self._validate_module(self.module)
 
-        self.qcfg = qcfg if qcfg else QuantizeConfig() # HF compat will not pass qcfg
+        self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
 
         self.module_copy = None
 
@@ -104,7 +105,8 @@ class GPTQ:
 
     @staticmethod
     def _validate_module(module):
-        assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
+                                   transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
     # def has_hessian_issues(self) -> bool:
     #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
@@ -117,6 +119,13 @@ class GPTQ:
             return self.module.weight.shape
         else:
             return (0, 0)
+
+    def _mock_hessian_inverse(self, H: torch.Tensor):
+        """Mock hessian inverse for fast testing"""
+        damp = self.qcfg.damp_percent
+        # Return identity matrix instead of complex inversion
+        identity = torch.eye(H.shape[0], device=H.device)
+        return identity, damp
 
     def _clone_module(self, copy=True, device: torch.device = None):
         if not device:
@@ -201,30 +210,30 @@ class GPTQ:
         self.nsamples += batch_token_size
 
         # inp returned here is flattened/reshaped original inp
-        #return batch_token_size, reshaped_inp, alpha, beta
+        # return batch_token_size, reshaped_inp, alpha, beta
         del batch_token_size, reshaped_inp, alpha, beta
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
-        self,
-        blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
+            self,
+            blocksize=128,
+            percdamp=0.01,
+            damp_auto_increment=0.0015,
+            group_size=-1,
+            actorder=False,
+            static_groups=False,
     ):
         return self.hf_quantize(blocksize, percdamp, damp_auto_increment, group_size, actorder, static_groups)
 
     # public api exposed to hf
     def hf_quantize(
-        self,
-        blocksize=128,
-        percdamp=0.01,
-        damp_auto_increment=0.0015,
-        group_size=-1,
-        actorder=False,
-        static_groups=False,
+            self,
+            blocksize=128,
+            percdamp=0.01,
+            damp_auto_increment=0.0015,
+            group_size=-1,
+            actorder=False,
+            static_groups=False,
     ):
         self.qcfg.group_size = group_size
         self.qcfg.damp_percent = percdamp
@@ -237,6 +246,7 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
+
         damp = self.qcfg.damp_percent
         diag = torch.arange(self.columns, device=H.device)
         mean = torch.mean(torch.diag(H))
@@ -260,22 +270,31 @@ class GPTQ:
                     raise e
 
         if not (0 < damp < 1):
-            log.error(f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
-            #raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
+            log.error(
+                f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
+            # raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
             return None, 1.0
 
         return Hinv, damp
 
     @torch.inference_mode()
     def quantize(
-        self,
-        blocksize=128,
+            self,
+            blocksize=128,
     ):
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        self.hessian_inverse = torch_compile(self.hessian_inverse)
+        # Temporarily disable torch.compile due to compatibility issues with torch 2.8
+        # Will re-enable once the issue is fixed
+        if not TORCH_GTE_28:
+            self.hessian_inverse = torch_compile(self.hessian_inverse)
+
+        # Mock heavy computations
+        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+            # Use simplified hessian inverse (identity matrix)
+            self.hessian_inverse = self._mock_hessian_inverse
 
         # process buffered inputs
         if len(self.fwd_inputs_buffered_data) > 0:
@@ -292,7 +311,8 @@ class GPTQ:
 
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-            raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
+            raise RuntimeError(
+                "For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
@@ -321,7 +341,7 @@ class GPTQ:
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i : (i + self.qcfg.group_size)], weight=True)
+                quantizer.find_params(W[:, i: (i + self.qcfg.group_size)], weight=True)
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
@@ -334,7 +354,7 @@ class GPTQ:
             invperm = torch.argsort(perm)
 
         if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import compute_local_perms, compute_global_perm, compose_final_perm
+            from .gar import compose_final_perm, compute_global_perm, compute_local_perms
             local_perms = compute_local_perms(torch.diag(H), self.qcfg.group_size)
             global_perm = compute_global_perm(torch.diag(H), self.qcfg.group_size)
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
@@ -346,51 +366,152 @@ class GPTQ:
 
         Hinv, damp = self.hessian_inverse(H)
 
-        for i1 in range(0, self.columns, blocksize):
-            i2 = min(i1 + blocksize, self.columns)
-            count = i2 - i1
+        # Use simplified loop when mock_quantization is active
+        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
+                # Clone the weights like the original code to maintain device/dtype consistency
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
 
-            if Hinv is not None:
-                Hinv1 = Hinv[i1:i2, i1:i2]
-
-            for i in range(count):
-                w = W1[:, i]
-                if Hinv is not None:
-                    d = Hinv1[i, i]
-
+                # Handle group quantization parameters efficiently (similar to original)
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
-                        if (i1 + i) % self.qcfg.group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
-
-                        if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
-                            scale.append(self.quantizer.scale)
-                            zero.append(self.quantizer.zero)
-                            now_idx += 1
+                        # Find parameters for entire groups at once (optimized)
+                        group_start_cols = list(range(i1, i2, self.qcfg.group_size))
+                        for group_start in group_start_cols:
+                            group_end = min(group_start + self.qcfg.group_size, self.columns)
+                            if group_start < group_end:
+                                self.quantizer.find_params(W[:, group_start:group_end], weight=True)
+                                scale.append(self.quantizer.scale)
+                                zero.append(self.quantizer.zero)
+                                now_idx += 1
                     else:
-                        idx = i1 + i
-                        if self.qcfg.desc_act:
-                            idx = perm[idx]
+                        # Static groups - use pre-computed groups
+                        for i in range(count):
+                            idx = i1 + i
+                            if self.qcfg.desc_act:
+                                idx = perm[idx]
+                            self.quantizer = groups[idx // self.qcfg.group_size]
 
-                        self.quantizer = groups[idx // self.qcfg.group_size]
+                    # Vectorized quantization for the entire block (major optimization)
+                    if len(scale) > 0 and len(zero) > 0:
+                        # Use latest scale and zero for the entire block
+                        latest_scale = scale[-1]
+                        latest_zero = zero[-1]
 
-                q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                Q1[:, i] = q
+                        # Vectorized quantization using broadcasting
+                        # Reshape scales and zeros to match block dimensions
+                        if latest_scale.dim() == 1:
+                            latest_scale = latest_scale.view(-1, 1)
+                        if latest_zero.dim() == 1:
+                            latest_zero = latest_zero.view(-1, 1)
+
+                        # Apply quantization formula using the cloned weights W1
+                        maxq_val = 2 ** self.qcfg.bits - 1
+                        if self.qcfg.sym:
+                            # Symmetric quantization: Q = scale * clamp(round(x/scale), -maxq/2, maxq/2)
+                            Q1 = latest_scale * torch.clamp(
+                                torch.round(W1 / latest_scale),
+                                -(maxq_val // 2),
+                                maxq_val // 2
+                            )
+                        else:
+                            # Asymmetric quantization: Q = scale * (clamp(round(x/scale) + zero, 0, maxq) - zero)
+                            quantized = torch.clamp(
+                                torch.round(W1 / latest_scale) + latest_zero,
+                                0,
+                                maxq_val
+                            )
+                            Q1 = latest_scale * (quantized - latest_zero)
+                    else:
+                        # Fallback to individual quantization if no scale/zero available
+                        for i in range(count):
+                            w = W1[:, i]
+                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                            Q1[:, i] = q
+                else:
+                    # No grouping - vectorized quantization for entire block
+                    maxq_val = 2 ** self.qcfg.bits - 1
+                    if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
+                        latest_scale = self.quantizer.scale
+                        latest_zero = self.quantizer.zero
+
+                        if latest_scale.dim() == 1:
+                            latest_scale = latest_scale.view(-1, 1)
+                        if latest_zero.dim() == 1:
+                            latest_zero = latest_zero.view(-1, 1)
+
+                        if self.qcfg.sym:
+                            Q1 = latest_scale * torch.clamp(
+                                torch.round(W1 / latest_scale),
+                                -(maxq_val // 2),
+                                maxq_val // 2
+                            )
+                        else:
+                            quantized = torch.clamp(
+                                torch.round(W1 / latest_scale) + latest_zero,
+                                0,
+                                maxq_val
+                            )
+                            Q1 = latest_scale * (quantized - latest_zero)
+                    else:
+                        # Fallback to individual quantization
+                        for i in range(count):
+                            w = W1[:, i]
+                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                            Q1[:, i] = q
+
+                Q[:, i1:i2] = Q1
+        else:
+            # Original heavy loop for normal quantization
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
+
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+
                 if Hinv is not None:
-                    Losses1[:, i] = (w - q) ** 2 / d**2
-                    err1 = (w - q) / d
-                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                    Err1[:, i] = err1
+                    Hinv1 = Hinv[i1:i2, i1:i2]
 
-            Q[:, i1:i2] = Q1
-            if Hinv is not None:
-                Losses[:, i1:i2] = Losses1 / 2
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                for i in range(count):
+                    w = W1[:, i]
+                    if Hinv is not None:
+                        d = Hinv1[i, i]
+
+                    if self.qcfg.group_size != -1:
+                        if not self.qcfg.static_groups:
+                            if (i1 + i) % self.qcfg.group_size == 0:
+                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
+
+                            if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
+                                scale.append(self.quantizer.scale)
+                                zero.append(self.quantizer.zero)
+                                now_idx += 1
+                        else:
+                            idx = i1 + i
+                            if self.qcfg.desc_act:
+                                idx = perm[idx]
+
+                            self.quantizer = groups[idx // self.qcfg.group_size]
+
+                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                    Q1[:, i] = q
+                    if Hinv is not None:
+                        Losses1[:, i] = (w - q) ** 2 / d**2
+                        err1 = (w - q) / d
+                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                        Err1[:, i] = err1
+
+                Q[:, i1:i2] = Q1
+                if Hinv is not None:
+                    Losses[:, i1:i2] = Losses1 / 2
+                    W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         # TODO: why is there a torch_sync here? There are no streaming ops here?
         # torch_sync(device=self.module.target_device)
@@ -430,20 +551,24 @@ class GPTQ:
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
             inv_global_perm_list = inv_global_perm.tolist()
-            temp_scale = [ scale[i] for i in inv_global_perm_list ]
+            temp_scale = [scale[i] for i in inv_global_perm_list]
             scale = temp_scale
-            temp_zero = [ zero[i] for i in inv_global_perm_list ]
+            temp_zero = [zero[i] for i in inv_global_perm_list]
             zero = temp_zero
 
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
+
+        # Ensure Q is on the same device as the original module weight before type conversion
+        if Q.device != self.module.weight.data.device:
+            Q = Q.to(device=self.module.weight.data.device)
 
         if Q.shape != self.module.weight.shape:
             Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        #Q = Q.to(device=use_device)
+        # Q = Q.to(device=use_device)
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -465,5 +590,6 @@ class GPTQ:
         del self.module
 
         # torch_empty_cache(self.device)
+
 
 __all__ = ["GPTQ"]

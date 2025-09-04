@@ -29,12 +29,12 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.torch import torch_compile, torch_sync
+from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
 from .gptq import GPTQ
 
 
 class GPTQv2(GPTQ):
-    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig]=None):
+    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig] = None):
         from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
 
         super().__init__(module, qcfg)
@@ -115,18 +115,20 @@ class GPTQv2(GPTQ):
 
         self.H += inp.matmul(inp.t())
         native_inp = math.sqrt(2 / self.nsamples) * native_inp
-        self.dXXT += (native_inp-inp).matmul(inp.t())
+        self.dXXT += (native_inp - inp).matmul(inp.t())
 
     @torch.inference_mode()
     def quantize(
-        self,
-        blocksize=128,
+            self,
+            blocksize=128,
     ):
-        #self.H = self.H.to(device=CUDA_0)
+        # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        self.hessian_inverse = torch_compile(self.hessian_inverse)
+        # TODO compilation failure for Torch >= 2.8
+        if not TORCH_GTE_28:
+            self.hessian_inverse = torch_compile(self.hessian_inverse)
 
         # process buffered inputs
         for inp in self.fwd_inputs_buffered_data:
@@ -141,7 +143,8 @@ class GPTQv2(GPTQ):
 
         # TODO: waiting for pytorch implementation of ops for MPS
         if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-            raise RuntimeError("For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
+            raise RuntimeError(
+                "For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
@@ -170,7 +173,7 @@ class GPTQv2(GPTQ):
             groups = []
             for i in range(0, self.columns, self.qcfg.group_size):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i : (i + self.qcfg.group_size)], weight=True)
+                quantizer.find_params(W[:, i: (i + self.qcfg.group_size)], weight=True)
 
                 scale.append(quantizer.scale)
                 zero.append(quantizer.zero)
@@ -182,7 +185,6 @@ class GPTQv2(GPTQ):
             H = H[perm][:, perm]
             self.dXXT = self.dXXT[perm][:, perm]
             invperm = torch.argsort(perm)
-
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
@@ -209,7 +211,7 @@ class GPTQv2(GPTQ):
                 if self.qcfg.group_size != -1:
                     if not self.qcfg.static_groups:
                         if (i1 + i) % self.qcfg.group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
+                            self.quantizer.find_params(W[:, (i1 + i): (i1 + i + self.qcfg.group_size)], weight=True)
 
                         if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
                             scale.append(self.quantizer.scale)
@@ -224,10 +226,11 @@ class GPTQv2(GPTQ):
 
                 q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
+                Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(P1[i, i:].unsqueeze(0))
+                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(
+                    P1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
@@ -269,7 +272,7 @@ class GPTQv2(GPTQ):
         else:
             Q = Q.type_as(self.module.weight.data)
 
-        #Q = Q.to(device=DEVICE_1)
+        # Q = Q.to(device=DEVICE_1)
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -287,5 +290,6 @@ class GPTQv2(GPTQ):
 
         if hasattr(self, 'dXXT'):
             del self.dXXT
+
 
 __all__ = ["GPTQv2"]

@@ -23,6 +23,7 @@ class TestCodeGen(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2005
     TRUST_REMOTE_CODE = True
     USE_VLLM = False
+    USE_FLASH_ATTN = False
 
     def test_codegen(self):
         self.quant_lm_eval()

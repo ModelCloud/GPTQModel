@@ -13,19 +13,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from model_test import ModelTest
 
 
-class TestTeleChat_2(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/TeleChat2-7B/"  # "Tele-AI/TeleChat2-7B"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3677
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3831
+class TestSeedOSS(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Seed-OSS-36B-Instruct/"
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    NATIVE_ARC_CHALLENGE_ACC = 0.2739
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
+    TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
-    TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 6
-    USE_VLLM = False
-    USE_FLASH_ATTN = False
 
-
-    def test_telechat2(self):
+    def test_seed_oss(self):
         self.quant_lm_eval()

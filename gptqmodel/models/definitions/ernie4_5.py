@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
 from . import LlamaGPTQ
 
 
@@ -26,6 +25,7 @@ class ERNIE4_5GPTQ(LlamaGPTQ):
 
     def monkey_patch(self):
         from typing import Optional, Tuple
+
         import torch
         from transformers.modeling_outputs import BaseModelOutputWithPast
 

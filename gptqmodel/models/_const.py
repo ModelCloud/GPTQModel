@@ -42,7 +42,7 @@ class DEVICE(str, Enum):
     CPU = "cpu"  # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
     CUDA = "cuda"  # Nvidia GPU: Optimized for Ampere+
     XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
-    MPS = "mps"  # MacOS GPU: Apple Silion/Metal)
+    MPS = "mps"  # MacOS GPU: Apple Silicon/Metal)
     ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
 
     @classmethod

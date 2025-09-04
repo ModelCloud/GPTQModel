@@ -8,7 +8,7 @@ from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.ipex import IPEXQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
@@ -59,6 +59,8 @@ class TestPackable(unittest.TestCase):
         ]
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
+        if backend == BACKEND.IPEX and not HAS_IPEX:
+            self.skipTest("IPEX is not available")
         model = GPTQModel.load(self.model_id, backend=backend, device_map="auto")
         model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
 

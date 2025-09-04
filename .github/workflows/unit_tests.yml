@@ -57,11 +57,14 @@ on:
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
   CUDA_VISIBLE_DEVICES: 0
-  TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0'
+  TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
   PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
   MAX_JOBS: 8
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.248
+  CUDA_VERSION: 128
+  TORCH_VERSION: 2.8.0
+  PYTHON_VERSION: 312
   LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
   GPTQMODEL_FORCE_BUILD: 1
@@ -79,6 +82,7 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
+      cuda_version: ${{ env.CUDA_VERSION }}
     steps:
       - name: Print env
         run: |
@@ -156,7 +160,7 @@ jobs:
 
           torch_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files and 'mlx' not in f]
 
-          torch_test_files = [test for test in torch_test_files if re.match(f'{TEST_REGEX}', test)]
+          torch_test_files = [test for test in torch_test_files if re.match(f'{TEST_REGEX}', test) and 'ipex' not in test and 'xpu' not in test]
           transformers_test_files = [test for test in transformers_test_files if re.match(f'{TEST_REGEX}', test)]
 
           m4_test_files = [f for f in all_tests if ('mlx' in f or 'apple' in f) and (f.strip().removesuffix('.py') in input_test_files_list if input_test_files_list else True)]
@@ -201,10 +205,11 @@ jobs:
       - list-test-files
     if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0822
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
+        - /home/ci/models/pyenv:/opt/pyenv
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
 
@@ -226,6 +231,29 @@ jobs:
 
       - name: Print Env
         run: |
+          python_version=${{ env.PYTHON_VERSION }}
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
+
+          echo "env name: $env_name"
+
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -233,7 +261,7 @@ jobs:
           echo "== nvcc =="
           nvcc --version
           echo "== torch =="
-          pip show torch
+          pip show torch || true
           echo "##### pip list #####"
           pip list
 
@@ -259,7 +287,7 @@ jobs:
 
       - name: Compile
         if: github.event.inputs.artifact_id == '' && !cancelled()
-        timeout-minutes: 35
+        timeout-minutes: 45
         run: python setup.py bdist_wheel
 
       - name: Test install
@@ -290,171 +318,7 @@ jobs:
 
       - name: Clean cache
         if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
-
-  legacy:
-    needs:
-      - build
-      - list-test-files
-      - check-vm
-    runs-on: [ self-hosted, xeon5 ]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.transformers-files != '[]'
-    container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
-      volumes:
-        - /home/ci/models:/monster/data/model
-        - /home/ci/models/huggingface:/github/home/.cache/huggingface
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
-      matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.transformers-files) }}
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ github.event.inputs.repo }}
-          ref: ${{ github.event.inputs.ref }}
-
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
-
-      - name: Print Env
-        run: |
-          echo "== pyenv =="
-          pyenv versions
-          echo "== python =="
-          python --version
-          echo "== nvcc =="
-          nvcc --version
-          echo "== torch =="
-          pip show torch
-          echo "== pip list =="
-          pip list
-
-      - name: Download source from local
-        continue-on-error: true
-        run: |
-          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
-          ls -ahl .
-          sha256=$(sha256sum $file_name)
-          echo "sha256=$sha256"
-          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
-
-      # - name: Download source from github
-      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v5
-      #   with:
-      #     name: source
-      #     path: dist
-      #     run-id: ${{ github.run_id }}
-
-      #      - name: Uncompress source
-      #       continue-on-error: true
-      #      run: |
-      #       find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-      #      ls -ahl .
-      #     tar -zxf gptqmodel_source.tar.gz
-
-      - name: Download wheel from local
-        continue-on-error: true
-        run: |
-          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
-
-          echo "file_name=$file_name"
-
-          if echo "$file_name" | grep -q "gptqmodel"; then
-              mkdir dist || true
-              cd dist
-              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
-              ls -ahl .
-              sha256=$(sha256sum $file_name)
-              echo "sha256=$sha256"
-              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-          fi
-
-      - name: Download artifact from github
-        if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v5
-        with:
-          name: whl
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
-      - name: Install wheel
-        run: |
-          uv pip install tokenicer==0.0.4 -U
-          uv pip install logbar==0.0.3 -U
-          uv pip install -r requirements.txt
-          echo "===== install optimum bitblas parameterized uvicorn ====="
-          uv pip install optimum bitblas==0.0.1.dev13 parameterized uvicorn -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          echo "===== install dist/whl ====="
-          uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          echo "===== init test env ====="
-          echo "===== install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 ====="
-          uv pip install transformers==4.38.2 typing-extensions numpy==1.26.4 peft==0.13.2 -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          if [ "${{ matrix.test_script }}" == "models/test_xverse" ]; then
-            echo "===== install tokenizers==0.15.2 ====="
-            uv pip install tokenizers==0.15.2 -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-          if [ "${{ matrix.test_script }}" == "test_quant_formats" ] || [ "${{ matrix.test_script }}" == "test_perplexity" ]; then
-            echo "===== install auto_round ====="
-            uv pip install auto_round -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          echo "== pip list =="
-          pip list
-
-      - name: Find suitable GPU
-        if: ${{ !contains(matrix.test_script, 'ipex') && !cancelled() }}
-        run: |
-          timestamp=$(date +%s%3N)
-          gpu_id=-1
-
-          url="http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
-          echo "$url"
-          while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "$url")
-
-            if [ "$gpu_id" -lt 0 ]; then
-              echo "http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
-              echo "No available GPU, waiting 5 seconds..."
-              curl http://$XEON5/gpu/status2
-              sleep 5
-            else
-              echo "Allocated GPU ID: $gpu_id"
-            fi
-          done
-          if [[ ! "$gpu_id" =~ ^[0-9]+$ ]]; then
-            echo "gpu_id: $gpu_id is not a number"
-          fi
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
-          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
-          curl http://$XEON5/gpu/status2
-
-      - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: |
-          start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
-          execution_time=$(( $(date +%s) - start_time ))
-          echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://$RUNNER/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&name=${{ matrix.test_script }}"
-
-      - name: Release GPU
-        if: always() && !contains(matrix.test_script, 'ipex')
-        run: curl -X GET "http://$XEON5/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
-
-      - name: Clean cache
-        if: always()
-        run: pip cache purge && uv cache clean && rm -rf ./* ./.*
+        run: rm -rf ./* .[^.] .??* # pip cache purge && uv cache clean &&
 
   torch:
     needs:
@@ -462,19 +326,20 @@ jobs:
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:github-ci-v7
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0822
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
+        - /home/ci/models/pyenv:/opt/pyenv
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v5
@@ -493,6 +358,29 @@ jobs:
 
       - name: Print Env
         run: |
+          python_version=${{ env.PYTHON_VERSION }}
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
+         
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -504,6 +392,9 @@ jobs:
           echo "== pip list =="
           pip list
 
+#      - name: Install requirements
+#        run: |
+#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Download source from local
         continue-on-error: true
@@ -557,7 +448,6 @@ jobs:
       - name: Install wheel
         run: |
           uv pip install -U transformers 
-          uv pip install -U logbar==0.0.3
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
              [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
              [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
@@ -570,6 +460,14 @@ jobs:
             uv pip install auto_round
           fi
 
+          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
+            uv pip install intel_extension_for_pytorch -U
+          fi
+
+          if [[ "${{ matrix.test_script }}" == "models/test_pangu_alpha" ]]; then
+            uv pip install jieba
+          fi
+
           if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
             echo "===== install transformers from git ====="
             uv pip install -U transformers -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
@@ -578,7 +476,7 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install -U logbar==0.0.3
+            uv pip install -U logbar==0.0.4
           fi
 
           if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
@@ -622,9 +520,6 @@ jobs:
             uv pip install transformers==4.48.3
             uv pip install numpy==1.26.3
           fi
-
-          echo "===== uninstall torchvision ====="
-          uv pip uninstall  torchvision
 
           echo "===== install -r requirements.txt ====="
           uv pip install -r requirements.txt
@@ -689,7 +584,8 @@ jobs:
         if: always()
         run: |
           # rm ~/.cache/evalplus/*pkl || true
-          pip cache purge && uv cache clean && rm -rf ./* ./.*
+          # pip cache purge && uv cache clean
+          rm -rf rm -rf ./* .[^.] .??*
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
@@ -697,7 +593,6 @@ jobs:
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
-      - legacy
       - torch
     steps:
       - name: Print statistics
@@ -743,7 +638,7 @@ jobs:
           curl -O http://$RUNNER/scripts/m4/profile.sb
 
           echo "=== installing uv setuptools build"
-          pip install uv setuptools build -U -i http://$RUNNER/simple --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          pip install setuptools build -U -i http://$RUNNER/simple --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
           echo "=== installing test tools"
           uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple

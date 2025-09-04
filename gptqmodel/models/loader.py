@@ -47,10 +47,10 @@ from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
-from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_modules, get_checkpoints,
-                           get_moe_layer_modules, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights,
-                           make_quant, simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes,
-                           find_config_seq_len)
+from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
+                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init,
+                           load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model,
+                           verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -189,8 +189,8 @@ def ModelLoader(cls):
         model_init_kwargs["_fast_init"] = cls.require_fast_init
         # model_init_kwargs["low_cpu_mem_usage"] = True
 
+        cls.before_model_load(cls, load_quantized_model=False)
         model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-
         # from concurrent.futures import ThreadPoolExecutor
         #
         # def fast_pin_model(model):
@@ -298,6 +298,7 @@ def ModelLoader(cls):
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
+        attn_implementation = kwargs.pop("attn_implementation", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -310,6 +311,7 @@ def ModelLoader(cls):
             "subfolder": subfolder,
             "_raise_exceptions_for_missing_entries": False,
             "_commit_hash": commit_hash,
+            "attn_implementation": attn_implementation,
         }
 
         # == step1: prepare configs and file names == #
@@ -444,6 +446,8 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            cls.before_model_load(cls, load_quantized_model=True)
+
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)
                 if model_class is not None and hasattr(model_class, "_supports_flash_attn_2"):
@@ -474,7 +478,10 @@ def ModelLoader(cls):
             model.checkpoint_file_name = model_save_name
 
             if cls.dynamic_expert_index is not None:
-                num_experts = getattr(config, cls.dynamic_expert_index)
+                if hasattr(config, "text_config"):
+                    num_experts = getattr(config.text_config, cls.dynamic_expert_index)
+                else:
+                    num_experts = getattr(config, cls.dynamic_expert_index)
                 cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 
