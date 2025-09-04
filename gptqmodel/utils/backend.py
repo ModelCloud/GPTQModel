@@ -36,6 +36,8 @@ class BACKEND(str, Enum):
     # qqq
     QQQ = "qqq" # marlin based qqq kernel
 
+    AWQ = "awq"
+
     # external
     VLLM = "vllm" # External inference engine: CUDA + ROCm + IPEX
     SGLANG = "sglang" # External inference engine: CUDA + ROCm

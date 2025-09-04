@@ -76,6 +76,7 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     IPEX = "ipex"
     QQQ = "qqq"
+    AWQ = "awq"
 
 
 # quant methods
@@ -83,6 +84,7 @@ class QUANT_METHOD(str, Enum):
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
     QQQ = "qqq"
+    AWQ = "awq"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -101,6 +103,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     QUANT_METHOD.QQQ: {
         FORMAT.QQQ,
+    },
+    QUANT_METHOD.AWQ: {
+        FORMAT.AWQ,
     },
 }
 
@@ -216,6 +221,8 @@ class QuantizeConfig():
     v2_alpha: float = 0.25
     v2_memory_device: str = "auto" #
 
+    zero_point: bool = field(default=True) # awq config
+
     # Skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
@@ -246,6 +253,11 @@ class QuantizeConfig():
         if self.quant_method == QUANT_METHOD.QQQ and self.format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             self.format = FORMAT.QQQ
+
+        # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
+        if self.quant_method == QUANT_METHOD.AWQ and self.format != FORMAT.AWQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.AWQ}`")
+            self.format = FORMAT.AWQ
 
         if self.format not in valid_formats:
             raise ValueError(
@@ -408,7 +420,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ}:
+                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ, QUANT_METHOD.AWQ}:
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
