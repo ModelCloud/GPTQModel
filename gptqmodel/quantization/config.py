@@ -254,6 +254,11 @@ class QuantizeConfig():
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             self.format = FORMAT.QQQ
 
+        # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
+        if self.quant_method == QUANT_METHOD.AWQ and self.format != FORMAT.AWQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.AWQ}`")
+            self.format = FORMAT.AWQ
+
         if self.format not in valid_formats:
             raise ValueError(
                 f"QuantizeConfig: checkpoint `format` used is {self.format}, and the quantization method is {self.quant_method}. "
@@ -415,7 +420,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ}:
+                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ, QUANT_METHOD.AWQ}:
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val

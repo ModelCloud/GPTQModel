@@ -23,6 +23,7 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear.awq import AWQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -56,7 +57,7 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 
     BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
 
-    BACKEND.AWQ: QQQQuantLinear, # TODO change this
+    BACKEND.AWQ: AWQuantLinear,
 })
 
 FORMAT_DICT = {
