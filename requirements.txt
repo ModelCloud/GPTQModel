@@ -12,7 +12,7 @@ pillow>=11.3.0
 hf_transfer>=0.1.9
 huggingface_hub>=0.34.4
 random_word==1.0.13
-tokenicer==0.0.4
+tokenicer==0.0.5
 logbar==0.0.4
 # req for Qwen-Omni model
 # soundfile==0.13.1
