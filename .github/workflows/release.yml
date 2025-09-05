@@ -537,7 +537,8 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-      - uses: actions/setup-python@v5
+          
+      - uses: actions/setup-python@v6
         with:
           python-version: 3.13
           cache: 'pip'
