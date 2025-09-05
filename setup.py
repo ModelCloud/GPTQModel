@@ -47,9 +47,42 @@ version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
 
-BASE_WHEEL_URL = (
-    "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
-)
+# -----------------------------
+# Prebuilt wheel download config
+# -----------------------------
+# Default template (GitHub Releases), can be overridden via env.
+DEFAULT_WHEEL_URL_TEMPLATE = "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
+WHEEL_URL_TEMPLATE = os.environ.get("GPTQMODEL_WHEEL_URL_TEMPLATE")
+WHEEL_BASE_URL = os.environ.get("GPTQMODEL_WHEEL_BASE_URL")
+WHEEL_TAG = os.environ.get("GPTQMODEL_WHEEL_TAG")  # Optional override of release tag
+
+def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
+    """
+    Build the final wheel URL based on:
+      1) GPTQMODEL_WHEEL_URL_TEMPLATE (highest priority)
+      2) GPTQMODEL_WHEEL_BASE_URL (append /{wheel_name})
+      3) DEFAULT_WHEEL_URL_TEMPLATE (GitHub Releases)
+    """
+    # Highest priority: explicit template
+    if WHEEL_URL_TEMPLATE:
+        tmpl = WHEEL_URL_TEMPLATE
+        # If {wheel_name} or {tag_name} not present, treat as base and append name.
+        if ("{wheel_name}" in tmpl) or ("{tag_name}" in tmpl):
+            return tmpl.format(tag_name=tag_name, wheel_name=wheel_name)
+        # Otherwise, join as base
+        if tmpl.endswith("/"):
+            return tmpl + wheel_name
+        return tmpl + "/" + wheel_name
+
+    # Next priority: base URL
+    if WHEEL_BASE_URL:
+        base = WHEEL_BASE_URL
+        if base.endswith("/"):
+            return base + wheel_name
+        return base + "/" + wheel_name
+
+    # Fallback: default GitHub template
+    return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
 BUILD_CUDA_EXT = os.environ.get("BUILD_CUDA_EXT")
 if BUILD_CUDA_EXT is None:
@@ -107,7 +140,6 @@ def get_version_tag() -> str:
         )
         sys.exit(1)
 
-
     CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
@@ -117,7 +149,6 @@ requirements = []
 if not os.getenv("CI"):
     with open('requirements.txt') as f:
         requirements = [line.strip() for line in f if line.strip()]
-
 
 if TORCH_CUDA_ARCH_LIST is None:
     HAS_CUDA_V8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
@@ -200,7 +231,7 @@ if BUILD_CUDA_EXT == "1":
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "--use_fast_math",
-            "-diag-suppress=179,39,177",  
+            "-diag-suppress=179,39,177",
         ]
     else:
         # TODO: waiting for this PR in pytorch to merge for full fix
@@ -211,15 +242,12 @@ if BUILD_CUDA_EXT == "1":
             modified_flags = []
             for flag in flags:
                 if flag.startswith("-") and "CUDA" in flag and not flag.startswith("-I"):
-                    # check/split flag into flag and value
                     parts = flag.split("=", 1)
                     if len(parts) == 2:
                         flag_part, value_part = parts
-                        # replace fist instance of "CUDA" with "HIP" only in the flag and not flag value
                         modified_flag_part = flag_part.replace("CUDA", "HIP", 1)
                         modified_flag = f"{modified_flag_part}={value_part}"
                     else:
-                        # replace fist instance of "CUDA" with "HIP" in flag
                         modified_flag = flag.replace("CUDA", "HIP", 1)
                     modified_flags.append(modified_flag)
                     print(f'Modified flag: {flag} -> {modified_flag}', file=sys.stderr)
@@ -309,8 +337,11 @@ class CachedWheelsCommand(_bdist_wheel):
 
         wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
-        wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{gptqmodel_version}", wheel_name=wheel_filename)
-        print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
+        # Allow tag override via env; default to "v{gptqmodel_version}"
+        tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
+        wheel_url = _resolve_wheel_url(tag_name=tag_name, wheel_name=wheel_filename)
+
+        print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
             urllib.request.urlretrieve(wheel_url, wheel_filename)
@@ -326,7 +357,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
             os.rename(wheel_filename, wheel_path)
         except BaseException:
-            print(f"Precompiled wheel not found in url: {wheel_url}. Building from source...")
+            print(f"Precompiled wheel not found at: {wheel_url}. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
 
