@@ -287,15 +287,16 @@ if BUILD_CUDA_EXT == "1":
                         extra_link_args=extra_link_args,
                         extra_compile_args=extra_compile_args,
                     ),
-                    cpp_ext.CUDAExtension(
-                        'gptqmodel_exllama_eora',
-                        [
-                            "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                            "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
+                    # TODO re-enable after Nvidia readies fixed fused kernel for EoRA
+                    # cpp_ext.CUDAExtension(
+                    #     'gptqmodel_exllama_eora',
+                    #     [
+                    #         "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                    #         "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                    #     ],
+                    #     extra_link_args=extra_link_args,
+                    #     extra_compile_args=extra_compile_args,
+                    # ),
                     # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
                     cpp_ext.CUDAExtension(
                         "gptqmodel_exllamav2_kernels",
