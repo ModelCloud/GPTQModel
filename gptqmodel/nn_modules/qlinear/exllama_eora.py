@@ -89,7 +89,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     ):
         if exllama_eora_import_exception is not None:
             raise ValueError(
-                f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_eora_import_exception}"
+                f"Trying to use the Exllama EoRA v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_eora_import_exception}"
             )
 
         # # backup original values
