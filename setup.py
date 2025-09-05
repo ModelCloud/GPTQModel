@@ -179,6 +179,26 @@ include_dirs = ["gptqmodel_cuda"]
 
 extensions = []
 
+# -----------------------------
+# Per-extension build toggles
+# -----------------------------
+def _env_enabled(val: str) -> bool:
+    if val is None:
+        return True
+    return str(val).strip().lower() not in ("0", "false", "off", "no")
+
+def _env_enabled_any(names, default="1") -> bool:
+    for n in names:
+        if n in os.environ:
+            return _env_enabled(os.environ.get(n))
+    return _env_enabled(default)
+
+BUILD_EORA        = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "1"))
+BUILD_EXLLAMA_V1  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "1"))
+BUILD_EXLLAMA_V2  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+BUILD_QQQ         = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
+BUILD_MARLIN      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+
 if BUILD_CUDA_EXT == "1":
     from distutils.sysconfig import get_python_lib
 
@@ -257,75 +277,87 @@ if BUILD_CUDA_EXT == "1":
             return modified_flags
 
         # convert nvcc flags to hip flags
-        extra_compile_args["nvcc"] =_hipify_compile_flags(extra_compile_args["nvcc"])
+        extra_compile_args["nvcc"] = _hipify_compile_flags(extra_compile_args["nvcc"])
 
     extensions = []
 
     # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-    if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
-        # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
-        # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
+    if sys.platform != "win32": # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
+        # -------------------------
+        # NVIDIA-only extensions
+        # -------------------------
         if not ROCM_VERSION:
             if HAS_CUDA_V8:
-                extensions += [
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_marlin_kernels",
-                        [
-                            "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                            "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                            "gptqmodel_ext/marlin/marlin_repack.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_qqq_kernels",
-                        [
-                            "gptqmodel_ext/qqq/qqq.cpp",
-                            "gptqmodel_ext/qqq/qqq_gemm.cu"
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    # TODO re-enable after Nvidia readies fixed fused kernel for EoRA
-                    # cpp_ext.CUDAExtension(
-                    #     'gptqmodel_exllama_eora',
-                    #     [
-                    #         "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                    #         "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                    #     ],
-                    #     extra_link_args=extra_link_args,
-                    #     extra_compile_args=extra_compile_args,
-                    # ),
-                    # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_exllamav2_kernels",
-                        [
-                            "gptqmodel_ext/exllamav2/ext.cpp",
-                            "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
-                            "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    )
-                ]
+                if BUILD_MARLIN:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_marlin_kernels",
+                            [
+                                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                                "gptqmodel_ext/marlin/marlin_repack.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_QQQ:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_qqq_kernels",
+                            [
+                                "gptqmodel_ext/qqq/qqq.cpp",
+                                "gptqmodel_ext/qqq/qqq_gemm.cu"
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_EXLLAMA_V2:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav2_kernels",
+                            [
+                                "gptqmodel_ext/exllamav2/ext.cpp",
+                                "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                                "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_EORA:
+                    # WARNING: EoRA may be experimental. Keep togglable via env.
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            'gptqmodel_exllama_eora',
+                            [
+                                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
 
-        # both cuda and rocm compatible
-        extensions += [
-
-            cpp_ext.CUDAExtension(
-                "gptqmodel_exllama_kernels",
-                [
-                    "gptqmodel_ext/exllama/exllama_ext.cpp",
-                    "gptqmodel_ext/exllama/cuda_buffers.cu",
-                    "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                    "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                    "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            ),
-        ]
+        # -------------------------
+        # CUDA & ROCm compatible
+        # -------------------------
+        if BUILD_EXLLAMA_V1:
+            extensions += [
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_exllama_kernels",
+                    [
+                        "gptqmodel_ext/exllama/exllama_ext.cpp",
+                        "gptqmodel_ext/exllama/cuda_buffers.cu",
+                        "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                        "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                        "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
+                    ],
+                    extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                )
+            ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 

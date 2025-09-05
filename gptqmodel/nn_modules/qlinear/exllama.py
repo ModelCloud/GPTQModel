@@ -80,7 +80,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
     ):
         if exllama_import_exception is not None:
             raise ValueError(
-                f"Trying to use the exllama backend, but could not import the C++/CUDA dependencies with the following error: {exllama_import_exception}"
+                f"Trying to use the Exllama v1 backend but could not import the kernel cpp extension error: {exllama_import_exception}. Please manually reinstall and recompile package as Exllama v1 kernel extension is not part of prebuilt wheels."
             )
 
         # backup original values
