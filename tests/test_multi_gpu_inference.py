@@ -63,4 +63,4 @@ class TestMultiGPUInference(unittest.TestCase):
             skip_special_tokens=False
         )
 
-        self.assertIn("2 p's", result.lower(), "The generated result should contain '2 p's'")
+        self.assertIn("2</longcat_s>", result.lower(), "The generated result should contain '2</longcat_s>'")
