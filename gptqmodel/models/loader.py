@@ -22,6 +22,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
 import torch
+import accelerate
 import transformers
 
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
@@ -256,6 +257,7 @@ def ModelLoader(cls):
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            max_memory: Optional[dict] = None,
             **kwargs,
     ):
         # normalized device + device_map into single device
@@ -265,7 +267,6 @@ def ModelLoader(cls):
         if isinstance(backend, str):
             backend =  (backend)
         device = auto_select_device(device, backend)
-        device_map = device.to_device_map()
 
         if backend == BACKEND.VLLM:
             import os
@@ -512,6 +513,40 @@ def ModelLoader(cls):
 
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
+
+        if isinstance(device_map, str) and device_map not in [
+                "auto",
+                "balanced",
+                "balanced_low_0",
+                "sequential",
+            ]:
+                raise ValueError(
+                    "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
+                    "'sequential'."
+                )
+                
+        if isinstance(device_map, dict):
+            max_memory = None
+        else:
+            if device is None and not device_map and not max_memory:
+                device_map = "auto"
+            if device is not None:
+                device = torch.device(device)
+                if not max_memory and not device_map:
+                    device_map = {"": device.index if device.type == "cuda" else device.type}
+            if not isinstance(device_map, dict) and device_map != "sequential":
+                max_memory = accelerate.utils.get_balanced_memory(
+                    model=model,
+                    max_memory=max_memory,
+                    no_split_module_classes=[cls.layer_type],
+                    low_zero=(device_map == "balanced_low_0"),
+                )
+        if not isinstance(device_map, dict):
+            device_map = accelerate.infer_auto_device_map(
+                model,
+                max_memory=max_memory,
+                no_split_module_classes=[cls.layer_type],
+            )
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
