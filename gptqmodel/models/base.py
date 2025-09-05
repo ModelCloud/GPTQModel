@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 import torch._dynamo
 import torch.nn as nn
+from awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from tokenicer import Tokenicer
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
@@ -459,6 +460,18 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = [QQQProcessor(**args)]
+        elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+            from ..looper.awq_processor import AWQProcessor
+            awq_processor = AWQProcessor(**args)
+
+            # TODO AWQ_BATCH_SIZE
+            # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
+            # TODO check model_type
+            # model_type = check_and_get_model_type(quant_path, trust_remote_code)
+            print("self.model.config.model_type",self.model.config.model_type)
+            awq_processor.awq_model = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
+
+            quantize_processor = [awq_processor]
 
         else:
             from ..looper.gptq_processor import GPTQProcessor

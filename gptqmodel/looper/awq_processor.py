@@ -26,15 +26,16 @@ from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..quantization.awq_quantizer import AWQ
+# from ..quantization.awq.quantize.quantizer import AwqQuantizer
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
-from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
 from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
-class QQQProcessor(LoopProcessor):
+class AWQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
                  calibration_dataset_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
@@ -46,6 +47,8 @@ class QQQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+
+        self.awq_model = None
 
     def log_plotly(self):
         task = self.logger_task
@@ -62,7 +65,7 @@ class QQQProcessor(LoopProcessor):
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def set_calibration_dataset(self, calibration_dataset):
-        raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
+        raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         # entire module is skipped
@@ -82,7 +85,7 @@ class QQQProcessor(LoopProcessor):
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
-        tmp = QQQ(module=module, qcfg=qcfg_clone)
+        tmp = AWQ(module=module, qcfg=qcfg_clone, awq_model=self.awq_model)
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
@@ -93,9 +96,6 @@ class QQQProcessor(LoopProcessor):
             log.info(f"Quantize: Enabling fwd buffered mode for: `{module.name}`")
             tmp.fwd_inputs_buffered = True
 
-        tmp.quantizer.configure(
-            perchannel=True,
-        )
         self.tasks[module.name] = tmp
 
     def is_skipped(self, module: NamedModule) -> bool:
