@@ -93,7 +93,7 @@ class QQQQuantLinear(BaseQuantLinear):
         **kwargs):
         if qqq_import_exception is not None:
             raise ValueError(
-                f"Trying to use the qqq backend, but could not import the C++/CUDA dependencies with the following error: {qqq_import_exception}"
+                f"Trying to use the QQQ backend but could not import the kernel cpp extension with the following error: {qqq_import_exception}. Please manually reinstall and recompile package as QQQ kernel extension is not part of prebuilt wheels."
             )
 
         self.tile = 16
