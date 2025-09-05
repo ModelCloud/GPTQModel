@@ -200,7 +200,7 @@ if BUILD_CUDA_EXT == "1":
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "--use_fast_math",
-            "-diag-suppress=179,39",  # 186
+            "-diag-suppress=179,39,177",  
         ]
     else:
         # TODO: waiting for this PR in pytorch to merge for full fix
