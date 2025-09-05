@@ -61,6 +61,9 @@ env:
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
   MAX_JOBS: 8
+  GPTQMODEL_BUILD_QQQ: 0
+  GTTQMODEL_BUILD_EORA: 0
+  GPTQMODEL_BUILD_EXLLAMA_V1: 0
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
