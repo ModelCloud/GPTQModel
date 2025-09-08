@@ -103,6 +103,7 @@ from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.llama4 import Llama4GPTQ  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
+from .definitions.klear import KlearGPTQ  # noqa: E402
 from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
@@ -147,6 +148,7 @@ MODEL_MAP = {
     "bloom": BloomGPTQ,
     "gpt_neo": GPTNeoGPTQ,
     "kimi_k2": KimiK2GPTQ,
+    "klear": KlearGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
@@ -162,15 +164,15 @@ MODEL_MAP = {
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
     "cohere2": Cohere2GPTQ,
-    "RefinedWebModel": RWGPTQ,
-    "RefinedWeb": RWGPTQ,
+    "refinedWebModel": RWGPTQ,
+    "refinedWeb": RWGPTQ,
     "falcon": RWGPTQ,
     "baichuan": BaiChuanGPTQ,
     "internlm": InternLMGPTQ,
     "internlm2": InternLM2GPTQ,
     "qwen": QwenGPTQ,
     "mistral": MistralGPTQ,
-    "Yi": YiGPTQ,
+    "yi": YiGPTQ,
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
     "nemotron-nas": DeciLMGPTQ,
