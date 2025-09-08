@@ -16,6 +16,7 @@
 
 import copy
 import functools
+import inspect
 from collections import defaultdict
 from typing import Callable, Optional, Tuple, List, Dict
 
@@ -78,6 +79,12 @@ class AWQProcessor(LoopProcessor):
         # FIXME Temporarily set the version to "gemm". Then use backend to do a mapping.
         self.version = "gemm"
 
+        # The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len.
+        self.max_calib_seq_len = 512
+
+        # Whether to scale using both w/x or just x.
+        self.duo_scaling = True
+
         self.modules, self.module_kwargs, self.inps = self.init_quant()
 
     def log_plotly(self):
@@ -99,7 +106,12 @@ class AWQProcessor(LoopProcessor):
 
     def init_quant(self):
         modules = self.awq_model.get_model_layers(self.model)
-        samples = self.calibration_dataset
+        # make sure samples tensor's shape is [1, max_calib_seq_len]
+        samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration_dataset if data['input_ids'].shape[1] >= self.max_calib_seq_len]
+
+        # FIXME TEST reduce samples size
+        samples = samples[:60]
+
         samples = torch.cat(samples, dim=0)
 
         inps = []
@@ -658,6 +670,25 @@ class AWQProcessor(LoopProcessor):
             q_linear.to(next(module.parameters()).device)
             set_op_by_name(module, name, q_linear)
             clear_memory()
+
+    def _sanitize_kwargs(self, inputs_kwargs, module):
+        """
+        Remove the arguments that are not supported in the module's
+        forward pass to avoid breaking behaviour between different versions
+        of transformers.
+
+        Args:
+            inputs_kwargs (`dict`):
+                The input dictionary to pass to the model layer
+            module (`torch.nn.Module`):
+                Target module to quantize.
+        """
+        module_signature = inspect.signature(module.forward).parameters
+        sanitized_kwargs = {}
+        for k, v in inputs_kwargs.items():
+            if k in module_signature:
+                sanitized_kwargs[k] = v
+        return sanitized_kwargs
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         # entire module is skipped

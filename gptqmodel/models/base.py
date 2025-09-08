@@ -467,7 +467,10 @@ class BaseGPTQModel(nn.Module):
             # TODO check model_type
             # model_type = check_and_get_model_type(quant_path, trust_remote_code)
             print("self.model.config.model_type", self.model.config.model_type)
-            args["awq_model"] = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
+
+            awq_model = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
+            awq_model.model_type = self.model.config.model_type
+            args["awq_model"] = awq_model
             args["model"] = self.model
             args["batch_size"] = batch_size
             awq_processor = AWQProcessor(**args)
