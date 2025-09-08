@@ -81,3 +81,4 @@ from .yi import YiGPTQ
 from .falcon_h1 import FalconH1GPTQ
 from .pangu_alpha import PanguAlphaGPTQ
 from .longcat_flash import LongCatFlashGPTQ
+from .apertus import ApertusGPTQ

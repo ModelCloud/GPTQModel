@@ -65,6 +65,7 @@ from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
+from .definitions.apertus import ApertusGPTQ  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
 from .definitions.chatglm import ChatGLM  # noqa: E402
@@ -140,6 +141,7 @@ random.seed(787)
 numpy.random.seed(787)
 
 MODEL_MAP = {
+    "apertus": ApertusGPTQ,
     "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
     "gpt_neo": GPTNeoGPTQ,
