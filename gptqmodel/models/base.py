@@ -462,15 +462,15 @@ class BaseGPTQModel(nn.Module):
             quantize_processor = [QQQProcessor(**args)]
         elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
-            awq_processor = AWQProcessor(**args)
-
             # TODO AWQ_BATCH_SIZE
             # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
             # TODO check model_type
             # model_type = check_and_get_model_type(quant_path, trust_remote_code)
-            print("self.model.config.model_type",self.model.config.model_type)
-            awq_processor.awq_model = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
-
+            print("self.model.config.model_type", self.model.config.model_type)
+            args["awq_model"] = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
+            args["model"] = self.model
+            args["batch_size"] = batch_size
+            awq_processor = AWQProcessor(**args)
             quantize_processor = [awq_processor]
 
         else:

@@ -302,6 +302,10 @@ class LoopProcessor:
     def pre_process_streaming(self, module: NamedModule):
         pass
 
+    # The module here is model.layers[x]
+    def pre_quantize(self, module: Module, device: torch.device):
+        pass
+
     # do work and return processor.self state which will updated/merged
     def process(self, module: NamedModule, device: torch.device = None):
         pass

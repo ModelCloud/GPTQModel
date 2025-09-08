@@ -21,6 +21,7 @@ from typing import List
 
 import torch
 
+from .awq_processor import AWQProcessor
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
@@ -253,6 +254,11 @@ class ModuleLooper():
             for p_index, processor in enumerate(self.processors):
                 processor.log_call_count = 0 # reset
                 processor.collect_memory_info(layer_index)
+
+                # FIXME For a quick test
+                if isinstance(processor, AWQProcessor):
+                    processor.pre_quantize(module, cur_layer_device)
+                    continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
                 if is_lm_head_module:

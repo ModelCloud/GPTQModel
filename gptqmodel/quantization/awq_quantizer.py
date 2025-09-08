@@ -31,7 +31,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from .awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_Marlin, WQLinear_GEMVFast
 from .awq.quantize.scale import apply_scale
-from .awq.utils.module import get_op_name, append_str_prefix
+from .awq.utils.module import get_op_name, append_str_prefix, set_op_by_name
 from .awq.utils.utils import clear_memory, get_best_device
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
