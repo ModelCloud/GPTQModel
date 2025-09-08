@@ -103,6 +103,7 @@ from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.llama4 import Llama4GPTQ  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
+from .definitions.klear import KlearGPTQ  # noqa: E402
 from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
@@ -147,6 +148,7 @@ MODEL_MAP = {
     "bloom": BloomGPTQ,
     "gpt_neo": GPTNeoGPTQ,
     "kimi_k2": KimiK2GPTQ,
+    "Klear": KlearGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
