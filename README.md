@@ -168,17 +168,17 @@ Native support support some of the most popular multi-modal models:
 ## Model Support  
 | Model             |   |                   |   |                |   |                |   |               |   |
 |-------------------|---|-------------------|---|----------------|---|----------------|---|---------------|---|
-| Apertus           | ✅ | ERNIE 4.5         | ✅ | Hymba          | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL | ✅ |
-| Baichuan          | ✅ | EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | MOSS           | ✅ | Qwen 2.5 Omni | ✅ |
-| Bloom             | ✅ | Falcon (H1)       | ✅ | Llama 1-3.3    | ✅ | MPT            | ✅ | RefinedWeb    | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3       | ✅ | Llama 3.2 VL   | ✅ | OPT            | ✅ | StableLM      | ✅ |
-| CodeGen           | ✅ | GPTBigCod         | ✅ | Llama 4        | ✅ | OLMo2          | ✅ | StarCoder2    | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo/GPT-NeoX | ✅ | LongCatFlash   | ✅ | Ovis 1.6/2     | ✅ | TeleChat2     | ✅ |
-| DBRX Converted    | ✅ | GPT-2             | ✅ | LongLLaMA      | ✅ | Phi 1-4        | ✅ | Yi            | ✅ |
-| Deci              | ✅ | GPT-J             | ✅ | Instella       | ✅ | Nemotron Ultra | ✅ | Seed-OSS      | ✅ |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE        | ✅ |
-| DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |               |   |
-| Dream             | ✅ | GRIN-MoE          | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE   | ✅ |               |   |
+| Apertus           | ✅ | ERNIE 4.5         | ✅ | Hymba          | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE  | ✅ |
+| Baichuan          | ✅ | EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL | ✅ |
+| Bloom             | ✅ | Falcon (H1)       | ✅ | Kimi K2        | ✅ | MOSS           | ✅ | Qwen 2.5 Omni | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3       | ✅ | Llama 1-3.3    | ✅ | MPT            | ✅ | RefinedWeb    | ✅ |
+| CodeGen           | ✅ | GPTBigCod         | ✅ | Llama 3.2 VL   | ✅ | OPT            | ✅ | StableLM      | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo/GPT-NeoX | ✅ | Llama 4        | ✅ | OLMo2          | ✅ | StarCoder2    | ✅ |
+| DBRX Converted    | ✅ | GPT-2             | ✅ | LongCatFlash   | ✅ | Ovis 1.6/2     | ✅ | TeleChat2     | ✅ |
+| Deci              | ✅ | GPT-J             | ✅ | LongLLaMA      | ✅ | Phi 1-4        | ✅ | Yi            | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | Instella       | ✅ | Nemotron Ultra | ✅ | Seed-OSS      | ✅ |
+| DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE        | ✅ |
+| Dream             | ✅ | GRIN-MoE          | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |               |   |
 
 ## Platform and HW Support 
 
