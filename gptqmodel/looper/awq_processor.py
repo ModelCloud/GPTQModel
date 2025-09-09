@@ -145,7 +145,10 @@ class AWQProcessor(LoopProcessor):
         # patch layer 0 to catch input and kwargs
         modules[0] = Catcher(modules[0])
         try:
-            self.model(samples.to(next(self.model.parameters()).device))
+            # If use_cache=True, layer_kwargs will contain past_key_values instead of attention_mask.
+            # Autoawq does not pass the use_cache parameter here.
+            # I haven't found the root cause yet.
+            self.model(samples.to(next(self.model.parameters()).device), use_cache=False)
         except ValueError:  # work with early exit
             pass
         modules[0] = modules[0].module  # restore
