@@ -18,6 +18,7 @@ from ..base import BaseGPTQModel
 
 
 class NemotronHGPTQ(BaseGPTQModel):
+    require_monkeypatch = True
     layer_modules_strict = False
     require_pkgs_version = ["transformers<=4.48.3"]
 
@@ -29,8 +30,71 @@ class NemotronHGPTQ(BaseGPTQModel):
         ["mixer.k_proj", "mixer.v_proj", "mixer.q_proj"],
         ["mixer.o_proj"],
 
+        ["mixer.conv1d"]
+
         ["mixer.in_proj", "mixer.out_proj"],
 
         ["mixer.gate_proj", "mixer.up_proj"],
         ["mixer.down_proj"],
     ]
+
+    def monkey_patch(self):
+        if not self.load_quantized_model:
+            return
+
+        from transformers.utils.import_utils import (
+            is_causal_conv1d_available,
+            is_flash_attn_2_available,
+            is_mamba_2_ssm_available,
+        )
+
+        if is_mamba_2_ssm_available():
+            from mamba_ssm.ops.triton.selective_state_update import selective_state_update
+            from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined
+        else:
+            mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined, selective_state_update = None, None, None
+
+        try:
+            #from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
+            from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn
+        except ImportError:
+            raise ImportError("mamba-ssm is required by the Mamba model but cannot be imported")
+
+        if is_causal_conv1d_available():
+            from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+        else:
+            causal_conv1d_update, causal_conv1d_fn = None, None
+
+        if is_flash_attn_2_available():
+            from transformers.modeling_flash_attention_utils import _flash_attention_forward
+
+        is_fast_path_available = all(
+            (
+                selective_state_update,
+                mamba_chunk_scan_combined,
+                mamba_split_conv1d_scan_combined,
+                causal_conv1d_fn,
+                causal_conv1d_update,
+            )
+        )
+
+        def forward(
+            self,
+            hidden_states,
+            cache_params=None,
+            cache_position=None,
+            attention_mask=None,
+        ):
+            if is_fast_path_available and "cuda" in self.in_proj.qweight.device.type:
+                return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
+            dtype = hidden_states.dtype
+            if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
+                # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
+                hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
+
+            return self.torch_forward(hidden_states, cache_params, cache_position, attention_mask)
+
+        for layer in self.model.backbone.layers:
+            if layer.mixer.__class__.__name__ == "NemotronHMamba2Mixer":
+                mixer_class = type(layer.mixer)
+                mixer_class.forward = forward
