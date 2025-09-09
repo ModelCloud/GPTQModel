@@ -32,7 +32,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_empty_cache, torch_sync
+from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
@@ -576,7 +576,6 @@ class GPTQ:
             except Exception as e:
                 #log.warn(f'Failed to move Q from {Q.device} to {self.module.weight.data.device} retrying with torch_empty_cache, {e}')
                 try:
-                    torch_empty_cache()
                     Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
                 except Exception as e2:
                     log.error(f'Failed to move Q from {Q.device} to {self.module.weight.data.device}, {e2}')
