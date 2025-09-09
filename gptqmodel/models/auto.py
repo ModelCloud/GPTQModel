@@ -136,6 +136,7 @@ from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
 from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
+from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -221,6 +222,7 @@ MODEL_MAP = {
     "seed_oss": SeedOSSGPTQ,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashGPTQ,
+    "llava_qwen2": LlavaQwen2GPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
