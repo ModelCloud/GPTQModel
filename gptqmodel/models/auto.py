@@ -137,6 +137,7 @@ from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
 from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
+from .definitions.nemotron_h import NemotronHGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -223,6 +224,7 @@ MODEL_MAP = {
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashGPTQ,
     "llava_qwen2": LlavaQwen2GPTQ,
+    "nemotron_h": NemotronHGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
