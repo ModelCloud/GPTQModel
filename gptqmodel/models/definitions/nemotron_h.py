@@ -49,12 +49,6 @@ class NemotronHGPTQ(BaseGPTQModel):
         else:
             mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined, selective_state_update = None, None, None
 
-        try:
-            #from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
-            from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn
-        except ImportError:
-            raise ImportError("mamba-ssm is required by the Mamba model but cannot be imported")
-
         if is_causal_conv1d_available():
             from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
         else:
