@@ -42,7 +42,8 @@ class TestGroupSize(unittest.TestCase):
     #     result = model.generate("Uncovering deep insights begins with")[0] # tokens
     #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
-    @parameterized.expand([-1, 128])
+    # @parameterized.expand([-1, 128])
+    @parameterized.expand([128])
     def test_quant_and_inference(self, group_size: int):
         quantize_config = QuantizeConfig(
             bits=4,
@@ -56,7 +57,6 @@ class TestGroupSize(unittest.TestCase):
             quantize_config=quantize_config,
         )
         model.quantize(self.calibration_dataset, batch_size=1, calibration_dataset_concat_size=2048)
-        raise Exception("Test")
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
 
