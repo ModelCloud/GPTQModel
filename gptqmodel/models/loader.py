@@ -21,8 +21,8 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
-import torch
 import accelerate
+import torch
 import transformers
 
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
@@ -524,7 +524,7 @@ def ModelLoader(cls):
                     "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
                     "'sequential'."
                 )
-                
+
         if isinstance(device_map, dict):
             max_memory = None
         else:

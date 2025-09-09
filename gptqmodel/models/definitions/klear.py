@@ -19,6 +19,7 @@ from ..base import BaseGPTQModel
 
 
 class KlearGPTQ(BaseGPTQModel):
+    layer_modules_strict = False
     dynamic_expert_index = "num_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]

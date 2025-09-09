@@ -99,11 +99,13 @@ from .definitions.hymba import HymbaGPTQ  # noqa: E402
 from .definitions.instella import InstellaGPTQ  # noqa: E402
 from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
+from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
+from .definitions.klear import KlearGPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
 from .definitions.llama4 import Llama4GPTQ  # noqa: E402
+from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
-from .definitions.klear import KlearGPTQ  # noqa: E402
 from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
@@ -113,6 +115,7 @@ from .definitions.mllama import MLlamaGPTQ  # noqa: E402
 from .definitions.mobilellm import MobileLLMGPTQ  # noqa: E402
 from .definitions.moss import MOSSGPTQ  # noqa: E402
 from .definitions.mpt import MPTGPTQ  # noqa: E402
+from .definitions.nemotron_h import NemotronHGPTQ  # noqa: E402
 from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
 from .definitions.opt import OPTGPTQ  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
@@ -135,8 +138,6 @@ from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
-from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
-from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -223,6 +224,7 @@ MODEL_MAP = {
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashGPTQ,
     "llava_qwen2": LlavaQwen2GPTQ,
+    "nemotron_h": NemotronHGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
