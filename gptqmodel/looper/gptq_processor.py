@@ -30,7 +30,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, DEVICE_1, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, DEVICE_1, torch_empty_cache, torch_streamCtx, torch_sync
 
 log = setup_logger()
 lock = threading.Lock()
@@ -221,14 +221,6 @@ class GPTQProcessor(LoopProcessor):
 
         with self.lock:
             self.tasks[module.name].free()
-
-        # prepare for module.forward post generate
-        # module.weight.data = torch.empty(1,1) # hack to remove weight.data
-        # if auto_gc:
-        #     torch_empty_cache()
-        # with torch_streamCtx(DEVICE_0_STREAM):
-        #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
-        wq = wq.to(device=DEVICE_0, non_blocking=False)
 
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
 
