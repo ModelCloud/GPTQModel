@@ -30,7 +30,6 @@ class KlearGPTQ(BaseGPTQModel):
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
 
-        ["mlp.gate"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj", "mlp.shared_experts.down_proj"],
 
         # uses dynamic_expert_index
