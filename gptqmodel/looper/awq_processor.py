@@ -71,7 +71,7 @@ class AWQProcessor(LoopProcessor):
         # "A high number of parallel samples can result in OOM during quantization if max_calib_samples is high enough. "
         # "If None, runs through all samples at the same time. "
         # "You can set this to a low number for more memory efficient quantization."
-        self.n_parallel_calib_samples = batch_size
+        self.n_parallel_calib_samples = None if batch_size == 1 else batch_size
 
         # This argument avoids real quantization by only applying the scales without quantizing down to FP16.
         self.export_compatible = False
@@ -375,7 +375,7 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 4]: Quantize weights
         if not self.export_compatible:
-            self._apply_quant(self.module, named_linears)
+            self._apply_quant(module, named_linears)
 
         clear_memory()
 
@@ -659,8 +659,8 @@ class AWQProcessor(LoopProcessor):
 
             q_linear = q_linear_module.from_linear(
                 linear=linear_layer,
-                w_bit=self.w_bit,
-                group_size=self.group_size,
+                w_bit=self.qcfg.bits,
+                group_size=self.qcfg.group_size,
                 init_only=False,
                 scales=scales,
                 zeros=zeros,
