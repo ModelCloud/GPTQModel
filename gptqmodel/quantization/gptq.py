@@ -288,11 +288,10 @@ class GPTQ:
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
-        if not TORCH_GTE_28:
+        if not TORCH_GTE_28 and not self.qcfg.mock_quantization:
             self.hessian_inverse = torch_compile(self.hessian_inverse)
 
-        # Mock heavy computations
-        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+        if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
             self.hessian_inverse = self._mock_hessian_inverse
 
@@ -367,13 +366,12 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+        if self.qcfg.mock_quantization:
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
 
-                # Clone the weights like the original code to maintain device/dtype consistency
-                W1 = W[:, i1:i2].clone()
+                W1 = W[:, i1:i2]
                 Q1 = torch.zeros_like(W1)
 
                 # Handle group quantization parameters efficiently (similar to original)
@@ -559,16 +557,10 @@ class GPTQ:
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
-        # Ensure Q is on the same device as the original module weight before type conversion
-        if Q.device != self.module.weight.data.device:
-            Q = Q.to(device=self.module.weight.data.device)
-
         if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
         else:
-            Q = Q.type_as(self.module.weight.data)
-
-        # Q = Q.to(device=use_device)
+            Q = Q.to(self.module.weight.dtype)
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -576,6 +568,18 @@ class GPTQ:
 
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+
+        # prepare for module.forward post generate, move to weight device with retry
+        if Q.device != self.module.weight.data.device:
+            try:
+                Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+            except Exception as e:
+                #log.warn(f'Failed to move Q from {Q.device} to {self.module.weight.data.device} retrying with torch_empty_cache, {e}')
+                try:
+                    Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+                except Exception as e2:
+                    log.error(f'Failed to move Q from {Q.device} to {self.module.weight.data.device}, {e2}')
+                    raise
 
         duration = time.time() - start
 
