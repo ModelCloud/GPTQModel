@@ -25,12 +25,12 @@ import transformers
 from torch.nn import Module
 from torch import nn
 
-from .. import BACKEND
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..nn_modules.qlinear.awq import AWQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_Marlin, WQLinear_GEMVFast
 from ..quantization.awq.quantize.scale import apply_scale, apply_clip
 from ..quantization.awq.utils.module import get_op_name, get_named_linears, exclude_layers_to_not_quantize, \
@@ -825,25 +825,12 @@ class AWQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        model.qlinear_kernel = pack_model(
-            model=model.model,
-            quant_result=self.results(),
-            bits=self.qcfg.bits,
-            group_size=self.qcfg.group_size,
-            backend=BACKEND.QQQ,
-            desc_act=self.qcfg.desc_act,
-            format=self.qcfg.format,
-            quant_method=self.qcfg.quant_method,
-            lm_head_name=model.lm_head,
-            dynamic=self.qcfg.dynamic,
-            parallel_packing=self.qcfg.parallel_packing,
-            pack_dtype=self.qcfg.pack_dtype,
-        )
+        model.qlinear_kernel = AWQuantLinear
 
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = QUANT_METHOD.QQQ
+        model.quantize_config.quant_method = QUANT_METHOD.AWQ
 
         super().finalize(model=model, **kwargs)
 
@@ -855,4 +842,4 @@ class AWQProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
-        return "qqq"
+        return "awq"

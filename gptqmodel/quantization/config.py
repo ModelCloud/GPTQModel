@@ -487,6 +487,9 @@ class QuantizeConfig():
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
 
+        if self.format == FORMAT.AWQ:
+            out["zero_point"] = self.zero_point
+
         dynamic = out["dynamic"]
         if dynamic:
             # dynamic adapter config is only used in the quantize phase and is deleted when saving.
