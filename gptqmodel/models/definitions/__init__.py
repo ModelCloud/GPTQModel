@@ -83,3 +83,4 @@ from .pangu_alpha import PanguAlphaGPTQ
 from .longcat_flash import LongCatFlashGPTQ
 from .apertus import ApertusGPTQ
 from .klear import KlearGPTQ
+from .llava_qwen2 import LlavaQwen2GPTQ
