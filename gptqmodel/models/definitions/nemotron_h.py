@@ -18,6 +18,8 @@ from ..base import BaseGPTQModel
 
 
 class NemotronHGPTQ(BaseGPTQModel):
+    require_pkgs_version = ["transformers<=4.48.3"]
+
     base_modules = ["backbone.embeddings"]
 
     layers_node = "backbone.layers"
