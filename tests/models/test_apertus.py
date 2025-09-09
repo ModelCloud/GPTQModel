@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from model_test import ModelTest
 from gptqmodel import BACKEND
+from model_test import ModelTest
+
 
 class TestApertus(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Apertus-8B-Instruct-2509/"
