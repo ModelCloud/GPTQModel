@@ -30,8 +30,6 @@ class NemotronHGPTQ(BaseGPTQModel):
         ["mixer.k_proj", "mixer.v_proj", "mixer.q_proj"],
         ["mixer.o_proj"],
 
-        ["mixer.conv1d"],
-
         ["mixer.in_proj", "mixer.out_proj"],
 
         ["mixer.gate_proj", "mixer.up_proj"],
