@@ -2,7 +2,7 @@
 <div align=center>
 <img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=500>
 </div>
-<h1 align="center">GPTQModel</h1>
+<h1 align="center">GPT-QModel</h1>
 </p>
 <p align="center">LLM model compression/quantization toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU and Intel/AMD/Apple CPU via HF, vLLM, and SGLang.</p>
 <p align="center">
@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 09/10/2025 4.2.0-dev (main): ✨ New Models Support: Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. 
 * 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
 * 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 * 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
@@ -109,18 +110,18 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ [0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 </details>
 
-## What is GPTQModel?
-GPTQModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
+## What is GPT-QModel?
+GPTQ-Model is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
 Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
-GPTQModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
+GPTQ-Model not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
-GPTQModel is a modular design supporting multiple quantization methods and feature extensions.
+GPTQ-Model is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization Feature |  GPTQModel | Transformers | vLLM  | SGLang | Lora Training |
+| Quantization Feature |  GPTQ-Model | Transformers | vLLM  | SGLang | Lora Training |
 |----------------------|---|---|---|---|---------------|
 | GPTQ                 | ✅ | ✅ | ✅ | ✅ | ✅             | 
 | EoRA                 | ✅ | ✅ | ✅ | ✅ | x             | 
@@ -183,7 +184,7 @@ Native support support some of the most popular multi-modal models:
 
 ## Platform and HW Support 
 
-GPTQModel is validated for Linux, MacOS, and Windows 11:
+GPTQ-Model is validated for Linux, MacOS, and Windows 11:
 
 | Platform        | Device        |     |  Optimized Arch              | Kernels                                                     |
 |-----------------|---------------| --- | -------------- |-------------------------------------------------------------| 
@@ -219,7 +220,7 @@ pip install -v . --no-build-isolation
 ```
 
 ### Inference
-Three line api to use `GPTQModel` for gptq model inference:
+Three line api to use `GPT-QModel` for gptq model inference:
 
 ```py
 from gptqmodel import GPTQModel
@@ -300,7 +301,7 @@ print(model.tokenizer.decode(result)) # string output
 
 ### Quantization + EoRA Accuracy Recovery 
 
-GPTQModel now support EoRA, a LoRA method that can further imporve the accuracy of the quantized model
+GPT-QModel now support EoRA, a LoRA method that can further imporve the accuracy of the quantized model
 ```py
 # higher rank improves accuracy at the cost of vram usage
 # suggestion: test rank 64 and 32 before 128 or 256 as latter may overfit while increasing memory usage
