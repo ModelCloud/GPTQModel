@@ -432,7 +432,10 @@ class ModuleLooper():
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []
                             def process_module(name, m):
-                                processor.process(module=m, auto_gc=auto_gc)
+                                if isinstance(processor, GPTQProcessor):
+                                    processor.process(module=m, auto_gc=auto_gc, fail_safe=(name in moe_skip_modules))
+                                else:
+                                    processor.process(module=m, auto_gc=auto_gc)
                                 return name, m
 
                             for name in subset:
