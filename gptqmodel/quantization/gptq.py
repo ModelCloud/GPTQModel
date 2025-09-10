@@ -281,6 +281,7 @@ class GPTQ:
     def quantize(
             self,
             blocksize=128,
+            fail_safe: bool = False,
     ):
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
@@ -366,7 +367,8 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization:
+        if self.qcfg.mock_quantization or fail_safe:
+            log.Info(f"Quantization: Module `{self.name}` -> Using fail safe mode")
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
