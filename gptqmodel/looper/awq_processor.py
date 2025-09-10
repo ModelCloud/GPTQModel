@@ -642,13 +642,31 @@ class AWQProcessor(LoopProcessor):
 
     def _apply_quant(self, module, named_linears: Dict[str, NamedModule], start_time, scales_list):
         for name, named_module in named_linears.items():
+            self.pb.title(f"Quantizing {named_module.name} in layer ").draw()
             linear_layer = named_module.module
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.to(get_best_device()).half()
 
-            linear_layer.weight.data, scales, zeros = self.pseudo_quantize_tensor(
+            wq, scales, zeros = self.pseudo_quantize_tensor(
                 linear_layer.weight.data
             )
+            if self.calculate_w_wq_diff:
+                if named_module.weight.data.dtype == torch.float16:
+                    # diff in float16
+                    w_wq_diff = linear_layer.weight.data - wq
+                else:
+                    # diff in float32
+                    w_wq_diff = linear_layer.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+
+                named_module.state.update({
+                    "w_wq_diff": w_wq_diff,
+                })
+
+            named_module.state.update({
+                "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+            })
+
+            linear_layer.weight.data = wq
 
             if self.version == "gemm":
                 scales = scales.t().contiguous()
@@ -685,7 +703,7 @@ class AWQProcessor(LoopProcessor):
             # records
             duration = time.time() - start_time
 
-            avg_loss = None
+            avg_loss = 999999999
             for _, layer_names, _, loss in scales_list:
                 if any(named_module.name in layer_name for layer_name in layer_names):
                     avg_loss = loss
@@ -696,13 +714,14 @@ class AWQProcessor(LoopProcessor):
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: named_module.layer_index,
                 PROCESS_LOG_MODULE: named_module.name,
-                QUANT_LOG_LOSS: "N/A" if avg_loss else f"{avg_loss:.10f}",
+                QUANT_LOG_LOSS: f"{avg_loss:.10f}",
                 QUANT_LOG_NSAMPLES: f"{self.nsamples}",
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
                 PROCESS_MAX_MEMORY: get_max_memory(),
             }
+            self.module_names.append(f"layer-{named_module.layer_index}-{named_module.name}")
 
             with self.lock:
                 self.log.append(stat)
@@ -730,125 +749,26 @@ class AWQProcessor(LoopProcessor):
         return sanitized_kwargs
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
-        # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
-            return
-
-        qcfg_clone = copy.deepcopy(self.qcfg)
-
-        # dynamic overrides
-        if self.qcfg.dynamic is not None:
-            qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
-            qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
-
-            qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
-            qcfg_clone.desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", qcfg_clone.desc_act)
-            qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
-            qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-
-        tmp = AWQ(module=module, qcfg=qcfg_clone, awq_model=self.awq_model)
-
-        # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
-        # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
-        # all sub-modules within a single layer needs to store all the inputs.
-        # deepseek has massive # of sub-modules per layer, causing vram pressure
-        # buffered mode is slower due to gpu<->cpu movement
-        if buffered_fwd:
-            log.info(f"Quantize: Enabling fwd buffered mode for: `{module.name}`")
-            tmp.fwd_inputs_buffered = True
-
-        self.tasks[module.name] = tmp
+        # TODO Dynamic is not yet supported
+        pass
 
     def is_skipped(self, module: NamedModule) -> bool:
+        # TODO Dynamic is not yet supported
         # gptq has no dynamic method of full override (removal)
-        t = self.tasks.get(module.name, False)
-        if t == False:
-            return True
-        else:
-            return False
+        # t = self.tasks.get(module.name, False)
+        # if t == False:
+        #     return True
+        # else:
+        #     return False
+        pass
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
-        def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-            # gptq is mutable.
-            q = self.tasks[name]  # noqa: F821
-            q.add_batch(inp[0].data, out.data)  # noqa: F821
-        return tmp
+        pass
 
     def process(self, module: NamedModule, auto_gc: bool = True):
-        self.pb.title(f"Quantizing {module.name} in layer ").draw()
-        qqq = self.tasks
-
-        # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
-        ## Need to return the quantized_weight for offloading
-        q = qqq[module.name]
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, nsamples = q.quantize()
-        ## Assign the quantized weight to the weight
-        #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
-
-        ## Offload the quantized weight to CPU for EoRA
-        #quantized_weights['model.layers.%d.%s' % (module_index, name)] = q_full_weights.cpu()
-
-        # if task is not None:
-        #     task.get_logger().report_scalar(
-        #         title='Quantization Loss',
-        #         series=f'layer_{module_index}_loss',
-        #         value=avg_loss,
-        #         iteration=name_index,
-        #     )
-        #
-        #     task.get_logger().report_scalar(
-        #         title='Quantization Time',
-        #         series=f'layer_{module_index}_time',
-        #         value=duration,
-        #         iteration=name_index,
-        #     )
-        self.durations.append(duration)
-        self.avg_losses.append(avg_loss)
-        self.module_names.append(f"layer-{module.layer_index}-{module.name}")
-
-        stat = {
-            PROCESS_LOG_NAME:  self.name(),
-            PROCESS_LOG_LAYER: module.layer_index,
-            PROCESS_LOG_MODULE: module.name,
-            QUANT_LOG_LOSS: f"{avg_loss:.10f}",
-            QUANT_LOG_NSAMPLES: f"{nsamples}",
-            QUANT_LOG_DAMP: f"{damp_percent:.5f}",
-            PROCESS_LOG_TIME: f"{duration:.3f}",
-            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
-        }
-
-        if self.qcfg.dynamic is not None:
-            stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
-
-        self.log.append(stat)
-        self.log_new_row(stat)
-
-        self.result_save(module.full_name, {
-            "scale": move_to(scale, device=CPU, stream=self.stream),
-            "zero": move_to(zero, device=CPU, stream=self.stream),
-            "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
-            "scale_extra": move_to(scale_extra, device=CPU, stream=self.stream),
-        })
-
-        if self.calculate_w_wq_diff:
-            if module.weight.data.dtype == torch.float16:
-                # diff in float16
-                w_wq_diff = module.weight.data - wq
-            else:
-                # diff in float32
-                w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
-
-            module.state.update({
-                "w_wq_diff": w_wq_diff,
-            })
-
-        # with torch_streamCtx(DEVICE_0_STREAM):
-        #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
-        wq = wq.to(device=DEVICE_0, non_blocking=False)
-
-        # prepare for module.forward post generate
-        module.weight.data = wq
+        # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
+        # This method will not be called.
+        pass
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
