@@ -130,7 +130,7 @@ class GPTQProcessor(LoopProcessor):
                 g.H = g.H.to(device=module.target_device, non_blocking=True)
             g.module.weight.data = g.module.weight.data.to(device=module.target_device, non_blocking=True)
 
-    def process(self, module: NamedModule, auto_gc: bool = True):
+    def process(self, module: NamedModule, auto_gc: bool = True, fail_safe: bool = False):
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
@@ -140,7 +140,7 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             g = self.tasks[module.name]
 
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize(fail_safe=fail_safe)
 
         with self.lock:
             self.result_save(module.full_name, {

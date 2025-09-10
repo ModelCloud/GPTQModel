@@ -351,6 +351,8 @@ class BaseGPTQModel(nn.Module):
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
+        # use mock quantization to quantize module so the gptq process can continue and not fail
+        fail_safe: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -493,6 +495,7 @@ class BaseGPTQModel(nn.Module):
             buffered_fwd=buffered_fwd,
             auto_gc=auto_gc,
             backend=backend,
+            fail_safe=fail_safe,
         )
 
     def _eora_generate(

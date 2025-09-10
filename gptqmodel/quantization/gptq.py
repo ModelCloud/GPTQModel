@@ -103,6 +103,9 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
+        self.H = torch.zeros((self.columns, self.columns),
+                                 dtype=torch.float32)
+
     @staticmethod
     def _validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
@@ -192,10 +195,8 @@ class GPTQ:
 
         batch_token_size = reshaped_inp.shape[0]
 
-        if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns),
-                                 dtype=torch.float32,
-                                 device=reshaped_inp.device)
+        if self.H.device != reshaped_inp.device:
+            self.H = self.H.to(device=reshaped_inp.device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
@@ -281,6 +282,7 @@ class GPTQ:
     def quantize(
             self,
             blocksize=128,
+            fail_safe: bool = False,
     ):
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
@@ -366,7 +368,7 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization:
+        if self.qcfg.mock_quantization or fail_safe:
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -523,7 +525,10 @@ class GPTQ:
                     print("Losses sum item:", torch.sum(Losses).item())
                     raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
             else:
-                log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
+                if fail_safe:
+                    log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
+                else:
+                    log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
                 avg_loss = 999999999
         else:
             avg_loss = 999999999
