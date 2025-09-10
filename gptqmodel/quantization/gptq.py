@@ -80,10 +80,10 @@ lock = threading.Lock()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-# TODO: is there a threading init bug in torch.linalg?
-# bypass strange threading bug
+# TODO: is there a buffer init threading init bug in torch.linalg?
+# bypass strange threading bug by warming up torch.linalg.cholesky to setup internal setup calls
 if HAS_CUDA or HAS_XPU:
-    tmp_eye = torch.eye(64, device="cuda" if HAS_CUDA else "xpu")
+    tmp_eye = torch.eye(64, dtype=torch.float32, device="cuda" if HAS_CUDA else "xpu")
     torch.linalg.cholesky(tmp_eye)
     del tmp_eye
 
@@ -167,7 +167,7 @@ class GPTQ:
         """Mock hessian inverse for fast testing"""
         damp = self.qcfg.damp_percent
         # Return identity matrix instead of complex inversion
-        identity = torch.eye(H.shape[0], device=H.device)
+        identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
 
     def _clone_module(self, copy=True, device: torch.device = None):
