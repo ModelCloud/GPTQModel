@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 import torch._dynamo
 import torch.nn as nn
-from awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
+from gptqmodel.quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from tokenicer import Tokenicer
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
@@ -464,9 +464,9 @@ class BaseGPTQModel(nn.Module):
             from ..looper.awq_processor import AWQProcessor
             # TODO AWQ_BATCH_SIZE
             # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
-            # TODO check model_type
-            # model_type = check_and_get_model_type(quant_path, trust_remote_code)
-            print("self.model.config.model_type", self.model.config.model_type)
+
+            if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
+                raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
 
             awq_model = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
             awq_model.model_type = self.model.config.model_type

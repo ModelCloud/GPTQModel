@@ -262,7 +262,6 @@ class ModuleLooper():
                     # merge all subsets into one
                     modules = [sum(modules, [])]
 
-                # FIXME For a quick test
                 if isinstance(processor, AWQProcessor):
                     named_childs = dict()
                     for index, names in enumerate(modules):
@@ -273,7 +272,7 @@ class ModuleLooper():
                         named_childs.update(named_modules)
 
                     # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
-                    processor.pre_quantize(module, cur_layer_device, named_childs)
+                    processor.layer_quantize(module, cur_layer_device, named_childs)
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs

@@ -78,6 +78,7 @@ class AWQProcessor(LoopProcessor):
         # FIXME Temporarily set the version to "gemm". Then use backend to do a mapping.
         self.version = "gemm"
 
+        # TODO Can it be configured?
         # The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len.
         self.max_calib_seq_len = 512
 
@@ -107,9 +108,6 @@ class AWQProcessor(LoopProcessor):
         modules = self.awq_model.get_model_layers(self.model)
         # make sure samples tensor's shape is [1, max_calib_seq_len]
         samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration_dataset if data['input_ids'].shape[1] >= self.max_calib_seq_len]
-
-        # FIXME TEST reduce samples size
-        samples = samples[:60]
 
         samples = torch.cat(samples, dim=0)
 
@@ -311,7 +309,8 @@ class AWQProcessor(LoopProcessor):
             loss
         )
 
-    def pre_quantize(self, module: Module, device: torch.device, named_childs: Dict[str, NamedModule]):
+    # The module here is model.layers[x]
+    def layer_quantize(self, module: Module, device: torch.device, named_childs: Dict[str, NamedModule]):
         start = time.time()
         common_device = device
 
