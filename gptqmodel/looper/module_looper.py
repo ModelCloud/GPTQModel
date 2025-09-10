@@ -415,7 +415,7 @@ class ModuleLooper():
                         for name_index, name in enumerate(subset):
                             m = subset[name]
                             if isinstance(processor, GPTQProcessor):
-                                processor.process(module=m, auto_gc=auto_gc, fail_safe=(name in self.gptq_model.moe_skip))
+                                processor.process(module=m, auto_gc=auto_gc, fail_safe=(name in moe_skip_modules))
                             else:
                                 processor.process(module=m, auto_gc=auto_gc)
                             processed_subset[name] = m
