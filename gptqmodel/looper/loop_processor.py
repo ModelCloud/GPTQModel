@@ -32,6 +32,7 @@ from ..models import BaseGPTQModel
 from ..quantization.config import QuantizeConfig
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.logger import setup_logger
+from ..utils.torch import DEVICE_0, DEVICE_1
 
 log = setup_logger()
 
@@ -303,7 +304,7 @@ class LoopProcessor:
         pass
 
     # The module here is model.layers[x]
-    def pre_quantize(self, module: Module, device: torch.device):
+    def pre_quantize(self, module: Module, device: torch.device, named_childs: Dict[str, NamedModule]):
         pass
 
     # do work and return processor.self state which will updated/merged
@@ -339,3 +340,18 @@ class LoopProcessor:
 
     def name(self) -> str:
         pass
+
+def get_max_memory() -> str:
+    stats_0 = torch.cuda.memory_stats(DEVICE_0)
+    active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
+    peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
+
+    if torch.cuda.device_count() > 1:
+        stats_1 = torch.cuda.memory_stats(DEVICE_1)
+        active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
+        peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
+
+        max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
+    else:
+        max_memory = f"{active_0:.2f}MB"
+    return max_memory

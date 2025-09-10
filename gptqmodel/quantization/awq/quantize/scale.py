@@ -35,7 +35,7 @@ def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
 
 
 def apply_scale(module, scales_list, input_feat_dict=None):
-    for prev_op_name, layer_names, scales in scales_list:
+    for prev_op_name, layer_names, scales, _ in scales_list:
         prev_op = get_op_by_name(module, prev_op_name)
         layers = [get_op_by_name(module, name) for name in layer_names]
 

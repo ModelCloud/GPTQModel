@@ -17,6 +17,7 @@
 import copy
 import functools
 import inspect
+import time
 from collections import defaultdict
 from typing import Callable, Optional, Tuple, List, Dict
 
@@ -25,11 +26,11 @@ import transformers
 from torch.nn import Module
 from torch import nn
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, PROCESS_MAX_MEMORY)
 from ..nn_modules.qlinear.awq import AWQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_Marlin, WQLinear_GEMVFast
 from ..quantization.awq.quantize.scale import apply_scale, apply_clip
@@ -57,6 +58,7 @@ class AWQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        self.nsamples = 0
 
         self.awq_model = awq_model
         self.model = model
@@ -204,7 +206,7 @@ class AWQProcessor(LoopProcessor):
                 **named_linears,
                 "mlp": layer.mlp,
             }
-        print("named_linears", named_linears)
+
         for name in named_linears:
             handles.append(
                 named_linears[name].register_forward_hook(
@@ -245,6 +247,8 @@ class AWQProcessor(LoopProcessor):
             module2inspect=None,
             kwargs={},
     ):
+        self.nsamples += inp.shape[0]
+
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
@@ -299,7 +303,7 @@ class AWQProcessor(LoopProcessor):
             fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
         # [STEP 4]: Compute loss
-        best_scales = self._compute_best_scale(
+        best_scales, loss = self._compute_best_scale(
             inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
         )
 
@@ -307,9 +311,11 @@ class AWQProcessor(LoopProcessor):
             get_op_name(module, prev_op),
             tuple([get_op_name(module, m) for m in layers]),
             best_scales,
+            loss
         )
 
-    def pre_quantize(self, module: Module, device: torch.device):
+    def pre_quantize(self, module: Module, device: torch.device, named_childs: Dict[str, NamedModule]):
+        start = time.time()
         common_device = device
 
         self.inps = self.inps.to(common_device)
@@ -341,7 +347,8 @@ class AWQProcessor(LoopProcessor):
                 )
 
         # [STEP 1]: Get layer, extract linear modules, extract input features
-        named_linears = get_named_linears(module)
+        # named_linears = get_named_linears(module)
+        named_linears = {name: m.module for name, m in named_childs.items()}
 
         # TODO quant_config.modules_to_not_convert
         # Filter out the linear layers we don't want to exclude
@@ -378,7 +385,7 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 4]: Quantize weights
         if not self.export_compatible:
-            self._apply_quant(module, named_linears)
+            self._apply_quant(module, named_childs, start, scales_list)
 
         clear_memory()
 
@@ -573,7 +580,7 @@ class AWQProcessor(LoopProcessor):
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
 
-        return best_scales.detach().cpu()
+        return best_scales.detach().cpu(), best_error
 
     @torch.no_grad()
     def _compute_loss(
@@ -633,8 +640,9 @@ class AWQProcessor(LoopProcessor):
 
         return module_output
 
-    def _apply_quant(self, module, named_linears: Dict[str, nn.Linear]):
-        for name, linear_layer in named_linears.items():
+    def _apply_quant(self, module, named_linears: Dict[str, NamedModule], start_time, scales_list):
+        for name, named_module in named_linears.items():
+            linear_layer = named_module.module
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.to(get_best_device()).half()
 
@@ -673,6 +681,34 @@ class AWQProcessor(LoopProcessor):
             q_linear.to(next(module.parameters()).device)
             set_op_by_name(module, name, q_linear)
             clear_memory()
+
+            # records
+            duration = time.time() - start_time
+
+            avg_loss = None
+            for _, layer_names, _, loss in scales_list:
+                if any(named_module.name in layer_name for layer_name in layer_names):
+                    avg_loss = loss
+                    break
+
+            # TODO "loss" and "nsamples" may not be consistent with the semantics of gptq quantization.
+            stat = {
+                PROCESS_LOG_NAME: self.name(),
+                PROCESS_LOG_LAYER: named_module.layer_index,
+                PROCESS_LOG_MODULE: named_module.name,
+                QUANT_LOG_LOSS: "N/A" if avg_loss else f"{avg_loss:.10f}",
+                QUANT_LOG_NSAMPLES: f"{self.nsamples}",
+                # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
+                PROCESS_LOG_TIME: f"{duration:.3f}",
+                # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+                PROCESS_MAX_MEMORY: get_max_memory(),
+            }
+
+            with self.lock:
+                self.log.append(stat)
+
+            # Log the new row
+            self.log_new_row(stat)
 
     def _sanitize_kwargs(self, inputs_kwargs, module):
         """

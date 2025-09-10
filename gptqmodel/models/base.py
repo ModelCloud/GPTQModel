@@ -475,7 +475,6 @@ class BaseGPTQModel(nn.Module):
             args["batch_size"] = batch_size
             awq_processor = AWQProcessor(**args)
             quantize_processor = [awq_processor]
-
         else:
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = [GPTQProcessor(**args)]
