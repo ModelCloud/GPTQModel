@@ -495,6 +495,7 @@ class BaseGPTQModel(nn.Module):
             buffered_fwd=buffered_fwd,
             auto_gc=auto_gc,
             backend=backend,
+            fail_safe=fail_safe,
         )
 
     def _eora_generate(
