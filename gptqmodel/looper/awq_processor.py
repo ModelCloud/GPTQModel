@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import functools
 import inspect
 import time
@@ -37,12 +36,10 @@ from ..quantization.awq.quantize.scale import apply_scale, apply_clip
 from ..quantization.awq.utils.module import get_op_name, get_named_linears, exclude_layers_to_not_quantize, \
     append_str_prefix, set_op_by_name
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
-from ..quantization.awq_quantizer import AWQ
-# from ..quantization.awq.quantize.quantizer import AwqQuantizer
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, torch_streamCtx, torch_sync
+from ..utils.model import move_to
+from ..utils.torch import CPU, torch_sync
 
 log = setup_logger()
 
