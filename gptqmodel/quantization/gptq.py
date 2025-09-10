@@ -576,6 +576,9 @@ class GPTQ:
 
         # prepare for module.forward post generate, move to weight device with retry
         if Q.device != self.module.weight.data.device:
+            # TODO FIXME: cuda async errors are reported with multi-gpu during mock-quantization which makes the quant process
+            # extremely fast but prone to threading/locking errors in GIL=0 env. We may need to use a threading lock to so that 
+            # a lock map of self.module.weight.data.device is maintained and lock this code so only 1 call can be made per device
             try:
                 Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
             except Exception as e:
