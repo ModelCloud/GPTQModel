@@ -19,22 +19,21 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import PackableQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from packaging import version
 
 log = setup_logger()
 
-class AWQuantLinear_GEMM(PackableQuantLinear):
+class AWQuantLinear_GEMM(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
-    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
@@ -122,8 +121,7 @@ class AWQuantLinear_GEMM(PackableQuantLinear):
         # awq only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
 
-        # torch benefits the most from torch.compile, enable it by default
-        self.optimize()
+        super().post_init()
 
     def list_buffers(self) -> List:
         buf = []
@@ -136,22 +134,6 @@ class AWQuantLinear_GEMM(PackableQuantLinear):
         if hasattr(self, "bias") and self.bias is not None:
             buf.append(self.bias)
         return buf
-
-    def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
-        if self.optimized:
-            return
-
-        if backend is None:
-            # MPS doesn't support inductor.
-            backend = "inductor" if self.list_buffers()[0].device.type != "mps" else "aot_eager"
-
-        # # compile dequantize
-        # self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
-
-        if self.adapter:
-            self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
-
-        super().optimize()
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -186,6 +168,9 @@ class AWQuantLinear_GEMM(PackableQuantLinear):
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
 

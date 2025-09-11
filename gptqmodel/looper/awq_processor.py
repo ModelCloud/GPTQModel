@@ -30,7 +30,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseGPTQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, PROCESS_MAX_MEMORY)
-from ..nn_modules.qlinear.awq import AWQuantLinear_GEMM
+from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_Marlin, WQLinear_GEMVFast
 from ..quantization.awq.quantize.scale import apply_scale, apply_clip
 from ..quantization.awq.utils.module import get_op_name, get_named_linears, exclude_layers_to_not_quantize, \
