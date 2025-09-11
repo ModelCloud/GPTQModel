@@ -7,7 +7,7 @@ import unittest
 
 from datasets import load_dataset
 
-from gptqmodel.nn_modules.qlinear.awq import AWQuantLinear
+from gptqmodel.nn_modules.qlinear.awq import AWQuantLinear_GEMM
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD
 from gptqmodel.utils.torch import torch_empty_cache
 from parameterized import parameterized
@@ -49,7 +49,7 @@ class TestGroupSize(unittest.TestCase):
             bits=4,
             group_size=group_size,
             quant_method=QUANT_METHOD.AWQ,
-            format=FORMAT.AWQ,
+            format=FORMAT.GEMM,
         )
 
         model = GPTQModel.load(
@@ -78,14 +78,14 @@ class TestGroupSize(unittest.TestCase):
 
             tokens = model.generate("Capital of France is", max_new_tokens=100)[0]
             result = model.tokenizer.decode(tokens)
-            print(f"BACKEND: {BACKEND.AWQ}, Result: {result}")
+            print(f"BACKEND: {BACKEND.GEMM}, Result: {result}")
             if "paris" not in result.lower() and "city" not in result.lower():
                 raise AssertionError(" `paris` not found in `result`")
 
     def assert_awq_linear(self, model):
         has_qqq = False
         for _, module in model.named_modules():
-            linear = AWQuantLinear
+            linear = AWQuantLinear_GEMM
             if isinstance(module, linear):
                 has_qqq = True
                 break

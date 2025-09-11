@@ -27,7 +27,7 @@ from packaging import version
 
 log = setup_logger()
 
-class AWQuantLinear(PackableQuantLinear):
+class AWQuantLinear_GEMM(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -189,4 +189,4 @@ class AWQuantLinear(PackableQuantLinear):
 
         return out.reshape(out_shape)
 
-__all__ = ["AWQuantLinear"]
+__all__ = ["AWQuantLinear_GEMM"]

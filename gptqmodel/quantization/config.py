@@ -76,10 +76,10 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     IPEX = "ipex"
     QQQ = "qqq"
-    AWQ_GEMM = "awq_gemm"
-    AWQ_GEMV = "awq_gemv"
-    AWQ_GEMV_FAST = "awq_gemv_fast"
-    AWQ_MARLIN = "awq_marlin"
+
+    GEMM = "gemm"
+    GEMV = "gemv"
+    GEMV_FAST = "gemv_fast"
 
 
 # quant methods
@@ -108,10 +108,10 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.QQQ,
     },
     QUANT_METHOD.AWQ: {
-        FORMAT.AWQ_GEMM,
-        FORMAT.AWQ_GEMV,
-        FORMAT.AWQ_GEMV_FAST,
-        FORMAT.AWQ_MARLIN,
+        FORMAT.GEMM,
+        FORMAT.GEMV,
+        FORMAT.GEMV_FAST,
+        FORMAT.MARLIN,
     },
 }
 
@@ -261,9 +261,9 @@ class QuantizeConfig():
             self.format = FORMAT.QQQ
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == QUANT_METHOD.AWQ and self.format != FORMAT.AWQ:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.AWQ}`")
-            self.format = FORMAT.AWQ
+        if self.quant_method == QUANT_METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
+            self.format = FORMAT.GEMM
 
         if self.format not in valid_formats:
             raise ValueError(
@@ -493,7 +493,7 @@ class QuantizeConfig():
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
 
-        if self.format == FORMAT.AWQ:
+        if self.quant_method == QUANT_METHOD.AWQ:
             out["zero_point"] = self.zero_point
 
         dynamic = out["dynamic"]

@@ -599,6 +599,7 @@ def ModelLoader(cls):
             sym=qcfg.sym,
             backend=backend,
             format=qcfg.format,
+            quant_method=qcfg.quant_method,
             device=device,
             pack_dtype=qcfg.pack_dtype,
         )

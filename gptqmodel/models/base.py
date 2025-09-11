@@ -385,9 +385,10 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
+            format=self.quantize_config.format,
+            quant_method=self.quantize_config.quant_method,
             device=DEVICE(self.quantize_config.device),
             pack=True,
-            format=self.quantize_config.format,
             pack_dtype=self.quantize_config.pack_dtype,
         )
 
@@ -636,6 +637,7 @@ class BaseGPTQModel(nn.Module):
             device=DEVICE(self.quantize_config.device),
             pack=True,
             format=self.quantize_config.format,
+            quant_method=self.quantize_config.quant_method,
             pack_dtype=self.quantize_config.pack_dtype,
         )
 
