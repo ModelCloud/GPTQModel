@@ -23,8 +23,9 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
 from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
-from ..nn_modules.qlinear.awq_exllama import AWQuantLinear_EXLLAMA
+from ..nn_modules.qlinear.awq_exllama import AWQuantLinear_Exllama
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -66,7 +67,8 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.GEMM: AWQuantLinear_GEMM,
     }),
     QUANT_METHOD.AWQ: OrderedDict({
-        BACKEND.EXLLAMA_V1: AWQuantLinear_EXLLAMA,
+        BACKEND.EXLLAMA_V2: AWQuantLinear_ExllamaV2,
+        BACKEND.EXLLAMA_V1: AWQuantLinear_Exllama,
         BACKEND.GEMM: AWQuantLinear_GEMM, # TODO ADD more BACKEND
     }),
 }

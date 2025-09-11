@@ -23,17 +23,18 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
+from ...utils.exllamav2 import ScratchSpace
 from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-exl_ext, msg = try_import("gptqmodel_awq_exl_kernels")
+exlv2_ext, msg = try_import("gptqmodel_awq_exlv2_kernels")
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")
 
 
-class AWQuantLinear_Exllama(AWQuantLinear):
+class AWQuantLinear_ExllamaV2(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -82,7 +83,7 @@ class AWQuantLinear_Exllama(AWQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
-    def post_init(self):
+    def post_init(self, scratch_space: ScratchSpace):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
         #     self.qzeros.resize_(
@@ -93,7 +94,7 @@ class AWQuantLinear_Exllama(AWQuantLinear):
         #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
         #                               device=self.g_idx.device)
 
-        if exl_ext is None:
+        if exlv2_ext is None:
             raise ModuleNotFoundError("External ExLlama kernels are not properly installed." + msg)
 
         # awq only accepts float16
@@ -105,23 +106,31 @@ class AWQuantLinear_Exllama(AWQuantLinear):
         self.qweight, self.qzeros = unpack_reorder_pack(
             self.qweight, self.qzeros, self.bits
         )
-        self.q4 = exl_ext.make_q4(
+
+        temp_dq_size = self.temp_dq_size()
+        temp_dq = scratch_space.get_slice(temp_dq_size)
+        self.q_handle = exlv2_ext.make_q_matrix(
             self.qweight,
+            none_tensor,
+            none_tensor,
+            none_tensor,
+            none_tensor,
+            none_tensor,
             self.qzeros,
             self.scales,
-            none_tensor,  # g_idx
-            self.qweight.device.index,  # device index
+            none_tensor,
+            temp_dq,
         )
 
         super().post_init()
 
     def forward(self, x: torch.Tensor):
-        assert self.q4 is not None, (
+        assert self.q_handle is not None, (
             "module.post_init() must be called before module.forward(). "
-            "Use exllama_post_init() on the whole model."
+            "Use exllamav2_post_init() on the whole model."
         )
-        if exl_ext is None:
-            raise ModuleNotFoundError("External ExLlama kernels are not properly installed." + msg)
+        if exlv2_ext is None:
+            raise ModuleNotFoundError("External ExLlamaV2 kernels are not properly installed." + msg)
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -136,7 +145,7 @@ class AWQuantLinear_Exllama(AWQuantLinear):
             dtype=torch.float16,
             device=x.device,
         )
-        exl_ext.q4_matmul(x, self.q4, out)
+        exlv2_ext.gemm_half_q_half(x, self.q_handle, out, False)
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
@@ -149,5 +158,27 @@ class AWQuantLinear_Exllama(AWQuantLinear):
 
         return out.view(out_shape)
 
+    def temp_dq_size(self):
+        """
+        Returns the size of the temporary buffer required for the dq kernel.
+        """
+        return self.in_features * self.out_features * 2 + 128
 
-__all__ = ["AWQuantLinear_Exllama"]
+    def temp_fwd_size(self, max_input_len, max_batch_size):
+        """
+        Returns the size of the temporary buffer required for the fwd kernel.
+        """
+        return self.out_features * max_input_len * max_batch_size * 4 + 128
+
+    def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
+        """
+        Returns the size of the fixed scratch space required for the kernel.
+        """
+        return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
+
+
+def next_multiple(x, multiple):
+    return ((x + multiple - 1) // multiple) * multiple
+
+
+__all__ = ["AWQuantLinear_ExllamaV2"]

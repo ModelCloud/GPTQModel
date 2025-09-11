@@ -75,38 +75,6 @@ class AWQuantLinear_GEMM(AWQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
-        # if self.group_size != self.in_features:
-        #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
-        # else:
-        #     self.padded_infeatures = self.in_features
-
-        in_features = self.in_features
-        out_features = self.out_features
-
-        self.register_buffer(
-            "qweight",
-            torch.zeros((in_features, out_features // (self.pack_dtype_bits // self.bits)), dtype=self.pack_dtype),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                (in_features // self.group_size, out_features // (self.pack_dtype_bits // self.bits)),
-                dtype=self.pack_dtype,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                (in_features // self.group_size, out_features),
-                dtype=torch.float16,
-            ),
-        )
-
-        if bias:
-            self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
-        else:
-            self.bias = None
-
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
@@ -122,18 +90,6 @@ class AWQuantLinear_GEMM(AWQuantLinear):
         self.scales = self.scales.to(dtype=torch.float16)
 
         super().post_init()
-
-    def list_buffers(self) -> List:
-        buf = []
-        if hasattr(self, "qweight") and self.qweight is not None:
-            buf.append(self.qweight)
-        if hasattr(self, "qzeros") and self.qzeros is not None:
-            buf.append(self.qzeros)
-        if hasattr(self, "scales") and self.scales is not None:
-            buf.append(self.scales)
-        if hasattr(self, "bias") and self.bias is not None:
-            buf.append(self.bias)
-        return buf
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
