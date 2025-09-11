@@ -13,28 +13,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List
 
 import torch
 
+from .awq_gemm import AWQuantLinear_GEMM
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
-from ...quantization.awq.utils.module import try_import
-from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
+from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
-from ...utils.exllamav2 import ScratchSpace
 from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-exlv2_ext, msg = try_import("gptqmodel_awq_exlv2_kernels")
+try:
+    from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
 
-# Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
-none_tensor = torch.empty((1, 1), device="meta")
+    assert hasattr(IPEXWeightOnlyQuantizedLinear, "from_weight"), "The minimum version for ipex is at least 2.4"
+    IPEX_INSTALLED = True
+except:
+    IPEX_INSTALLED = False
 
 
-class AWQuantLinear_ExllamaV2(AWQuantLinear):
+class AWQuantLinear_IPEX(AWQuantLinear_GEMM):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -45,7 +45,7 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -53,7 +53,7 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "awq_exllamav2"
+    QUANT_TYPE = "awq_gemm_ipex"
 
     def __init__(
             self,
@@ -68,6 +68,11 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
             adapter: Adapter = None,
             **kwargs,
     ):
+        assert IPEX_INSTALLED, \
+            "Please install IPEX package with `pip install intel_extension_for_pytorch`."
+
+        self.init_ipex = False
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -77,11 +82,11 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.EXLLAMA_V2),
+            backend=kwargs.pop("backend", BACKEND.IPEX),
             adapter=adapter,
             **kwargs)
 
-    def post_init(self, scratch_space: ScratchSpace):
+    def post_init(self):
         # if self.padded_infeatures != self.in_features:
         #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
         #     self.qzeros.resize_(
@@ -92,84 +97,62 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
         #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
         #                               device=self.g_idx.device)
 
-        if exlv2_ext is None:
-            raise ModuleNotFoundError("External ExLlama kernels are not properly installed." + msg)
-
         # awq only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
 
-        assert self.qweight.device.type == "cuda"
-        assert self.qweight.device.index is not None
-
-        self.qweight, self.qzeros = unpack_reorder_pack(
-            self.qweight, self.qzeros, self.bits
-        )
-
-        temp_dq_size = self.temp_dq_size()
-        temp_dq = scratch_space.get_slice(temp_dq_size)
-        self.q_handle = exlv2_ext.make_q_matrix(
-            self.qweight,
-            none_tensor,
-            none_tensor,
-            none_tensor,
-            none_tensor,
-            none_tensor,
-            self.qzeros,
-            self.scales,
-            none_tensor,
-            temp_dq,
-        )
+        device_type = self.qweight.device.type
+        if device_type != "meta":
+            assert device_type in ("cpu", "xpu")
 
         super().post_init()
 
+    def init_ipex_linear(self):
+        if not self.training:
+            self.ipex_linear = IPEXWeightOnlyQuantizedLinear.from_weight(self.qweight, self.scales, self.qzeros,
+                                                                         self.in_features, self.out_features, None,
+                                                                         self.bias,
+                                                                         self.group_size, None, quant_method=1, dtype=0)
+
     def forward(self, x: torch.Tensor):
-        assert self.q_handle is not None, (
-            "module.post_init() must be called before module.forward(). "
-            "Use exllamav2_post_init() on the whole model."
-        )
-        if exlv2_ext is None:
-            raise ModuleNotFoundError("External ExLlamaV2 kernels are not properly installed." + msg)
+        assert IPEX_INSTALLED, (
+            "IPEX kernels could not be loaded. "
+            "Please install with `pip install intel_extension_for_pytorch` and "
+            "refer to the detial https://github.com/intel/intel-extension-for-pytorch/tree/main")
+
+        if not self.init_ipex:
+            self.init_ipex_linear()
+            self.init_ipex = True
 
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        x = x.view(-1, x.shape[-1])
-
-        out = torch.empty(
-            (x.shape[0], self.out_features),
-            dtype=torch.float16,
-            device=x.device,
-        )
-        exlv2_ext.gemm_half_q_half(x, self.q_handle, out, False)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+        if hasattr(self, "ipex_linear"):
+            with torch.no_grad():
+                out = self.ipex_linear(x)
+        else:
+            out = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size).to(x.dtype)
+            out = torch.matmul(x, out)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
-        return out.view(out_shape)
+        return out.reshape(out_shape)
 
-    def temp_dq_size(self):
-        """
-        Returns the size of the temporary buffer required for the dq kernel.
-        """
-        return self.in_features * self.out_features * 2 + 128
+    def backward(self, grad_output):
+        weights = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size).to(
+            grad_output.dtype)
+        batch_size = grad_output.shape[0]
+        grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
 
-    def temp_fwd_size(self, max_input_len, max_batch_size):
-        """
-        Returns the size of the temporary buffer required for the fwd kernel.
-        """
-        return self.out_features * max_input_len * max_batch_size * 4 + 128
+        return grad_input, None, None, None, None, None, None, None
 
-    def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
-        """
-        Returns the size of the fixed scratch space required for the kernel.
-        """
-        return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
-
-
-def next_multiple(x, multiple):
-    return ((x + multiple - 1) // multiple) * multiple
+    def extra_repr(self) -> str:
+        return ("in_features={}, out_features={}, bias={}, bits={}, group_size={}".format(
+            self.in_features,
+            self.out_features,
+            self.bias is not None,
+            self.bits,
+            self.group_size,
+        ))
 
 
-__all__ = ["AWQuantLinear_ExllamaV2"]
+__all__ = ["AWQuantLinear_IPEX"]

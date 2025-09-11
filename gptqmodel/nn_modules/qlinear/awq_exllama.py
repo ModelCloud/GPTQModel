@@ -52,7 +52,7 @@ class AWQuantLinear_Exllama(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "awq"
+    QUANT_TYPE = "awq_exllama"
 
     def __init__(
             self,
@@ -77,9 +77,8 @@ class AWQuantLinear_Exllama(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.EXLLAMA_V1),
             adapter=adapter,
-            register_buffers=register_buffers,
             **kwargs)
 
     def post_init(self):
@@ -123,11 +122,7 @@ class AWQuantLinear_Exllama(AWQuantLinear):
         if exl_ext is None:
             raise ModuleNotFoundError("External ExLlama kernels are not properly installed." + msg)
 
-        input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
-
-        if input_dtype != torch.float16:
-            x = x.to(dtype=torch.float16)
 
         x = x.view(-1, x.shape[-1])
 
@@ -137,9 +132,6 @@ class AWQuantLinear_Exllama(AWQuantLinear):
             device=x.device,
         )
         exl_ext.q4_matmul(x, self.q4, out)
-
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
 
         if self.bias is not None:
             out.add_(self.bias)

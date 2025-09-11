@@ -45,7 +45,7 @@ class AWQuantLinear_GEMM(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "awq"
+    QUANT_TYPE = "awq_gemm"
 
     def __init__(
         self,
@@ -58,7 +58,6 @@ class AWQuantLinear_GEMM(AWQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
-        register_buffers: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -70,9 +69,8 @@ class AWQuantLinear_GEMM(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.GEMM),
             adapter=adapter,
-            register_buffers=register_buffers,
             **kwargs)
 
     def post_init(self):
@@ -93,10 +91,6 @@ class AWQuantLinear_GEMM(AWQuantLinear):
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
-
-        input_dtype = x.dtype
-        if input_dtype != torch.float16:
-            x = x.half()
 
         if self.training:
             out = WQLinearMMFunction.apply(
@@ -121,9 +115,6 @@ class AWQuantLinear_GEMM(AWQuantLinear):
                     self.bias,
                     self.out_features,
                 )
-
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
