@@ -76,7 +76,10 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     IPEX = "ipex"
     QQQ = "qqq"
-    AWQ = "awq"
+    AWQ_GEMM = "awq_gemm"
+    AWQ_GEMV = "awq_gemv"
+    AWQ_GEMV_FAST = "awq_gemv_fast"
+    AWQ_MARLIN = "awq_marlin"
 
 
 # quant methods
@@ -105,7 +108,10 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.QQQ,
     },
     QUANT_METHOD.AWQ: {
-        FORMAT.AWQ,
+        FORMAT.AWQ_GEMM,
+        FORMAT.AWQ_GEMV,
+        FORMAT.AWQ_GEMV_FAST,
+        FORMAT.AWQ_MARLIN,
     },
 }
 

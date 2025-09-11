@@ -57,7 +57,7 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 
     BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
 
-    BACKEND.AWQ: AWQuantLinear,
+    BACKEND.GEMM: AWQuantLinear,
 })
 
 FORMAT_DICT = {
@@ -67,7 +67,11 @@ FORMAT_DICT = {
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
     FORMAT.IPEX: [BACKEND.IPEX],
     FORMAT.QQQ: [BACKEND.QQQ],
-    FORMAT.AWQ: [BACKEND.AWQ],
+
+    FORMAT.AWQ_GEMM: [BACKEND.GEMM, BACKEND.IPEX, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_V2],
+    FORMAT.AWQ_GEMV: [BACKEND.GEMV],
+    FORMAT.AWQ_GEMV_FAST: [BACKEND.GEMV_FAST],
+    FORMAT.AWQ_MARLIN: [BACKEND.MARLIN],
 }
 
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
@@ -224,6 +228,8 @@ def select_quant_linear(
             raise err
 
         return validated_qlinears
+
+    # TODO check AWQ format supports BACKEND
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
