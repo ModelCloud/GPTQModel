@@ -405,6 +405,8 @@ class ModuleLooper():
                                 log.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
                                 moe_skip_modules.append(name)
 
+                        # If fail_safe is True, mock_quantize will be used and modules in moe_skip_modules don't need to be removed
+                        # If fail_safe is False, remove modules in moe_skip_modules from subset to avoid quantization errors
                         if not fail_safe:
                             for name in moe_skip_modules:
                                 subset.pop(name)
@@ -415,7 +417,7 @@ class ModuleLooper():
                         for name_index, name in enumerate(subset):
                             m = subset[name]
                             if isinstance(processor, GPTQProcessor):
-                                processor.process(module=m, auto_gc=auto_gc, fail_safe=(name in moe_skip_modules))
+                                processor.process(module=m, auto_gc=auto_gc, fail_safe=fail_safe and name in moe_skip_modules)
                             else:
                                 processor.process(module=m, auto_gc=auto_gc)
                             processed_subset[name] = m
@@ -432,7 +434,10 @@ class ModuleLooper():
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []
                             def process_module(name, m):
-                                processor.process(module=m, auto_gc=auto_gc)
+                                if isinstance(processor, GPTQProcessor):
+                                    processor.process(module=m, auto_gc=auto_gc, fail_safe=fail_safe and name in moe_skip_modules)
+                                else:
+                                    processor.process(module=m, auto_gc=auto_gc)
                                 return name, m
 
                             for name in subset:
