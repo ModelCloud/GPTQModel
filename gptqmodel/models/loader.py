@@ -531,9 +531,12 @@ def ModelLoader(cls):
             if device is None and not device_map and not max_memory:
                 device_map = "auto"
             if device is not None:
-                torch_device = torch.device(device)
                 if not max_memory and not device_map:
-                    device_map = {"": torch_device.index if torch_device.type == "cuda" else torch_device.type}
+                    torch_device = torch.device(device)
+                    if torch_device.type in ["cuda", "xpu"] and torch_device.index is not None:
+                        device_map = {"": torch_device.index}
+                    else:
+                        device_map = {"": torch_device.type}
             if not isinstance(device_map, dict) and device_map != "sequential":
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
