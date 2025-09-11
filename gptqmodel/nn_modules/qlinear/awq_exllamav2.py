@@ -130,7 +130,11 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
         if exlv2_ext is None:
             raise ModuleNotFoundError("External ExLlamaV2 kernels are not properly installed." + msg)
 
+        input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
+
+        if input_dtype != torch.float16:
+            x = x.to(dtype=torch.float16)
 
         x = x.view(-1, x.shape[-1])
 
@@ -140,6 +144,9 @@ class AWQuantLinear_ExllamaV2(AWQuantLinear):
             device=x.device,
         )
         exlv2_ext.gemm_half_q_half(x, self.q_handle, out, False)
+
+        if input_dtype != torch.float16:
+            out = out.to(dtype=input_dtype)
 
         if self.bias is not None:
             out.add_(self.bias)

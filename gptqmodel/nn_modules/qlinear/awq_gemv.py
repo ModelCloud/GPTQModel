@@ -21,12 +21,15 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
+from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-class AWQuantLinear_GEMM(AWQuantLinear):
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
+
+class AWQuantLinear_GEMV(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -69,7 +72,7 @@ class AWQuantLinear_GEMM(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GEMM),
+            backend=kwargs.pop("backend", BACKEND.GEMV),
             adapter=adapter,
             **kwargs)
 
@@ -90,42 +93,49 @@ class AWQuantLinear_GEMM(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
+        if awq_ext is None:
+            raise ModuleNotFoundError("External AWQ kernels are not properly installed." + msg)
+
         out_shape = x.shape[:-1] + (self.out_features,)
+        inputs = x.reshape(-1, x.shape[-1])
 
-        input_dtype = x.dtype
+        input_dtype = inputs.dtype
         if input_dtype != torch.float16:
-            x = x.half()
+            inputs = inputs.half()
 
-        if self.training:
-            out = WQLinearMMFunction.apply(
-                x,
+        if inputs.shape[0] > 8:
+            out = awq_ext.gemmv2_forward_cuda(
+                inputs,
                 self.qweight,
-                self.qzeros,
                 self.scales,
-                self.bits,
+                self.qzeros,
                 self.group_size,
-                self.bias,
-                self.out_features,
+                self.split_k_iters,
             )
         else:
-            with torch.no_grad():
-                out = WQLinearMMFunction.apply(
-                    x,
-                    self.qweight,
-                    self.qzeros,
-                    self.scales,
-                    self.bits,
-                    self.group_size,
-                    self.bias,
-                    self.out_features,
-                )
+            out = awq_ext.gemv_forward_cuda(
+                inputs, self.qweight, self.scales, self.qzeros, self.group_size
+            )
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
+
+        out = out + self.bias if self.bias is not None else out
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
 
-__all__ = ["AWQuantLinear_GEMM"]
+    def extra_repr(self) -> str:
+        return (
+            "in_features={}, out_features={}, bias={}, bits={}, group_size={}".format(
+                self.in_features,
+                self.out_features,
+                self.bias is not None,
+                self.bits,
+                self.group_size,
+            )
+        )
+
+__all__ = ["AWQuantLinear_GEMV"]

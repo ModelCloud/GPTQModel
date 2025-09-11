@@ -27,6 +27,8 @@ from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
 from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
 from ..nn_modules.qlinear.awq_exllama import AWQuantLinear_Exllama
 from ..nn_modules.qlinear.awq_gemm_ipex import AWQuantLinear_IPEX
+from ..nn_modules.qlinear.awq_gemv import AWQuantLinear_GEMV
+from ..nn_modules.qlinear.awq_gemv_fast import AWQuantLinear_GEMVFast
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -58,20 +60,17 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
         BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
         BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
-
-        BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
-
-        BACKEND.GEMM: AWQuantLinear_GEMM,
     }),
     QUANT_METHOD.QQQ: OrderedDict({
         BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
-        BACKEND.GEMM: AWQuantLinear_GEMM,
     }),
     QUANT_METHOD.AWQ: OrderedDict({
         BACKEND.IPEX: AWQuantLinear_IPEX,
         BACKEND.EXLLAMA_V2: AWQuantLinear_ExllamaV2,
         BACKEND.EXLLAMA_V1: AWQuantLinear_Exllama,
         BACKEND.GEMM: AWQuantLinear_GEMM, # TODO ADD more BACKEND
+        BACKEND.GEMV: AWQuantLinear_GEMV,
+        BACKEND.GEMV_FAST: AWQuantLinear_GEMVFast,
     }),
 }
 
