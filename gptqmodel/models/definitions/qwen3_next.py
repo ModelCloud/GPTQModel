@@ -25,8 +25,6 @@ class Qwen3NextGPTQ(BaseGPTQModel):
       - Dense MLP (Qwen3NextMLP) and Sparse MoE (Qwen3NextSparseMoeBlock)
       - Dynamic expert indexing via config.num_experts
     """
-    # Allow dynamic expert index for layer_modules; uses config.num_experts
-    dynamic_expert_index = "num_experts"
 
     # Embeddings & final norm (pre lm_head)
     base_modules = ["model.embed_tokens", "model.norm"]
@@ -46,7 +44,7 @@ class Qwen3NextGPTQ(BaseGPTQModel):
         "#",
         {
             # Token mixers
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            #"self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
             "linear_attn": ("in_proj_qkvz", "in_proj_ba", "out_proj"),  # conv1d intentionally excluded
 
             # MLP / MoE
