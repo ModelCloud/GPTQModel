@@ -30,9 +30,22 @@ class Qwen3NextGPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
+    dynamic_expert_index = "num_experts"
+
     # Decoder layers container and per-layer type
     layers_node = ["model.layers"]
     layer_type = "Qwen3NextDecoderLayer"
+
+    layer_modules = [
+            ['linear_attn.in_proj_qkvz', 'linear_attn.in_proj_ba'],
+            ['linear_attn.out_proj'], 
+           
+            ['mlp.gate'], 
+            ['mlp.shared_expert_gate'], 
+            ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.shared_expert.down_proj'], 
+            [f'mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj', f'mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj'], 
+            [f'mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj']
+        ]
 
     # -----------------------------------------------------------------------------
     # Preferred modern hierarchical spec. The loader will gracefully skip any
