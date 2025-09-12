@@ -49,9 +49,6 @@ class Qwen3NextGPTQ(BaseGPTQModel):
 
             # MLP / MoE
             "mlp": {
-                # Dense MLP (Qwen3NextMLP)
-                "_dense": ("gate_proj", "up_proj", "down_proj"),
-
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
                 "gate": ("gate",),  # router gate linear
                 "shared_expert_gate": ("shared_expert_gate",),
