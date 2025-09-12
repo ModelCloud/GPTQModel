@@ -198,6 +198,7 @@ BUILD_EXLLAMA_V1  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "1
 BUILD_EXLLAMA_V2  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
 BUILD_QQQ         = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_MARLIN      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+BUILD_AWQ      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
 if BUILD_CUDA_EXT == "1":
     from distutils.sysconfig import get_python_lib
@@ -355,6 +356,37 @@ if BUILD_CUDA_EXT == "1":
                         "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
                     ],
                     extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                )
+            ]
+
+        if BUILD_AWQ:
+            extensions += [
+                # contain un-hipifiable inline PTX
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_awq_kernels",
+                    [
+                        "gptqmodel_ext/awq/pybind_awq.cpp",
+                        "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
+                        "gptqmodel_ext/awq/layernorm/layernorm.cu",
+                        "gptqmodel_ext/awq/position_embedding/pos_encoding_kernels.cu",
+                        "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
+                        "gptqmodel_ext/awq/vllm/moe_alig_block.cu",
+                        "gptqmodel_ext/awq/vllm/activation.cu",
+                        "gptqmodel_ext/awq/vllm/topk_softmax_kernels.cu",
+                    ],
+                    extra_compile_args=extra_compile_args,
+                ),
+                # TODO only compatible with ampere?
+                # arch_flags = get_compute_capabilities({80, 86, 89, 90})
+                # extra_compile_args_v2 = get_extra_compile_args(arch_flags, generator_flags)
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_awq_v2_kernels",
+                    [
+                        "gptqmodel_ext/awq/pybind_awq_v2.cpp",
+                        "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
+                        "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
+                    ],
                     extra_compile_args=extra_compile_args,
                 )
             ]

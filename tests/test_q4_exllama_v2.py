@@ -25,7 +25,7 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.quantization import FORMAT  # noqa: E402
+from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from test_q4_exllama_v1 import REFERENCE, get_diff  # noqa: E402
@@ -50,6 +50,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
             sym=True,
             backend=BACKEND.EXLLAMA_V2,
             format=FORMAT.GPTQ,
+            quant_method=QUANT_METHOD.GPTQ,
             pack_dtype=pack_dtype,
         )
 

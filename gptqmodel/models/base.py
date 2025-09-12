@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 import torch._dynamo
 import torch.nn as nn
+from gptqmodel.quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from tokenicer import Tokenicer
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
@@ -386,9 +387,10 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
+            format=self.quantize_config.format,
+            quant_method=self.quantize_config.quant_method,
             device=DEVICE(self.quantize_config.device),
             pack=True,
-            format=self.quantize_config.format,
             pack_dtype=self.quantize_config.pack_dtype,
         )
 
@@ -461,7 +463,21 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = [QQQProcessor(**args)]
+        elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+            from ..looper.awq_processor import AWQProcessor
+            # TODO AWQ_BATCH_SIZE
+            # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
 
+            if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
+                raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
+
+            awq_model = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
+            awq_model.model_type = self.model.config.model_type
+            args["awq_model"] = awq_model
+            args["model"] = self.model
+            args["batch_size"] = batch_size
+            awq_processor = AWQProcessor(**args)
+            quantize_processor = [awq_processor]
         else:
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = [GPTQProcessor(**args)]
@@ -624,6 +640,7 @@ class BaseGPTQModel(nn.Module):
             device=DEVICE(self.quantize_config.device),
             pack=True,
             format=self.quantize_config.format,
+            quant_method=self.quantize_config.quant_method,
             pack_dtype=self.quantize_config.pack_dtype,
         )
 

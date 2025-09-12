@@ -49,7 +49,8 @@ from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, AWQuantLinear
+from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
@@ -207,6 +208,7 @@ def make_quant(
         sym=sym,
         backend=backend,
         format=format,
+        quant_method=qcfg.quant_method,
         pack=pack,
         dynamic=dynamic,
         device=device,
@@ -470,7 +472,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
+    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -492,6 +494,11 @@ def convert_gptq_v1_to_v2_format(
         log.info(f"Format: Conversion complete: {time.time() - t}s")
 
     return model
+
+
+def need_skip_gptq_v1_v2_convert(qlinear_kernel: Type[BaseQuantLinear]):
+    # TODO FORMAT.GEMM EXLLAMA V1 V2 needs to convert between v1 and v2
+    return qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]
 
 
 # public/stable api exposed to transformer/optimum
@@ -547,7 +554,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]:
+    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -761,6 +768,14 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
+        elif isinstance(submodule, AWQuantLinear_ExllamaV2):
+            model_uses_exllamav2 = True
+            device = submodule.qweight.device
+            scratch_fixed = submodule.scratch_space_fixed(
+                max_input_len=max_input_length or 2048,
+                max_batch_size=int(os.getenv("AWQ_BATCH_SIZE", 1))
+            )
+            fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
         elif isinstance(submodule, ExllamaQuantLinear):
             model_uses_exllama = True
             device = submodule.qweight.device
@@ -843,20 +858,21 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         set_tuning_params(matmul_recons_thd, matmul_fused_remap, matmul_no_half2)
 
     if model_uses_exllamav2:
-        from ..nn_modules.qlinear.exllamav2 import ExLlamaV2DeviceTensors
+        from ..utils.exllamav2 import ScratchSpace
 
+        # we allocate a model-persistent scratch space for each device
         device_tensors = {}
         for device, scratch_bytes in fixed_bytes.items():
-            device_tensors[device] = ExLlamaV2DeviceTensors(device.index, scratch_bytes)
+            device_tensors[device] = ScratchSpace(scratch_bytes=scratch_bytes, dev=device)
 
         # have persistent buffers, otherwise we will get OOM
         model.device_tensors = device_tensors
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaV2QuantLinear):
+        if isinstance(submodule, ExllamaV2QuantLinear) or isinstance(submodule, AWQuantLinear_ExllamaV2):
             device = submodule.qweight.device
-            submodule.post_init(temp_dq=model.device_tensors[device])
+            submodule.post_init(scratch_space=model.device_tensors[device])
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 

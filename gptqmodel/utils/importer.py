@@ -23,6 +23,12 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
+from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
+from ..nn_modules.qlinear.awq_exllama import AWQuantLinear_Exllama
+from ..nn_modules.qlinear.awq_gemm_ipex import AWQuantLinear_IPEX
+from ..nn_modules.qlinear.awq_gemv import AWQuantLinear_GEMV
+from ..nn_modules.qlinear.awq_gemv_fast import AWQuantLinear_GEMVFast
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -33,7 +39,7 @@ from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
-from ..quantization import FORMAT
+from ..quantization import FORMAT, QUANT_METHOD
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
@@ -42,28 +48,49 @@ from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 message_logged = False
 log = setup_logger()
 
-AUTO_SELECT_BACKEND_ORDER = OrderedDict({
-    BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
-    # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
-    BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
-    BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
-    BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
-    BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
-    # BACKEND.CUDA: DynamicCudaQuantLinear,
-    BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
-    BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
-    BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
+AUTO_SELECT_BACKEND_ORDER_MAP = {
+    QUANT_METHOD.GPTQ: OrderedDict({
+        BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
+        # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
+        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
+        BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
+        BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
+        BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
+        # BACKEND.CUDA: DynamicCudaQuantLinear,
+        BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
+        BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
+        BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
+    }),
+    QUANT_METHOD.QQQ: OrderedDict({
+        BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
+    }),
+    QUANT_METHOD.AWQ: OrderedDict({
+        BACKEND.IPEX: AWQuantLinear_IPEX,
+        BACKEND.EXLLAMA_V2: AWQuantLinear_ExllamaV2,
+        BACKEND.EXLLAMA_V1: AWQuantLinear_Exllama,
+        BACKEND.GEMM: AWQuantLinear_GEMM, # TODO ADD more BACKEND
+        BACKEND.GEMV: AWQuantLinear_GEMV,
+        BACKEND.GEMV_FAST: AWQuantLinear_GEMVFast,
+    }),
+}
 
-    BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
-})
-
-FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-    FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
-    FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
-    FORMAT.BITBLAS: [BACKEND.BITBLAS],
-    FORMAT.IPEX: [BACKEND.IPEX],
-    FORMAT.QQQ: [BACKEND.QQQ],
+SUPPORTS_BACKEND_MAP = {
+    QUANT_METHOD.GPTQ: {
+        FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+        FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
+        FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
+        FORMAT.BITBLAS: [BACKEND.BITBLAS],
+        FORMAT.IPEX: [BACKEND.IPEX],
+    },
+    QUANT_METHOD.QQQ: {
+        FORMAT.QQQ: [BACKEND.QQQ],
+    },
+    QUANT_METHOD.AWQ: {
+        FORMAT.GEMM: [BACKEND.GEMM, BACKEND.IPEX, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_V2],
+        FORMAT.GEMV: [BACKEND.GEMV],
+        FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
+        FORMAT.MARLIN: [BACKEND.MARLIN],
+    }
 }
 
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
@@ -144,6 +171,7 @@ def hf_select_quant_linear(
         backend=backend,
         device=device,
         format=FORMAT.GPTQ,
+        quant_method=QUANT_METHOD.GPTQ,
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
@@ -161,6 +189,7 @@ def select_quant_linear(
         device: Optional[DEVICE] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
+        quant_method: QUANT_METHOD = QUANT_METHOD.GPTQ,
         pack: bool = False,
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
@@ -178,7 +207,7 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = [(k, v) for k,v in AUTO_SELECT_BACKEND_ORDER.items() if k in FORMAT_DICT[format]]
+        allow_quant_linears = [(k, v) for k, v in AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].items() if k in SUPPORTS_BACKEND_MAP[quant_method][format]]
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
@@ -220,6 +249,8 @@ def select_quant_linear(
             raise err
 
         return validated_qlinears
+
+    # TODO check AWQ format supports BACKEND
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:

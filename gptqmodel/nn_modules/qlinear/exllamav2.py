@@ -24,6 +24,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
+from ...utils.exllamav2 import ScratchSpace
 from ...utils.logger import setup_logger
 
 exllama_v2_import_exception = None
@@ -198,7 +199,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             return False, ImportError(exllama_v2_import_exception)
         return cls._validate(**args)
 
-    def post_init(self, temp_dq):
+    def post_init(self, scratch_space: ScratchSpace):
         # resize due to padding after model weights have been loaded
         # if self.out_features != self.original_out_features or self.in_features != self.original_in_features:
         #     self.qweight.resize_(self.in_features // self.pack_dtype_bits * self.bits, self.out_features)
@@ -220,7 +221,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
-        temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
+        temp_dq = scratch_space.get_slice(self.temp_dq_size())
         self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
 
         super().post_init()
@@ -269,30 +270,3 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
-
-
-class ExLlamaV2DeviceTensors:
-    device_idx: int
-    scratch_bytes: int
-    scratch_idx: int
-    scratch: torch.tensor = None
-
-    def __init__(self, device_idx, scratch_bytes):
-        self.device_idx = device_idx
-        self.scratch_bytes = scratch_bytes
-
-    def prepare(self):
-        self.scratch = torch.empty(
-            (self.scratch_bytes // 2,),
-            dtype=torch.half,
-            device=_torch_device(self.device_idx),
-        )
-
-    def get_scratch_slice(self, size_bytes):
-        if self.scratch is None:
-            self.prepare()
-
-        size_bytes = ((size_bytes + 127) // 128) * 128
-        size_half = size_bytes // 2
-        scratch_slice = self.scratch.narrow(0, 0, size_half)
-        return scratch_slice
