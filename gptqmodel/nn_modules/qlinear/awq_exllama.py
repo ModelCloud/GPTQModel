@@ -27,7 +27,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-exl_ext, msg = try_import("gptqmodel_awq_exl_kernels")
+exl_ext, msg = try_import("gptqmodel_exllama_kernels")
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")
@@ -36,7 +36,7 @@ none_tensor = torch.empty((1, 1), device="meta")
 class AWQuantLinear_Exllama(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
-    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False

@@ -553,7 +553,7 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format == FORMAT.GPTQ and backend not in [BACKEND.IPEX]:
+        if (qcfg.format == FORMAT.GPTQ or qcfg.format == FORMAT.GEMM) and backend not in [BACKEND.IPEX]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=torch_dtype,

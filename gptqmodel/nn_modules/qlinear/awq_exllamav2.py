@@ -28,7 +28,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-exlv2_ext, msg = try_import("gptqmodel_awq_exlv2_kernels")
+exlv2_ext, msg = try_import("gptqmodel_exllamav2_kernels")
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")

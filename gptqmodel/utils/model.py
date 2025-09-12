@@ -472,7 +472,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if need_gptq_v1_v2_convert(qlinear_kernel):
+    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -496,9 +496,9 @@ def convert_gptq_v1_to_v2_format(
     return model
 
 
-def need_gptq_v1_v2_convert(qlinear_kernel: Type[BaseQuantLinear]):
-    return qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear] or issubclass(
-        qlinear_kernel, AWQuantLinear)
+def need_skip_gptq_v1_v2_convert(qlinear_kernel: Type[BaseQuantLinear]):
+    # TODO FORMAT.GEMM EXLLAMA V1 V2 needs to convert between v1 and v2
+    return qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]
 
 
 # public/stable api exposed to transformer/optimum
@@ -554,7 +554,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if need_gptq_v1_v2_convert(qlinear_kernel):
+    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
