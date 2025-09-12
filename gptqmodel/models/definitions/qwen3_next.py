@@ -37,35 +37,6 @@ class Qwen3NextGPTQ(BaseGPTQModel):
     layer_type = "Qwen3NextDecoderLayer"
 
     # -----------------------------------------------------------------------------
-    # Legacy flat listing (kept for back-compat with old packers)
-    # NOTE: Missing paths are ignored at runtime, so we can list both variants.
-    # -----------------------------------------------------------------------------
-    layer_modules = [
-        # --- Full Attention path ---
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-
-        # --- Linear Attention path (do NOT quantize conv1d) ---
-        ["linear_attn.in_proj_qkvz", "linear_attn.in_proj_ba"],
-        ["linear_attn.out_proj"],
-
-        # --- Dense MLP (when not an MoE layer) ---
-        ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"],
-
-        # --- MoE router + shared expert (when MoE layer is active) ---
-        ["mlp.gate"],  # router gate (routing logits)
-        ["mlp.shared_expert_gate"],
-        ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
-        ["mlp.shared_expert.down_proj"],
-
-        # --- Per-expert projections (dynamic index) ---
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj",
-         f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-    ]
-
-    # -----------------------------------------------------------------------------
     # Preferred modern hierarchical spec. The loader will gracefully skip any
     # subpaths that don't exist on a given layer (e.g., dense vs MoE, or mixer type).
     # -----------------------------------------------------------------------------
