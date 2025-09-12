@@ -34,6 +34,8 @@ class Llama4GPTQ(BaseGPTQModel):
 
     dynamic_expert_index = "num_local_experts"
 
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj", "self_attn.o_proj"],
 

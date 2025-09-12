@@ -23,6 +23,9 @@ class MPTGPTQ(BaseGPTQModel):
 
     layers_node = ["transformer.blocks"]
     layer_type = "MPTBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["attn.Wqkv"],
         ["attn.out_proj"],

@@ -26,6 +26,9 @@ class DbrxConvertedGPTQ(BaseGPTQModel):
 
     layers_node = ["transformer.blocks"]
     layer_type = "DbrxBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["norm_attn_norm.attn.q_proj", "norm_attn_norm.attn.k_proj", "norm_attn_norm.attn.v_proj"],
         ["norm_attn_norm.attn.out_proj"],

@@ -143,6 +143,8 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
+        self.fail_safe = False
+
         self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32)
 
@@ -322,7 +324,6 @@ class GPTQ:
     def quantize(
             self,
             blocksize=128,
-            fail_safe: bool = False,
     ):
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
@@ -365,7 +366,6 @@ class GPTQ:
         self.quantizer.find_params(W, weight=True)
 
         H = self.H.to(device=self.module.target_device)
-        del self.H
 
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -408,7 +408,7 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization or fail_safe:
+        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0):
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -563,9 +563,14 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+                    if self.fail_safe:
+                        log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
+                        self.qcfg.mock_quantization = True
+                        return self.quantize(blocksize=blocksize)
+                    else:
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
             else:
-                if fail_safe:
+                if self.fail_safe:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
@@ -574,6 +579,7 @@ class GPTQ:
             avg_loss = 999999999
 
         del Losses
+        del self.H
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 

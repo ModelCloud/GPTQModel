@@ -29,6 +29,9 @@ class BloomGPTQ(BaseGPTQModel):
     # repeating layers
     layers_node = ["transformer.h"]
     layer_type = "BloomBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attention.query_key_value"],
         ["self_attention.dense"],

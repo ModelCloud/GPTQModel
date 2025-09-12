@@ -21,6 +21,7 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
+from ..utils.structure import print_module_tree
 
 log = setup_logger()
 
@@ -131,6 +132,7 @@ from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
+from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
 from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
@@ -198,6 +200,7 @@ MODEL_MAP = {
     "minicpm3": MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
     "qwen3_moe": Qwen3MoeGPTQ,
+    "qwen3_next": Qwen3NextGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "qwen2_5_vl": Qwen2_5_VLGPTQ,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
@@ -255,6 +258,7 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            debug: Optional[bool] = False,
             **kwargs,
     ):
         if isinstance(model_id_or_path, str):
@@ -286,7 +290,7 @@ class GPTQModel:
                             break
 
         if is_quantized:
-            return cls.from_quantized(
+            m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
                 device=device,
@@ -296,7 +300,7 @@ class GPTQModel:
                 **kwargs,
             )
         else:
-            return cls.from_pretrained(
+            m = cls.from_pretrained(
                 model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
                 device_map=device_map,
@@ -304,6 +308,13 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 **kwargs,
             )
+
+        # debug model structure
+        if debug:
+            print_module_tree(m.model)
+
+        return m
+
 
     @classmethod
     def from_pretrained(

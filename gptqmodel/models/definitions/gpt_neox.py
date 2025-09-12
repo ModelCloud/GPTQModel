@@ -24,6 +24,9 @@ class GPTNeoXGPTQ(BaseGPTQModel):
 
     layers_node = ["gpt_neox.layers"]
     layer_type = "GPTNeoXLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["attention.query_key_value"],
         ["attention.dense"],
