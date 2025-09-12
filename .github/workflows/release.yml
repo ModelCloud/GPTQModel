@@ -377,11 +377,11 @@ jobs:
           fi
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py$python_version"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env exists, skip"
+            echo "env: ${env_name} exists, skip"
             pyenv local $env_name
             pyenv activate $env_name
           else
-            echo "creating venv..."
+            echo "creating venv: ${env_name}..."
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
