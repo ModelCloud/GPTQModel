@@ -26,6 +26,8 @@ class Qwen3NextGPTQ(BaseGPTQModel):
       - Dynamic expert indexing via config.num_experts
     """
 
+    layer_modules_strict = False
+
     # Embeddings & final norm (pre lm_head)
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
