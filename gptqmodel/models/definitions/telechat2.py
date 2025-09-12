@@ -14,6 +14,8 @@ class TeleChat2GPTQ(BaseGPTQModel):
     base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     """
     If other frameworks are used for inference (such as VLLM),
     it is best not to quantify QKV due to the organization of

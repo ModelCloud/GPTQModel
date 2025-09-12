@@ -26,6 +26,9 @@ class NemotronHGPTQ(BaseGPTQModel):
 
     layers_node = "backbone.layers"
     layer_type = "NemotronHBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["mixer.k_proj", "mixer.v_proj", "mixer.q_proj"],
         ["mixer.o_proj"],

@@ -23,6 +23,9 @@ class MiniCPM3GPTQ(BaseGPTQModel):
 
     layers_node = ["model.layers"]
     layer_type = "MiniCPM3DecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attn.q_a_proj","self_attn.kv_a_proj_with_mqa"],
         ["self_attn.q_b_proj","self_attn.kv_b_proj"],

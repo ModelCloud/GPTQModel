@@ -23,6 +23,9 @@ class GPTJGPTQ(BaseGPTQModel):
 
     layers_node = ["transformer.h"]
     layer_type = "GPTJBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["attn.k_proj", "attn.v_proj", "attn.q_proj"],
         ["attn.out_proj"],
