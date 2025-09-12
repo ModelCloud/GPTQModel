@@ -36,17 +36,19 @@ none_tensor = torch.empty((1, 1), device="meta")
 
 class AWQuantLinear_ExllamaV2(AWQuantLinear):
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
+    # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
-    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CUDA] # ROCm has broken accuracies issues
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
