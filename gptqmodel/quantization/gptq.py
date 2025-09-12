@@ -365,7 +365,6 @@ class GPTQ:
         self.quantizer.find_params(W, weight=True)
 
         H = self.H.to(device=self.module.target_device)
-        del self.H
 
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -563,7 +562,11 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples")
+                    if fail_safe:
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples")
+                    else:
+                        log.info(f"Retrying quantization for `{self.name}` with fail_safe=True")
+                        return self.quantize(blocksize=blocksize, fail_safe=True)
             else:
                 if fail_safe:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
@@ -574,6 +577,7 @@ class GPTQ:
             avg_loss = 999999999
 
         del Losses
+        del self.H
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
