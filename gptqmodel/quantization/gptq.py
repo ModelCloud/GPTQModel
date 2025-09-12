@@ -563,7 +563,7 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples")
             else:
                 if fail_safe:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
