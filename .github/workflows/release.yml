@@ -61,6 +61,9 @@ env:
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
   MAX_JOBS: 8
+  GPTQMODEL_BUILD_QQQ: 0
+  GTTQMODEL_BUILD_EORA: 0
+  GPTQMODEL_BUILD_EXLLAMA_V1: 0
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
@@ -75,7 +78,7 @@ jobs:
       ip: ${{ steps.get_ip.outputs.ip }}
       task_list: ${{ steps.assign.outputs.task_list }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
-    if: github.event.inputs.github_vm == 'false'
+    if: ${{ inputs.github_vm == false }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v5
@@ -91,19 +94,16 @@ jobs:
           echo "max-parallel: ${{ inputs.max-parallel }}"
           echo "upload_release: ${{ inputs.upload_release }}"
           echo "upload_pypi: ${{ inputs.upload_pypi }}"
-
       - name: Select server
         id: get_ip
         run: |
           echo "ip=${RUNNER}" >> "$GITHUB_OUTPUT"
           echo "GPU_IP=${RUNNER}" >> $GITHUB_ENV
           echo "ip: $ip"
-
           max_p=${{ github.event.inputs.max-parallel }}
           max_p="{\"size\": ${max_p:-10}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
-
   release:
     strategy:
       fail-fast: false
@@ -366,19 +366,16 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-
       - name: Print Env
         run: |
           if [ "${{ matrix.cuda }}" -lt 128 ]; then # CUDA >= 12.8 supports 12.0 (5090)
             echo "TORCH_CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
           fi
-
           python_version=${{ matrix.python }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py$python_version"
-
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env exists, skip"
             pyenv local $env_name
@@ -390,7 +387,6 @@ jobs:
             pyenv activate $env_name
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ {{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
-
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -399,11 +395,9 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
-
       - name: Install requirements
         run: |
           # bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ $cuda_version $torch_version $python_version
-
       - name: Compile
         run: python setup.py bdist_wheel
 
@@ -412,10 +406,8 @@ jobs:
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
-
           twine check dist/$whl
           pip install dist/$whl
-
       - name: Upload wheel
         continue-on-error: true
         run: |
@@ -424,7 +416,6 @@ jobs:
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
@@ -466,7 +457,6 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-
       - name: Install requirements
         run: pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
@@ -478,9 +468,7 @@ jobs:
           ls -ahl dist
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
-
           twine check dist/$whl
-
       - name: Upload to local
         continue-on-error: true
         run: |
@@ -489,7 +477,6 @@ jobs:
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
-
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
@@ -510,13 +497,10 @@ jobs:
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
           timestamp=$(date +%s%3N)
-
           echo "open http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&confirmed=1 to confirm releasing to pypi"
           for i in {1..5}; do echo "."; done
           echo "click http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp&denied=1 to DENY"
-
           status=-1
-
           while [ "$status" -lt 0 ]; do
             status=$(curl -s "http://${RUNNER}/gpu/ci/confirm?id=${{ github.run_id }}&timestamp=$timestamp")
             if [ "$status" == "2" ]; then
@@ -528,7 +512,6 @@ jobs:
               echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
             fi
           done
-
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
         env:
@@ -536,14 +519,12 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
           python -m twine upload dist/*gz
-
-
   release-source-github:
     runs-on: ubuntu-24.04
     env:
       RELEASE_MODE: 0
       BUILD_CUDA_EXT: '0'
-    if: github.event.inputs.github_vm == 'true'
+    if: ${{ inputs.github_vm == true }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v5
@@ -559,8 +540,8 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-
-      - uses: actions/setup-python@v5
+          
+      - uses: actions/setup-python@v6
         with:
           python-version: 3.13
           cache: 'pip'
@@ -569,7 +550,6 @@ jobs:
         run: |
           pip install build setuptools uv -U
           uv pip install torch twine --system
-
       - name: Compile
         run: python -m build --no-isolation --sdist
 
@@ -578,9 +558,7 @@ jobs:
           ls -ahl dist
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
-
           twine check dist/$whl
-
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -600,7 +578,6 @@ jobs:
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
           for i in {1..5}; do sleep 5; done
-
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         env:

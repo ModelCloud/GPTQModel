@@ -14,4 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "4.2.0"
+from . import DeepSeekV3GPTQ
+
+
+class KimiK2GPTQ(DeepSeekV3GPTQ):
+    pass

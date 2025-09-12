@@ -14,4 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "4.2.0"
+from gptqmodel import BACKEND
+from model_test import ModelTest
+
+
+class TestApertus(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Apertus-8B-Instruct-2509/"
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    NATIVE_ARC_CHALLENGE_ACC = 0.5145
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5256
+    TRUST_REMOTE_CODE = False
+    APPLY_CHAT_TEMPLATE = True
+    EVAL_BATCH_SIZE = 6
+    LOAD_BACKEND = BACKEND.TORCH
+
+    def test_apertus(self):
+        self.quant_lm_eval()

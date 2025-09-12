@@ -47,9 +47,42 @@ version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars['version']
 
-BASE_WHEEL_URL = (
-    "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
-)
+# -----------------------------
+# Prebuilt wheel download config
+# -----------------------------
+# Default template (GitHub Releases), can be overridden via env.
+DEFAULT_WHEEL_URL_TEMPLATE = "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
+WHEEL_URL_TEMPLATE = os.environ.get("GPTQMODEL_WHEEL_URL_TEMPLATE")
+WHEEL_BASE_URL = os.environ.get("GPTQMODEL_WHEEL_BASE_URL")
+WHEEL_TAG = os.environ.get("GPTQMODEL_WHEEL_TAG")  # Optional override of release tag
+
+def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
+    """
+    Build the final wheel URL based on:
+      1) GPTQMODEL_WHEEL_URL_TEMPLATE (highest priority)
+      2) GPTQMODEL_WHEEL_BASE_URL (append /{wheel_name})
+      3) DEFAULT_WHEEL_URL_TEMPLATE (GitHub Releases)
+    """
+    # Highest priority: explicit template
+    if WHEEL_URL_TEMPLATE:
+        tmpl = WHEEL_URL_TEMPLATE
+        # If {wheel_name} or {tag_name} not present, treat as base and append name.
+        if ("{wheel_name}" in tmpl) or ("{tag_name}" in tmpl):
+            return tmpl.format(tag_name=tag_name, wheel_name=wheel_name)
+        # Otherwise, join as base
+        if tmpl.endswith("/"):
+            return tmpl + wheel_name
+        return tmpl + "/" + wheel_name
+
+    # Next priority: base URL
+    if WHEEL_BASE_URL:
+        base = WHEEL_BASE_URL
+        if base.endswith("/"):
+            return base + wheel_name
+        return base + "/" + wheel_name
+
+    # Fallback: default GitHub template
+    return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
 BUILD_CUDA_EXT = os.environ.get("BUILD_CUDA_EXT")
 if BUILD_CUDA_EXT is None:
@@ -107,7 +140,6 @@ def get_version_tag() -> str:
         )
         sys.exit(1)
 
-
     CUDA_VERSION = "".join(cuda_version.split("."))
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
@@ -117,7 +149,6 @@ requirements = []
 if not os.getenv("CI"):
     with open('requirements.txt') as f:
         requirements = [line.strip() for line in f if line.strip()]
-
 
 if TORCH_CUDA_ARCH_LIST is None:
     HAS_CUDA_V8 = any(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
@@ -147,6 +178,27 @@ additional_setup_kwargs = {}
 include_dirs = ["gptqmodel_cuda"]
 
 extensions = []
+
+# -----------------------------
+# Per-extension build toggles
+# -----------------------------
+def _env_enabled(val: str) -> bool:
+    if val is None:
+        return True
+    return str(val).strip().lower() not in ("0", "false", "off", "no")
+
+def _env_enabled_any(names, default="1") -> bool:
+    for n in names:
+        if n in os.environ:
+            return _env_enabled(os.environ.get(n))
+    return _env_enabled(default)
+
+BUILD_EORA        = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "1"))
+BUILD_EXLLAMA_V1  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "1"))
+BUILD_EXLLAMA_V2  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+BUILD_QQQ         = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
+BUILD_MARLIN      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+BUILD_AWQ      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
 if BUILD_CUDA_EXT == "1":
     from distutils.sysconfig import get_python_lib
@@ -200,7 +252,7 @@ if BUILD_CUDA_EXT == "1":
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "--use_fast_math",
-            "-diag-suppress=179,39",  # 186
+            "-diag-suppress=179,39,177",
         ]
     else:
         # TODO: waiting for this PR in pytorch to merge for full fix
@@ -211,15 +263,12 @@ if BUILD_CUDA_EXT == "1":
             modified_flags = []
             for flag in flags:
                 if flag.startswith("-") and "CUDA" in flag and not flag.startswith("-I"):
-                    # check/split flag into flag and value
                     parts = flag.split("=", 1)
                     if len(parts) == 2:
                         flag_part, value_part = parts
-                        # replace fist instance of "CUDA" with "HIP" only in the flag and not flag value
                         modified_flag_part = flag_part.replace("CUDA", "HIP", 1)
                         modified_flag = f"{modified_flag_part}={value_part}"
                     else:
-                        # replace fist instance of "CUDA" with "HIP" in flag
                         modified_flag = flag.replace("CUDA", "HIP", 1)
                     modified_flags.append(modified_flag)
                     print(f'Modified flag: {flag} -> {modified_flag}', file=sys.stderr)
@@ -229,56 +278,70 @@ if BUILD_CUDA_EXT == "1":
             return modified_flags
 
         # convert nvcc flags to hip flags
-        extra_compile_args["nvcc"] =_hipify_compile_flags(extra_compile_args["nvcc"])
+        extra_compile_args["nvcc"] = _hipify_compile_flags(extra_compile_args["nvcc"])
 
     extensions = []
 
     # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-    if sys.platform != "win32":# TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
-        # https://rocm.docs.amd.com/projects/HIPIFY/en/docs-6.1.0/tables/CUDA_Device_API_supported_by_HIP.html
-        # nv_bfloat16 and nv_bfloat162 (2x bf16) missing replacement in ROCm
+    if sys.platform != "win32": # TODO: VC++: fatal error C1061: compiler limit : blocks nested too deeply
+        # -------------------------
+        # NVIDIA-only extensions
+        # -------------------------
         if not ROCM_VERSION:
             if HAS_CUDA_V8:
-                extensions += [
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_marlin_kernels",
-                        [
-                            "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                            "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                            "gptqmodel_ext/marlin/marlin_repack.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_qqq_kernels",
-                        [
-                            "gptqmodel_ext/qqq/qqq.cpp",
-                            "gptqmodel_ext/qqq/qqq_gemm.cu"
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    cpp_ext.CUDAExtension(
-                        'gptqmodel_exllama_eora',
-                        [
-                            "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                            "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    # TODO: VC++: error lnk2001 unresolved external symbol cublasHgemm
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_exllamav2_kernels",
-                        [
-                            "gptqmodel_ext/exllamav2/ext.cpp",
-                            "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
-                            "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
+                if BUILD_MARLIN:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_marlin_kernels",
+                            [
+                                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                                "gptqmodel_ext/marlin/marlin_repack.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_QQQ:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_qqq_kernels",
+                            [
+                                "gptqmodel_ext/qqq/qqq.cpp",
+                                "gptqmodel_ext/qqq/qqq_gemm.cu"
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_EXLLAMA_V2:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav2_kernels",
+                            [
+                                "gptqmodel_ext/exllamav2/ext.cpp",
+                                "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                                "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_EORA:
+                    # WARNING: EoRA may be experimental. Keep togglable via env.
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            'gptqmodel_exllama_eora',
+                            [
+                                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+
+                if BUILD_AWQ:
                     cpp_ext.CUDAExtension(
                         "gptqmodel_awq_kernels",
                         [
@@ -303,45 +366,6 @@ if BUILD_CUDA_EXT == "1":
                         ],
                         extra_compile_args=extra_compile_args,
                     )
-                ]
-
-        # both cuda and rocm compatible
-        extensions += [
-            cpp_ext.CUDAExtension(
-                "gptqmodel_exllama_kernels",
-                [
-                    "gptqmodel_ext/exllama/exllama_ext.cpp",
-                    "gptqmodel_ext/exllama/cuda_buffers.cu",
-                    "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                    "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                    "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-                ],
-                extra_link_args=extra_link_args,
-                extra_compile_args=extra_compile_args,
-            ),
-            cpp_ext.CUDAExtension(
-                "gptqmodel_awq_exl_kernels",
-                [
-                    "gptqmodel_ext/awq/exllama/exllama_ext.cpp",
-                    "gptqmodel_ext/awq/exllama/cuda_buffers.cu",
-                    "gptqmodel_ext/awq/exllama/cuda_func/column_remap.cu",
-                    "gptqmodel_ext/awq/exllama/cuda_func/q4_matmul.cu",
-                    "gptqmodel_ext/awq/exllama/cuda_func/q4_matrix.cu",
-                ],
-                extra_compile_args=extra_compile_args,
-                extra_link_args=extra_link_args,
-            ),
-            cpp_ext.CUDAExtension(
-                "gptqmodel_awq_exlv2_kernels",
-                [
-                    "gptqmodel_ext/awq/exllamav2/ext.cpp",
-                    "gptqmodel_ext/awq/exllamav2/cuda/q_matrix.cu",
-                    "gptqmodel_ext/awq/exllamav2/cuda/q_gemm.cu",
-                ],
-                extra_compile_args=extra_compile_args,
-                extra_link_args=extra_link_args,
-            )
-        ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
@@ -354,8 +378,11 @@ class CachedWheelsCommand(_bdist_wheel):
 
         wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
-        wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{gptqmodel_version}", wheel_name=wheel_filename)
-        print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
+        # Allow tag override via env; default to "v{gptqmodel_version}"
+        tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
+        wheel_url = _resolve_wheel_url(tag_name=tag_name, wheel_name=wheel_filename)
+
+        print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
             urllib.request.urlretrieve(wheel_url, wheel_filename)
@@ -371,7 +398,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
             os.rename(wheel_filename, wheel_path)
         except BaseException:
-            print(f"Precompiled wheel not found in url: {wheel_url}. Building from source...")
+            print(f"Precompiled wheel not found at: {wheel_url}. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
 
