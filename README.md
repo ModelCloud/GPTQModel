@@ -4,7 +4,7 @@
 </div>
 <h1 align="center">GPT-QModel</h1>
 </p>
-<p align="center">LLM model compression/quantization toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU and Intel/AMD/Apple CPU via HF, vLLM, and SGLang.</p>
+<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU and Intel/AMD/Apple CPU via HF, vLLM, and SGLang.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 09/11/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ New Models Support: Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
+* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
 * 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
 * 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 * 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
@@ -180,7 +180,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE        | ✅ |
 | DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ |               |   |
 | Dream             | ✅ | GRIN-MoE          | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |               |   |
-| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE   | ✅ |               |   |
+| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mixtral        | ✅ | Qwen 2/3 (Next/MoE)   | ✅ |               |   |
 
 ## Platform and HW Support 
 
