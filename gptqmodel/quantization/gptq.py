@@ -324,7 +324,6 @@ class GPTQ:
     def quantize(
             self,
             blocksize=128,
-            fail_safe: bool = False,
     ):
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
