@@ -22,6 +22,7 @@ class LlamaGPTQ(BaseGPTQModel):
     # Excluding `layers_node`.
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
+    embed_modules = ["model.embed_tokens", "model.rotary_emb"]
 
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
@@ -53,3 +54,53 @@ class LlamaGPTQ(BaseGPTQModel):
         ["mlp.gate_proj", "mlp.up_proj",],
         ["mlp.down_proj"],
     ]
+
+    def get_layers_for_scaling(self, module, input_feat, module_kwargs):
+        layers = []
+
+        # attention input
+        layers.append(
+            dict(
+                prev_op=module.input_layernorm,
+                layers=[
+                    module.self_attn.q_proj,
+                    module.self_attn.k_proj,
+                    module.self_attn.v_proj,
+                ],
+                inp=input_feat["self_attn.q_proj"],
+                module2inspect=module.self_attn,
+                kwargs=module_kwargs,
+            )
+        )
+
+        # attention out
+        # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
+        if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
+            layers.append(
+                dict(
+                    prev_op=module.self_attn.v_proj,
+                    layers=[module.self_attn.o_proj],
+                    inp=input_feat["self_attn.o_proj"],
+                )
+            )
+
+        # linear 1
+        layers.append(
+            dict(
+                prev_op=module.post_attention_layernorm,
+                layers=[module.mlp.gate_proj, module.mlp.up_proj],
+                inp=input_feat["mlp.gate_proj"],
+                module2inspect=module.mlp,
+            )
+        )
+
+        # linear 2
+        layers.append(
+            dict(
+                prev_op=module.mlp.up_proj,
+                layers=[module.mlp.down_proj],
+                inp=input_feat["mlp.down_proj"],
+            )
+        )
+
+        return layers

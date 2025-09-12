@@ -85,6 +85,7 @@ class BaseGPTQModel(nn.Module):
     layer_modules_strict = True
 
     pre_lm_head_norm_module: str = None
+    embed_modules: List[str] = None
 
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
@@ -471,9 +472,7 @@ class BaseGPTQModel(nn.Module):
             if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
                 raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
 
-            awq_model = AWQ_CAUSAL_LM_MODEL_MAP[self.model.config.model_type]
-            awq_model.model_type = self.model.config.model_type
-            args["awq_model"] = awq_model
+            args["gptq_model"] = self
             args["model"] = self.model
             args["batch_size"] = batch_size
             awq_processor = AWQProcessor(**args)
@@ -1294,6 +1293,14 @@ class BaseGPTQModel(nn.Module):
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         return move_to(module, device=CPU)
+
+    def move_embed(self, device: str):
+        for embed_module_name in self.embed_modules:
+            embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
+            embed_module.to(device)
+
+    def get_layers_for_scaling(self, module, input_feat, module_kwargs):
+        pass
 
     ## overrides nn.module.train()
     # def train(self, mode=True):

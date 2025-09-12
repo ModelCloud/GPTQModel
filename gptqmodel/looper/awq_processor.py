@@ -38,14 +38,14 @@ from ..quantization.awq.utils.module import get_op_name, get_named_linears, excl
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.model import move_to
+from ..utils.model import move_to, get_module_by_name_prefix
 from ..utils.torch import CPU, torch_sync
 
 log = setup_logger()
 
 class AWQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
-                 calibration_dataset_concat_size: Optional[int], batch_size: int, awq_model, model,
+                 calibration_dataset_concat_size: Optional[int], batch_size: int, gptq_model, model,
                  logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
@@ -57,7 +57,7 @@ class AWQProcessor(LoopProcessor):
         self.avg_losses = []
         self.nsamples = 0
 
-        self.awq_model = awq_model
+        self.gptq_model = gptq_model
         self.model = model
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
         self.apply_clip = True
@@ -105,7 +105,7 @@ class AWQProcessor(LoopProcessor):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
 
     def init_quant(self):
-        modules = self.awq_model.get_model_layers(self.model)
+        modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
         # make sure samples tensor's shape is [1, max_calib_seq_len]
         samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration_dataset if data['input_ids'].shape[1] >= self.max_calib_seq_len]
 
@@ -116,7 +116,7 @@ class AWQProcessor(LoopProcessor):
 
         best_device = get_best_device()
         modules[0] = modules[0].to(best_device)
-        self.awq_model.move_embed(self.model, best_device)
+        self.gptq_model.move_embed(best_device)
 
         # get input and kwargs to layer 0
         # with_kwargs is only supported in PyTorch 2.0
@@ -160,7 +160,7 @@ class AWQProcessor(LoopProcessor):
         inps = inps[0]
 
         modules[0] = modules[0].cpu()
-        self.awq_model.move_embed(self.model, "cpu")
+        self.gptq_model.move_embed("cpu")
 
         clear_memory()
 
@@ -168,7 +168,7 @@ class AWQProcessor(LoopProcessor):
             layer_kwargs["attention_mask"] = layer_kwargs["attention_mask"].to(
                 best_device
             )
-        elif "qwen" in self.awq_model.model_type:
+        elif "qwen" in self.model.config.model_type:
             layer_kwargs["attention_mask"] = None
 
         return modules, layer_kwargs, inps
@@ -184,19 +184,19 @@ class AWQProcessor(LoopProcessor):
         handles = []
 
         # FIXME: Workaround for Mixtral to use block_sparse_moe input features
-        if self.awq_model.model_type == "mixtral":
+        if self.model.config.model_type == "mixtral":
             named_linears = {
                 **named_linears,
                 "block_sparse_moe": layer.block_sparse_moe,
             }
 
-        if self.awq_model.model_type == "deepseek_v2" or self.awq_model.model_type == "deepseek_v3":
+        if self.model.config.model_type == "deepseek_v2" or self.model.config.model_type == "deepseek_v3":
             named_linears = {
                 **named_linears,
                 "mlp": layer.mlp,
             }
 
-        if self.awq_model.model_type == "qwen3_moe":
+        if self.model.config.model_type == "qwen3_moe":
             named_linears = {
                 **named_linears,
                 "mlp": layer.mlp,
@@ -319,7 +319,7 @@ class AWQProcessor(LoopProcessor):
         # We need to move the rotary embedding every time we move to a new module.
         # Transformers 4.45.0 moved rotary embedding to model definition as of this PR:
         # https://github.com/huggingface/transformers/pull/32617
-        self.awq_model.move_embed(self.model, common_device)
+        self.gptq_model.move_embed(common_device)
 
         # Transformers >= 4.48.0 requires positional embeddings should be computed before forward pass
         if (
@@ -357,7 +357,7 @@ class AWQProcessor(LoopProcessor):
         clear_memory()
 
         # [STEP 2]: Compute and apply scale list
-        module_config: List[Dict] = self.awq_model.get_layers_for_scaling(
+        module_config: List[Dict] = self.gptq_model.get_layers_for_scaling(
             module, input_feat, self.module_kwargs
         )
         scales_list = [
