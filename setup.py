@@ -341,31 +341,55 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_AWQ:
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_awq_kernels",
-                        [
-                            "gptqmodel_ext/awq/pybind_awq.cpp",
-                            "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
-                            "gptqmodel_ext/awq/layernorm/layernorm.cu",
-                            "gptqmodel_ext/awq/position_embedding/pos_encoding_kernels.cu",
-                            "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
-                            "gptqmodel_ext/awq/vllm/moe_alig_block.cu",
-                            "gptqmodel_ext/awq/vllm/activation.cu",
-                            "gptqmodel_ext/awq/vllm/topk_softmax_kernels.cu",
-                        ],
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    # TODO only compatible with ampere?
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_awq_v2_kernels",
-                        [
-                            "gptqmodel_ext/awq/pybind_awq_v2.cpp",
-                            "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
-                            "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
-                        ],
-                        extra_compile_args=extra_compile_args,
-                    )
+        # -------------------------
+        # CUDA & ROCm compatible
+        # -------------------------
+        if BUILD_EXLLAMA_V1:
+            extensions += [
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_exllama_kernels",
+                    [
+                        "gptqmodel_ext/exllama/exllama_ext.cpp",
+                        "gptqmodel_ext/exllama/cuda_buffers.cu",
+                        "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                        "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                        "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
+                    ],
+                    extra_link_args=extra_link_args,
+                    extra_compile_args=extra_compile_args,
+                )
+            ]
+
+        if BUILD_AWQ:
+            extensions += [
+                # contain un-hipifiable inline PTX
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_awq_kernels",
+                    [
+                        "gptqmodel_ext/awq/pybind_awq.cpp",
+                        "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
+                        "gptqmodel_ext/awq/layernorm/layernorm.cu",
+                        "gptqmodel_ext/awq/position_embedding/pos_encoding_kernels.cu",
+                        "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
+                        "gptqmodel_ext/awq/vllm/moe_alig_block.cu",
+                        "gptqmodel_ext/awq/vllm/activation.cu",
+                        "gptqmodel_ext/awq/vllm/topk_softmax_kernels.cu",
+                    ],
+                    extra_compile_args=extra_compile_args,
+                ),
+                # TODO only compatible with ampere?
+                # arch_flags = get_compute_capabilities({80, 86, 89, 90})
+                # extra_compile_args_v2 = get_extra_compile_args(arch_flags, generator_flags)
+                cpp_ext.CUDAExtension(
+                    "gptqmodel_awq_v2_kernels",
+                    [
+                        "gptqmodel_ext/awq/pybind_awq_v2.cpp",
+                        "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
+                        "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
+                    ],
+                    extra_compile_args=extra_compile_args,
+                )
+            ]
 
     additional_setup_kwargs = {"ext_modules": extensions, "cmdclass": {"build_ext": cpp_ext.BuildExtension}}
 
