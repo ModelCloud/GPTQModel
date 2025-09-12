@@ -180,7 +180,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE        | ✅ |
 | DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ |               |   |
 | Dream             | ✅ | GRIN-MoE          | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |               |   |
-| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE   | ✅ |               |   |
+| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mixtral        | ✅ | Qwen 2/3 (Next/MoE)   | ✅ |               |   |
 
 ## Platform and HW Support 
 
