@@ -408,7 +408,7 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0) or self.retry_quantize:
+        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0):
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
