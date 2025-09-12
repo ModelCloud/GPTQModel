@@ -65,7 +65,7 @@ class GPTQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, buffered_fwd: bool):
+    def preprocess(self, module: NamedModule, buffered_fwd: bool, fail_safe: bool):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -92,6 +92,7 @@ class GPTQProcessor(LoopProcessor):
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
+            tmp.fail_safe = fail_safe
 
         # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
         # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
@@ -130,7 +131,7 @@ class GPTQProcessor(LoopProcessor):
                 g.H = g.H.to(device=module.target_device, non_blocking=True)
             g.module.weight.data = g.module.weight.data.to(device=module.target_device, non_blocking=True)
 
-    def process(self, module: NamedModule, auto_gc: bool = True, fail_safe: bool = False):
+    def process(self, module: NamedModule, auto_gc: bool = True):
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
@@ -140,7 +141,7 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             g = self.tasks[module.name]
 
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize(fail_safe=fail_safe)
+        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
         with self.lock:
             self.result_save(module.full_name, {

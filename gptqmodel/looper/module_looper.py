@@ -298,7 +298,7 @@ class ModuleLooper():
                             subset[name] = named_module
                             full[name] = named_module
 
-                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
                         # some modules are skipped
                         if processor.is_skipped(subset[name]):
                             skipped_modules.append(name)
@@ -416,10 +416,7 @@ class ModuleLooper():
                     if len(ALL_DEVICES) <= 1:
                         for name_index, name in enumerate(subset):
                             m = subset[name]
-                            if isinstance(processor, GPTQProcessor):
-                                processor.process(module=m, auto_gc=auto_gc, fail_safe=fail_safe and name in moe_skip_modules)
-                            else:
-                                processor.process(module=m, auto_gc=auto_gc)
+                            processor.process(module=m, auto_gc=auto_gc)
                             processed_subset[name] = m
                     else:
                         # TODO: there are threading/sync issues with streaming transfers
@@ -434,10 +431,7 @@ class ModuleLooper():
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []
                             def process_module(name, m):
-                                if isinstance(processor, GPTQProcessor):
-                                    processor.process(module=m, auto_gc=auto_gc, fail_safe=fail_safe and name in moe_skip_modules)
-                                else:
-                                    processor.process(module=m, auto_gc=auto_gc)
+                                processor.process(module=m, auto_gc=auto_gc)
                                 return name, m
 
                             for name in subset:

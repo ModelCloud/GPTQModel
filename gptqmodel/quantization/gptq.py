@@ -143,6 +143,8 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
+        self.fail_safe = False
+
         self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32)
 
@@ -407,7 +409,7 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization or fail_safe:
+        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0) or self.retry_quantize:
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -561,10 +563,15 @@ class GPTQ:
                 avg_loss = torch.sum(Losses).item() / self.nsamples
 
                 if math.isnan(avg_loss):
-                    log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, retrying quantization for `{self.name}` with fail_safe=True")
-                    return self.quantize(blocksize=blocksize, fail_safe=True)
+                    print("Losses sum item:", torch.sum(Losses).item())
+                    if self.fail_safe:
+                        log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
+                        self.qcfg.mock_quantization = True
+                        return self.quantize(blocksize=blocksize)
+                    else:
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
             else:
-                if fail_safe:
+                if self.fail_safe:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
