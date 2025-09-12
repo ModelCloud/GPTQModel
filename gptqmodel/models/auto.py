@@ -131,7 +131,7 @@ from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
-from .definitions.qwen3_next import Qwen3MoeGPTQ  # noqa: E402
+from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
 from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
