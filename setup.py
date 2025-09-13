@@ -82,46 +82,40 @@ def _probe_rocm_version():
     return None
 
 def _detect_cuda_arch_list():
-    # Public knob: CUDA_ARCH_LIST
+    """Return TORCH_CUDA_ARCH_LIST style string for the *installed* GPUs only.
+    Priority:
+      1) CUDA_ARCH_LIST env override (verbatim)
+      2) nvidia-smi compute_cap (actual devices)
+      3) minimal, conservative default ('8.0+PTX') to avoid compiling every arch
+    """
+    # 1) explicit override
     env_arch = _read_env("CUDA_ARCH_LIST")
     if env_arch:
         return env_arch
 
-    # Try nvcc --list-gpu-arch
-    nvcc_out = _probe_cmd(["nvcc", "--list-gpu-arch"])
-    if nvcc_out:
-        archs = []
-        for line in nvcc_out.splitlines():
-            line = line.strip()
-            if line.startswith("sm_") or line.startswith("compute_"):
-                try:
-                    # normalize to "major.minor"
-                    num = line.split("_")[1]
-                    if num.isdigit():  # e.g. "80"
-                        maj, mn = num[0], num[1] if len(num) > 1 else "0"
-                        cap = f"{maj}.{mn}"
-                    else:  # compute_80
-                        cap = f"{num[0]}.{num[1] if len(num) > 1 else '0'}"
-                    if float(cap) >= 6.0:
-                        archs.append(cap)
-                except Exception:
-                    continue
-        if archs:
-            return " ".join(sorted(set(archs)))
-
-    # Try nvidia-smi
+    # 2) actual devices present
     smi_out = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
     if smi_out:
         caps = []
         for line in smi_out.splitlines():
-            line = line.strip()
-            if line:
-                caps.append(line)
+            cap = line.strip()
+            if not cap:
+                continue
+            # normalize like '8.0'
+            try:
+                major, minor = cap.split(".", 1)
+                caps.append(f"{int(major)}.{int(minor)}")
+            except Exception:
+                # some drivers return just '8' -> treat as '8.0'
+                if cap.isdigit():
+                    caps.append(f"{cap}.0")
+        caps = sorted(set(caps), key=lambda x: (int(x.split(".")[0]), int(x.split(".")[1])))
         if caps:
-            return " ".join(caps)
+            # PyTorch prefers ';' separators
+            return ";".join(caps)
 
-    # default to nvidia 3090+
-    print("⚠️  Could not auto-detect CUDA arch list. Defaulting to 8.0+PTX")
+    # 3) conservative default for modern datacenter GPUs (A100 et al.)
+    print("⚠️  Could not get compute capability from nvidia-smi; defaulting to 8.0+PTX")
     return "8.0+PTX"
 
 def _parse_arch_list(s):
