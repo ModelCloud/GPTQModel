@@ -34,6 +34,7 @@ from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
 from .quantizer import HF_OPTIMUM, Quantizer
+from .gar import invert_perm, compose_final_perm, compute_global_perm, compute_local_perms
 
 log = setup_logger()
 
@@ -277,11 +278,13 @@ class GPTQ:
             group_size=-1,
             actorder=False,
             static_groups=False,
+            hyb_act=False,
     ):
         self.qcfg.group_size = group_size
         self.qcfg.damp_percent = percdamp
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
+        self.qcfg.hyb_act = hyb_act
         self.qcfg.static_groups = static_groups
         (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
         self.module.weight.data = Q
@@ -394,10 +397,10 @@ class GPTQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import compose_final_perm, compute_global_perm, compute_local_perms
-            local_perms = compute_local_perms(torch.diag(H), self.qcfg.group_size)
-            global_perm = compute_global_perm(torch.diag(H), self.qcfg.group_size)
+        elif self.qcfg.hyb_act:
+            diag_h = torch.diag(H)
+            local_perms = compute_local_perms(diag_h, self.qcfg.group_size)
+            global_perm = compute_global_perm(diag_h, self.qcfg.group_size)
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             W = W[:, final_perm]
             H = H[final_perm][:, final_perm]
@@ -594,8 +597,7 @@ class GPTQ:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import invert_perm
+        elif self.qcfg.hyb_act:
             inv_final = invert_perm(final_perm)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)

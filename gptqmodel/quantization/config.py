@@ -277,6 +277,10 @@ class QuantizeConfig():
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
 
+        # validate hybrid act order
+        if self.hyb_act and self.desc_act:
+            raise ValueError("QuantizeConfig:: `hyb_act` == `True` requires `desc_act` == `False`.")
+
         # validate meta
         if self.meta is not None:
             if not isinstance(self.meta, dict):
