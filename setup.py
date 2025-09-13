@@ -133,12 +133,14 @@ def _detect_cxx11_abi():
         return int(v)
     return 1
 
-def _torch_version_for_tag():
+def _torch_version_for_release():
     # No torch import; allow env override
     v = _read_env("TORCH_VERSION")
     if v:
         parts = v.split(".")
         return ".".join(parts[:2])
+    else:
+        raise Exception("TORCH_VERSION not passed for wheel generation.")
     return None
 
 def _cuda_version_for_tag():
@@ -199,7 +201,7 @@ BASE_WHEEL_URL = (
     "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
 )
 
-def get_version_tag() -> str:
+def get_version_for_release() -> str:
     if BUILD_CUDA_EXT != "1":
         return "cpu"
     if ROCM_VERSION:
@@ -212,8 +214,7 @@ def get_version_tag() -> str:
         )
         sys.exit(1)
     CUDA_VERSION = "".join(cuda_version.split("."))  # e.g. "12.1" -> "121"
-    tv = _torch_version_for_tag()
-    torch_tag = f"torch{tv}" if tv else "torchNA"
+    torch_tag = f"torch{_torch_version_for_release()}"
     return f"cu{CUDA_VERSION[:3]}{torch_tag}"
 
 requirements = []
@@ -235,7 +236,7 @@ else:
             HAS_CUDA_V8 = False
 
 if RELEASE_MODE == "1":
-    gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
+    gptqmodel_version = f"{gptqmodel_version}+{get_version_for_release()}"
 
 include_dirs = ["gptqmodel_cuda"]
 extensions = []
