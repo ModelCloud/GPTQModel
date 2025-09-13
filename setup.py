@@ -120,8 +120,9 @@ def _detect_cuda_arch_list():
         if caps:
             return " ".join(caps)
 
-    print("⚠️  Could not auto-detect CUDA arch list. Defaulting to 6.0+PTX")
-    return "6.0+PTX"
+    # default to nvidia 3090+
+    print("⚠️  Could not auto-detect CUDA arch list. Defaulting to 8.0+PTX")
+    return "8.0+PTX"
 
 def _parse_arch_list(s):
     return [tok for tok in s.split() if tok.strip()]
@@ -164,11 +165,9 @@ FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
 # BUILD_CUDA_EXT:
 # - If user sets explicitly, respect it.
 # - Otherwise auto: enable only if CUDA or ROCm detected.
-_build_env = _read_env("BUILD_CUDA_EXT")
-if _build_env is None:
+BUILD_CUDA_EXT = _read_env("BUILD_CUDA_EXT")
+if BUILD_CUDA_EXT is None:
     BUILD_CUDA_EXT = "1" if (_probe_cuda_version() or ROCM_VERSION) else "0"
-else:
-    BUILD_CUDA_EXT = _build_env
 
 if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     try:
