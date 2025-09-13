@@ -305,7 +305,7 @@ if BUILD_CUDA_EXT == "1":
                 "--expt-relaxed-constexpr",
                 "--expt-extended-lambda",
                 "--use_fast_math",
-                "-diag-suppress=179,39",
+                "-diag-suppress=179,39,177",
             ]
         else:
             # hipify CUDA-like flags
