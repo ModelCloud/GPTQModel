@@ -77,7 +77,6 @@ def _detect_cuda_arch_list():
     Priority:
       1) CUDA_ARCH_LIST env override (verbatim)
       2) nvidia-smi compute_cap (actual devices)
-      3) minimal, conservative default ('8.0+PTX') to avoid compiling every arch
     """
     # 1) explicit override
     env_arch = _read_env("CUDA_ARCH_LIST")
@@ -106,8 +105,7 @@ def _detect_cuda_arch_list():
             return ";".join(caps)
 
     # 3) conservative default for modern datacenter GPUs (A100 et al.)
-    print("⚠️  Could not get compute capability from nvidia-smi; defaulting to 8.0+PTX")
-    return "8.0+PTX"
+    raise Exception("Could not get compute capability from nvidia-smi. Please check nvidia-utils package is installed.")
 
 def _parse_arch_list(s: str):
     # Accept semicolons, commas, and any whitespace as separators.
