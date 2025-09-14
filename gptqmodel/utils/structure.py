@@ -14,12 +14,9 @@ Notes:
 - Collapsing is generic: any numeric-indexed ModuleList whose qualified name matches `experts-regex`.
 """
 
-import argparse
 import re
-import sys
-import torch
+from typing import Optional, Set, Tuple
 
-from typing import Iterable, Tuple, Optional, Set
 from torch import nn
 
 
@@ -84,7 +81,7 @@ def print_module_tree(
     experts_regex: str = r"(^|\.)experts($|\.)",
     experts_show: int = 1,
 ):
-    regex = re.compile(filter_regex) if filter_regex else None
+    re.compile(filter_regex) if filter_regex else None
     experts_name_re = re.compile(experts_regex) if collapse_experts else None
     seen: Set[int] = set()
 

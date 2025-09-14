@@ -33,8 +33,8 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
+from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
-from .gar import invert_perm, compose_final_perm, compute_global_perm, compute_local_perms
 
 log = setup_logger()
 
@@ -629,7 +629,7 @@ class GPTQ:
             dev_lock = _get_device_lock(target_device)
             with dev_lock:
                 Q = Q.to(device=target_device, non_blocking=False)
-        
+
         duration = time.time() - start
 
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
