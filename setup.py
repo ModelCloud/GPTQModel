@@ -34,26 +34,6 @@ def _bool_env(name, default=False):
         return default
     return str(v).lower() in ("1", "true", "yes", "y", "on")
 
-def _probe_cuda_version():
-    # Prefer env override
-    v = _read_env("CUDA_VERSION")
-    if v:
-        return v
-    # Try nvcc
-    nvcc = _probe_cmd(["nvcc", "--version"])
-    if nvcc:
-        for tok in nvcc.replace(",", " ").split():
-            if tok.count(".") == 1 and tok.replace(".", "").isdigit():
-                return tok
-    # Try nvidia-smi
-    smi = _probe_cmd(["nvidia-smi"])
-    if smi and "CUDA Version" in smi:
-        import re
-        m = re.search(r"CUDA Version:\s*([0-9]+\.[0-9]+)", smi)
-        if m:
-            return m.group(1)
-    return None
-
 def _probe_rocm_version():
     v = _read_env("ROCM_VERSION")
     if v:
@@ -140,7 +120,7 @@ def _torch_version_for_release():
     return None
 
 def _cuda_version_for_tag():
-    return _probe_cuda_version()
+    return _detect_cuda_version()
 
 def _is_rocm_available():
     return _probe_rocm_version() is not None
@@ -266,7 +246,7 @@ FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
 # - Otherwise auto: enable only if CUDA or ROCm detected.
 BUILD_CUDA_EXT = _read_env("BUILD_CUDA_EXT")
 if BUILD_CUDA_EXT is None:
-    BUILD_CUDA_EXT = "1" if (_probe_cuda_version() or ROCM_VERSION) else "0"
+    BUILD_CUDA_EXT = "1" if (_detect_cuda_version() or ROCM_VERSION) else "0"
 
 if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     try:
