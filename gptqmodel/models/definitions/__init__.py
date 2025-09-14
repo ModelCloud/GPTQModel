@@ -50,6 +50,7 @@ from .instella import InstellaGPTQ
 from .internlm import InternLMGPTQ
 from .internlm2 import InternLM2GPTQ
 from .llama import LlamaGPTQ
+from .llama4 import Llama4GPTQ
 from .longllama import LongLlamaGPTQ
 from .mimo import MimoGPTQ
 from .minicpm3 import MiniCPM3GPTQ
@@ -79,3 +80,8 @@ from .xverse import XverseGPTQ
 from .yi import YiGPTQ
 from .falcon_h1 import FalconH1GPTQ
 from .pangu_alpha import PanguAlphaGPTQ
+from .longcat_flash import LongCatFlashGPTQ
+from .apertus import ApertusGPTQ
+from .klear import KlearGPTQ
+from .llava_qwen2 import LlavaQwen2GPTQ
+from .nemotron_h import NemotronHGPTQ

@@ -33,17 +33,58 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
+from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
+
+# TODO: move this to a locking class
+# --------------------------------------------------------------------------------------
+# Per-device lock registry to guard device-specific critical sections (like tensor moves)
+# --------------------------------------------------------------------------------------
+_device_locks = {}                 # {(device_type, index): threading.Lock()}
+_device_locks_guard = threading.Lock()  # guards the registry itself
+
+
+def _device_key(dev) -> tuple:
+    """
+    Normalize a device into a hashable (type, index) key.
+    Examples:
+      torch.device('cuda', 0) -> ('cuda', 0)
+      torch.device('xpu')     -> ('xpu', -1)
+      'cuda:1'                -> ('cuda', 1)
+      'cpu'                   -> ('cpu', -1)
+    """
+    if isinstance(dev, torch.device):
+        return (dev.type, dev.index if dev.index is not None else -1)
+    if isinstance(dev, str):
+        try:
+            d = torch.device(dev)
+            return _device_key(d)
+        except Exception:
+            return ("str", dev)  # last-resort string key
+    # Unknown type — stringify
+    return ("unknown", str(dev))
+
+
+def _get_device_lock(dev) -> threading.Lock:
+    key = _device_key(dev)
+    with _device_locks_guard:
+        lk = _device_locks.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _device_locks[key] = lk
+        return lk
+# --------------------------------------------------------------------------------------
+
 lock = threading.Lock()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-# TODO: is there a threading init bug in torch.linalg?
-# bypass strange threading bug
+# TODO: is there a buffer init threading init bug in torch.linalg?
+# bypass strange threading bug by warming up torch.linalg.cholesky to setup internal setup calls
 if HAS_CUDA or HAS_XPU:
-    tmp_eye = torch.eye(64, device="cuda" if HAS_CUDA else "xpu")
+    tmp_eye = torch.eye(64, dtype=torch.float32, device="cuda" if HAS_CUDA else "xpu")
     torch.linalg.cholesky(tmp_eye)
     del tmp_eye
 
@@ -103,6 +144,11 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
+        self.fail_safe = False
+
+        self.H = torch.zeros((self.columns, self.columns),
+                                 dtype=torch.float32)
+
     @staticmethod
     def _validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
@@ -124,7 +170,7 @@ class GPTQ:
         """Mock hessian inverse for fast testing"""
         damp = self.qcfg.damp_percent
         # Return identity matrix instead of complex inversion
-        identity = torch.eye(H.shape[0], device=H.device)
+        identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
 
     def _clone_module(self, copy=True, device: torch.device = None):
@@ -192,10 +238,8 @@ class GPTQ:
 
         batch_token_size = reshaped_inp.shape[0]
 
-        if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns),
-                                 dtype=torch.float32,
-                                 device=reshaped_inp.device)
+        if self.H.device != reshaped_inp.device:
+            self.H = self.H.to(device=reshaped_inp.device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
@@ -234,11 +278,13 @@ class GPTQ:
             group_size=-1,
             actorder=False,
             static_groups=False,
+            hyb_act=False,
     ):
         self.qcfg.group_size = group_size
         self.qcfg.damp_percent = percdamp
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
+        self.qcfg.hyb_act = hyb_act
         self.qcfg.static_groups = static_groups
         (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
         self.module.weight.data = Q
@@ -288,11 +334,10 @@ class GPTQ:
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
-        if not TORCH_GTE_28:
+        if not TORCH_GTE_28 and not self.qcfg.mock_quantization:
             self.hessian_inverse = torch_compile(self.hessian_inverse)
 
-        # Mock heavy computations
-        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+        if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
             self.hessian_inverse = self._mock_hessian_inverse
 
@@ -324,7 +369,6 @@ class GPTQ:
         self.quantizer.find_params(W, weight=True)
 
         H = self.H.to(device=self.module.target_device)
-        del self.H
 
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -353,10 +397,10 @@ class GPTQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import compose_final_perm, compute_global_perm, compute_local_perms
-            local_perms = compute_local_perms(torch.diag(H), self.qcfg.group_size)
-            global_perm = compute_global_perm(torch.diag(H), self.qcfg.group_size)
+        elif self.qcfg.hyb_act:
+            diag_h = torch.diag(H)
+            local_perms = compute_local_perms(diag_h, self.qcfg.group_size)
+            global_perm = compute_global_perm(diag_h, self.qcfg.group_size)
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             W = W[:, final_perm]
             H = H[final_perm][:, final_perm]
@@ -367,13 +411,12 @@ class GPTQ:
         Hinv, damp = self.hessian_inverse(H)
 
         # Use simplified loop when mock_quantization is active
-        if hasattr(self.qcfg, 'mock_quantization') and self.qcfg.mock_quantization:
+        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0):
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
 
-                # Clone the weights like the original code to maintain device/dtype consistency
-                W1 = W[:, i1:i2].clone()
+                W1 = W[:, i1:i2]
                 Q1 = torch.zeros_like(W1)
 
                 # Handle group quantization parameters efficiently (similar to original)
@@ -523,14 +566,23 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+                    if self.fail_safe:
+                        log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
+                        self.qcfg.mock_quantization = True
+                        return self.quantize(blocksize=blocksize)
+                    else:
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
             else:
-                log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
+                if self.fail_safe:
+                    log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
+                else:
+                    log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
                 avg_loss = 999999999
         else:
             avg_loss = 999999999
 
         del Losses
+        del self.H
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
@@ -545,8 +597,7 @@ class GPTQ:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        if hasattr(self.qcfg, "hyb_act") and self.qcfg.hyb_act and not self.qcfg.desc_act:
-            from .gar import invert_perm
+        elif self.qcfg.hyb_act:
             inv_final = invert_perm(final_perm)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
@@ -559,16 +610,10 @@ class GPTQ:
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
-        # Ensure Q is on the same device as the original module weight before type conversion
-        if Q.device != self.module.weight.data.device:
-            Q = Q.to(device=self.module.weight.data.device)
-
         if Q.shape != self.module.weight.shape:
-            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
         else:
-            Q = Q.type_as(self.module.weight.data)
-
-        # Q = Q.to(device=use_device)
+            Q = Q.to(self.module.weight.dtype)
 
         if scale == []:
             scale.append(self.quantizer.scale)
@@ -576,6 +621,14 @@ class GPTQ:
 
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+
+        target_device = self.module.weight.data.device
+
+        # limit one sync tensor move action per device due to cuda limits
+        if Q.device != target_device:
+            dev_lock = _get_device_lock(target_device)
+            with dev_lock:
+                Q = Q.to(device=target_device, non_blocking=False)
 
         duration = time.time() - start
 

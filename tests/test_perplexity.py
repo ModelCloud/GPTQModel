@@ -26,7 +26,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, AutoRoundQuantizeConfig, QuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -151,12 +151,6 @@ class TestPerplexity(unittest.TestCase):
                     "+:.*mlp\.NEVER_POSITIVE_MATCH_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
                     ":.*mlp\.NEVER_POSITIVE_MATCH2_proj.*": {"bits": 8 if format != FORMAT.BITBLAS else 4, "group_size": 32},
                 }
-            )
-        elif method == QUANT_METHOD.AUTO_ROUND:
-            quantize_config = AutoRoundQuantizeConfig(
-                bits=bits,
-                group_size=group_size,
-                format=format,
             )
         else:
             raise ValueError(f"Invalid quantization method: {method}")

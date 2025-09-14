@@ -138,7 +138,7 @@ class ModuleLooper():
                           attention_masks=attention_masks)
 
     @torch.no_grad()
-    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, **kwargs):
+    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -196,7 +196,10 @@ class ModuleLooper():
 
         # dynamic expert layer index for model defs
         if self.gptq_model.dynamic_expert_index is not None:
-            num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
+            if hasattr(self.gptq_model.model.config, "text_config"):
+                num_experts = getattr(self.gptq_model.model.config.text_config, self.gptq_model.dynamic_expert_index)
+            else:
+                num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
             layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
                                                   num_experts=num_experts)
 
@@ -295,7 +298,7 @@ class ModuleLooper():
                             subset[name] = named_module
                             full[name] = named_module
 
-                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
                         # some modules are skipped
                         if processor.is_skipped(subset[name]):
                             skipped_modules.append(name)
@@ -395,15 +398,18 @@ class ModuleLooper():
 
                     # TODO FIXME: MoE modules forward() may not trigger if dataset is too small
                     # and moe gating logic does not trigger some moes
+                    moe_skip_modules = []
                     if isinstance(processor, GPTQProcessor):
-                        moe_skip_modules = []
                         for name in subset :
                             if processor.tasks[name].fwd_counter == 0:
                                 log.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
                                 moe_skip_modules.append(name)
 
-                        for name in moe_skip_modules:
-                            subset.pop(name)
+                        # If fail_safe is True, mock_quantize will be used and modules in moe_skip_modules don't need to be removed
+                        # If fail_safe is False, remove modules in moe_skip_modules from subset to avoid quantization errors
+                        if not fail_safe:
+                            for name in moe_skip_modules:
+                                subset.pop(name)
                     # ---- END Pre-Quantized Forward ----
 
                     # ---- Start Proceess Hook ----

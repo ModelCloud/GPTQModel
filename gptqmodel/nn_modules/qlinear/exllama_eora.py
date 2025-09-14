@@ -89,7 +89,7 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     ):
         if exllama_eora_import_exception is not None:
             raise ValueError(
-                f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_eora_import_exception}"
+                f"Trying to use the Exllama EoRA backend but could not import the kernel cpp extension with the following error: {exllama_eora_import_exception}. Please manually reinstall and recompile package as Eora kernel extension is not part of prebuilt by wheels."
             )
 
         # # backup original values

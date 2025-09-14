@@ -21,6 +21,7 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
+import accelerate
 import torch
 import transformers
 
@@ -189,8 +190,8 @@ def ModelLoader(cls):
         model_init_kwargs["_fast_init"] = cls.require_fast_init
         # model_init_kwargs["low_cpu_mem_usage"] = True
 
+        cls.before_model_load(cls, load_quantized_model=False)
         model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-
         # from concurrent.futures import ThreadPoolExecutor
         #
         # def fast_pin_model(model):
@@ -256,6 +257,7 @@ def ModelLoader(cls):
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            max_memory: Optional[dict] = None,
             **kwargs,
     ):
         # normalized device + device_map into single device
@@ -265,7 +267,6 @@ def ModelLoader(cls):
         if isinstance(backend, str):
             backend =  (backend)
         device = auto_select_device(device, backend)
-        device_map = device.to_device_map()
 
         if backend == BACKEND.VLLM:
             import os
@@ -446,6 +447,8 @@ def ModelLoader(cls):
         init_contexts = [no_init_weights()]
 
         with ContextManagers(init_contexts):
+            cls.before_model_load(cls, load_quantized_model=True)
+
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)
                 if model_class is not None and hasattr(model_class, "_supports_flash_attn_2"):
@@ -476,7 +479,10 @@ def ModelLoader(cls):
             model.checkpoint_file_name = model_save_name
 
             if cls.dynamic_expert_index is not None:
-                num_experts = getattr(config, cls.dynamic_expert_index)
+                if hasattr(config, "text_config"):
+                    num_experts = getattr(config.text_config, cls.dynamic_expert_index)
+                else:
+                    num_experts = getattr(config, cls.dynamic_expert_index)
                 cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
                                                           num_experts=num_experts)
 
@@ -507,6 +513,43 @@ def ModelLoader(cls):
 
             if preload_qlinear_kernel == IPEXQuantLinear:
                 qcfg.runtime_format = FORMAT.IPEX
+
+        if isinstance(device_map, str) and device_map not in [
+                "auto",
+                "balanced",
+                "balanced_low_0",
+                "sequential",
+            ]:
+                raise ValueError(
+                    "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
+                    "'sequential'."
+                )
+
+        if isinstance(device_map, dict):
+            max_memory = None
+        else:
+            if device is None and not device_map and not max_memory:
+                device_map = "auto"
+            if device is not None:
+                if not max_memory and not device_map:
+                    torch_device = torch.device(device)
+                    if torch_device.type in ["cuda", "xpu"] and torch_device.index is not None:
+                        device_map = {"": torch_device.index}
+                    else:
+                        device_map = {"": torch_device.type}
+            if not isinstance(device_map, dict) and device_map != "sequential":
+                max_memory = accelerate.utils.get_balanced_memory(
+                    model=model,
+                    max_memory=max_memory,
+                    no_split_module_classes=[cls.layer_type],
+                    low_zero=(device_map == "balanced_low_0"),
+                )
+        if not isinstance(device_map, dict):
+            device_map = accelerate.infer_auto_device_map(
+                model,
+                max_memory=max_memory,
+                no_split_module_classes=[cls.layer_type],
+            )
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format

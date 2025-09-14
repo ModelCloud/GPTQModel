@@ -25,6 +25,8 @@ class Phi4MMGPTQ(BaseGPTQModel):
     layers_node = "model.layers"
     layer_type = "Phi4MMDecoderLayer"
 
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     # text modules only
     layer_modules = [
         ["self_attn.qkv_proj.base_layer"],

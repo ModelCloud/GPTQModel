@@ -147,6 +147,113 @@ def _cuda_version_for_tag():
 def _is_rocm_available():
     return _probe_rocm_version() is not None
 
+# If you already have _probe_cmd elsewhere, you can delete this copy.
+def _probe_cmd(args, timeout=6):
+    try:
+        return subprocess.check_output(args, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    except Exception:
+        return ""
+
+def _first_token_line(s: str) -> str | None:
+    for line in (s or "").splitlines():
+        t = line.strip()
+        if t:
+            return t
+    return None
+
+def _detect_torch_version_via_cmds() -> str | None:
+    # 1) uv pip show torch
+    out = _probe_cmd(["uv", "pip", "show", "torch"])
+    if out:
+        m = re.search(r"^Version:\s*([^\s]+)\s*$", out, flags=re.MULTILINE)
+        if m:
+            return m.group(1)
+
+    # 2) pip show torch (both 'pip' and 'python -m pip')
+    for cmd in (["pip", "show", "torch"], [sys.executable, "-m", "pip", "show", "torch"]):
+        out = _probe_cmd(cmd)
+        if out:
+            m = re.search(r"^Version:\s*([^\s]+)\s*$", out, flags=re.MULTILINE)
+            if m:
+                return m.group(1)
+
+    # 3) conda list torch
+    out = _probe_cmd(["conda", "list", "torch"])
+    if out:
+        # Typical line starts with: torch  2.4.1  ...
+        for line in out.splitlines():
+            if line.strip().startswith("torch"):
+                parts = re.split(r"\s+", line.strip())
+                if len(parts) >= 2 and re.match(r"^\d+\.\d+(\.\d+)?", parts[1]):
+                    return parts[1]
+
+    # 4) Fallback: importlib.metadata (does not import torch package module)
+    try:
+        import importlib.metadata as im  # py3.8+
+        return im.version("torch")
+    except Exception:
+        raise Exception("Unable to detect torch version via uv/pip/conda/importlib. Please install torch >= 2.7.1")
+
+def _major_minor(v: str) -> str:
+    parts = v.split(".")
+    return ".".join(parts[:2]) if parts else v
+
+def _detect_cuda_version() -> str | None:
+    # Priority: env → nvidia-smi → nvcc
+    v = os.environ.get("CUDA_VERSION")
+    if v and v.strip():
+        return v.strip()
+
+    # nvidia-smi (modern drivers expose cuda_version)
+    out = _probe_cmd(["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader"])
+    if out:
+        line = _first_token_line(out)
+        if line and re.match(r"^\d+\.\d+(\.\d+)?$", line):
+            return line
+
+    # nvcc --version (parse 'release X.Y')
+    out = _probe_cmd(["nvcc", "--version"])
+    if out:
+        m = re.search(r"release\s+(\d+)\.(\d+)", out)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}"
+
+    return None
+
+def get_version_tag() -> str:
+    BUILD_CUDA_EXT = os.environ.get("BUILD_CUDA_EXT", "")
+    ROCM_VERSION = os.environ.get("ROCM_VERSION", "")
+
+    if BUILD_CUDA_EXT != "1":
+        return "cpu"
+
+    if ROCM_VERSION:
+        return f"rocm{ROCM_VERSION}"
+
+    cuda_version = _detect_cuda_version()
+    if not cuda_version or not cuda_version.split("."):
+        print(
+            "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
+            "Set CUDA_VERSION env var or ensure nvidia-smi/nvcc is available on PATH."
+        )
+        sys.exit(1)
+
+    # Torch version (major.minor) without importing torch
+    torch_version = _detect_torch_version_via_cmds()
+    if not torch_version:
+        print(
+            "Warning: Unable to detect installed torch version via uv/pip/conda. "
+            "Proceeding without torch suffix."
+        )
+        torch_suffix = ""
+    else:
+        torch_suffix = f"torch{_major_minor(torch_version)}"
+
+    CUDA_VERSION_COMPACT = "".join(cuda_version.split("."))
+    base = f"cu{CUDA_VERSION_COMPACT[:3]}"
+    return f"{base}{torch_suffix}"
+
+
 # ---------------------------
 # Env and versioning
 # ---------------------------
@@ -199,9 +306,42 @@ version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars["version"]
 
-BASE_WHEEL_URL = (
-    "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
-)
+# -----------------------------
+# Prebuilt wheel download config
+# -----------------------------
+# Default template (GitHub Releases), can be overridden via env.
+DEFAULT_WHEEL_URL_TEMPLATE = "https://github.com/ModelCloud/GPTQModel/releases/download/{tag_name}/{wheel_name}"
+WHEEL_URL_TEMPLATE = os.environ.get("GPTQMODEL_WHEEL_URL_TEMPLATE")
+WHEEL_BASE_URL = os.environ.get("GPTQMODEL_WHEEL_BASE_URL")
+WHEEL_TAG = os.environ.get("GPTQMODEL_WHEEL_TAG")  # Optional override of release tag
+
+def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
+    """
+    Build the final wheel URL based on:
+      1) GPTQMODEL_WHEEL_URL_TEMPLATE (highest priority)
+      2) GPTQMODEL_WHEEL_BASE_URL (append /{wheel_name})
+      3) DEFAULT_WHEEL_URL_TEMPLATE (GitHub Releases)
+    """
+    # Highest priority: explicit template
+    if WHEEL_URL_TEMPLATE:
+        tmpl = WHEEL_URL_TEMPLATE
+        # If {wheel_name} or {tag_name} not present, treat as base and append name.
+        if ("{wheel_name}" in tmpl) or ("{tag_name}" in tmpl):
+            return tmpl.format(tag_name=tag_name, wheel_name=wheel_name)
+        # Otherwise, join as base
+        if tmpl.endswith("/"):
+            return tmpl + wheel_name
+        return tmpl + "/" + wheel_name
+
+    # Next priority: base URL
+    if WHEEL_BASE_URL:
+        base = WHEEL_BASE_URL
+        if base.endswith("/"):
+            return base + wheel_name
+        return base + "/" + wheel_name
+
+    # Fallback: default GitHub template
+    return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
 def get_version_for_release() -> str:
     if BUILD_CUDA_EXT != "1":
@@ -215,9 +355,11 @@ def get_version_for_release() -> str:
             "Set CUDA_VERSION env (e.g. 12.1)."
         )
         sys.exit(1)
-    CUDA_VERSION = "".join(cuda_version.split("."))  # e.g. "12.1" -> "121"
-    torch_tag = f"torch{_torch_version_for_release()}"
-    return f"cu{CUDA_VERSION[:3]}{torch_tag}"
+
+    CUDA_VERSION = "".join(cuda_version.split("."))
+
+    # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
+    return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
 
 requirements = []
 if not os.getenv("CI"):
@@ -241,12 +383,33 @@ if RELEASE_MODE == "1":
     gptqmodel_version = f"{gptqmodel_version}+{get_version_for_release()}"
 
 include_dirs = ["gptqmodel_cuda"]
+
 extensions = []
 additional_setup_kwargs = {}
 
 # ---------------------------
 # Build CUDA/ROCm extensions (only when enabled)
 # ---------------------------
+# -----------------------------
+# Per-extension build toggles
+# -----------------------------
+def _env_enabled(val: str) -> bool:
+    if val is None:
+        return True
+    return str(val).strip().lower() not in ("0", "false", "off", "no")
+
+def _env_enabled_any(names, default="1") -> bool:
+    for n in names:
+        if n in os.environ:
+            return _env_enabled(os.environ.get(n))
+    return _env_enabled(default)
+
+BUILD_EORA        = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "1"))
+BUILD_EXLLAMA_V1  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "1"))
+BUILD_EXLLAMA_V2  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+BUILD_QQQ         = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
+BUILD_MARLIN      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
     try:
@@ -326,62 +489,75 @@ if BUILD_CUDA_EXT == "1":
         # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
-                extensions += [
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_marlin_kernels",
-                        [
-                            "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                            "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                            "gptqmodel_ext/marlin/marlin_repack.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_qqq_kernels",
-                        [
-                            "gptqmodel_ext/qqq/qqq.cpp",
-                            "gptqmodel_ext/qqq/qqq_gemm.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_exllama_eora",
-                        [
-                            "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                            "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_exllamav2_kernels",
-                        [
-                            "gptqmodel_ext/exllamav2/ext.cpp",
-                            "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
-                            "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                ]
+                if BUILD_MARLIN:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_marlin_kernels",
+                            [
+                                "gptqmodel_ext/marlin/marlin_cuda.cpp",
+                                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
+                                "gptqmodel_ext/marlin/marlin_repack.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+
+                if BUILD_QQQ:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_qqq_kernels",
+                            [
+                                "gptqmodel_ext/qqq/qqq.cpp",
+                                "gptqmodel_ext/qqq/qqq_gemm.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+
+                if BUILD_EORA:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllama_eora",
+                            [
+                                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
+                                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
+                if BUILD_EXLLAMA_V2:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav2_kernels",
+                            [
+                                "gptqmodel_ext/exllamav2/ext.cpp",
+                                "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
+                                "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
 
             # both CUDA and ROCm compatible
-            extensions += [
-                cpp_ext.CUDAExtension(
-                    "gptqmodel_exllama_kernels",
-                    [
-                        "gptqmodel_ext/exllama/exllama_ext.cpp",
-                        "gptqmodel_ext/exllama/cuda_buffers.cu",
-                        "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                        "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                        "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-                    ],
-                    extra_link_args=extra_link_args,
-                    extra_compile_args=extra_compile_args,
-                ),
-            ]
+            if BUILD_EXLLAMA_V1:
+                extensions += [
+                    cpp_ext.CUDAExtension(
+                        "gptqmodel_exllama_kernels",
+                        [
+                            "gptqmodel_ext/exllama/exllama_ext.cpp",
+                            "gptqmodel_ext/exllama/cuda_buffers.cu",
+                            "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
+                            "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
+                            "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
+                        ],
+                        extra_link_args=extra_link_args,
+                        extra_compile_args=extra_compile_args,
+                    )
+                ]
 
         additional_setup_kwargs = {
             "ext_modules": extensions,
@@ -407,8 +583,13 @@ class CachedWheelsCommand(_bdist_wheel):
             f"{python_version}-{python_version}-{system_name}_x86_64.whl"
         )
 
-        wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{version_vars['version']}", wheel_name=wheel_filename)
-        print(f"Guessing wheel URL: {wheel_url}\nwheel name={wheel_filename}")
+        wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
+
+        # Allow tag override via env; default to "v{gptqmodel_version}"
+        tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
+        wheel_url = _resolve_wheel_url(tag_name=tag_name, wheel_name=wheel_filename)
+
+        print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
             import urllib.error  # noqa: F401

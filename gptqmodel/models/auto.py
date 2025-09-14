@@ -21,6 +21,7 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
+from ..utils.structure import print_module_tree
 
 log = setup_logger()
 
@@ -65,6 +66,7 @@ from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
+from .definitions.apertus import ApertusGPTQ  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
 from .definitions.chatglm import ChatGLM  # noqa: E402
@@ -90,6 +92,7 @@ from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
 from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
+from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GPTJGPTQ  # noqa: E402
 from .definitions.granite import GraniteGPTQ  # noqa: E402
 from .definitions.grinmoe import GrinMOEGPTQ  # noqa: E402
@@ -97,7 +100,12 @@ from .definitions.hymba import HymbaGPTQ  # noqa: E402
 from .definitions.instella import InstellaGPTQ  # noqa: E402
 from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
+from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
+from .definitions.klear import KlearGPTQ  # noqa: E402
 from .definitions.llama import LlamaGPTQ  # noqa: E402
+from .definitions.llama4 import Llama4GPTQ  # noqa: E402
+from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
+from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
 from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
 from .definitions.mimo import MimoGPTQ  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
@@ -108,6 +116,7 @@ from .definitions.mllama import MLlamaGPTQ  # noqa: E402
 from .definitions.mobilellm import MobileLLMGPTQ  # noqa: E402
 from .definitions.moss import MOSSGPTQ  # noqa: E402
 from .definitions.mpt import MPTGPTQ  # noqa: E402
+from .definitions.nemotron_h import NemotronHGPTQ  # noqa: E402
 from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
 from .definitions.opt import OPTGPTQ  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
@@ -123,6 +132,7 @@ from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
+from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
 from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
@@ -137,13 +147,17 @@ random.seed(787)
 numpy.random.seed(787)
 
 MODEL_MAP = {
+    "apertus": ApertusGPTQ,
     "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
     "gpt_neo": GPTNeoGPTQ,
+    "kimi_k2": KimiK2GPTQ,
+    "klear": KlearGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
     "llama": LlamaGPTQ,
+    "llama4": Llama4GPTQ,
     "opt": OPTGPTQ,
     "moss": MOSSGPTQ,
     "chatglm": ChatGLM,
@@ -154,15 +168,15 @@ MODEL_MAP = {
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
     "cohere2": Cohere2GPTQ,
-    "RefinedWebModel": RWGPTQ,
-    "RefinedWeb": RWGPTQ,
+    "refinedWebModel": RWGPTQ,
+    "refinedWeb": RWGPTQ,
     "falcon": RWGPTQ,
     "baichuan": BaiChuanGPTQ,
     "internlm": InternLMGPTQ,
     "internlm2": InternLM2GPTQ,
     "qwen": QwenGPTQ,
     "mistral": MistralGPTQ,
-    "Yi": YiGPTQ,
+    "yi": YiGPTQ,
     "xverse": XverseGPTQ,
     "deci": DeciLMGPTQ,
     "nemotron-nas": DeciLMGPTQ,
@@ -186,6 +200,7 @@ MODEL_MAP = {
     "minicpm3": MiniCPM3GPTQ,
     "qwen2_moe": Qwen2MoeGPTQ,
     "qwen3_moe": Qwen3MoeGPTQ,
+    "qwen3_next": Qwen3NextGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
     "qwen2_5_vl": Qwen2_5_VLGPTQ,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
@@ -209,6 +224,10 @@ MODEL_MAP = {
     "ernie4_5": ERNIE4_5GPTQ,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
     "seed_oss": SeedOSSGPTQ,
+    "gpt_oss": GPTOSSGPTQ,
+    "longcat_flash": LongCatFlashGPTQ,
+    "llava_qwen2": LlavaQwen2GPTQ,
+    "nemotron_h": NemotronHGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
@@ -239,6 +258,7 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            debug: Optional[bool] = False,
             **kwargs,
     ):
         if isinstance(model_id_or_path, str):
@@ -270,7 +290,7 @@ class GPTQModel:
                             break
 
         if is_quantized:
-            return cls.from_quantized(
+            m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
                 device=device,
@@ -280,7 +300,7 @@ class GPTQModel:
                 **kwargs,
             )
         else:
-            return cls.from_pretrained(
+            m = cls.from_pretrained(
                 model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
                 device_map=device_map,
@@ -288,6 +308,13 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 **kwargs,
             )
+
+        # debug model structure
+        if debug:
+            print_module_tree(m.model)
+
+        return m
+
 
     @classmethod
     def from_pretrained(

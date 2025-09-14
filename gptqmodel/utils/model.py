@@ -55,7 +55,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
-from . import has_gil
+from . import has_gil_disabled
 from .backend import BACKEND
 from .importer import select_quant_linear
 from .logger import setup_logger
@@ -642,7 +642,7 @@ def pack_model(
     names = list(qModules.keys())
     lock = threading.Lock()
 
-    if not has_gil():
+    if has_gil_disabled():
         from device_smi import Device
         cpu = Device("cpu")
         max_packers = cpu.count * cpu.cores
@@ -697,14 +697,40 @@ def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
     return True
 
 def simple_dispatch_model(model, device_map):
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     if "" in device_map:
         d = device_map[""]
         model = model.to(torch.device(d))
         model.hf_device_map = device_map
         return model
+
+    tied_params = accelerate.utils.modeling.find_tied_parameters(model)
+    if set(device_map.values()) == {"cpu"} or set(device_map.values()) == {
+        "cpu",
+        "disk",
+    }:
+        main_device = "cpu"
     else:
-        raise ValueError("internal device_map must contain an empty string")
+        main_device = [d for d in device_map.values() if d not in ["cpu", "disk"]][0]
+
+    cpu_offload_group = [(n, d) for n, d in device_map.items() if d == "cpu"]
+    prev_hook = None
+    for idx, (n, d) in enumerate(cpu_offload_group):
+        m = get_module_by_name_suffix(model, n)
+        _, prev_hook = accelerate.cpu_offload_with_hook(m, execution_device=main_device, prev_module_hook=prev_hook)
+    # set first cpu offload module's prev_module_hook to the last cpu offload module's hook
+    if len(cpu_offload_group) > 1:
+        get_module_by_name_suffix(model, cpu_offload_group[0][0])._hf_hook.prev_module_hook = prev_hook
+
+    for n, d in device_map.items():
+        m = get_module_by_name_suffix(model, n)
+        if d != "cpu":
+            d = torch.device(d)
+            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
+            add_hook_to_module(m, hook)
+    accelerate.utils.modeling.retie_parameters(model, tied_params)
+    model.hf_device_map = device_map
 
     return model
 

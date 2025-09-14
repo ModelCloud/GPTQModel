@@ -33,6 +33,9 @@ class OPTGPTQ(BaseGPTQModel):
 
     layers_node = ["model.decoder.layers"]
     layer_type = "OPTDecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.out_proj"],

@@ -27,8 +27,7 @@ import tempfile  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD  # noqa: E402
-from gptqmodel.quantization.config import (META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL,  # noqa: E402
-                                           AutoRoundQuantizeConfig, QuantizeConfig)
+from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -61,13 +60,6 @@ class TestQuantization(ModelTest):
                 sym=sym,
                 format=format,
                 damp_percent=0.05
-            )
-        elif method == QUANT_METHOD.AUTO_ROUND:
-            quantize_config = AutoRoundQuantizeConfig(
-                bits=bits,
-                group_size=128,
-                sym=sym,
-                format=format,
             )
         else:
             raise ValueError(f"Invalid quantization method: {method}")

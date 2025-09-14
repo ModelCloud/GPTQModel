@@ -16,12 +16,24 @@
 
 from .backend import BACKEND
 from .logger import setup_logger
-from .python import has_gil, log_gil_required
+from .python import gte_python_3_13_3, has_gil_control, has_gil_disabled, log_gil_requirements_for
+
+log = setup_logger()
 
 # TODO: datasets is not compatible with free threading
-if has_gil():
+if has_gil_disabled():
+    log.info("Python GIL is disabled and GPTQModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
     from .perplexity import Perplexity
 else:
-    log_gil_required("utils/Perplexity")
+    if has_gil_control():
+        log.warn(
+            "Python >= 3.13T (free-threading) version detected but GIL is not disabled due to manual override or `regex` package compatibility which can be ignored. Please disable GIL via env `PYTHON_GIL=0`.")
+
+    log.warn(
+        "Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.")
+
+    log_gil_requirements_for("utils/Perplexity")
+
+
 
 from .vram import get_vram
