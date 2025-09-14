@@ -11,17 +11,7 @@ import sys
 from pathlib import Path
 
 from setuptools import find_packages, setup
-
-try:
-    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
-except BaseException:
-    try:
-        from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
-    except BaseException:
-        sys.exit(
-            "Both latest setuptools and wheel package are not found. "
-            "Please upgrade to latest setuptools: `pip install -U setuptools`"
-        )
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 # ---------------------------
 # Helpers (no torch required)
@@ -261,6 +251,7 @@ if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
     try:
         from distutils.sysconfig import get_python_lib
+
         from torch.utils import cpp_extension as cpp_ext  # type: ignore
     except Exception:
         if FORCE_BUILD:
@@ -474,9 +465,13 @@ common_setup_kwargs = {
 # ---------------------------
 # setup()
 # ---------------------------
+print(f"CUDA {CUDA_ARCH_LIST}")
+print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
+print(f"SETUP_KWARGS {additional_setup_kwargs}")
 
 setup(
     packages=find_packages(),
+    # setup_requires=["setuptools>=80.9.0", "torch>=2.7.1"],
     install_requires=requirements,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
@@ -485,6 +480,7 @@ setup(
         "sglang": ["sglang[srt]>=0.4.6", "flashinfer-python>=0.2.1"],
         "bitblas": ["bitblas==0.0.1-dev13"],
         "hf": ["optimum>=1.21.2"],
+        # @deprecation after torch 2.9 is released
         "ipex": ["intel_extension_for_pytorch>=2.7.0"],
         "auto_round": ["auto_round>=0.3"],
         "logger": ["clearml", "random_word", "plotly"],
