@@ -278,13 +278,13 @@ class GPTQ:
             group_size=-1,
             actorder=False,
             static_groups=False,
-            hyb_act=False,
+            act_group_aware=False,
     ):
         self.qcfg.group_size = group_size
         self.qcfg.damp_percent = percdamp
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
-        self.qcfg.hyb_act = hyb_act
+        self.qcfg.act_group_aware = act_group_aware
         self.qcfg.static_groups = static_groups
         (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
         self.module.weight.data = Q
@@ -397,7 +397,7 @@ class GPTQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        elif self.qcfg.hyb_act:
+        elif self.qcfg.act_group_aware:
             diag_h = torch.diag(H)
             local_perms = compute_local_perms(diag_h, self.qcfg.group_size)
             global_perm = compute_global_perm(diag_h, self.qcfg.group_size)
@@ -597,7 +597,7 @@ class GPTQ:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        elif self.qcfg.hyb_act:
+        elif self.qcfg.act_group_aware:
             inv_final = invert_perm(final_perm)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
