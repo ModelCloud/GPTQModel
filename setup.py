@@ -256,6 +256,7 @@ if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
 
 # Handle CUDA_ARCH_LIST (public) and set TORCH_CUDA_ARCH_LIST for build toolchains
 CUDA_ARCH_LIST = _detect_cuda_arch_list() if (BUILD_CUDA_EXT == "1" and not ROCM_VERSION) else None
+
 if CUDA_ARCH_LIST:
     archs = _parse_arch_list(CUDA_ARCH_LIST)
     kept = []
@@ -270,11 +271,11 @@ if CUDA_ARCH_LIST:
             kept.append(arch)
 
     # Use semicolons for TORCH_CUDA_ARCH_LIST (PyTorch likes this),
-    # and keep a space-joined copy for our own readability.
-    CUDA_ARCH_LIST = " ".join(kept)
-    os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(kept)
+    TORCH_CUDA_ARCH_LIST = ";".join(kept)
+    os.environ["TORCH_CUDA_ARCH_LIST"] = TORCH_CUDA_ARCH_LIST
 
-print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
+    print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
+    print(f"TORCH_CUDA_ARCH_LIST: {TORCH_CUDA_ARCH_LIST}")
 
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
