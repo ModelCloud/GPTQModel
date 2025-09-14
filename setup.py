@@ -5,6 +5,7 @@
 
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -118,12 +119,19 @@ def _detect_cuda_arch_list():
     print("⚠️  Could not get compute capability from nvidia-smi; defaulting to 8.0+PTX")
     return "8.0+PTX"
 
-def _parse_arch_list(s):
-    return [tok for tok in s.split() if tok.strip()]
+def _parse_arch_list(s: str):
+    # Accept semicolons, commas, and any whitespace as separators.
+    # Keep tokens like "8.0", "8.0+PTX" intact (we’ll strip suffixes later).
+    return [tok for tok in re.split(r"[;\s,]+", s) if tok.strip()]
 
 def _has_cuda_v8_from_arch_list(arch_list):
     try:
-        return any(float(a.split("+")[0]) >= 8.0 for a in arch_list)
+        vals = []
+        for a in arch_list:
+            # Handle things like "8.0+PTX"
+            base = a.split("+", 1)[0]
+            vals.append(float(base))
+        return any(v >= 8.0 for v in vals)
     except Exception:
         return False
 
@@ -178,20 +186,24 @@ if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
 # Handle CUDA_ARCH_LIST (public) and set TORCH_CUDA_ARCH_LIST for build toolchains
 CUDA_ARCH_LIST = _detect_cuda_arch_list() if (BUILD_CUDA_EXT == "1" and not ROCM_VERSION) else None
 if CUDA_ARCH_LIST:
-    # sanitize list to >= 6.0
     archs = _parse_arch_list(CUDA_ARCH_LIST)
     kept = []
     for arch in archs:
         try:
-            if float(arch.split("+")[0]) >= 6.0:
+            base = arch.split("+", 1)[0]
+            if float(base) >= 6.0:
                 kept.append(arch)
             else:
                 print(f"we do not support this compute arch: {arch}, skipped.")
         except Exception:
             kept.append(arch)
+
+    # Use semicolons for TORCH_CUDA_ARCH_LIST (PyTorch likes this),
+    # and keep a space-joined copy for our own readability.
     CUDA_ARCH_LIST = " ".join(kept)
-    # Many build systems still read TORCH_CUDA_ARCH_LIST; set it from CUDA_ARCH_LIST
-    os.environ["TORCH_CUDA_ARCH_LIST"] = CUDA_ARCH_LIST
+    os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(kept)
+
+print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
 
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
