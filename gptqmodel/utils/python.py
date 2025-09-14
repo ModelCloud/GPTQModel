@@ -22,4 +22,4 @@ def gte_python_3_13_3():
 
 # torch compile requires GIL=1 or python 3.13.3t with GIL=0
 def log_gil_requirements_for(feature: str):
-    log.warn.once(f"Feature `{feature}` requires python GIL or Python > 3.13.3T (T for Threading-Free edition of Python) plus Torch 2.8. Feature is currently skipped/disabled.")
+    log.warn.once(f"Feature `{feature}` requires python GIL or Python >= 3.13.3T (T for Threading-Free edition of Python) plus Torch 2.8. Feature is currently skipped/disabled.")
