@@ -34,7 +34,7 @@ def _bool_env(name, default=False):
         return default
     return str(v).lower() in ("1", "true", "yes", "y", "on")
 
-def _probe_rocm_version():
+def _detect_rocm_version():
     v = _read_env("ROCM_VERSION")
     if v:
         return v
@@ -119,11 +119,8 @@ def _torch_version_for_release():
         raise Exception("TORCH_VERSION not passed for wheel generation.")
     return None
 
-def _cuda_version_for_tag():
-    return _detect_cuda_version()
-
 def _is_rocm_available():
-    return _probe_rocm_version() is not None
+    return _detect_rocm_version() is not None
 
 # If you already have _probe_cmd elsewhere, you can delete this copy.
 def _probe_cmd(args, timeout=6):
@@ -139,7 +136,7 @@ def _first_token_line(s: str) -> str | None:
             return t
     return None
 
-def _detect_torch_version_via_cmds() -> str | None:
+def _detect_torch_version() -> str | None:
     # 1) uv pip show torch
     out = _probe_cmd(["uv", "pip", "show", "torch"])
     if out:
@@ -168,7 +165,9 @@ def _detect_torch_version_via_cmds() -> str | None:
     # 4) Fallback: importlib.metadata (does not import torch package module)
     try:
         import importlib.metadata as im  # py3.8+
-        return im.version("torch")
+        version = im.version("torch")
+        if not version:
+            raise Exception("torch not found")
     except Exception:
         raise Exception("Unable to detect torch version via uv/pip/conda/importlib. Please install torch >= 2.7.1")
 
@@ -217,7 +216,7 @@ def get_version_tag() -> str:
         sys.exit(1)
 
     # Torch version (major.minor) without importing torch
-    torch_version = _detect_torch_version_via_cmds()
+    torch_version = _detect_torch_version()
     if not torch_version:
         print(
             "Warning: Unable to detect installed torch version via uv/pip/conda. "
@@ -236,8 +235,20 @@ def get_version_tag() -> str:
 # Env and versioning
 # ---------------------------
 
+TORCH_VERSION = _read_env("TORCH_VERSION")
 RELEASE_MODE = _read_env("RELEASE_MODE")
-ROCM_VERSION = _probe_rocm_version()
+CUDA_VERSION = _read_env("TORCH_VERSION")
+ROCM_VERSION = _read_env("ROCM_VERSION")
+
+
+# respect user env then detect
+if not TORCH_VERSION:
+    TORCH_VERSION = _detect_torch_version()
+if not CUDA_VERSION:
+    CUDA_VERSION = _detect_cuda_version()
+if not ROCM_VERSION:
+    ROCM_VERSION = _detect_rocm_version()
+
 SKIP_ROCM_VERSION_CHECK = _read_env("SKIP_ROCM_VERSION_CHECK")
 FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
 
@@ -246,7 +257,7 @@ FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
 # - Otherwise auto: enable only if CUDA or ROCm detected.
 BUILD_CUDA_EXT = _read_env("BUILD_CUDA_EXT")
 if BUILD_CUDA_EXT is None:
-    BUILD_CUDA_EXT = "1" if (_detect_cuda_version() or ROCM_VERSION) else "0"
+    BUILD_CUDA_EXT = "1" if (CUDA_VERSION or ROCM_VERSION) else "0"
 
 if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     try:
@@ -326,18 +337,15 @@ def get_version_for_release() -> str:
         return "cpu"
     if ROCM_VERSION:
         return f"rocm{'.'.join(str(ROCM_VERSION).split('.')[:2])}"
-    cuda_version = _cuda_version_for_tag()
-    if not cuda_version:
+    if not CUDA_VERSION:
         print(
             "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
             "Set CUDA_VERSION env (e.g. 12.1)."
         )
         sys.exit(1)
 
-    CUDA_VERSION = "".join(cuda_version.split("."))
-
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    return f"cu{CUDA_VERSION[:3]}torch{'.'.join(torch.version.__version__.split('.')[:2])}"
+    return f"cu{CUDA_VERSION[:3]}torch{TORCH_VERSION}"
 
 requirements = []
 if not os.getenv("CI"):
@@ -572,9 +580,8 @@ class CachedWheelsCommand(_bdist_wheel):
         print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
-            import urllib.error  # noqa: F401
-            import urllib.request
-            urllib.request.urlretrieve(wheel_url, wheel_filename)
+            import urllib.request as req
+            req.urlretrieve(wheel_url, wheel_filename)
 
             if not os.path.exists(self.dist_dir):
                 os.makedirs(self.dist_dir)
