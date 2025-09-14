@@ -198,35 +198,20 @@ def _detect_cuda_version() -> str | None:
     return None
 
 def get_version_tag() -> str:
-    BUILD_CUDA_EXT = os.environ.get("BUILD_CUDA_EXT", "")
-    ROCM_VERSION = os.environ.get("ROCM_VERSION", "")
-
+    # TODO FIX ME: cpu wheels don't have torch version tags?
     if BUILD_CUDA_EXT != "1":
         return "cpu"
 
+    # TODO FIX ME: rocm wheels don't have torch version tags?
     if ROCM_VERSION:
         return f"rocm{ROCM_VERSION}"
 
-    cuda_version = _detect_cuda_version()
-    if not cuda_version or not cuda_version.split("."):
-        print(
-            "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
-            "Set CUDA_VERSION env var or ensure nvidia-smi/nvcc is available on PATH."
-        )
-        sys.exit(1)
+    if not CUDA_VERSION:
+        raise Exception("Trying to compile GPTQModel for CUDA/ROCm, but no cuda or rocm version was detected.")
 
-    # Torch version (major.minor) without importing torch
-    torch_version = _detect_torch_version()
-    if not torch_version:
-        print(
-            "Warning: Unable to detect installed torch version via uv/pip/conda. "
-            "Proceeding without torch suffix."
-        )
-        torch_suffix = ""
-    else:
-        torch_suffix = f"torch{_major_minor(torch_version)}"
+    torch_suffix = f"torch{_major_minor(TORCH_VERSION)}"
 
-    CUDA_VERSION_COMPACT = "".join(cuda_version.split("."))
+    CUDA_VERSION_COMPACT = "".join(CUDA_VERSION.split("."))
     base = f"cu{CUDA_VERSION_COMPACT[:3]}"
     return f"{base}{torch_suffix}"
 
@@ -333,10 +318,14 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
 def get_version_for_release() -> str:
+    # TODO FIX ME: cpu wheels don't have torch version tags?
     if BUILD_CUDA_EXT != "1":
         return "cpu"
+
+    # TODO FIX ME: rocm wheels don't have torch version tags?
     if ROCM_VERSION:
         return f"rocm{'.'.join(str(ROCM_VERSION).split('.')[:2])}"
+
     if not CUDA_VERSION:
         print(
             "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
@@ -345,7 +334,7 @@ def get_version_for_release() -> str:
         sys.exit(1)
 
     # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    return f"cu{CUDA_VERSION[:3]}torch{TORCH_VERSION}"
+    return f"cu{CUDA_VERSION[:3]}torch{_major_minor(TORCH_VERSION)}"
 
 requirements = []
 if not os.getenv("CI"):
