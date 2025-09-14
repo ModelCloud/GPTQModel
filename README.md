@@ -287,9 +287,9 @@ quant_config = QuantizeConfig(bits=4, group_size=128, v2=True)
 | Method  | Bits/Group Size | ARC_CHALLENGE   | GSM8K_Platinum_COT | 
 |---------|-----------------|-----------------|--------------------|
 | GPTQ    | 4 / 128         | 49.15           | 48.30              |
-| GPTQ v2 | 4 / 128         | 49.74 👍 +1.20% | 61.46 🔥 +27.25%   
+| GPTQ v2 | 4 / 128         | 49.74  +1.20%   | 61.46  +27.25%     |
 | GPTQ    | 3 / 128         | 39.93           | 43.26              |
-| GPTQ v2 | 3 / 128         | 41.13 👍 +3.01% | 50.54 🔥 +16.83%         | 
+| GPTQ v2 | 3 / 128         | 41.13  +3.01%   | 50.54  +16.83%     | 
 
 # Quantization Inference
 ```py
@@ -396,36 +396,34 @@ dynamic = {
 
 ```
 
-### Experimental Features
-
-* GPTQ v2: set `v2=True` in quantization config.
-* Multi-GPU Quantization: set `CUDA_VISIBLE_DEVICES=0,1` to two devices and GPTQModel will use second gpu for quantization.
-* Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
-* Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
-
 ### Group Aware Reordering (GAR)
 
 Group Aware Reordering (GAR) is an enhanced activation reordering scheme designed to significantly improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
 
 How to enable GAR:
 
-Set the `hyb_act` parameter to `True` and disable the default activation reordering by setting `desc_act` to `False` in your `QuantizeConfig`. For example:
+Set the `act_group_aware` parameter to `True` and disable the default activation reordering by setting `desc_act` to `False` in your `QuantizeConfig`. For example:
 
 ```python
-quant_config = QuantizeConfig(bits=4, group_size=128, desc_act=False, hyb_act=True)
+quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ```
 
-This feature is based on the method introduced in:
 
-[T Gafni, A Karnieli, Y Hanani, "Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference," CVPR Workshop, 2025.](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
+### Experimental Features
 
+* GPTQ v2: set `v2=True` in quantization config.
+* Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
+* Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
 
 
 ### Attribution of Quantization Methods:
 
 * GPTQ (v1): IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
-* GPTQ (v2): Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692
+* GPTQ (v2*): Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692. v2 naming is by Yale author and not endorsed by original GPTQ authors.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
+* EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
+* GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
+
 
 ## Citation
 
