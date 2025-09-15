@@ -322,16 +322,13 @@ class AWQProcessor(LoopProcessor):
         self.gptq_model.move_embed(common_device)
 
         # Transformers >= 4.48.0 requires positional embeddings should be computed before forward pass
-        if (
-                transformers.__version__ >= "4.48.0"
-                and self.module_kwargs.get("position_embeddings") is None
-        ):
+        if (self.module_kwargs.get("position_embeddings") is None):
             self.module_kwargs["position_embeddings"] = self.model.model.rotary_emb(
                 self.inps, self.module_kwargs["position_ids"]
             )
 
-        if (transformers.__version__ >= "4.48.0"
-                and self.module_kwargs.get('attention_mask') is None):
+        # TODO FIX ME: ???
+        if (self.module_kwargs.get('attention_mask') is None):
             self.module_kwargs['attention_mask'] = None
 
         for k, v in self.module_kwargs.items():
