@@ -16,97 +16,6 @@
 
 from ..base import BaseGPTQModel
 
-from collections import defaultdict
-
-
-def build_layer_modules(tree):
-    """
-    tree format:
-      [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
-    Rules:
-      - ':!' means participates in inference but is NOT quantized; keep this marker in output.
-      - ':<digit>' means grouping; children with the same group id are emitted in the same block.
-      - Both can appear together, e.g. 'module_name:!:2'.
-    Output:
-      _layer_modules = [ [items...], [items...], ... ]
-    """
-    # Be lenient: just require a dict as the 4th element.
-    if not (isinstance(tree, list) and len(tree) >= 4 and isinstance(tree[3], dict)):
-        raise ValueError("layers_modules_tree must be ['model','layers','#',{...}] (4th element a dict)")
-
-    mapping = tree[3]
-    out_blocks = []
-
-    for parent, entries in mapping.items():
-        groups = defaultdict(list)
-
-        for ent in entries:
-            parts = ent.split(':')
-            child = parts[0]
-
-            flags = parts[1:]
-            has_bang = ('!' in flags)
-            # first numeric tag is the group id; default 0
-            grp = next((int(p) for p in flags if p.isdigit()), 0)
-
-            groups[grp].append((child, has_bang))
-
-        # Emit per-group, skipping pure-:! blocks (norm-only), but
-        # preserving :! markers on mixed blocks if they ever occur.
-        for g in sorted(groups):
-            items = groups[g]
-            # if every entry is :!, skip this block (matches your expected output)
-            # if all(has_bang for _, has_bang in items):
-            #     continue
-
-            block = []
-            for child, has_bang in items:
-                full = child if child == parent else f"{parent}.{child}"
-                if has_bang:
-                    full += ":!"
-                block.append(full)
-
-            out_blocks.append(block)
-
-    return out_blocks
-
-
-def generate_layers_modules_tree_simple(node):
-    """
-    Recursively walk a nested list/dict structure and:
-      1. Drop dict entries where *all* values are ':!' flagged.
-      2. Remove ':!' and ':<digit>' markers from strings.
-    """
-
-    # If it's a list, recurse into each element
-    if isinstance(node, list):
-        return [generate_layers_modules_tree_simple(x) for x in node]
-
-    # If it's a dict, process each key -> value
-    if isinstance(node, dict):
-        new_dict = {}
-        for k, v in node.items():
-            # Expand tuple-of-strings blocks (special handling)
-            if isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v):
-                # Rule 1: check if ALL entries are :!
-                if all(any(p == "!" for p in x.split(":")[1:]) for x in v):
-                    continue  # skip this parent entirely
-
-                # Rule 2: strip :! and :digit markers
-                cleaned = tuple(x.split(":")[0] for x in v)
-                new_dict[k] = cleaned
-            else:
-                # Recurse deeper
-                new_dict[k] = generate_layers_modules_tree_simple(v)
-        return new_dict
-
-    # If it's a plain string (unlikely here), strip markers
-    if isinstance(node, str):
-        return node.split(":")[0]
-
-    # For other types, return as-is
-    return node
-
 
 class LlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
@@ -133,9 +42,3 @@ class LlamaGPTQ(BaseGPTQModel):
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
-
-    layers_modules_tree = generate_layers_modules_tree_simple(_layers_modules_tree)
-    print(f"layers_modules_tree: {layers_modules_tree}")
-
-    _layer_modules = build_layer_modules(_layers_modules_tree)
-    print(f"layers_modules: {_layer_modules}")

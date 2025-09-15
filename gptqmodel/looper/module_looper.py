@@ -190,7 +190,7 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
-        layer_modules = self.gptq_model.layer_modules
+        layer_modules = self.gptq_model.simple_layer_modules()
 
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
@@ -201,7 +201,7 @@ class ModuleLooper():
                 num_experts = getattr(self.gptq_model.model.config.text_config, self.gptq_model.dynamic_expert_index)
             else:
                 num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
+            layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.simple_layer_modules(),
                                                   num_experts=num_experts)
 
         layer_count = len(layers)
@@ -216,9 +216,12 @@ class ModuleLooper():
         shared_kv_cache_dict = {}
 
         # replace quantizable modules with hooked version
-        if self.gptq_model.layers_modules_tree:
-            replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree, debug=False)
+        layers_modules_tree = self.gptq_model.generate_layers_modules_tree_simple(self.gptq_model._layers_modules_tree)
+        print(f"layers_modules_tree: {layers_modules_tree}")
+        if layers_modules_tree:
+            replace_module_with_hooked_tree(self.gptq_model.model, layers_modules_tree, debug=False)
         else:
+            raise Exception("layers_modules_tree is now required for all model defs")
             replace_module_with_hooked_legacy(self.gptq_model.model)
 
         if self.gptq_model.quantize_config.lm_head:

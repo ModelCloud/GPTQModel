@@ -437,8 +437,8 @@ def ModelWriter(cls):
 
             if self.dynamic_expert_index is not None:
                 num_experts = getattr(config, self.dynamic_expert_index)
-                _ = get_moe_layer_modules(layer_modules=self.layer_modules,
-                                                      num_experts=num_experts)
+                _ = get_moe_layer_modules(layer_modules=self.simple_layer_modules(),
+                                          num_experts=num_experts)
 
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.base_modules
@@ -449,7 +449,7 @@ def ModelWriter(cls):
                     continue
 
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in self.layer_modules for ignore_module in sublist
+                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules() for ignore_module in sublist
                 ):
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:

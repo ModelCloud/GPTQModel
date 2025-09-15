@@ -20,6 +20,7 @@ import copy
 import json
 import os
 import time
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
@@ -90,10 +91,9 @@ class BaseGPTQModel(nn.Module):
     layers_node: str = None
     # repeating layer type
     layer_type: Union[List[str], str] = None
-    # for each repeating layer there are multiple modules within each layer
-    _layer_modules: List[List[str]] = None
+
     # a tree node of all the roots that contain quantizable modules
-    layers_modules_tree: List[str] = None
+    _layers_modules_tree: List[str] = None
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -212,13 +212,22 @@ class BaseGPTQModel(nn.Module):
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
-    @classproperty
-    def layer_modules(self):
-        return [
-            [name for name in block if not name.endswith("!")]
-            for block in self._layer_modules
-            if any(not name.endswith("!") for name in block)
+    def simple_layer_modules(self):
+        layer_modules = self.build_layer_modules(self._layers_modules_tree)
+
+        simple = [
+            [name for name in block if not name.endswith(":!")]
+            for block in layer_modules
+            if any(not name.endswith(":!") for name in block)
         ]
+
+        print(f"simple layer_modules: {simple}")
+        return simple
+
+    def full_layer_modules(self):
+        full = self.build_layer_modules(self._layers_modules_tree)
+        print(f"full layer_modules: {full}")
+        return full
 
     def prepare_dataset(
         self,
@@ -836,7 +845,7 @@ class BaseGPTQModel(nn.Module):
         if auto_gc:
             torch_empty_cache()
 
-        layer_modules = self.layer_modules
+        layer_modules = self.simple_layer_modules()
 
         if not self.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
@@ -844,7 +853,7 @@ class BaseGPTQModel(nn.Module):
         # dynamic expert layer index for model defs
         if self.dynamic_expert_index is not None:
             num_experts = getattr(self.model.config, self.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
+            layer_modules = get_moe_layer_modules(layer_modules=self.simple_layer_modules(),
                                                   num_experts=num_experts)
 
         quantizers = {}
@@ -1336,7 +1345,7 @@ class BaseGPTQModel(nn.Module):
 
         NOT_QUANTIZE_SUFFIX = ":!"
 
-        for block in self._layer_modules:
+        for block in self.full_layer_modules():
             not_quantized = all(name.endswith(NOT_QUANTIZE_SUFFIX) for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
@@ -1347,7 +1356,7 @@ class BaseGPTQModel(nn.Module):
             subset = []
             skip = False
             for name in block:
-                if not name.endswith("!"):
+                if not name.endswith(NOT_QUANTIZE_SUFFIX):
                     m, _ = get_module_by_name_prefix(module, name)
                     # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                     # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
@@ -1429,6 +1438,93 @@ class BaseGPTQModel(nn.Module):
     #             log.info(f"{self.__class__.__name__}: MODEL switching to training mode.")
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
+
+    def build_layer_modules(self, tree):
+        """
+        tree format:
+          [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
+        Rules:
+          - ':!' means participates in inference but is NOT quantized; keep this marker in output.
+          - ':<digit>' means grouping; children with the same group id are emitted in the same block.
+          - Both can appear together, e.g. 'module_name:!:2'.
+        Output:
+          _layer_modules = [ [items...], [items...], ... ]
+        """
+        # Be lenient: just require a dict as the 4th element.
+        if not (isinstance(tree, list) and len(tree) >= 4 and isinstance(tree[3], dict)):
+            raise ValueError("layers_modules_tree must be ['model','layers','#',{...}] (4th element a dict)")
+
+        mapping = tree[3]
+        out_blocks = []
+
+        for parent, entries in mapping.items():
+            groups = defaultdict(list)
+
+            for ent in entries:
+                parts = ent.split(':')
+                child = parts[0]
+
+                flags = parts[1:]
+                has_bang = ('!' in flags)
+                # first numeric tag is the group id; default 0
+                grp = next((int(p) for p in flags if p.isdigit()), 0)
+
+                groups[grp].append((child, has_bang))
+
+            # Emit per-group, skipping pure-:! blocks (norm-only), but
+            # preserving :! markers on mixed blocks if they ever occur.
+            for g in sorted(groups):
+                items = groups[g]
+                # if every entry is :!, skip this block (matches your expected output)
+                # if all(has_bang for _, has_bang in items):
+                #     continue
+
+                block = []
+                for child, has_bang in items:
+                    full = child if child == parent else f"{parent}.{child}"
+                    if has_bang:
+                        full += ":!"
+                    block.append(full)
+
+                out_blocks.append(block)
+
+        return out_blocks
+
+    def generate_layers_modules_tree_simple(self, node):
+        """
+        Recursively walk a nested list/dict structure and:
+          1. Drop dict entries where *all* values are ':!' flagged.
+          2. Remove ':!' and ':<digit>' markers from strings.
+        """
+
+        # If it's a list, recurse into each element
+        if isinstance(node, list):
+            return [self.generate_layers_modules_tree_simple(x) for x in node]
+
+        # If it's a dict, process each key -> value
+        if isinstance(node, dict):
+            new_dict = {}
+            for k, v in node.items():
+                # Expand tuple-of-strings blocks (special handling)
+                if isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v):
+                    # Rule 1: check if ALL entries are :!
+                    if all(any(p == "!" for p in x.split(":")[1:]) for x in v):
+                        continue  # skip this parent entirely
+
+                    # Rule 2: strip :! and :digit markers
+                    cleaned = tuple(x.split(":")[0] for x in v)
+                    new_dict[k] = cleaned
+                else:
+                    # Recurse deeper
+                    new_dict[k] = generate_layers_modules_tree_simple(v)
+            return new_dict
+
+        # If it's a plain string (unlikely here), strip markers
+        if isinstance(node, str):
+            return node.split(":")[0]
+
+        # For other types, return as-is
+        return node
 
     def __getattr__(self, item):
         try:

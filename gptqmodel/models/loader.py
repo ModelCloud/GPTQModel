@@ -483,8 +483,8 @@ def ModelLoader(cls):
                     num_experts = getattr(config.text_config, cls.dynamic_expert_index)
                 else:
                     num_experts = getattr(config, cls.dynamic_expert_index)
-                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
-                                                          num_experts=num_experts)
+                cls.simple_layer_modules = get_moe_layer_modules(layer_modules=cls.simple_layer_modules(),
+                                                                 num_experts=num_experts)
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.base_modules
@@ -495,7 +495,7 @@ def ModelLoader(cls):
                     continue
 
                 if not any(name.startswith(prefix) for prefix in cls.layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
+                        not name.endswith(ignore_module) for sublist in cls.simple_layer_modules() for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
