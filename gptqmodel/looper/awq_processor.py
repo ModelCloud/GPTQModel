@@ -354,7 +354,7 @@ class AWQProcessor(LoopProcessor):
         clear_memory()
 
         # [STEP 2]: Compute and apply scale list
-        module_config: List[Dict] = self.gptq_model.get_layers_for_scaling(
+        module_config: List[Dict] = self.gptq_model.awq_get_modules_for_scaling(
             module, input_feat, self.module_kwargs
         )
         scales_list = [

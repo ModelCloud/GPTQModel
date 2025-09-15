@@ -52,6 +52,21 @@ from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE
                      QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
 
 
+class _ClassPropertyDescriptor:
+    def __init__(self, fget, fset=None):
+        self.fget = fget
+
+    def __get__(self, instance, owner=None):
+        if owner is None:
+            owner = type(instance)
+        return self.fget.__get__(instance, owner)()
+
+
+def classproperty(func):
+    if not isinstance(func, (classmethod, staticmethod)):
+        func = classmethod(func)
+    return _ClassPropertyDescriptor(func)
+
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
 
@@ -1299,8 +1314,73 @@ class BaseGPTQModel(nn.Module):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
             embed_module.to(device)
 
-    def get_layers_for_scaling(self, module, input_feat, module_kwargs):
-        pass
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = []
+        last_module = None  # most recent norm obj (from a '!...' block)
+        last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
+
+        for block in self._layer_modules:
+            not_quantized = all(name.endswith("!") for name in block)
+
+            if not_quantized:
+                # Remember the latest norm (use the last entry if multiple are present)
+                last_module, _ = get_module_by_name_prefix(module, block[-1].strip("!"))
+                continue
+
+            # Normal execution subset
+            subset = []
+            for name in block:
+                if not name.endswith("!"):
+                    m, _ = get_module_by_name_prefix(module, name)
+                    subset.append(m)
+
+            assert len(subset) > 0
+
+            prev_op = last_module
+
+            assert prev_op is not None
+
+            n = dict(
+                prev_op=prev_op,
+                layers=subset,
+                inp=input_feat[block[0]],
+                kwargs=module_kwargs
+            )
+
+            root_split = block[0].split(".", 2)
+            if len(root_split) == 2:
+                root = root_split[0]
+                if root != last_module_root:
+                    last_module_root = root
+                    n["module2inspect"], _ = get_module_by_name_prefix(module, root)
+
+            nodes.append(n)
+
+            # Update tracker to the LAST item of this block
+            last_module, _ = get_module_by_name_prefix(module, block[-1].strip("!"))
+
+        import torch
+        def format_nodes(nodes):
+            out = []
+            for n in nodes:
+                entry = {}
+                for k, v in n.items():
+                    if isinstance(v, torch.Tensor):
+                        entry[k] = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
+                    elif isinstance(v, dict):
+                        entry[k] = [
+                            f"Key: {kk}, Tensor(shape={tuple(x.shape)}, dtype={x.dtype})" if isinstance(x,
+                                                                                                        torch.Tensor) else type(
+                                x).__name__
+                            for kk, x in v.items()
+                        ]
+                    else:
+                        entry[k] = v
+                out.append(entry)
+            return out
+
+        print("DEBUG AWQ NODES:", format_nodes(nodes))
+        return nodes
 
     ## overrides nn.module.train()
     # def train(self, mode=True):

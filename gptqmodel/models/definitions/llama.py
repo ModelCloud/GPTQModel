@@ -14,8 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
-from ...quantization.awq.utils.module import get_op_by_name
+from ..base import BaseGPTQModel, classproperty
 
 
 class LlamaGPTQ(BaseGPTQModel):
@@ -49,138 +48,19 @@ class LlamaGPTQ(BaseGPTQModel):
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
-    layer_modules = [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.gate_proj", "mlp.up_proj",],
-        ["mlp.down_proj"],
-    ]
+    @classproperty
+    def layer_modules(self):
+        return [
+            [name for name in block if not name.endswith("!")]
+            for block in self._layer_modules
+            if any(not name.endswith("!") for name in block)
+        ]
 
     _layer_modules = [
         ["input_layernorm!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["input_layernorm!"],
         ["self_attn.o_proj"],
+        ["post_attention_layernorm!"],
         ["mlp.gate_proj", "mlp.up_proj", ],
         ["mlp.down_proj"],
     ]
-
-
-    def get_layers_for_scaling(self, module, input_feat, module_kwargs):
-        nodes = []
-        last_module = None  # most recent norm obj (from a '!...' block)
-        last_module_root = None # self_attn.* has root == self_attn, mlp.* has root == mlp
-
-        for block in self._layer_modules:
-            not_quantized = all(name.endswith("!") for name in block)
-
-            if not_quantized:
-                # Remember the latest norm (use the last entry if multiple are present)
-                last_module = get_op_by_name(module, block[-1].strip("!"))
-                continue
-
-            # Normal execution subset
-            subset = []
-            for name in block:
-                if not name.endswith("!"):
-                    subset.append(get_op_by_name(module, name))
-
-            assert len(subset) > 0
-
-            prev_op = last_module
-
-            assert prev_op != None
-
-            n = dict(
-                    prev_op=prev_op,
-                    layers=subset,
-                    inp=input_feat[block[0]],
-                    kwargs=module_kwargs
-                )
-
-            root_split = block[0].split(".", 2)
-            if len(root_split) == 2:
-                root = root_split[0]
-                if root != last_module_root:
-                    last_module_root = root
-                    n["module2inspect"] = get_op_by_name(module, root)
-
-
-            nodes.append(n)
-
-            # Update tracker to the LAST item of this block
-            last_module = get_op_by_name(module, block[-1].strip("!"))
-
-        import torch
-        def format_nodes(nodes):
-            out = []
-            for n in nodes:
-                entry = {}
-                for k, v in n.items():
-                    if isinstance(v, torch.Tensor):
-                        entry[k] = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
-                    elif isinstance(v, dict):
-                        entry[k] = [
-                            f"Key: {kk}, Tensor(shape={tuple(x.shape)}, dtype={x.dtype})" if isinstance(x, torch.Tensor) else type(
-                                x).__name__
-                            for kk, x in v.items()
-                        ]
-                    else:
-                        entry[k] = v
-                out.append(entry)
-            return out
-
-        print("DEBUG AWQ NODES:", format_nodes(nodes))
-        return nodes
-
-
-    # def get_layers_for_scaling(self, module, input_feat, module_kwargs):
-    #     layers = []
-    #
-    #     # attention input
-    #     layers.append(
-    #         dict(
-    #             prev_op=module.input_layernorm,
-    #             layers=[
-    #                 module.self_attn.q_proj,
-    #                 module.self_attn.k_proj,
-    #                 module.self_attn.v_proj,
-    #             ],
-    #             inp=input_feat["self_attn.q_proj"],
-    #             module2inspect=module.self_attn,
-    #             kwargs=module_kwargs,
-    #         )
-    #     )
-    #
-    #     # attention out
-    #     # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
-    #     # Not GPA attention we need to skip o projection quant
-    #     if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
-    #         layers.append(
-    #             dict(
-    #                 prev_op=module.self_attn.v_proj,
-    #                 layers=[module.self_attn.o_proj],
-    #                 inp=input_feat["self_attn.o_proj"],
-    #             )
-    #         )
-    #
-    #     # linear 1
-    #     layers.append(
-    #         dict(
-    #             prev_op=module.post_attention_layernorm,
-    #             layers=[module.mlp.gate_proj, module.mlp.up_proj],
-    #             inp=input_feat["mlp.gate_proj"],
-    #             module2inspect=module.mlp,
-    #         )
-    #     )
-    #
-    #     # linear 2
-    #     layers.append(
-    #         dict(
-    #             prev_op=module.mlp.up_proj,
-    #             layers=[module.mlp.down_proj],
-    #             inp=input_feat["mlp.down_proj"],
-    #         )
-    #     )
-    #
-    #     return layers
