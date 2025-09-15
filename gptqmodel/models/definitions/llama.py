@@ -55,8 +55,8 @@ def build_layer_modules(tree):
         for g in sorted(groups):
             items = groups[g]
             # if every entry is :!, skip this block (matches your expected output)
-            if all(has_bang for _, has_bang in items):
-                continue
+            # if all(has_bang for _, has_bang in items):
+            #     continue
 
             block = []
             for child, has_bang in items:
