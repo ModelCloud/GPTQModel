@@ -376,7 +376,7 @@ jobs:
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py$python_version"
+          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env: ${env_name} exists, skip"
             pyenv local $env_name
