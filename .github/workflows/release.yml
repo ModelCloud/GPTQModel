@@ -386,8 +386,8 @@ jobs:
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
+          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           echo "== pyenv =="
           pyenv versions
           echo "== python =="
@@ -396,9 +396,7 @@ jobs:
           #nvcc --version
           echo "== torch =="
           pip show torch
-      - name: Install requirements
-        run: |
-          # bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ $cuda_version $torch_version $python_version
+
       - name: Compile
         run: python setup.py bdist_wheel
 
