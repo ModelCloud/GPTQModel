@@ -64,22 +64,28 @@ class LlamaGPTQ(BaseGPTQModel):
         last_module_root = None # self_attn.* has root == self_attn, mlp.* has root == mlp
 
         for block in self.layer_modules:
-            is_non_quantized = all(name.endswith("!") for name in block)
+            not_quantized = all(name.endswith("!") for name in block)
 
-            if is_non_quantized:
+            if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
                 last_module = get_attr(module, block[-1].strip("!"))
                 continue
 
-            # Normal execution block
-            layers = [get_attr(module, name) for name in block]
+            # Normal execution subset
+            subset = []
+            for name in block:
+                if not name.endswith("!"):
+                    subset.append(get_attr(module, name))
+
+            assert len(subset) > 0
+
             prev_op = last_module
 
             assert prev_op != None
 
             n = dict(
                     prev_op=prev_op,
-                    layers=layers,
+                    layers=subset,
                     inp=input_feat[block[0]],
                     kwargs=module_kwargs
                 )
@@ -95,7 +101,7 @@ class LlamaGPTQ(BaseGPTQModel):
             nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module = layers[-1]
+            last_module = getattr(module, block[-1].strip("!"))
 
         print(f"DEBUG AWQ NODES: {nodes}")
         return nodes
