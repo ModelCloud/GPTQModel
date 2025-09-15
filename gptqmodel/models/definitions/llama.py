@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from ..base import BaseGPTQModel
+from ...quantization.awq.utils.module import get_op_by_name
 
 
 class LlamaGPTQ(BaseGPTQModel):
@@ -45,17 +46,22 @@ class LlamaGPTQ(BaseGPTQModel):
         }
     ]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     layer_modules = [
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.gate_proj", "mlp.up_proj",],
+        ["mlp.down_proj"],
+    ]
+
+    _layer_modules = [
         ["input_layernorm!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["input_layernorm!"],
         ["self_attn.o_proj"],
-        ["mlp.gate_proj", "mlp.up_proj",],
+        ["mlp.gate_proj", "mlp.up_proj", ],
         ["mlp.down_proj"],
     ]
 
@@ -65,19 +71,19 @@ class LlamaGPTQ(BaseGPTQModel):
         last_module = None  # most recent norm obj (from a '!...' block)
         last_module_root = None # self_attn.* has root == self_attn, mlp.* has root == mlp
 
-        for block in self.layer_modules:
+        for block in self._layer_modules:
             not_quantized = all(name.endswith("!") for name in block)
 
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module = get_attr(module, block[-1].strip("!"))
+                last_module = get_op_by_name(module, block[-1].strip("!"))
                 continue
 
             # Normal execution subset
             subset = []
             for name in block:
                 if not name.endswith("!"):
-                    subset.append(get_attr(module, name))
+                    subset.append(get_op_by_name(module, name))
 
             assert len(subset) > 0
 
@@ -97,15 +103,34 @@ class LlamaGPTQ(BaseGPTQModel):
                 root = root_split[0]
                 if root != last_module_root:
                     last_module_root = root
-                    node["module2inspect"] = get_attr(module, root)
+                    n["module2inspect"] = get_op_by_name(module, root)
 
 
             nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module = getattr(module, block[-1].strip("!"))
+            last_module = get_op_by_name(module, block[-1].strip("!"))
 
-        print(f"DEBUG AWQ NODES: {nodes}")
+        import torch
+        def format_nodes(nodes):
+            out = []
+            for n in nodes:
+                entry = {}
+                for k, v in n.items():
+                    if isinstance(v, torch.Tensor):
+                        entry[k] = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
+                    elif isinstance(v, dict):
+                        entry[k] = [
+                            f"Key: {kk}, Tensor(shape={tuple(x.shape)}, dtype={x.dtype})" if isinstance(x, torch.Tensor) else type(
+                                x).__name__
+                            for kk, x in v.items()
+                        ]
+                    else:
+                        entry[k] = v
+                out.append(entry)
+            return out
+
+        print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
 
