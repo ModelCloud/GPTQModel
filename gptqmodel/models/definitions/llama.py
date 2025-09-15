@@ -16,6 +16,95 @@
 
 from ..base import BaseGPTQModel, classproperty
 
+from collections import defaultdict
+
+def build_layer_modules(tree):
+    """
+    tree format:
+      [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
+    Rules:
+      - ':!' means participates in inference but is NOT quantized; keep this marker in output.
+      - ':<digit>' means grouping; children with the same group id are emitted in the same block.
+      - Both can appear together, e.g. 'module_name:!:2'.
+    Output:
+      _layer_modules = [ [items...], [items...], ... ]
+    """
+    # Be lenient: just require a dict as the 4th element.
+    if not (isinstance(tree, list) and len(tree) >= 4 and isinstance(tree[3], dict)):
+        raise ValueError("layers_modules_tree must be ['model','layers','#',{...}] (4th element a dict)")
+
+    mapping = tree[3]
+    out_blocks = []
+
+    for parent, entries in mapping.items():
+        groups = defaultdict(list)
+
+        for ent in entries:
+            parts = ent.split(':')
+            child = parts[0]
+
+            flags = parts[1:]
+            has_bang = ('!' in flags)
+            # first numeric tag is the group id; default 0
+            grp = next((int(p) for p in flags if p.isdigit()), 0)
+
+            groups[grp].append((child, has_bang))
+
+        # Emit per-group, skipping pure-:! blocks (norm-only), but
+        # preserving :! markers on mixed blocks if they ever occur.
+        for g in sorted(groups):
+            items = groups[g]
+            # if every entry is :!, skip this block (matches your expected output)
+            if all(has_bang for _, has_bang in items):
+                continue
+
+            block = []
+            for child, has_bang in items:
+                full = child if child == parent else f"{parent}.{child}"
+                if has_bang:
+                    full += ":!"
+                block.append(full)
+
+            out_blocks.append(block)
+
+    return out_blocks
+
+def generate_layers_modules_tree_simple(node):
+    """
+    Recursively walk a nested list/dict structure and:
+      1. Drop dict entries where *all* values are ':!' flagged.
+      2. Remove ':!' and ':<digit>' markers from strings.
+    """
+
+    # If it's a list, recurse into each element
+    if isinstance(node, list):
+        return [generate_layers_modules_tree_simple(x) for x in node]
+
+    # If it's a dict, process each key -> value
+    if isinstance(node, dict):
+        new_dict = {}
+        for k, v in node.items():
+            # Expand tuple-of-strings blocks (special handling)
+            if isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v):
+                # Rule 1: check if ALL entries are :!
+                if all(any(p == "!" for p in x.split(":")[1:]) for x in v):
+                    continue  # skip this parent entirely
+
+                # Rule 2: strip :! and :digit markers
+                cleaned = tuple(x.split(":")[0] for x in v)
+                new_dict[k] = cleaned
+            else:
+                # Recurse deeper
+                new_dict[k] = convert_tree(v)
+        return new_dict
+
+    # If it's a plain string (unlikely here), strip markers
+    if isinstance(node, str):
+        return node.split(":")[0]
+
+    # For other types, return as-is
+    return node
+
 
 class LlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
@@ -30,37 +119,22 @@ class LlamaGPTQ(BaseGPTQModel):
     # Each repeating layer in `model.layers` is of type `LlamaDecoderLayer`
     layer_type = "LlamaDecoderLayer"
 
-    # Full tree of quantizable modules
-    # `#` str will match any number: useful for layers and moe indexing.
-    # List[str] for serial linked nodes. List str are linear depth linked modules presented in a linear fashion with no divergence.
-    # Dict{str: List[str] | Dict | Tuple[str]} for diverging nodes where a node splits into multiple paths/nodes.
-    # Tuple(str) for final targeted modules/nodes: there are only strings representing the final targeted modules
-    layers_modules_tree = [
+    _layers_modules_tree = [
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-            "mlp": ("up_proj", "gate_proj", "down_proj"),
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
         }
     ]
 
-    # Inside each `LlamaDecoderLayer` layer are many internal modules
-    # List them in the order executed in model forward() code
-    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
-    @classproperty
-    def layer_modules(self):
-        return [
-            [name for name in block if not name.endswith("!")]
-            for block in self._layer_modules
-            if any(not name.endswith("!") for name in block)
-        ]
+    layers_modules_tree = generate_layers_modules_tree_simple(_layers_modules_tree)
+    print(f"layers_modules_tree: {layers_modules_tree}")
 
-    _layer_modules = [
-        ["input_layernorm!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-        ["post_attention_layernorm!"],
-        ["mlp.gate_proj", "mlp.up_proj", ],
-        ["mlp.down_proj"],
-    ]
+    layer_modules = build_layer_modules(layers_modules_tree)
+    print(f"layers_modules: {layer_modules}")
+
+
