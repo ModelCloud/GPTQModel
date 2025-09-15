@@ -23,6 +23,9 @@ class MOSSGPTQ(BaseGPTQModel):
 
     layers_node = ["transformer.h"]
     layer_type = "MossBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["attn.qkv_proj"],
         ["attn.out_proj"],

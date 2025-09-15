@@ -23,6 +23,9 @@ class RWGPTQ(BaseGPTQModel):
 
     layers_node = ["transformer.h"]
     layer_type = "DecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attention.query_key_value"],
         ["self_attention.dense"],

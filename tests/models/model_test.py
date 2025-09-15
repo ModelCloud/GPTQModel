@@ -95,6 +95,7 @@ class ModelTest(unittest.TestCase):
     QUANTIZE_CONFIG_GROUP_SIZE = 128
 
     V2 = False
+    ACT_GROUP_AWARE = False
     QUANT_SAVE_PATH = None # default is temp folder
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
@@ -172,7 +173,8 @@ class ModelTest(unittest.TestCase):
             bits=self.QUANTIZE_CONFIG_BITS,
             group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
             format=self.QUANT_FORMAT,
-            desc_act=self.DESC_ACT,
+            desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
+            act_group_aware=self.ACT_GROUP_AWARE,
             sym=self.SYM,
             v2=self.V2
         )

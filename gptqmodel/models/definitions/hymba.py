@@ -35,6 +35,9 @@ class HymbaGPTQ(BaseGPTQModel):
 
     layers_node = ["model.layers"]
     layer_type = "HymbaDecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["mamba.in_proj"],
         ["mamba.out_proj"],

@@ -4,7 +4,7 @@
 </div>
 <h1 align="center">GPT-QModel</h1>
 </p>
-<p align="center">LLM model compression/quantization toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU and Intel/AMD/Apple CPU via HF, vLLM, and SGLang.</p>
+<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU and Intel/AMD/Apple CPU via HF, vLLM, and SGLang.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 09/11/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ New Models Support: Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
+* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
 * 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
 * 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 * 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
@@ -180,7 +180,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE        | ✅ |
 | DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ |               |   |
 | Dream             | ✅ | GRIN-MoE          | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |               |   |
-| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE   | ✅ |               |   |
+| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mixtral        | ✅ | Qwen 2/3 (Next/MoE)   | ✅ |               |   |
 
 ## Platform and HW Support 
 
@@ -287,9 +287,9 @@ quant_config = QuantizeConfig(bits=4, group_size=128, v2=True)
 | Method  | Bits/Group Size | ARC_CHALLENGE   | GSM8K_Platinum_COT | 
 |---------|-----------------|-----------------|--------------------|
 | GPTQ    | 4 / 128         | 49.15           | 48.30              |
-| GPTQ v2 | 4 / 128         | 49.74 👍 +1.20% | 61.46 🔥 +27.25%   
+| GPTQ v2 | 4 / 128         | 49.74  +1.20%   | 61.46  +27.25%     |
 | GPTQ    | 3 / 128         | 39.93           | 43.26              |
-| GPTQ v2 | 3 / 128         | 41.13 👍 +3.01% | 50.54 🔥 +16.83%         | 
+| GPTQ v2 | 3 / 128         | 41.13  +3.01%   | 50.54  +16.83%     | 
 
 # Quantization Inference
 ```py
@@ -396,36 +396,34 @@ dynamic = {
 
 ```
 
-### Experimental Features
-
-* GPTQ v2: set `v2=True` in quantization config.
-* Multi-GPU Quantization: set `CUDA_VISIBLE_DEVICES=0,1` to two devices and GPTQModel will use second gpu for quantization.
-* Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
-* Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
-
 ### Group Aware Reordering (GAR)
 
 Group Aware Reordering (GAR) is an enhanced activation reordering scheme designed to significantly improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
 
 How to enable GAR:
 
-Set the `hyb_act` parameter to `True` and disable the default activation reordering by setting `desc_act` to `False` in your `QuantizeConfig`. For example:
+Set the `act_group_aware` parameter to `True` and disable the default activation reordering by setting `desc_act` to `False` in your `QuantizeConfig`. For example:
 
 ```python
-quant_config = QuantizeConfig(bits=4, group_size=128, desc_act=False, hyb_act=True)
+quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ```
 
-This feature is based on the method introduced in:
 
-[T Gafni, A Karnieli, Y Hanani, "Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference," CVPR Workshop, 2025.](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
+### Experimental Features
 
+* GPTQ v2: set `v2=True` in quantization config.
+* Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
+* Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
 
 
 ### Attribution of Quantization Methods:
 
 * GPTQ (v1): IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
-* GPTQ (v2): Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692
+* GPTQ (v2*): Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692. v2 naming is by Yale author and not endorsed by original GPTQ authors.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
+* EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
+* GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
+
 
 ## Citation
 

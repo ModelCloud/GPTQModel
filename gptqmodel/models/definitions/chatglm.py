@@ -29,6 +29,9 @@ class ChatGLM(BaseGPTQModel):
 
     layers_node = ["transformer.encoder.layers"]
     layer_type = "GLMBlock"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attention.query_key_value"],
         ["self_attention.dense"],

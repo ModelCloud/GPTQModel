@@ -25,6 +25,9 @@ class BaiChuanGPTQ(BaseGPTQModel):
     # repeating layers
     layers_node = ["model.layers"]
     layer_type = "DecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attn.W_pack"],
         ["self_attn.o_proj"],

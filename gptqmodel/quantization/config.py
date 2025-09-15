@@ -179,7 +179,7 @@ class QuantizeConfig():
     damp_auto_increment: float = field(default=0.01)
 
     desc_act: bool = field(default=True)
-    hyb_act: bool = field(default=False)
+    act_group_aware: bool = field(default=False)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
@@ -294,6 +294,10 @@ class QuantizeConfig():
 
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
+
+        # validate hybrid act order
+        if self.act_group_aware and self.desc_act:
+            raise ValueError("QuantizeConfig:: `group_aware_reordering` == `True` requires `desc_act` == `False`.")
 
         # validate meta
         if self.meta is not None:
@@ -481,7 +485,7 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
-            "hyb_act": self.hyb_act,
+            "group_aware_reordering": self.act_group_aware,
             "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,

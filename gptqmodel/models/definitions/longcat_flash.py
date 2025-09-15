@@ -26,6 +26,9 @@ class LongCatFlashGPTQ(BaseGPTQModel):
 
     layers_node = ["model.layers"]
     layer_type = "LongcatFlashDecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attn.0.q_a_proj", "self_attn.0.q_b_proj", "self_attn.0.kv_a_proj_with_mqa", "self_attn.0.kv_b_proj"],
         ["self_attn.0.o_proj"],

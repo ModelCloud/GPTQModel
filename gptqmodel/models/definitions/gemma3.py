@@ -28,6 +28,9 @@ class Gemma3ForConditionalGenerationGPTQ(BaseGPTQModel):
 
     layers_node = "model.language_model.layers"
     layer_type = "Gemma3DecoderLayer"
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
         ["self_attn.o_proj"],

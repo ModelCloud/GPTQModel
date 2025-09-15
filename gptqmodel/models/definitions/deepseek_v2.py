@@ -37,6 +37,8 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712
     layer_modules_strict = False
 
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     # DeepSeek-V2 uses 160 experts, v2-lite is auto-switched during __init__
     layer_modules = [
         # DeepSeek-V2 and DeepSeek-V2-Lite use same model_type, but different self_attn

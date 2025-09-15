@@ -14,22 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from model_test import ModelTest
 
 
-class MiniCPMGPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens",]
-    pre_lm_head_norm_module = "model.norm"
+class TestQwen3Next(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Next-80B-A3B-Instruct"
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    NATIVE_ARC_CHALLENGE_ACC = 0.2739
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
+    TRUST_REMOTE_CODE = True
+    APPLY_CHAT_TEMPLATE = True
+    EVAL_BATCH_SIZE = 6
 
-    layers_node = ["model.layers"]
-    layer_type = "MiniCPMDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj"],
-        ["self_attn.k_proj"],
-        ["self_attn.v_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.gate_proj", "mlp.up_proj","mlp.down_proj"],
-    ]
+    def test_mimo(self):
+        self.quant_lm_eval()

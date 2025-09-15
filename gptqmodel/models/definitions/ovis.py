@@ -57,6 +57,9 @@ class OvisGPTQ(BaseGPTQModel):
     }
 
     layer_modules_strict = False # the layer modules are in different decode layers
+
+    # TODO: full deprecation by gptqmodel v4.3
+    # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
         ["qkv", "proj"],
         ["fc1", "fc2", "fc3"],

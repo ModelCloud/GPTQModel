@@ -75,8 +75,6 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
         log_gil_requirements_for("Torch Compile")
         return module
 
-    #from ..models.base import PYTORCH_MIN_VERSION_WITH_COMPILE
-
     if not TORCH_HAS_COMPILE:
         return module
     if HAS_MPS and not TORCH_GTE_28:
