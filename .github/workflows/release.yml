@@ -116,12 +116,12 @@ jobs:
           # - cuda: 128
           #   torch: 2.8.0
           #   python: 310
-          # - cuda: 128
-          #   torch: 2.8.0
-          #   python: 311
-          # - cuda: 128
-          #   torch: 2.8.0
-          #   python: 312
+          - cuda: 128
+            torch: 2.8.0
+            python: 311
+          - cuda: 128
+            torch: 2.8.0
+            python: 312
           # - cuda: 128
           #   torch: 2.8.0
           #   python: 313
@@ -152,21 +152,21 @@ jobs:
           # - cuda: 128
           #   torch: 2.7.0
           #   python: 39
-          # - cuda: 128
-          #   torch: 2.6.0
-          #   python: 39
+          - cuda: 128
+            torch: 2.6.0
+            python: 39
           # - cuda: 126
           #   torch: 2.8.0
           #   python: 39
           # - cuda: 126
           #   torch: 2.8.0
           #   python: 310
-          # - cuda: 126
-          #   torch: 2.8.0
-          #   python: 311
-          # - cuda: 126
-          #   torch: 2.8.0
-          #   python: 312
+          - cuda: 126
+            torch: 2.8.0
+            python: 311
+          - cuda: 126
+            torch: 2.8.0
+            python: 312
           # - cuda: 126
           #   torch: 2.8.0
           #   python: 313
@@ -366,38 +366,41 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
+
       - name: Print Env
         run: |
-          if [ "${{ matrix.cuda }}" -lt 128 ]; then # CUDA >= 12.8 supports 12.0 (5090)
+          if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
             echo "TORCH_CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
           fi
           python_version=${{ matrix.python }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py$python_version"
+          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env exists, skip"
+            echo "env: ${env_name} exists, skip"
+            pyenv global $env_name
             pyenv local $env_name
             pyenv activate $env_name
           else
-            echo "creating venv..."
-            pyenv virtualenv "$python_version" "$env_name"
+            echo "creating venv: ${env_name}..."
+            pyenv virtualenv "$python_version" "$env_name" || true
+            pyenv global $env_name
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ {{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
+          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           echo "== pyenv =="
-          pyenv versions
+          pyenv version
+          echo "== python path =="
+          which python
           echo "== python =="
           python --version
           echo "== nvcc =="
           #nvcc --version
           echo "== torch =="
           pip show torch
-      - name: Install requirements
-        run: |
-          # bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ $cuda_version $torch_version $python_version
+
       - name: Compile
         run: python setup.py bdist_wheel
 
@@ -519,6 +522,7 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
           python -m twine upload dist/*gz
+
   release-source-github:
     runs-on: ubuntu-24.04
     env:
