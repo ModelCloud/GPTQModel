@@ -76,6 +76,10 @@ class LlamaGPTQ(BaseGPTQModel):
             layers = [get_attr(module, name) for name in block]
             prev_op = last_non_norm_last if last_non_norm_last is not None else last_norm
 
+            # reset last
+            last_non_norm_last = None
+            last_norm = None
+
 
             n = dict(
                     prev_op=prev_op,
