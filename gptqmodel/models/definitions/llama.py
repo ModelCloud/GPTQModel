@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel, classproperty
+from ..base import BaseGPTQModel
 
 from collections import defaultdict
+
 
 def build_layer_modules(tree):
     """
@@ -69,6 +70,7 @@ def build_layer_modules(tree):
 
     return out_blocks
 
+
 def generate_layers_modules_tree_simple(node):
     """
     Recursively walk a nested list/dict structure and:
@@ -95,7 +97,7 @@ def generate_layers_modules_tree_simple(node):
                 new_dict[k] = cleaned
             else:
                 # Recurse deeper
-                new_dict[k] = convert_tree(v)
+                new_dict[k] = generate_layers_modules_tree_simple(v)
         return new_dict
 
     # If it's a plain string (unlikely here), strip markers
@@ -127,14 +129,12 @@ class LlamaGPTQ(BaseGPTQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
 
     layers_modules_tree = generate_layers_modules_tree_simple(_layers_modules_tree)
     print(f"layers_modules_tree: {layers_modules_tree}")
 
-    layer_modules = build_layer_modules(_layers_modules_tree)
-    print(f"layers_modules: {layer_modules}")
-
-
+    _layer_modules = build_layer_modules(_layers_modules_tree)
+    print(f"layers_modules: {_layer_modules}")

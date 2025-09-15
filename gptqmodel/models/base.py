@@ -91,7 +91,7 @@ class BaseGPTQModel(nn.Module):
     # repeating layer type
     layer_type: Union[List[str], str] = None
     # for each repeating layer there are multiple modules within each layer
-    layer_modules: List[List[str]] = None
+    _layer_modules: List[List[str]] = None
     # a tree node of all the roots that contain quantizable modules
     layers_modules_tree: List[str] = None
 
@@ -207,6 +207,17 @@ class BaseGPTQModel(nn.Module):
 
         # print kernel info:
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
+
+    # Inside each `LlamaDecoderLayer` layer are many internal modules
+    # List them in the order executed in model forward() code
+    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
+    @classproperty
+    def layer_modules(self):
+        return [
+            [name for name in block if not name.endswith("!")]
+            for block in self._layer_modules
+            if any(not name.endswith("!") for name in block)
+        ]
 
     def prepare_dataset(
         self,
@@ -1319,18 +1330,19 @@ class BaseGPTQModel(nn.Module):
         last_module = None  # most recent norm obj (from a '!...' block)
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
 
-        for block in self._layer_modules:
-            not_quantized = all(name.endswith("!") for name in block)
+        NOT_QUANTIZE_SUFFIX = ":!"
 
+        for block in self._layer_modules:
+            not_quantized = all(name.endswith(NOT_QUANTIZE_SUFFIX) for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module, _ = get_module_by_name_prefix(module, block[-1].strip("!"))
+                last_module, _ = get_module_by_name_prefix(module, block[-1].strip(NOT_QUANTIZE_SUFFIX))
                 continue
 
             # Normal execution subset
             subset = []
             for name in block:
-                if not name.endswith("!"):
+                if not name.endswith(NOT_QUANTIZE_SUFFIX):
                     m, _ = get_module_by_name_prefix(module, name)
                     subset.append(m)
 
@@ -1357,7 +1369,7 @@ class BaseGPTQModel(nn.Module):
             nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module, _ = get_module_by_name_prefix(module, block[-1].strip("!"))
+            last_module, _ = get_module_by_name_prefix(module, block[-1].strip(NOT_QUANTIZE_SUFFIX))
 
         import torch
         def format_nodes(nodes):
