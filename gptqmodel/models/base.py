@@ -212,6 +212,7 @@ class BaseGPTQModel(nn.Module):
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
+    @classmethod
     def simple_layer_modules(self):
         layer_modules = self.build_layer_modules(self._layers_modules_tree)
 
@@ -224,6 +225,7 @@ class BaseGPTQModel(nn.Module):
         print(f"simple layer_modules: {simple}")
         return simple
 
+    @classmethod
     def full_layer_modules(self):
         full = self.build_layer_modules(self._layers_modules_tree)
         print(f"full layer_modules: {full}")
@@ -1439,6 +1441,7 @@ class BaseGPTQModel(nn.Module):
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
 
+    @classmethod
     def build_layer_modules(self, tree):
         """
         tree format:
