@@ -93,8 +93,7 @@ class LlamaGPTQ(BaseGPTQModel):
                 root = root_split[0]
                 if root != last_module_root:
                     last_module_root = root
-
-                node["module2inspect"] = get_attr(module, root)
+                    node["module2inspect"] = get_attr(module, root)
 
 
             nodes.append(n)
