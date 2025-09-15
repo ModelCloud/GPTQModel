@@ -68,7 +68,7 @@ class LlamaGPTQ(BaseGPTQModel):
 
             if is_non_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module = get_attr(module, block[-1])
+                last_module = get_attr(module, block[-1].strip("!"))
                 continue
 
             # Normal execution block
