@@ -366,9 +366,10 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
+
       - name: Print Env
         run: |
-          if [ "${{ matrix.cuda }}" -lt 128 ]; then # CUDA >= 12.8 supports 12.0 (5090)
+          if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
             echo "TORCH_CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
           fi
           python_version=${{ matrix.python }}
@@ -385,7 +386,7 @@ jobs:
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ {{ matrix.cuda }} ${{ matrix.torch }} $python_version
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
           echo "== pyenv =="
           pyenv versions
