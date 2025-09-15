@@ -101,6 +101,7 @@ class BaseGPTQModel(nn.Module):
 
     pre_lm_head_norm_module: str = None
     embed_modules: List[str] = None
+    attention_out_module: str = None
 
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
@@ -1325,6 +1326,9 @@ class BaseGPTQModel(nn.Module):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
             embed_module.to(device)
 
+    def awq_skip_modules_for_scaling(self) -> bool:
+        pass
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
         last_module = None  # most recent norm obj (from a '!...' block)
@@ -1341,10 +1345,22 @@ class BaseGPTQModel(nn.Module):
 
             # Normal execution subset
             subset = []
+            skip = False
             for name in block:
-                if not name.endswith(NOT_QUANTIZE_SUFFIX):
+                if not name.endswith("!"):
                     m, _ = get_module_by_name_prefix(module, name)
+                    # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
+                    # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
+                    if (self.attention_out_module is not None
+                            and name == self.attention_out_module
+                            and isinstance(last_module, nn.Linear)
+                            and last_module.weight.shape != m.weight.shape):
+                        skip = True
+                        break
                     subset.append(m)
+
+            if skip:
+                continue
 
             assert len(subset) > 0
 
