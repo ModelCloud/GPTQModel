@@ -134,7 +134,7 @@ class LlamaGPTQ(BaseGPTQModel):
     layers_modules_tree = generate_layers_modules_tree_simple(_layers_modules_tree)
     print(f"layers_modules_tree: {layers_modules_tree}")
 
-    layer_modules = build_layer_modules(layers_modules_tree)
+    layer_modules = build_layer_modules(_layers_modules_tree)
     print(f"layers_modules: {layer_modules}")
 
 
