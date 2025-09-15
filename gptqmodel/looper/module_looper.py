@@ -262,6 +262,9 @@ class ModuleLooper():
                     # merge all subsets into one
                     modules = [sum(modules, [])]
 
+                # TODO: integrated AWQ module forward/hooks within module lopper so everything is unified
+                # AWQ does it's own per layer module hooks and calculations. Logic has not been fully integrated into
+                # the module_looper so we wil let awq handle per layer operations for now
                 if isinstance(processor, AWQProcessor):
                     named_childs = dict()
                     for index, names in enumerate(modules):
@@ -273,6 +276,7 @@ class ModuleLooper():
 
                     # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
                     processor.layer_quantize(module, cur_layer_device, named_childs)
+                    # skip module_looper processing for awq
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
