@@ -60,26 +60,22 @@ class LlamaGPTQ(BaseGPTQModel):
 
     def get_layers_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
-        last_non_norm_last = None  # last layer obj of the previous non-norm block
-        last_norm = None  # most recent norm obj (from a '!...' block)
+        last_module = None  # most recent norm obj (from a '!...' block)
         last_module_root = None # self_attn.* has root == self_attn, mlp.* has root == mlp
 
         for block in self.layer_modules:
-            is_norm_block = all(name.endswith("!") for name in block)
+            is_non_quantized = all(name.endswith("!") for name in block)
 
-            if is_norm_block:
+            if is_non_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_norm = get_attr(module, block[-1])
+                last_module = get_attr(module, block[-1])
                 continue
 
             # Normal execution block
             layers = [get_attr(module, name) for name in block]
-            prev_op = last_non_norm_last if last_non_norm_last is not None else last_norm
+            prev_op = last_module
 
-            # reset last
-            last_non_norm_last = None
-            last_norm = None
-
+            assert prev_op != None
 
             n = dict(
                     prev_op=prev_op,
@@ -98,8 +94,8 @@ class LlamaGPTQ(BaseGPTQModel):
 
             nodes.append(n)
 
-            # Update tracker to the LAST item of this non-norm block
-            last_non_norm_last = layers[-1]
+            # Update tracker to the LAST item of this block
+            last_module = layers[-1]
 
         print(f"DEBUG AWQ NODES: {nodes}")
         return nodes
