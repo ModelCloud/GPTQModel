@@ -595,12 +595,14 @@ class ModuleLooper():
                 subset[name] = named_module
                 full[name] = named_module
 
+            # TODO awq unification
             if not is_awq_quant:
                 processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
                 # some modules are skipped
                 if processor.is_skipped(subset[name]):
                     skipped_modules.append(name)
 
+        # TODO awq unification
         if not is_awq_quant:
             for name in skipped_modules:
                 subset.pop(name)
