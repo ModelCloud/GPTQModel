@@ -1467,8 +1467,8 @@ class BaseGPTQModel(nn.Module):
                         entry[k] = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
                     elif isinstance(v, dict):
                         entry[k] = [
-                            f"Key: {kk}, Tensor(shape={tuple(x.shape)}, dtype={x.dtype})" if isinstance(x,
-                                                                                                        torch.Tensor) else type(
+                            f"Key: {kk}, Value: Tensor(shape={tuple(x.shape)}, dtype={x.dtype}); " if isinstance(x,
+                                                                                                                 torch.Tensor) else type(
                                 x).__name__
                             for kk, x in v.items()
                         ]
