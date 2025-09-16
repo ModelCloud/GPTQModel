@@ -20,9 +20,8 @@ from ..base import BaseGPTQModel
 class LlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
-    base_modules = ["model.embed_tokens", "model.norm"]
+    base_modules = ["model.embed_tokens", "model.norm", "model.rotary_embed"]
     pre_lm_head_norm_module = "model.norm"
-    embed_modules = ["model.embed_tokens", "model.rotary_emb"]
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # here the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)

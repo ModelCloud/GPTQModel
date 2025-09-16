@@ -116,6 +116,8 @@ class AWQProcessor(LoopProcessor):
 
         best_device = get_best_device()
         modules[0] = modules[0].to(best_device)
+
+        # embed should be on same gpu/best device
         self.gptq_model.move_embed(best_device)
 
         # get input and kwargs to layer 0
@@ -160,6 +162,8 @@ class AWQProcessor(LoopProcessor):
         inps = inps[0]
 
         modules[0] = modules[0].cpu()
+
+        # we no longer need embed, reduce vram
         self.gptq_model.move_embed("cpu")
 
         clear_memory()
@@ -316,10 +320,11 @@ class AWQProcessor(LoopProcessor):
 
         self.inps = self.inps.to(common_device)
 
+        # TODO: why do we need this?
         # We need to move the rotary embedding every time we move to a new module.
         # Transformers 4.45.0 moved rotary embedding to model definition as of this PR:
         # https://github.com/huggingface/transformers/pull/32617
-        self.gptq_model.move_embed(common_device)
+        # self.gptq_model.move_embed(common_device)
 
         # Transformers >= 4.48.0 requires positional embeddings should be computed before forward pass
         if (self.module_kwargs.get("position_embeddings") is None):

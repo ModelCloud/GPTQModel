@@ -100,7 +100,6 @@ class BaseGPTQModel(nn.Module):
     layer_modules_strict = True
 
     pre_lm_head_norm_module: str = None
-    embed_modules: List[str] = None
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # list modules where they must match the shape of previous module in execution to consider for scaling optimization
@@ -1358,9 +1357,10 @@ class BaseGPTQModel(nn.Module):
         return move_to(module, device=CPU)
 
     def move_embed(self, device: str):
-        for embed_module_name in self.embed_modules:
+        for embed_module_name in self.base_modules:
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
-            embed_module.to(device)
+            if embed_module is not None:
+                embed_module.to(device)
 
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
