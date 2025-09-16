@@ -90,7 +90,7 @@ class ModuleLooper():
         # move layer to target device
         layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
         ori_outside_layer_module_devices = {}
-        for module_name in self.gptq_model.base_modules:
+        for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
 
             if module is None:
@@ -129,7 +129,7 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
         move_to(layers[0], device=CPU)
-        for module_name in self.gptq_model.base_modules:
+        for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
             if module is not None:
                 move_to(module, device=ori_outside_layer_module_devices[module_name])

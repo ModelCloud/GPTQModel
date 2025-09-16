@@ -23,7 +23,6 @@ class Qwen3MoeQModel(BaseQModel):
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module

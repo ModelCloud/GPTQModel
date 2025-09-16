@@ -484,7 +484,7 @@ def ModelLoader(cls):
             layer_type = layer0.__class__.__name__
 
             modules = find_modules(model)
-            ignore_modules = [cls.lm_head] + cls.base_modules
+            ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
 
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head

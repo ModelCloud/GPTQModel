@@ -18,9 +18,7 @@ from ..base import BaseQModel
 
 
 class LlamaQModel(BaseQModel):
-    # Non-repeating layers at the root level: same level as `layers_node`
-    # Excluding `layers_node`.
-    base_modules = ["model.embed_tokens", "model.norm", "model.rotary_embed"]
+
     pre_lm_head_norm_module = "model.norm"
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module

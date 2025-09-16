@@ -844,7 +844,7 @@ class BaseQModel(nn.Module):
         return move_to(module, device=CPU)
 
     def move_embed(self, device: str):
-        for embed_module_name in self.base_modules:
+        for embed_module_name in self.get_base_modules(self.model):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
             if embed_module is not None:
                 embed_module.to(device)
@@ -1039,6 +1039,23 @@ class BaseQModel(nn.Module):
                 out_blocks.append(block)
 
         return out_blocks
+
+    @classmethod
+    def get_base_modules(cls, model):
+        """
+        Return list of base modules directly under 'model' but not 'model.layers'.
+        """
+        root = cls._layers_modules_tree[0]  # "model"
+        exclude = cls._layers_modules_tree[1]  # "layers"
+
+        base = getattr(model, root)
+        out = []
+        for name, _ in base.named_children():
+            if name != exclude:  # skip second node which is parallel in scope
+                out.append(f"{root}.{name}")
+
+        print(f"Base Modules: {out}")
+        return out
 
     def generate_layers_modules_tree_simple(self, node):
         """

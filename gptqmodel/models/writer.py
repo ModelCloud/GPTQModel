@@ -444,7 +444,7 @@ def ModelWriter(cls):
             )
 
             modules = find_modules(model)
-            ignore_modules = [self.lm_head] + self.base_modules
+            ignore_modules = [self.lm_head] + self.get_base_modules(model)
 
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
