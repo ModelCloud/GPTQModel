@@ -47,7 +47,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
                           move_to, nested_move_to, pack_model)
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_TIME,
                      QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
