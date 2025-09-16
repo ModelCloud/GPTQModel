@@ -226,7 +226,7 @@ class BaseGPTQModel(nn.Module):
 
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
-            if hasattr(cls.model.config, "text_config"):
+            if hasattr(model_config, "text_config"):
                 num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
             else:
                 num_experts = getattr(model_config, cls.dynamic_expert_index)
