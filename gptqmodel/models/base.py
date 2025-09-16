@@ -68,6 +68,15 @@ def classproperty(func):
         func = classmethod(func)
     return _ClassPropertyDescriptor(func)
 
+
+def filter_not_quantize_module(layer_modules):
+    return [
+        [name for name in block if not name.endswith(":!")]
+        for block in layer_modules
+        if any(not name.endswith(":!") for name in block)
+    ]
+
+
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
 
@@ -277,10 +286,13 @@ class BaseGPTQModel(nn.Module):
                     for n in names:
                         moe_simple[-1].append(n)
 
+            moe_simple = filter_not_quantize_module(moe_simple)
             print(f"moe layer_modules: {moe_simple}")
             return moe_simple
 
-        return simple
+        layer_modules = filter_not_quantize_module(layer_modules)
+        print(f"simple_layer_modules layer_modules: {layer_modules}")
+        return layer_modules
 
     @classmethod
     def full_layer_modules(cls):
