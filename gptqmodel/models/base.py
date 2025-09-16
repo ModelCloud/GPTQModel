@@ -234,7 +234,8 @@ class BaseQModel(nn.Module):
         return [".".join(prefix_parts)] if prefix_parts else []
 
     @classmethod
-    def build_moe_modules_if_need(cls, model_config, layer_modules):
+    def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
+        print("layer_modules",layer_modules)
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             if hasattr(model_config, "text_config"):
@@ -245,34 +246,46 @@ class BaseQModel(nn.Module):
             moe_simple = []
             for names in layer_modules:
                 moe_simple.append([])
-                for n in names:
-                    if EXPERT_INDEX_PLACEHOLDER in n:
+
+                has_expert = all(EXPERT_INDEX_PLACEHOLDER in n for n in names)
+
+                if not has_expert:
+                    moe_simple[-1].extend(names)
+                    continue
+
+                if is_awq_quantize:
+                    # AWQ Required
+                    # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.1.up_proj', ...]
+                    for index in range(num_experts):
+                        for n in names:
+                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                else:
+                    # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
+                    for n in names:
                         for index in range(num_experts):
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-                    else:
-                        moe_simple[-1].append(n)
 
             return moe_simple
 
         return layer_modules
-        
+
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config=None):
+    def simple_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
         layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
 
-        layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules)
+        layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
         layer_modules = filter_not_quantize_module(layer_modules)
         print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
-    def full_layer_modules(cls, model_config=None):
+    def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
         full = cls.build_layer_modules(cls._layers_modules_tree)
-        full = cls.build_moe_modules_if_need(model_config, full)
+        full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
         print(f"full layer_modules: {full}")
         return full
 
@@ -850,7 +863,7 @@ class BaseQModel(nn.Module):
         def strip_not_quantize_flag(module_name):
             return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
 
-        for block in self.full_layer_modules(self.model.config):
+        for i, block in enumerate(self.full_layer_modules(self.model.config, is_awq_quantize=True)):
             not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
@@ -887,8 +900,10 @@ class BaseQModel(nn.Module):
                 prev_op=prev_op,
                 layers=subset,
                 inp=input_feat[block[0]],
-                kwargs=module_kwargs
             )
+
+            if i == 0:
+                n["kwargs"] = module_kwargs
 
             root_split = block[0].split(".", 2)
             if len(root_split) == 2:
@@ -965,11 +980,11 @@ class BaseQModel(nn.Module):
 
         mapping = tree[3]
         out_blocks = []
-        
+
         def process_entries(parent, entries):
             """Process entries recursively to handle nested dict structures for MoE"""
             groups = defaultdict(list)
-            
+
             # Handle tuple/list of strings (traditional format)
             if isinstance(entries, (tuple, list)):
                 for ent in entries:
@@ -988,7 +1003,7 @@ class BaseQModel(nn.Module):
                     else:
                         full_path = f"{parent}.{child}" if parent != child else child
                     groups[grp].append((full_path, has_bang))
-            
+
             # Handle nested dict structure (MoE format)
             elif isinstance(entries, dict):
                 for sub_parent, sub_entries in entries.items():
@@ -1005,7 +1020,7 @@ class BaseQModel(nn.Module):
                         sub_groups = process_entries(full_sub_parent, sub_entries)
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
-            
+
             return groups
 
         for parent, entries in mapping.items():
