@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class NemotronHGPTQ(BaseQModel):
+class NemotronHQModel(BaseQModel):
     require_monkeypatch = True
     layer_modules_strict = False
     require_pkgs_version = ["transformers<=4.48.3"]

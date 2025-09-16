@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class MPTGPTQ(BaseQModel):
+class MptQModel(BaseQModel):
     base_modules = ["transformer.wte", "transformer.norm_f"]
     pre_lm_head_norm_module = "transformer.norm_f"
 

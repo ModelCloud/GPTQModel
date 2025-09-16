@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class FalconH1GPTQ(BaseQModel):
+class FalconH1QModel(BaseQModel):
     base_modules = ["model.embed_tokens"]
 
     layers_node = "model.layers"

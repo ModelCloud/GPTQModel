@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class HymbaGPTQ(BaseQModel):
+class HymbaQModel(BaseQModel):
     supports_desc_act = [False]
     require_trust_remote_code = True
     require_monkeypatch = True

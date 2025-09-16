@@ -27,7 +27,7 @@ from .._const import CPU
 from ..base import BaseQModel
 
 
-class OvisGPTQ(BaseQModel):
+class OvisQModel(BaseQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
     pre_lm_head_norm_module = "llm.model.norm"
 

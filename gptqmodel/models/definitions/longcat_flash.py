@@ -18,7 +18,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class LongCatFlashGPTQ(BaseQModel):
+class LongCatFlashQModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]

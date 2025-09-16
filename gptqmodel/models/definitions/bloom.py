@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class BloomGPTQ(BaseQModel):
+class BloomQModel(BaseQModel):
     # non-layer (root) modules
     base_modules = [
         "transformer.word_embeddings",

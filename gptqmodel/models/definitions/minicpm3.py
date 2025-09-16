@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class MiniCPM3GPTQ(BaseQModel):
+class MiniCpm3QModel(BaseQModel):
     base_modules = ["model.embed_tokens",]
     pre_lm_head_norm_module = "model.norm"
 

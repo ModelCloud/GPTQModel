@@ -20,7 +20,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class Llama4GPTQ(BaseQModel):
+class Llama4QModel(BaseQModel):
     # some bug in the attention_mask of transformers.modeling_llama4,
     # so batch quantization for Llama4 is temporarily not supported.
     support_batch_quantize = False

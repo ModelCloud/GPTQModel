@@ -20,7 +20,7 @@ import torch
 from ..base import BaseQModel
 
 
-class ChatGLM(BaseQModel):
+class ChatGLMQModel(BaseQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
 

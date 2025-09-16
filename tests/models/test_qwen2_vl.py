@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from gptqmodel.models.definitions.qwen2_vl import Qwen2VLGPTQ
+from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from model_test import ModelTest
 
 
@@ -49,7 +49,7 @@ class TestQwen2_VL(ModelTest):
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        image_inputs = Qwen2VLGPTQ.process_vision_info(messages)
+        image_inputs = Qwen2VLQModel.process_vision_info(messages)
         inputs = processor(
             text=[text],
             images=image_inputs,

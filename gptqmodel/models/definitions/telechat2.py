@@ -3,7 +3,7 @@ import torch
 from ..base import BaseQModel
 
 
-class TeleChat2GPTQ(BaseQModel):
+class TeleChat2QModel(BaseQModel):
     # telechat2 requires custom model code
     require_trust_remote_code = True
     # telechat2 requires float16
@@ -27,4 +27,4 @@ class TeleChat2GPTQ(BaseQModel):
         ["mlp.down_proj"]
     ]
 
-__all__ = ["TeleChat2GPTQ"]
+__all__ = ["TeleChat2QModel"]

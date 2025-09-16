@@ -19,7 +19,7 @@ from ..base import BaseQModel
 
 
 # Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
-class DeepSeekV2GPTQ(BaseQModel):
+class DeepSeekV2QModel(BaseQModel):
     # deepseek_v2 requires custom model code
     require_trust_remote_code = True
 

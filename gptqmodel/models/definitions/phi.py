@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class PhiGPTQ(BaseQModel):
+class PhiQModel(BaseQModel):
     base_modules = ["model.embed_tokens", "model.final_layernorm"]
     pre_lm_head_norm_module = "model.final_layernorm"
 

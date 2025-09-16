@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class PanguAlphaGPTQ(BaseQModel):
+class PanguAlphaQModel(BaseQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
     base_modules = ["transformer.wte", "transformer.wpe", "transformer.wqe", "transformer.ln_f"]

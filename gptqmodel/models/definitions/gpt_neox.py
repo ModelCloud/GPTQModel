@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class GPTNeoXGPTQ(BaseQModel):
+class GPTNeoXQModel(BaseQModel):
     base_modules = ["gpt_neox.embed_in", "gpt_neox.final_layer_norm"]
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"

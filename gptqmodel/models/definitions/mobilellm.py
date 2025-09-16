@@ -17,5 +17,5 @@
 from . import LlamaQModel
 
 
-class MobileLLMGPTQ(LlamaQModel):
+class MobileLLMQModel(LlamaQModel):
     require_trust_remote_code = True

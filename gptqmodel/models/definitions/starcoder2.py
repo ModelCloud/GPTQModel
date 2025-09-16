@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class Starcoder2GPTQ(BaseQModel):
+class Starcoder2QModel(BaseQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 

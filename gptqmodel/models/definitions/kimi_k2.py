@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import DeepSeekV3GPTQ
+from . import DeepSeekV3QModel
 
 
-class KimiK2GPTQ(DeepSeekV3GPTQ):
+class KimiK2QModel(DeepSeekV3QModel):
     pass

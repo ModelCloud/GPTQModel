@@ -18,7 +18,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class GrinMOEGPTQ(BaseQModel):
+class GrinMoeQModel(BaseQModel):
     # grin moe requires custom model code
     require_trust_remote_code = True
 

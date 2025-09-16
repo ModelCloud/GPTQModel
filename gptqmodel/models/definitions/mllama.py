@@ -20,7 +20,7 @@ from ..base import BaseQModel
 
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
-class MLlamaGPTQ(BaseQModel):
+class MLlamaQModel(BaseQModel):
     # AutoModelForPreTraining return a correct MLlamaForConditionalGeneration for mllama.
     loader = AutoModelForPreTraining
 

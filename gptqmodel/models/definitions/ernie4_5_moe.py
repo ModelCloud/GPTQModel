@@ -18,7 +18,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class ERNIE4_5_MOEGPTQ(BaseQModel):
+class Ernie4_5_MoeQModel(BaseQModel):
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True

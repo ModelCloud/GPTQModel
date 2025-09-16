@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class InternLM2GPTQ(BaseQModel):
+class InternLM2QModel(BaseQModel):
 
     require_pkgs_version = ["transformers<=4.44.2"]
 

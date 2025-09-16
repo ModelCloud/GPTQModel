@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class ExaoneGPTQ(BaseQModel):
+class ExaOneQModel(BaseQModel):
     # exaone requires custom model code
     require_trust_remote_code = True
 

@@ -18,7 +18,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class DeepSeekV3GPTQ(BaseQModel):
+class DeepSeekV3QModel(BaseQModel):
     # deepseek_v3 requires custom model code
     require_trust_remote_code = True
 

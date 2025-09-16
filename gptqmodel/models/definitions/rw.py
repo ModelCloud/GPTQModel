@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class RWGPTQ(BaseQModel):
+class RwgQModel(BaseQModel):
     base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 

@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class GPTNeoGPTQ(BaseQModel):
+class GptNeoQModel(BaseQModel):
     base_modules = ["transformer.wte", "transformer.wpe", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
     lm_head = "lm_head"

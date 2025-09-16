@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class GPT2GPTQ(BaseQModel):
+class GPT2QModel(BaseQModel):
     base_modules = ["transformer.wte", "transformer.wpe", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 

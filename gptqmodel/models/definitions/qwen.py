@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class QwenGPTQ(BaseQModel):
+class QwenQModel(BaseQModel):
     base_modules = [
         "transformer.wte",
         "transformer.wpe",

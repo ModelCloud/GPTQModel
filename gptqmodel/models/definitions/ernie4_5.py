@@ -17,7 +17,7 @@
 from . import LlamaQModel
 
 
-class ERNIE4_5QModel(LlamaQModel):
+class Ernie4_5QModel(LlamaQModel):
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True

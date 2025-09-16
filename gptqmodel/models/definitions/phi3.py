@@ -17,7 +17,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class Phi3GPTQ(BaseQModel):
+class Phi3QModel(BaseQModel):
     base_modules = ["model.embed_tokens", "embed_dropout", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
@@ -49,4 +49,4 @@ class PhiMoEGPTQForCausalLM(BaseQModel):
         [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w2"],
     ]
 
-__all__ = ["Phi3GPTQ", "PhiMoEGPTQForCausalLM"]
+__all__ = ["Phi3QModel", "PhiMoEGPTQForCausalLM"]

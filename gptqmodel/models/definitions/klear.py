@@ -18,7 +18,7 @@ from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
-class KlearGPTQ(BaseQModel):
+class KlearQModel(BaseQModel):
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"
 

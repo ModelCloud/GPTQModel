@@ -17,7 +17,7 @@
 from ..base import BaseQModel
 
 
-class DbrxConvertedGPTQ(BaseQModel):
+class DbrxConvertedQModel(BaseQModel):
     # dbrx_converted requires custom model code
     require_trust_remote_code = True
 
