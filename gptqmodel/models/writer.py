@@ -435,11 +435,6 @@ def ModelWriter(cls):
                 config, torch_dtype=torch.float16
             )
 
-            if self.dynamic_expert_index is not None:
-                num_experts = getattr(config, self.dynamic_expert_index)
-                _ = get_moe_layer_modules(layer_modules=self.simple_layer_modules(),
-                                          num_experts=num_experts)
-
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.base_modules
 

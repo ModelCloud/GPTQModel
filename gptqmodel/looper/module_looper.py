@@ -195,15 +195,6 @@ class ModuleLooper():
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
-        # dynamic expert layer index for model defs
-        if self.gptq_model.dynamic_expert_index is not None:
-            if hasattr(self.gptq_model.model.config, "text_config"):
-                num_experts = getattr(self.gptq_model.model.config.text_config, self.gptq_model.dynamic_expert_index)
-            else:
-                num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.simple_layer_modules(),
-                                                  num_experts=num_experts)
-
         layer_count = len(layers)
         quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
                             .manual()

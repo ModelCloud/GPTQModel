@@ -45,7 +45,7 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
-                           get_moe_layer_modules, move_to, nested_move_to, pack_model)
+                           move_to, nested_move_to, pack_model)
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -212,7 +212,6 @@ class BaseGPTQModel(nn.Module):
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
-    @classmethod
     def simple_layer_modules(self):
         layer_modules = self.build_layer_modules(self._layers_modules_tree)
 
@@ -223,9 +222,29 @@ class BaseGPTQModel(nn.Module):
         ]
 
         print(f"simple layer_modules: {simple}")
+
+        # MoE models
+        if self.dynamic_expert_index is not None:
+            if hasattr(self.model.config, "text_config"):
+                num_experts = getattr(self.model.config.text_config, self.dynamic_expert_index)
+            else:
+                num_experts = getattr(self.model.config, self.dynamic_expert_index)
+
+            moe_simple = []
+            for names in simple:
+                moe_simple.append([])
+                for n in names:
+                    if EXPERT_INDEX_PLACEHOLDER in n:
+                        for index in range(num_experts):
+                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                    else:
+                        moe_simple[-1].append(n)
+
+            print(f"moe layer_modules: {moe_simple}")
+            return moe_simple
+
         return simple
 
-    @classmethod
     def full_layer_modules(self):
         full = self.build_layer_modules(self._layers_modules_tree)
         print(f"full layer_modules: {full}")
@@ -852,11 +871,12 @@ class BaseGPTQModel(nn.Module):
         if not self.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
+        # TODO: remove! merge into simple_layer_modules()
         # dynamic expert layer index for model defs
-        if self.dynamic_expert_index is not None:
-            num_experts = getattr(self.model.config, self.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.simple_layer_modules(),
-                                                  num_experts=num_experts)
+        # if self.dynamic_expert_index is not None:
+        #     num_experts = getattr(self.model.config, self.dynamic_expert_index)
+        #     layer_modules = get_moe_layer_modules(layer_modules=self.simple_layer_modules(),
+        #                                           num_experts=num_experts)
 
         quantizers = {}
 
@@ -1441,7 +1461,6 @@ class BaseGPTQModel(nn.Module):
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
 
-    @classmethod
     def build_layer_modules(self, tree):
         """
         tree format:
