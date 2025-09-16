@@ -243,13 +243,8 @@ class BaseGPTQModel(nn.Module):
 
         return [".".join(prefix_parts)] if prefix_parts else []
 
-    # Inside each `LlamaDecoderLayer` layer are many internal modules
-    # List them in the order executed in model forward() code
-    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config = None):
-        layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
-
+    def build_moe_modules_if_need(cls, model_config, layer_modules):
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             if hasattr(model_config, "text_config"):
@@ -261,12 +256,12 @@ class BaseGPTQModel(nn.Module):
             for names in layer_modules:
                 # Check if this group contains expert modules
                 has_expert_modules = any(EXPERT_INDEX_PLACEHOLDER in n for n in names)
-                
+
                 if has_expert_modules:
                     # For expert modules, create separate groups for each expert
                     expert_groups = {}  # expert_index -> list of modules
                     non_expert_modules = []
-                    
+
                     for n in names:
                         if EXPERT_INDEX_PLACEHOLDER in n:
                             for index in range(num_experts):
@@ -275,11 +270,11 @@ class BaseGPTQModel(nn.Module):
                                 expert_groups[index].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
                         else:
                             non_expert_modules.append(n)
-                    
+
                     # Add non-expert modules first (if any)
                     if non_expert_modules:
                         moe_simple.append(non_expert_modules)
-                    
+
                     # Add each expert as a separate group
                     for index in sorted(expert_groups.keys()):
                         moe_simple.append(expert_groups[index])
@@ -289,17 +284,27 @@ class BaseGPTQModel(nn.Module):
                     for n in names:
                         moe_simple[-1].append(n)
 
-            moe_simple = filter_not_quantize_module(moe_simple)
-            print(f"moe layer_modules: {moe_simple}")
             return moe_simple
+
+        return layer_modules
+
+    # Inside each `LlamaDecoderLayer` layer are many internal modules
+    # List them in the order executed in model forward() code
+    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
+    @classmethod
+    def simple_layer_modules(cls, model_config=None):
+        layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
+
+        layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules)
 
         layer_modules = filter_not_quantize_module(layer_modules)
         print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
-    def full_layer_modules(cls):
+    def full_layer_modules(cls, model_config=None):
         full = cls.build_layer_modules(cls._layers_modules_tree)
+        full = cls.build_moe_modules_if_need(model_config, full)
         print(f"full layer_modules: {full}")
         return full
 
@@ -1422,7 +1427,7 @@ class BaseGPTQModel(nn.Module):
         def strip_not_quantize_flag(module_name):
             return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
 
-        for block in self.full_layer_modules():
+        for block in self.full_layer_modules(self.model.config):
             not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
