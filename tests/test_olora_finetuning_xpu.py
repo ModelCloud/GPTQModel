@@ -59,10 +59,10 @@ def train(
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
         lora_target_modules: List[str] = None,
-        torch_dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype = torch.bfloat16,
         init_lora_weights="olora",
 ):
-    model_kwargs = {"torch_dtype": torch_dtype, "device_map": DEVICE}
+    model_kwargs = {"dtype": dtype, "device_map": DEVICE}
     if quantize:
         model_kwargs["quantization_config"] = GPTQConfig(
             bits=4,
@@ -179,6 +179,6 @@ class Test(unittest.TestCase):
                 lora_alpha=16,
                 lora_dropout=0.05,
                 lora_target_modules=None,
-                torch_dtype=torch.bfloat16,
+                dtype=torch.bfloat16,
                 init_lora_weights="olora",
             )

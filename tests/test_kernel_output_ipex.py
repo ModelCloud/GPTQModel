@@ -22,19 +22,19 @@ class TestKernelOutput(unittest.TestCase):
     device_map = "cpu"
     m = [1, 16, 64, 256, 1024]
     k = 2048
-    torch_dtype = torch.float16
+    dtype = torch.float16
     r_tolerance = 0.0
     a_tolerance = 0.01
     input_samples_each_size = 20 # final size == input_samples_each_size * len(m)
 
     @classmethod
     def setUp(self):
-        self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device_map=self.device_map, torch_dtype=self.torch_dtype)
+        self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device_map=self.device_map, dtype=self.dtype)
         self.x = []
         self.torch_kernel_outs = []
         for dim_0 in self.m:
             for _ in range(self.input_samples_each_size):
-                inputs = torch.rand((dim_0, self.k), dtype=self.torch_dtype)
+                inputs = torch.rand((dim_0, self.k), dtype=self.dtype)
                 self.x.append(inputs)
                 self.torch_kernel_outs.append(self.forward(self, self.torch_model, inputs, backend=BACKEND.TORCH))
 
@@ -63,7 +63,7 @@ class TestKernelOutput(unittest.TestCase):
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
         if not HAS_IPEX and backend == BACKEND.IPEX:
             self.skipTest("IPEX is not available")
-        model = GPTQModel.load(self.model_path, backend=backend, device_map=self.device_map, torch_dtype=self.torch_dtype)
+        model = GPTQModel.load(self.model_path, backend=backend, device_map=self.device_map, dtype=self.dtype)
         log.info(f"device_map: {self.device_map} ")
         log.info(f"backend: {backend} ")
         for i in range(len(self.x)):
@@ -72,7 +72,7 @@ class TestKernelOutput(unittest.TestCase):
 
 
 class TestKernelOutputBFloat16(TestKernelOutput):
-    torch_dtype = torch.bfloat16
+    dtype = torch.bfloat16
 
 
 @unittest.skipUnless(hasattr(torch, "xpu") and torch.xpu.is_available(), reason="Test requires XPU")
@@ -82,4 +82,4 @@ class TestKernelOutputXPU(TestKernelOutput):
 
 
 class TestKernelOutputXPUBFloat16(TestKernelOutputXPU):
-    torch_dtype = torch.bfloat16
+    dtype = torch.bfloat16

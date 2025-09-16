@@ -31,7 +31,7 @@ class TestOvis1_6_Llama(ModelTest):
 
     def test_ovis_1_6(self):
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                           torch_dtype=self.TORCH_DTYPE, multimodal_max_length=8192, batch_size=1)
+                                           dtype=self.TORCH_DTYPE, multimodal_max_length=8192, batch_size=1)
 
         text_tokenizer = model.get_text_tokenizer()
         visual_tokenizer = model.get_visual_tokenizer()

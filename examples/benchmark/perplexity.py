@@ -73,7 +73,7 @@ if __name__ == "__main__":
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             device_map="auto",
-            torch_dtype="auto",
+            dtype="auto",
             trust_remote_code=args.trust_remote_code,
         )
 

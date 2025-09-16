@@ -36,7 +36,7 @@ class TestsQ4Triton(ModelTest):
             self.model_id,
             device="cuda:0",
             backend=BACKEND.TRITON,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
         )
         for _, submodule in model_q.named_modules():
             if isinstance(submodule, TritonV2QuantLinear):

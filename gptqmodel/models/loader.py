@@ -123,7 +123,7 @@ def ModelLoader(cls):
             pretrained_model_id_or_path: str,
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
-            torch_dtype: [str | torch.dtype] = "auto",
+            dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
@@ -177,16 +177,16 @@ def ModelLoader(cls):
             quantize_config.device = normalize_device(quantize_config.device)
 
         if cls.require_dtype:
-            torch_dtype = cls.require_dtype
+            dtype = cls.require_dtype
 
-        if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype):
+        if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            torch_dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
+            dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
 
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
-        model_init_kwargs["torch_dtype"] = torch_dtype
+        model_init_kwargs["dtype"] = dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
         # model_init_kwargs["low_cpu_mem_usage"] = True
 
@@ -254,7 +254,7 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter] = None,
-            torch_dtype: [str | torch.dtype] = "auto",
+            dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
             max_memory: Optional[dict] = None,
@@ -323,11 +323,11 @@ def ModelLoader(cls):
         )
 
         if cls.require_dtype:
-            torch_dtype = cls.require_dtype
+            dtype = cls.require_dtype
 
-        if torch_dtype is None or torch_dtype == "auto" or not isinstance(torch_dtype, torch.dtype) :
+        if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            torch_dtype = auto_dtype(config=config, device=device, quant_inference=True)
+            dtype = auto_dtype(config=config, device=device, quant_inference=True)
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
@@ -475,7 +475,7 @@ def ModelLoader(cls):
                     log.info("Optimize: Auto enabling flash attention2")
 
             model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
+                config, trust_remote_code=trust_remote_code, dtype=dtype, **args
             )
             model.checkpoint_file_name = model_save_name
 
@@ -553,7 +553,7 @@ def ModelLoader(cls):
         if (qcfg.format == FORMAT.GPTQ or qcfg.format == FORMAT.GEMM) and backend not in [BACKEND.IPEX]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=torch_dtype,
+                dtype=dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
@@ -587,8 +587,8 @@ def ModelLoader(cls):
                 )
 
             # Validate the model can run in Marlin.
-            if torch_dtype != torch.float16:
-                raise ValueError("Marlin kernel requires torch_dtype=torch.float16.")
+            if dtype != torch.float16:
+                raise ValueError("Marlin kernel requires dtype=torch.float16.")
 
             _validate_marlin_compatibility(qcfg, throw_error=True)
 
@@ -602,7 +602,7 @@ def ModelLoader(cls):
                 model=model,
                 qcfg=qcfg,
                 quant_linear_class=preload_qlinear_kernel,
-                torch_dtype=torch_dtype,
+                dtype=dtype,
                 model_save_name=model_save_name,
                 device_map=device_map,
                 desc_act=qcfg.desc_act,
@@ -615,7 +615,7 @@ def ModelLoader(cls):
         if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=torch_dtype,
+                dtype=dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,

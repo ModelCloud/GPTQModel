@@ -634,7 +634,7 @@ class GPTQModel:
             auto_gc: bool = True,
             # pass-through vars for load()
             trust_remote_code: bool = False,
-            torch_dtype: Optional[Union[str, torch.dtype]] = None,
+            dtype: Optional[Union[str, torch.dtype]] = None,
         ):
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
@@ -648,7 +648,7 @@ class GPTQModel:
                     backend=BACKEND.TORCH,
                     device=CPU,
                     trust_remote_code=trust_remote_code,
-                    torch_dtype=torch_dtype,
+                    dtype=dtype,
                 )
 
                 qcfg = quantized_model.quantize_config
@@ -664,7 +664,7 @@ class GPTQModel:
                     quantize_config=qcfg,
                     backend=BACKEND.TORCH,
                     trust_remote_code=trust_remote_code,
-                    torch_dtype=torch_dtype,
+                    dtype=dtype,
                     device=CPU,
                 )
 

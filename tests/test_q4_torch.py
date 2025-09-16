@@ -37,7 +37,7 @@ class TestsQ4Torch(ModelTest):
             (torch.float16, "cuda"),
         ]
     )
-    def test_generation_desc_act_true(self, torch_dtype, device):
+    def test_generation_desc_act_true(self, dtype, device):
         revision = "desc_act_true"
 
         qmodel = GPTQModel.from_quantized(
@@ -45,7 +45,7 @@ class TestsQ4Torch(ModelTest):
             revision=revision,
             device=device,
             backend=BACKEND.TORCH,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
         )
 
         # gptqmodel
@@ -62,12 +62,12 @@ class TestsQ4Torch(ModelTest):
             # (torch.float16, "cpu"),
         ]
     )
-    def test_generation_desc_act_false(self, torch_dtype, device):
+    def test_generation_desc_act_false(self, dtype, device):
         qmodel = GPTQModel.from_quantized(
             self.model_id,
             device=device,
             backend=BACKEND.TORCH,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
         )
 
         # gptqmodel

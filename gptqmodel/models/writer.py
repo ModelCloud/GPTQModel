@@ -440,7 +440,7 @@ def ModelWriter(cls):
         init_contexts = [no_init_weights()]
         with ContextManagers(init_contexts):
             model = cls.loader.from_config(
-                config, torch_dtype=torch.float16
+                config, dtype=torch.float16
             )
 
             modules = find_modules(model)

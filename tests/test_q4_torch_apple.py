@@ -35,7 +35,7 @@ class TestsQ4Torch(ModelTest):
             (torch.bfloat16, "cpu"),
         ]
     )
-    def test_generation_desc_act_true(self, torch_dtype, device):
+    def test_generation_desc_act_true(self, dtype, device):
         if sys.platform != "darwin":
             self.skipTest("This test is macOS only")
 
@@ -47,7 +47,7 @@ class TestsQ4Torch(ModelTest):
             revision=revision,
             device=device,
             backend=BACKEND.TORCH,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
         )
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_id)
@@ -63,7 +63,7 @@ class TestsQ4Torch(ModelTest):
             (torch.float16, "mps"),
         ]
     )
-    def test_generation_desc_act_false(self, torch_dtype, device):
+    def test_generation_desc_act_false(self, dtype, device):
         if sys.platform != "darwin":
             self.skipTest("This test is macOS only")
 
@@ -71,7 +71,7 @@ class TestsQ4Torch(ModelTest):
             self.model_id,
             device=device,
             backend=BACKEND.TORCH,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
         )
         tokenizer = AutoTokenizer.from_pretrained(self.model_id)
 
