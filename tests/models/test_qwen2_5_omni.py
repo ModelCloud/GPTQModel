@@ -31,7 +31,7 @@ class TestQwen2_5_Omni(ModelTest):
 
     def test_qwen2_5_omni(self):
         model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                           torch_dtype=self.TORCH_DTYPE)
+                                                      dtype=self.TORCH_DTYPE)
         spk_path = self.NATIVE_MODEL_ID + '/spk_dict.pt'
         model.model.load_speakers(spk_path)
 

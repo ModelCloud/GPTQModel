@@ -70,7 +70,7 @@ if is_quantized_model:
     print("load quantized model, will use BACKEND.IPEX")
     model = GPTQModel.load(ars.model, backend=BACKEND.IPEX)
 else:
-    model = AutoModelForCausalLM.from_pretrained(ars.model, device_map="cpu", torch_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(ars.model, device_map="cpu", dtype=torch.bfloat16)
 print(f"load model use: {time.time() - start_load}")
 
 # set model to eval mode

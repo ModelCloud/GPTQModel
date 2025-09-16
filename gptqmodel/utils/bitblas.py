@@ -31,7 +31,7 @@ def prepare_model_for_bitblas_load(
         model,
         qcfg: QuantizeConfig,
         quant_linear_class,
-        torch_dtype,
+        dtype,
         model_save_name,
         device_map,
         sym: bool,
@@ -45,7 +45,7 @@ def prepare_model_for_bitblas_load(
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
         load_checkpoint_in_model_then_tie_weights(
             model,
-            dtype=torch_dtype,
+            dtype=dtype,
             checkpoint=model_save_name,
             device_map=device_map,
             offload_state_dict=True,
@@ -59,7 +59,7 @@ def prepare_model_for_bitblas_load(
         if load_checkpoint_in_model:
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=torch_dtype,
+                dtype=dtype,
                 checkpoint=model_save_name,
                 device_map=device_map,
                 offload_state_dict=True,

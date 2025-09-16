@@ -29,7 +29,7 @@ class TestQwen2_VL(ModelTest):
 
     def test_qwen2_vl(self):
         model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                           torch_dtype=self.TORCH_DTYPE)
+                                                      dtype=self.TORCH_DTYPE)
 
         # check image to text
         messages = [
