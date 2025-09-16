@@ -36,9 +36,9 @@ class Qwen3MoeGPTQ(BaseGPTQModel):
         {
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0",  "o_proj:1"),
             "mlp": {
-                "gate": ("gate",),
+                "gate": ("gate:2",),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:3", "up_proj:3", "down_proj:4"),
                 },
             },
         }
