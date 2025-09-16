@@ -1474,6 +1474,9 @@ class BaseGPTQModel(nn.Module):
           - ':!' means participates in inference but is NOT quantized; keep this marker in output.
           - ':<digit>' means grouping; children with the same group id are emitted in the same block.
           - Both can appear together, e.g. 'module_name:!:2'.
+          - Supports nested dict structures for MoE models with experts.
+          - Special key "#" in nested dicts means direct children under parent (no additional nesting).
+          - EXPERT_INDEX_PLACEHOLDER in keys will be handled by simple_layer_modules for MoE expansion.
         Output:
           _layer_modules = [ [items...], [items...], ... ]
         """
@@ -1483,20 +1486,51 @@ class BaseGPTQModel(nn.Module):
 
         mapping = tree[3]
         out_blocks = []
+        
+        def process_entries(parent, entries):
+            """Process entries recursively to handle nested dict structures for MoE"""
+            groups = defaultdict(list)
+            
+            # Handle tuple/list of strings (traditional format)
+            if isinstance(entries, (tuple, list)):
+                for ent in entries:
+                    parts = ent.split(':')
+                    child = parts[0]
+
+                    flags = parts[1:]
+                    has_bang = ('!' in flags)
+                    # first numeric tag is the group id; default 0
+                    grp = next((int(p) for p in flags if p.isdigit()), 0)
+
+                    # Store the full path including parent for later use
+                    # Special case: if parent ends with the same name as child, don't duplicate
+                    if parent.endswith(f".{child}"):
+                        full_path = parent
+                    else:
+                        full_path = f"{parent}.{child}" if parent != child else child
+                    groups[grp].append((full_path, has_bang))
+            
+            # Handle nested dict structure (MoE format)
+            elif isinstance(entries, dict):
+                for sub_parent, sub_entries in entries.items():
+                    if sub_parent == "#":
+                        # Special case: "#" means expert index placeholder
+                        # Create a template path that will be expanded later by simple_layer_modules
+                        template_parent = f"{parent}.{EXPERT_INDEX_PLACEHOLDER}"
+                        sub_groups = process_entries(template_parent, sub_entries)
+                        for grp, items in sub_groups.items():
+                            groups[grp].extend(items)
+                    else:
+                        # Nested structure: process recursively with full path
+                        full_sub_parent = f"{parent}.{sub_parent}"
+                        sub_groups = process_entries(full_sub_parent, sub_entries)
+                        for grp, items in sub_groups.items():
+                            groups[grp].extend(items)
+            
+            return groups
 
         for parent, entries in mapping.items():
-            groups = defaultdict(list)
-
-            for ent in entries:
-                parts = ent.split(':')
-                child = parts[0]
-
-                flags = parts[1:]
-                has_bang = ('!' in flags)
-                # first numeric tag is the group id; default 0
-                grp = next((int(p) for p in flags if p.isdigit()), 0)
-
-                groups[grp].append((child, has_bang))
+            groups = process_entries(parent, entries)
 
             # Emit per-group, skipping pure-:! blocks (norm-only), but
             # preserving :! markers on mixed blocks if they ever occur.
@@ -1507,11 +1541,11 @@ class BaseGPTQModel(nn.Module):
                 #     continue
 
                 block = []
-                for child, has_bang in items:
-                    full = child if child == parent else f"{parent}.{child}"
+                for full_path, has_bang in items:
+                    # The full path is already constructed in process_entries
                     if has_bang:
-                        full += ":!"
-                    block.append(full)
+                        full_path += ":!"
+                    block.append(full_path)
 
                 out_blocks.append(block)
 
