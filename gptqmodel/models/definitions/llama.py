@@ -27,9 +27,6 @@ class LlamaGPTQ(BaseGPTQModel):
     # here the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
     shape_must_match_previous = ["self_attn.o_proj"]
 
-    # Below describes all the repeating layers in this transformer model
-    # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
-    layers_node = ["model.layers"]
     # Each repeating layer in `model.layers` is of type `LlamaDecoderLayer`
     layer_type = "LlamaDecoderLayer"
 

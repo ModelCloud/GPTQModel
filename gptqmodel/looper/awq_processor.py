@@ -105,7 +105,7 @@ class AWQProcessor(LoopProcessor):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
 
     def init_quant(self):
-        modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
+        modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
         # make sure samples tensor's shape is [1, max_calib_seq_len]
         samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration_dataset if data['input_ids'].shape[1] >= self.max_calib_seq_len]
 

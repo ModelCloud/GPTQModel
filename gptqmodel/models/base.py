@@ -211,6 +211,26 @@ class BaseGPTQModel(nn.Module):
         # print kernel info:
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
 
+    @classmethod
+    def extract_layers_node(cls):
+        """
+        Given a _layers_modules_tree structure, return the layers_node string.
+        It concatenates everything up to (but not including) the first "#" with '.'.
+        Example:
+            ["model", "layers", "#", {...}] -> ["model.layers"]
+        """
+
+        prefix_parts = []
+        for node in cls._layers_modules_tree:
+            if node == "#":
+                break
+            if isinstance(node, str):
+                prefix_parts.append(node)
+            else:
+                break  # stop if unexpected nested structure
+
+        return [".".join(prefix_parts)] if prefix_parts else []
+
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
@@ -521,7 +541,7 @@ class BaseGPTQModel(nn.Module):
                 lm_head.weight = nn.Parameter(lm_head.weight.data.clone())
 
             module_name_args = {
-                "layers_node": self.layers_node,
+                "layers_node": self.extract_layers_node(),
                 "lm_head_name": self.lm_head
             }
             self.model = fuse_layer_norms(model=self.model,
@@ -798,7 +818,7 @@ class BaseGPTQModel(nn.Module):
         layer_outputs = []
 
         num_batches = len(calibration_dataset)
-        layers = get_module_by_name_prefix(self.model, self.layers_node)
+        layers = get_module_by_name_prefix(self.model, self.extract_layers_node())
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
@@ -958,7 +978,7 @@ class BaseGPTQModel(nn.Module):
 
                     # dynamic overrides
                     if self.quantize_config.dynamic is not None:
-                        layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
+                        layer_name = self.lm_head if is_lm_head_module else f"{self.extract_layers_node()}.{module_index}.{name}"
 
                         if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
                             log.info(f"skip module: {layer_name}")
@@ -1059,7 +1079,7 @@ class BaseGPTQModel(nn.Module):
                         torch_empty_cache()
 
                 for name_index, name in enumerate(subset):
-                    layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
+                    layer_name = self.lm_head if is_lm_head_module else f"{self.extract_layers_node()}.{module_index}.{name}"
                     quant_modules_pb._subtitle(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
 
                     # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
