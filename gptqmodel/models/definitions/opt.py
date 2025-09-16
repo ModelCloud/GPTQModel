@@ -21,7 +21,7 @@ from ...utils.model import get_module_by_name_prefix
 from ..base import BaseQModel
 
 
-class OPTGPTQ(BaseQModel):
+class OptQModel(BaseQModel):
     base_modules = [
         "model.decoder.embed_tokens",
         "model.decoder.embed_positions",

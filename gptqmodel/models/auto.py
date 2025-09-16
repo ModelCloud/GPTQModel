@@ -70,22 +70,22 @@ from .definitions.apertus import ApertusGPTQ  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
 from .definitions.chatglm import ChatGLM  # noqa: E402
-from .definitions.codegen import CodeGenGPTQ  # noqa: E402
-from .definitions.cohere import CohereGPTQ  # noqa: E402
-from .definitions.cohere2 import Cohere2GPTQ  # noqa: E402
+from .definitions.codegen import CodeGenQModel  # noqa: E402
+from .definitions.cohere import CohereQModel  # noqa: E402
+from .definitions.cohere2 import Cohere2QModel  # noqa: E402
 from .definitions.dbrx import DbrxGPTQ  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
 from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
-from .definitions.dream import DreamGPTQ  # noqa: E402
-from .definitions.ernie4_5 import ERNIE4_5GPTQ  # noqa: E402
+from .definitions.dream import DreamQModel  # noqa: E402
+from .definitions.ernie4_5 import ERNIE4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import ERNIE4_5_MOEGPTQ  # noqa: E402
 from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
-from .definitions.gemma import GemmaGPTQ  # noqa: E402
-from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
-from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3GPTQ  # noqa: E402
+from .definitions.gemma import GemmaQModel  # noqa: E402
+from .definitions.gemma2 import Gemma2QModel  # noqa: E402
+from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.glm import GLM  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
@@ -94,52 +94,52 @@ from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GPTJGPTQ  # noqa: E402
-from .definitions.granite import GraniteGPTQ  # noqa: E402
+from .definitions.granite import GraniteQModel  # noqa: E402
 from .definitions.grinmoe import GrinMOEGPTQ  # noqa: E402
 from .definitions.hymba import HymbaGPTQ  # noqa: E402
-from .definitions.instella import InstellaGPTQ  # noqa: E402
+from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMGPTQ  # noqa: E402
 from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
 from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
 from .definitions.klear import KlearGPTQ  # noqa: E402
-from .definitions.llama import LlamaGPTQ  # noqa: E402
+from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4GPTQ  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
-from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
-from .definitions.mimo import MimoGPTQ  # noqa: E402
+from .definitions.longllama import LongLlamaQModel  # noqa: E402
+from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
-from .definitions.mistral import MistralGPTQ  # noqa: E402
+from .definitions.mistral import MistralQModel  # noqa: E402
 from .definitions.mixtral import MixtralGPTQ  # noqa: E402
 from .definitions.mllama import MLlamaGPTQ  # noqa: E402
 from .definitions.mobilellm import MobileLLMGPTQ  # noqa: E402
 from .definitions.moss import MOSSGPTQ  # noqa: E402
 from .definitions.mpt import MPTGPTQ  # noqa: E402
 from .definitions.nemotron_h import NemotronHGPTQ  # noqa: E402
-from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
-from .definitions.opt import OPTGPTQ  # noqa: E402
+from .definitions.olmo2 import Olmo2QModel  # noqa: E402
+from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
 from .definitions.pangu_alpha import PanguAlphaGPTQ  # noqa: E402
 from .definitions.phi import PhiGPTQ  # noqa: E402
 from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
-from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
+from .definitions.qwen2 import Qwen2QModel  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
-from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
+from .definitions.qwen2_moe import Qwen2MoeQModel  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
-from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
+from .definitions.qwen3 import Qwen3QModel  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
 from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
-from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
+from .definitions.stablelmepoch import StableLMEpochQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
-from .definitions.xverse import XverseGPTQ  # noqa: E402
-from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.yi import YiQModel  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -148,7 +148,7 @@ numpy.random.seed(787)
 
 MODEL_MAP = {
     "apertus": ApertusGPTQ,
-    "dream": DreamGPTQ,
+    "dream": DreamQModel,
     "bloom": BloomGPTQ,
     "gpt_neo": GPTNeoGPTQ,
     "kimi_k2": KimiK2GPTQ,
@@ -156,18 +156,18 @@ MODEL_MAP = {
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
-    "llama": LlamaGPTQ,
+    "llama": LlamaQModel,
     "llama4": Llama4GPTQ,
-    "opt": OPTGPTQ,
+    "opt": OptQModel,
     "moss": MOSSGPTQ,
     "chatglm": ChatGLM,
     "glm": GLM,
     "glm4": GLM,
     "glm4_moe": GLM4MoEGPTQ,
     "gpt_bigcode": GPTBigCodeGPTQ,
-    "codegen": CodeGenGPTQ,
-    "cohere": CohereGPTQ,
-    "cohere2": Cohere2GPTQ,
+    "codegen": CodeGenQModel,
+    "cohere": CohereQModel,
+    "cohere2": Cohere2QModel,
     "refinedWebModel": RWGPTQ,
     "refinedWeb": RWGPTQ,
     "falcon": RWGPTQ,
@@ -175,21 +175,21 @@ MODEL_MAP = {
     "internlm": InternLMGPTQ,
     "internlm2": InternLM2GPTQ,
     "qwen": QwenGPTQ,
-    "mistral": MistralGPTQ,
-    "yi": YiGPTQ,
-    "xverse": XverseGPTQ,
+    "mistral": MistralQModel,
+    "yi": YiQModel,
+    "xverse": XverseQModel,
     "deci": DeciLMGPTQ,
     "nemotron-nas": DeciLMGPTQ,
-    "stablelm_epoch": StableLMEpochGPTQ,
-    "stablelm": StableLMEpochGPTQ,
+    "stablelm_epoch": StableLMEpochQModel,
+    "stablelm": StableLMEpochQModel,
     "starcoder2": Starcoder2GPTQ,
     "mixtral": MixtralGPTQ,
-    "qwen2": Qwen2GPTQ,
-    "qwen3": Qwen3GPTQ,
-    "longllama": LongLlamaGPTQ,
-    "gemma": GemmaGPTQ,
-    "gemma2": Gemma2GPTQ,
-    "gemma3_text": Gemma3GPTQ,
+    "qwen2": Qwen2QModel,
+    "qwen3": Qwen3QModel,
+    "longllama": LongLlamaQModel,
+    "gemma": GemmaQModel,
+    "gemma2": Gemma2QModel,
+    "gemma3_text": Gemma3QModel,
     "gemma3": Gemma3ForConditionalGenerationGPTQ,
     "phi": PhiGPTQ,
     "phi3": Phi3GPTQ,
@@ -198,7 +198,7 @@ MODEL_MAP = {
     "mpt": MPTGPTQ,
     "minicpm": MiniCPMGPTQ,
     "minicpm3": MiniCPM3GPTQ,
-    "qwen2_moe": Qwen2MoeGPTQ,
+    "qwen2_moe": Qwen2MoeQModel,
     "qwen3_moe": Qwen3MoeGPTQ,
     "qwen3_next": Qwen3NextGPTQ,
     "qwen2_vl": Qwen2VLGPTQ,
@@ -211,17 +211,17 @@ MODEL_MAP = {
     "exaone": ExaoneGPTQ,
     "grinmoe": GrinMOEGPTQ,
     "mllama": MLlamaGPTQ,
-    "granite": GraniteGPTQ,
+    "granite": GraniteQModel,
     "mobilellm": MobileLLMGPTQ,
     "hymba": HymbaGPTQ,
-    "olmo2": Olmo2GPTQ,
+    "olmo2": Olmo2QModel,
     "ovis": OvisGPTQ,
     "telechat": TeleChat2GPTQ,
-    "instella": InstellaGPTQ,
-    "mimo": MimoGPTQ,
+    "instella": InstellaQModel,
+    "mimo": MimoQModel,
     "falcon_h1": FalconH1GPTQ,
     "gpt_pangu": PanguAlphaGPTQ,
-    "ernie4_5": ERNIE4_5GPTQ,
+    "ernie4_5": ERNIE4_5QModel,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
     "seed_oss": SeedOSSGPTQ,
     "gpt_oss": GPTOSSGPTQ,

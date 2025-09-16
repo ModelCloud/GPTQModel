@@ -15,10 +15,10 @@
 # limitations under the License.
 from transformers import AutoModel
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class DreamGPTQ(LlamaGPTQ):
+class DreamQModel(LlamaQModel):
     loader = AutoModel
     # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
     support_batch_quantize = False

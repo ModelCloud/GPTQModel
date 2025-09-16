@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from ..base import BaseQModel
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class Gemma3GPTQ(LlamaGPTQ):
+class Gemma3QModel(LlamaQModel):
     layer_type = "Gemma3DecoderLayer"
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):

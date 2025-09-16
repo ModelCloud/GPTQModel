@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class InternLMGPTQ(LlamaGPTQ):
+class InternLMGPTQ(LlamaQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
     layer_type = "InternLMDecoderLayer"

@@ -526,9 +526,9 @@ class BaseQModel(nn.Module):
 
         # rotate model
         if self.quantize_config.rotation:
-            from gptqmodel.models.definitions.llama import LlamaGPTQ
-            from gptqmodel.models.definitions.qwen2 import Qwen2GPTQ
-            if not isinstance(self, (LlamaGPTQ, Qwen2GPTQ)):
+            from gptqmodel.models.definitions.llama import LlamaQModel
+            from gptqmodel.models.definitions.qwen2 import Qwen2QModel
+            if not isinstance(self, (LlamaQModel, Qwen2QModel)):
                 raise ValueError(f"rotation only supports: llama/qwen2 model, "
                                     f"current model is {self.__class__.__name__}")
 

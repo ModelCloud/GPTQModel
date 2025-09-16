@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class CohereGPTQ(LlamaGPTQ):
+class CohereQModel(LlamaQModel):
     layer_type = "CohereDecoderLayer"

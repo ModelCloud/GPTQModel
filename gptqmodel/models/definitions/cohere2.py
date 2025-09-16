@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class Cohere2GPTQ(LlamaGPTQ):
+class Cohere2QModel(LlamaQModel):
     require_pkgs_version = ["transformers>4.47.99"]
     layer_type = "Cohere2DecoderLayer"
