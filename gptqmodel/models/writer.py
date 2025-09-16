@@ -157,11 +157,13 @@ def ModelWriter(cls):
             value=quantizers
         )
 
+
         self.quantize_config.meta_set(
             key=META_FIELD_URI,
             value=META_VALUE_URI,
         )
 
+        # meta: write config fields to meta if they doe not participate in inference
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
             value=self.quantize_config.damp_percent
@@ -195,6 +197,11 @@ def ModelWriter(cls):
         self.quantize_config.meta_set(
             key=META_FIELD_V2_ALPHA,
             value=self.quantize_config.v2_alpha
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_ACT_GROUP_AWARE,
+            value=self.quantize_config.act_group_aware
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
