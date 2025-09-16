@@ -71,14 +71,17 @@ def classproperty(func):
 
 def filter_not_quantize_module(layer_modules):
     return [
-        [name for name in block if not name.endswith(":!")]
+        [name for name in block if NOT_QUANTIZE_FLAG not in name]
         for block in layer_modules
-        if any(not name.endswith(":!") for name in block)
+        if any(NOT_QUANTIZE_FLAG not in name for name in block)
     ]
 
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
+
+
+NOT_QUANTIZE_FLAG = ":!"
 
 
 # Fix cpu memory leak.
@@ -1416,20 +1419,21 @@ class BaseGPTQModel(nn.Module):
         last_module = None  # most recent norm obj (from a '!...' block)
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
 
-        NOT_QUANTIZE_SUFFIX = ":!"
+        def strip_not_quantize_flag(module_name):
+            return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
 
         for block in self.full_layer_modules():
-            not_quantized = all(name.endswith(NOT_QUANTIZE_SUFFIX) for name in block)
+            not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module, _ = get_module_by_name_prefix(module, block[-1].strip(NOT_QUANTIZE_SUFFIX))
+                last_module, _ = get_module_by_name_prefix(module, strip_not_quantize_flag(block[-1]))
                 continue
 
             # Normal execution subset
             subset = []
             skip = False
             for name in block:
-                if not name.endswith(NOT_QUANTIZE_SUFFIX):
+                if NOT_QUANTIZE_FLAG not in name:
                     m, _ = get_module_by_name_prefix(module, name)
                     # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                     # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
@@ -1467,7 +1471,7 @@ class BaseGPTQModel(nn.Module):
             nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module, _ = get_module_by_name_prefix(module, block[-1].strip(NOT_QUANTIZE_SUFFIX))
+            last_module, _ = get_module_by_name_prefix(module, strip_not_quantize_flag(block[-1]))
 
         import torch
         def format_nodes(nodes):
@@ -1590,7 +1594,7 @@ class BaseGPTQModel(nn.Module):
                 for full_path, has_bang in items:
                     # The full path is already constructed in process_entries
                     if has_bang:
-                        full_path += ":!"
+                        full_path += NOT_QUANTIZE_FLAG
                     block.append(full_path)
 
                 out_blocks.append(block)
