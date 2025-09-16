@@ -68,8 +68,20 @@ def classproperty(func):
         func = classmethod(func)
     return _ClassPropertyDescriptor(func)
 
+
+def filter_not_quantize_module(layer_modules):
+    return [
+        [name for name in block if NOT_QUANTIZE_FLAG not in name]
+        for block in layer_modules
+        if any(NOT_QUANTIZE_FLAG not in name for name in block)
+    ]
+
+
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
+
+
+NOT_QUANTIZE_FLAG = ":!"
 
 
 # Fix cpu memory leak.
@@ -231,13 +243,8 @@ class BaseGPTQModel(nn.Module):
 
         return [".".join(prefix_parts)] if prefix_parts else []
 
-    # Inside each `LlamaDecoderLayer` layer are many internal modules
-    # List them in the order executed in model forward() code
-    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config = None):
-        layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
-
+    def build_moe_modules_if_need(cls, model_config, layer_modules):
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             if hasattr(model_config, "text_config"):
@@ -249,12 +256,12 @@ class BaseGPTQModel(nn.Module):
             for names in layer_modules:
                 # Check if this group contains expert modules
                 has_expert_modules = any(EXPERT_INDEX_PLACEHOLDER in n for n in names)
-                
+
                 if has_expert_modules:
                     # For expert modules, create separate groups for each expert
                     expert_groups = {}  # expert_index -> list of modules
                     non_expert_modules = []
-                    
+
                     for n in names:
                         if EXPERT_INDEX_PLACEHOLDER in n:
                             for index in range(num_experts):
@@ -263,11 +270,11 @@ class BaseGPTQModel(nn.Module):
                                 expert_groups[index].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
                         else:
                             non_expert_modules.append(n)
-                    
+
                     # Add non-expert modules first (if any)
                     if non_expert_modules:
                         moe_simple.append(non_expert_modules)
-                    
+
                     # Add each expert as a separate group
                     for index in sorted(expert_groups.keys()):
                         moe_simple.append(expert_groups[index])
@@ -277,14 +284,27 @@ class BaseGPTQModel(nn.Module):
                     for n in names:
                         moe_simple[-1].append(n)
 
-            print(f"moe layer_modules: {moe_simple}")
             return moe_simple
 
-        return simple
+        return layer_modules
+
+    # Inside each `LlamaDecoderLayer` layer are many internal modules
+    # List them in the order executed in model forward() code
+    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
+    @classmethod
+    def simple_layer_modules(cls, model_config=None):
+        layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
+
+        layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules)
+
+        layer_modules = filter_not_quantize_module(layer_modules)
+        print(f"simple_layer_modules layer_modules: {layer_modules}")
+        return layer_modules
 
     @classmethod
-    def full_layer_modules(cls):
+    def full_layer_modules(cls, model_config=None):
         full = cls.build_layer_modules(cls._layers_modules_tree)
+        full = cls.build_moe_modules_if_need(model_config, full)
         print(f"full layer_modules: {full}")
         return full
 
@@ -1404,20 +1424,21 @@ class BaseGPTQModel(nn.Module):
         last_module = None  # most recent norm obj (from a '!...' block)
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
 
-        NOT_QUANTIZE_SUFFIX = ":!"
+        def strip_not_quantize_flag(module_name):
+            return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
 
-        for block in self.full_layer_modules():
-            not_quantized = all(name.endswith(NOT_QUANTIZE_SUFFIX) for name in block)
+        for block in self.full_layer_modules(self.model.config):
+            not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module, _ = get_module_by_name_prefix(module, block[-1].strip(NOT_QUANTIZE_SUFFIX))
+                last_module, _ = get_module_by_name_prefix(module, strip_not_quantize_flag(block[-1]))
                 continue
 
             # Normal execution subset
             subset = []
             skip = False
             for name in block:
-                if not name.endswith(NOT_QUANTIZE_SUFFIX):
+                if NOT_QUANTIZE_FLAG not in name:
                     m, _ = get_module_by_name_prefix(module, name)
                     # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                     # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
@@ -1455,7 +1476,7 @@ class BaseGPTQModel(nn.Module):
             nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module, _ = get_module_by_name_prefix(module, block[-1].strip(NOT_QUANTIZE_SUFFIX))
+            last_module, _ = get_module_by_name_prefix(module, strip_not_quantize_flag(block[-1]))
 
         import torch
         def format_nodes(nodes):
@@ -1578,7 +1599,7 @@ class BaseGPTQModel(nn.Module):
                 for full_path, has_bang in items:
                     # The full path is already constructed in process_entries
                     if has_bang:
-                        full_path += ":!"
+                        full_path += NOT_QUANTIZE_FLAG
                     block.append(full_path)
 
                 out_blocks.append(block)
