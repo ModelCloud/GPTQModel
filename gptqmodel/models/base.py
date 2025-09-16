@@ -254,40 +254,18 @@ class BaseGPTQModel(nn.Module):
 
             moe_simple = []
             for names in layer_modules:
-                # Check if this group contains expert modules
-                has_expert_modules = any(EXPERT_INDEX_PLACEHOLDER in n for n in names)
-
-                if has_expert_modules:
-                    # For expert modules, create separate groups for each expert
-                    expert_groups = {}  # expert_index -> list of modules
-                    non_expert_modules = []
-
-                    for n in names:
-                        if EXPERT_INDEX_PLACEHOLDER in n:
-                            for index in range(num_experts):
-                                if index not in expert_groups:
-                                    expert_groups[index] = []
-                                expert_groups[index].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-                        else:
-                            non_expert_modules.append(n)
-
-                    # Add non-expert modules first (if any)
-                    if non_expert_modules:
-                        moe_simple.append(non_expert_modules)
-
-                    # Add each expert as a separate group
-                    for index in sorted(expert_groups.keys()):
-                        moe_simple.append(expert_groups[index])
-                else:
-                    # For non-expert modules, keep original grouping
-                    moe_simple.append([])
-                    for n in names:
+                moe_simple.append([])
+                for n in names:
+                    if EXPERT_INDEX_PLACEHOLDER in n:
+                        for index in range(num_experts):
+                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                    else:
                         moe_simple[-1].append(n)
 
             return moe_simple
 
         return layer_modules
-
+        
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
