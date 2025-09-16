@@ -1446,6 +1446,7 @@ class BaseGPTQModel(nn.Module):
                             and name in self.shape_must_match_previous
                             and isinstance(last_module, nn.Linear)
                             and last_module.weight.shape != m.weight.shape):
+                        log.debug(f'"{name}" attention out skipped.')
                         skip = True
                         break
                     subset.append(m)
