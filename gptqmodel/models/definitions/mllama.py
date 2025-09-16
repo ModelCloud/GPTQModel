@@ -16,11 +16,11 @@
 
 from transformers import AutoModelForPreTraining
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
-class MLlamaGPTQ(BaseGPTQModel):
+class MLlamaGPTQ(BaseQModel):
     # AutoModelForPreTraining return a correct MLlamaForConditionalGeneration for mllama.
     loader = AutoModelForPreTraining
 

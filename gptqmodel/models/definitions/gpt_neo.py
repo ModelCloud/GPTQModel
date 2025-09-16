@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GPTNeoGPTQ(BaseGPTQModel):
+class GPTNeoGPTQ(BaseQModel):
     base_modules = ["transformer.wte", "transformer.wpe", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
     lm_head = "lm_head"

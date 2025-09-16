@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class LongCatFlashGPTQ(BaseGPTQModel):
+class LongCatFlashGPTQ(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]

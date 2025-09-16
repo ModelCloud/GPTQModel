@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class FalconH1GPTQ(BaseGPTQModel):
+class FalconH1GPTQ(BaseQModel):
     base_modules = ["model.embed_tokens"]
 
     layers_node = "model.layers"

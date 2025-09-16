@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 # GLM is HF-ied ChatGLM and marked by -HF suffix in THUDM hf repos
-class GLM(BaseGPTQModel):
+class GLM(BaseQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 

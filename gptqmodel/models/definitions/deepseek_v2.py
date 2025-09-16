@@ -15,11 +15,11 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 # Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
-class DeepSeekV2GPTQ(BaseGPTQModel):
+class DeepSeekV2GPTQ(BaseQModel):
     # deepseek_v2 requires custom model code
     require_trust_remote_code = True
 

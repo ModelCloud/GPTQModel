@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class DeepSeekV3GPTQ(BaseGPTQModel):
+class DeepSeekV3GPTQ(BaseQModel):
     # deepseek_v3 requires custom model code
     require_trust_remote_code = True
 

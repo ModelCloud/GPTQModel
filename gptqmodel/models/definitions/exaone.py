@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class ExaoneGPTQ(BaseGPTQModel):
+class ExaoneGPTQ(BaseQModel):
     # exaone requires custom model code
     require_trust_remote_code = True
 

@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 class GptOssExpertsNew(nn.Module):
@@ -137,7 +137,7 @@ class GptOssTopKRouterNew(nn.Module):
         router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
         return router_scores, router_indices
 
-class GPTOSSGPTQ(BaseGPTQModel):
+class GPTOSSGPTQ(BaseQModel):
     dynamic_expert_index = "num_local_experts"
 
     base_modules = ["model.embed_tokens", "model.norm"]

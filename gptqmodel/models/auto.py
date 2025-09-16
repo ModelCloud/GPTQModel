@@ -65,7 +65,7 @@ from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
-from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
+from .base import BaseQModel, QuantizeConfig  # noqa: E402
 from .definitions.apertus import ApertusGPTQ  # noqa: E402
 from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
 from .definitions.bloom import BloomGPTQ  # noqa: E402
@@ -323,7 +323,7 @@ class GPTQModel:
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             **model_init_kwargs,
-    ) -> BaseGPTQModel:
+    ) -> BaseQModel:
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
                    "quantization_config"):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
@@ -357,7 +357,7 @@ class GPTQModel:
             # supports all hashlib hash methods
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
-    ) -> BaseGPTQModel:
+    ) -> BaseQModel:
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
 
@@ -422,14 +422,14 @@ class GPTQModel:
             log.info(f"Eval: loading using backend = `{backend}`")
             model = GPTQModel.load(model_id_or_path=model_or_id_or_path, backend=backend)
             model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
+        elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
             model = model_or_id_or_path
             model_id_or_path = model.config.name_or_path  #
         else:
             raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
 
         if tokenizer is None:
-            if isinstance(model, BaseGPTQModel):
+            if isinstance(model, BaseQModel):
                 tokenizer = model.tokenizer
             elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
                 tokenizer = Tokenicer.load(model_id_or_path)

@@ -17,10 +17,10 @@ from typing import List
 
 import torch
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class ChatGLM(BaseGPTQModel):
+class ChatGLM(BaseQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
 

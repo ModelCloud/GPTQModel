@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class DbrxConvertedGPTQ(BaseGPTQModel):
+class DbrxConvertedGPTQ(BaseQModel):
     # dbrx_converted requires custom model code
     require_trust_remote_code = True
 

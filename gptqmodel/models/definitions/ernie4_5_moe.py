@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class ERNIE4_5_MOEGPTQ(BaseGPTQModel):
+class ERNIE4_5_MOEGPTQ(BaseQModel):
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True

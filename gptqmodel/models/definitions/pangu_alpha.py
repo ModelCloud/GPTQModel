@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class PanguAlphaGPTQ(BaseGPTQModel):
+class PanguAlphaGPTQ(BaseQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
     base_modules = ["transformer.wte", "transformer.wpe", "transformer.wqe", "transformer.ln_f"]

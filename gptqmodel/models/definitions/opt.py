@@ -18,10 +18,10 @@ from typing import List
 import torch
 
 from ...utils.model import get_module_by_name_prefix
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class OPTGPTQ(BaseGPTQModel):
+class OPTGPTQ(BaseQModel):
     base_modules = [
         "model.decoder.embed_tokens",
         "model.decoder.embed_positions",

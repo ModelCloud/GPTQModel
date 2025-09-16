@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class LlamaGPTQ(BaseGPTQModel):
+class LlamaGPTQ(BaseQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
     base_modules = ["model.embed_tokens", "model.norm", "model.rotary_embed"]

@@ -90,7 +90,7 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 log = setup_logger()
 
-class BaseGPTQModel(nn.Module):
+class BaseQModel(nn.Module):
     # these modules are non-repeating and at the root level
     # does not include the node which holds all the repeating layers
     base_modules: List[str] = None
@@ -1627,6 +1627,6 @@ class BaseGPTQModel(nn.Module):
         except Exception:
             return getattr(self.model, item)
 
-__all__ = ["BaseGPTQModel"]
+__all__ = ["BaseQModel"]
 
-BaseGPTQModel = ModelLoader(ModelWriter(BaseGPTQModel))
+BaseQModel = ModelLoader(ModelWriter(BaseQModel))

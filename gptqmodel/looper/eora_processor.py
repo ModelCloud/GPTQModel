@@ -25,7 +25,7 @@ from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_MAX_MEMORY)
 from ..quantization.config import QuantizeConfig
@@ -230,7 +230,7 @@ class EoraProcessor(LoopProcessor):
         #     # B.to(dtype=torch.float16, device=CPU),
         # })
 
-    def finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
         if self.stream:
             torch_sync()

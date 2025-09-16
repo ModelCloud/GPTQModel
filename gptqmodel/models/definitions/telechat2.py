@@ -1,9 +1,9 @@
 import torch
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class TeleChat2GPTQ(BaseGPTQModel):
+class TeleChat2GPTQ(BaseQModel):
     # telechat2 requires custom model code
     require_trust_remote_code = True
     # telechat2 requires float16

@@ -14,14 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 from . import LlamaGPTQ
 
 
 class Gemma3GPTQ(LlamaGPTQ):
     layer_type = "Gemma3DecoderLayer"
 
-class Gemma3ForConditionalGenerationGPTQ(BaseGPTQModel):
+class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     support_batch_quantize = False
     base_modules = ["model.language_model.embed_tokens", "model.language_model.norm"]
     pre_lm_head_norm_module = "model.language_model.norm"

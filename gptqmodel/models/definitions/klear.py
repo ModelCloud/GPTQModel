@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class KlearGPTQ(BaseGPTQModel):
+class KlearGPTQ(BaseQModel):
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"
 

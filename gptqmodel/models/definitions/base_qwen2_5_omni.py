@@ -23,10 +23,10 @@ from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from .._const import CPU
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
+class BaseQwen2_5_OmniGPTQ(BaseQModel):
     loader = AutoModelForTextToWaveform
 
     base_modules = ["thinker.model.embed_tokens", "thinker.model.norm"]

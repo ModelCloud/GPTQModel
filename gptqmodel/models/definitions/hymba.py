@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class HymbaGPTQ(BaseGPTQModel):
+class HymbaGPTQ(BaseQModel):
     supports_desc_act = [False]
     require_trust_remote_code = True
     require_monkeypatch = True

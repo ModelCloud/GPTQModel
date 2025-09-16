@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class QwenGPTQ(BaseGPTQModel):
+class QwenGPTQ(BaseQModel):
     base_modules = [
         "transformer.wte",
         "transformer.wpe",

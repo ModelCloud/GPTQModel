@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Phi3GPTQ(BaseGPTQModel):
+class Phi3GPTQ(BaseQModel):
     base_modules = ["model.embed_tokens", "embed_dropout", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
@@ -33,7 +33,7 @@ class Phi3GPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
     ]
 
-class PhiMoEGPTQForCausalLM(BaseGPTQModel):
+class PhiMoEGPTQForCausalLM(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
     layer_type = "PhiMoEDecoderLayer"

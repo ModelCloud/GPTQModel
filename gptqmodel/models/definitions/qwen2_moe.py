@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Qwen2MoeGPTQ(BaseGPTQModel):
+class Qwen2MoeGPTQ(BaseQModel):
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"

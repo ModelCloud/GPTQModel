@@ -23,10 +23,10 @@ from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from .._const import CPU
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class BaseQwen2VLGPTQ(BaseGPTQModel):
+class BaseQwen2VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 
     base_modules = ["model.embed_tokens", "model.norm"]

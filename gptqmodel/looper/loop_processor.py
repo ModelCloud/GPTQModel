@@ -28,7 +28,7 @@ from torch.nn import Module
 
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
 from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.logger import setup_logger
@@ -314,7 +314,7 @@ class LoopProcessor:
 
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
-    def finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseQModel, **kwargs):
         del self.inputs_cache
         del self._results
 

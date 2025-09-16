@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Qwen3NextGPTQ(BaseGPTQModel):
+class Qwen3NextGPTQ(BaseQModel):
     """
     GPTQ config for Qwen3-Next (HF: Qwen3Next*), supporting:
       - Mixed token mixers per layer: 'full_attention' (self_attn.*) and 'linear_attention' (linear_attn.*)

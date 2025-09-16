@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class MiniCPM3GPTQ(BaseGPTQModel):
+class MiniCPM3GPTQ(BaseQModel):
     base_modules = ["model.embed_tokens",]
     pre_lm_head_norm_module = "model.norm"
 

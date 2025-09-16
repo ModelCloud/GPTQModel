@@ -15,10 +15,10 @@
 # limitations under the License.
 
 from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GLM4MoEGPTQ(BaseGPTQModel):
+class GLM4MoEGPTQ(BaseQModel):
     # GLM-4.5-Air MoE Model Structure:
     # Layer 0: Standard MLP (no MoE experts) - handled by ["mlp.down_proj"], ["mlp.gate_proj"], ["mlp.up_proj"]
     # Layers 1-46: MoE with shared_experts and individual experts (128 experts total) - handled by MoE components

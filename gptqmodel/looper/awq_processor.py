@@ -27,7 +27,7 @@ from torch import nn
 
 from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, PROCESS_MAX_MEMORY)
 from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
@@ -774,7 +774,7 @@ class AWQProcessor(LoopProcessor):
         module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
-    def finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
         if self.stream:
             torch_sync()

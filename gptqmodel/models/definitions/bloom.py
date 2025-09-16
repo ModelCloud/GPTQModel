@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class BloomGPTQ(BaseGPTQModel):
+class BloomGPTQ(BaseQModel):
     # non-layer (root) modules
     base_modules = [
         "transformer.word_embeddings",

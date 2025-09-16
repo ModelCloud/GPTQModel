@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GPTNeoXGPTQ(BaseGPTQModel):
+class GPTNeoXGPTQ(BaseQModel):
     base_modules = ["gpt_neox.embed_in", "gpt_neox.final_layer_norm"]
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"

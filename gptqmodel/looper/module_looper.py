@@ -29,7 +29,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..looper.native_processor import NativeProcessor
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy, replace_module_with_hooked_tree
 from ..utils.logger import setup_logger
@@ -42,7 +42,7 @@ from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATE
 log = setup_logger()
 
 class ModuleLooper():
-    def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize

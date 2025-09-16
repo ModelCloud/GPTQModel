@@ -15,10 +15,10 @@
 # limitations under the License.
 
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Phi4MMGPTQ(BaseGPTQModel):
+class Phi4MMGPTQ(BaseQModel):
     base_modules = ["model.embed_tokens", "model.embed_tokens_extend", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 

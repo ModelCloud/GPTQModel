@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class RWGPTQ(BaseGPTQModel):
+class RWGPTQ(BaseQModel):
     base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 

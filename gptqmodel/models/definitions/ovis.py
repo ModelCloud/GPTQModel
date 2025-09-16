@@ -24,10 +24,10 @@ from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to
 from .._const import CPU
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class OvisGPTQ(BaseGPTQModel):
+class OvisGPTQ(BaseQModel):
     base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
     pre_lm_head_norm_module = "llm.model.norm"
 
