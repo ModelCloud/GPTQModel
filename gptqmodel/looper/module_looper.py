@@ -262,10 +262,12 @@ class ModuleLooper():
                 if isinstance(processor, AWQProcessor):
                     named_childs = dict()
                     for index, names in enumerate(modules):
-                        named_modules = self.crate_named_modules(buffered_fwd, full, is_lm_head_module, layer_index,
-                                                                 layers_prefix,
-                                                                 names,
-                                                                 processor)
+                        named_modules = self.crate_named_modules(buffered_fwd=buffered_fwd, full=full,
+                                                                 is_lm_head_module=is_lm_head_module,
+                                                                 layer_index=layer_index, layers_prefix=layers_prefix,
+                                                                 names=names,
+                                                                 processor=processor,
+                                                                 fail_safe=fail_safe)
                         named_childs.update(named_modules)
 
                     # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
@@ -283,9 +285,11 @@ class ModuleLooper():
                 processed_subset = {}
 
                 for index, names in enumerate(modules):
-                    subset = self.crate_named_modules(buffered_fwd, full, is_lm_head_module, layer_index, layers_prefix,
-                                                      names,
-                                                      processor)
+                    subset = self.crate_named_modules(buffered_fwd=buffered_fwd, full=full, is_lm_head_module=is_lm_head_module,
+                                                      layer_index=layer_index, layers_prefix=layers_prefix,
+                                                      names=names,
+                                                      processor=processor,
+                                                      fail_safe=fail_safe)
 
                     if len(subset) == 0:
                         continue
@@ -556,7 +560,7 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, buffered_fwd, full, is_lm_head_module, layer_index, layers_prefix, names, processor) -> Dict[str, NamedModule]:
+    def crate_named_modules(self, buffered_fwd, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe) -> Dict[str, NamedModule]:
         is_awq_quant = isinstance(processor, AWQProcessor)
         subset = {}
         for n in names:
@@ -585,7 +589,7 @@ class ModuleLooper():
 
             # TODO awq unification
             if not is_awq_quant:
-                processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
                 # some modules are skipped
                 if processor.is_skipped(subset[name]):
                     skipped_modules.append(name)
