@@ -1540,7 +1540,7 @@ class BaseGPTQModel(nn.Module):
                     new_dict[k] = cleaned
                 else:
                     # Recurse deeper
-                    new_dict[k] = generate_layers_modules_tree_simple(v)
+                    new_dict[k] = self.generate_layers_modules_tree_simple(v)
             return new_dict
 
         # If it's a plain string (unlikely here), strip markers
