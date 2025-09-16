@@ -23,7 +23,10 @@ class LlamaGPTQ(BaseGPTQModel):
     base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
     embed_modules = ["model.embed_tokens", "model.rotary_emb"]
-    attention_out_module = "self_attn.o_proj"
+
+    # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
+    # here the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
+    shape_must_match_previous = ["self_attn.o_proj"]
 
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
