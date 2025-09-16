@@ -446,6 +446,7 @@ def ModelLoader(cls):
 
         init_contexts = [no_init_weights()]
 
+        layer_type = ""
         with (ContextManagers(init_contexts)):
             cls.before_model_load(cls, load_quantized_model=True)
 
@@ -477,6 +478,10 @@ def ModelLoader(cls):
                 config, trust_remote_code=trust_remote_code, torch_dtype=torch_dtype, **args
             )
             model.checkpoint_file_name = model_save_name
+
+            # Get the first layer to determine layer type
+            layer0 = model.model.layers[0]
+            layer_type = layer0.__class__.__name__
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.base_modules
@@ -533,14 +538,14 @@ def ModelLoader(cls):
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
                     max_memory=max_memory,
-                    no_split_module_classes=[cls.layer_type],
+                    no_split_module_classes=[layer_type],
                     low_zero=(device_map == "balanced_low_0"),
                 )
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,
                 max_memory=max_memory,
-                no_split_module_classes=[cls.layer_type],
+                no_split_module_classes=[layer_type],
             )
 
         load_checkpoint_in_model = True
