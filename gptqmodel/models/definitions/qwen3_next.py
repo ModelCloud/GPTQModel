@@ -36,7 +36,6 @@ class Qwen3NextGPTQ(BaseQModel):
 
     # Decoder layers container and per-layer type
     layers_node = ["model.layers"]
-    layer_type = "Qwen3NextDecoderLayer"
 
     layer_modules = [
             ['linear_attn.in_proj_qkvz', 'linear_attn.in_proj_ba'],

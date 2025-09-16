@@ -27,9 +27,6 @@ class LlamaQModel(BaseQModel):
     # here the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
     shape_must_match_previous = ["self_attn.o_proj"]
 
-    # Each repeating layer in `model.layers` is of type `LlamaDecoderLayer`
-    layer_type = "LlamaDecoderLayer"
-
     _layers_modules_tree = [
         "model",
         "layers",

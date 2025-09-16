@@ -31,7 +31,6 @@ class DeepSeekV2QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     layers_node = ["model.layers"]
-    layer_type = "DeepseekV2DecoderLayer"
 
     # DeepSeek V2-Lite uses dynamic modules based on lora(rank):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712

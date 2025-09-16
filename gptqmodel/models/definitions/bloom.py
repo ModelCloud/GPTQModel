@@ -28,7 +28,6 @@ class BloomQModel(BaseQModel):
 
     # repeating layers
     layers_node = ["transformer.h"]
-    layer_type = "BloomBlock"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

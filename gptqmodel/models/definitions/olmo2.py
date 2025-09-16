@@ -18,5 +18,4 @@ from . import LlamaQModel
 
 
 class Olmo2QModel(LlamaQModel):
-    require_pkgs_version = ["transformers>=4.47.0"]
-    layer_type = "Olmo2DecoderLayer"
+    pass

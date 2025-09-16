@@ -30,8 +30,6 @@ class Qwen3MoeQModel(BaseQModel):
     # here the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
     shape_must_match_previous = ["self_attn.o_proj"]
 
-    layer_type = "Qwen3DecoderLayer"
-
     _layers_modules_tree = [
         "model",
         "layers",

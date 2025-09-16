@@ -25,7 +25,6 @@ class InternLM2QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     layers_node = ["model.layers"]
-    layer_type = "InternLM2DecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

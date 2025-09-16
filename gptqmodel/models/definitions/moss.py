@@ -22,7 +22,6 @@ class MossQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
     layers_node = ["transformer.h"]
-    layer_type = "MossBlock"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

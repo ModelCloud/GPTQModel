@@ -32,7 +32,6 @@ class OvisQModel(BaseQModel):
     pre_lm_head_norm_module = "llm.model.norm"
 
     layers_node = ["llm.model.layers"] #, "visual_tokenizer.backbone.trunk.blocks"]
-    layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer", "Qwen2DecoderLayer"]
 
     layers_modules_tree = {
         # "visual_tokenizer": [

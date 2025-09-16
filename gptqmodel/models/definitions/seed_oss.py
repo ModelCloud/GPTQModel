@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class SeedOSSGPTQ(LlamaQModel):
-    layer_type = "SeedOssDecoderLayer"
+    pass

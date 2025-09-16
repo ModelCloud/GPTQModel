@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class CohereQModel(LlamaQModel):
-    layer_type = "CohereDecoderLayer"
+    pass

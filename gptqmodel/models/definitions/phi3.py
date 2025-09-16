@@ -22,7 +22,6 @@ class Phi3QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     layers_node = "model.layers"
-    layer_type = ["Phi3DecoderLayer"]
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
@@ -36,7 +35,6 @@ class Phi3QModel(BaseQModel):
 class PhiMoEGPTQForCausalLM(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
-    layer_type = "PhiMoEDecoderLayer"
     layers_node = "model.layers"
     base_modules = ["model.embed_tokens", "model.norm"]
 

@@ -30,7 +30,6 @@ class Llama4QModel(BaseQModel):
     pre_lm_head_norm_module = "language_model.model.norm"
 
     layers_node = "language_model.model.layers"
-    layer_type = "Llama4TextDecoderLayer"
 
     dynamic_expert_index = "num_local_experts"
 

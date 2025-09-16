@@ -28,7 +28,6 @@ class ChatGLMQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
 
     layers_node = ["transformer.encoder.layers"]
-    layer_type = "GLMBlock"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

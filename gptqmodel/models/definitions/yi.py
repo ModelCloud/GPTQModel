@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class YiQModel(LlamaQModel):
-    layer_type = "YiDecoderLayer"
+    pass

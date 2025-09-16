@@ -36,7 +36,6 @@ class GLM4MoEGPTQ(BaseQModel):
     layer_modules_strict = False
 
     layers_node = ["model.layers"]
-    layer_type = "GLM4MoEDecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

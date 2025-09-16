@@ -19,4 +19,3 @@ from . import LlamaQModel
 
 class InternLMQModel(LlamaQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
-    layer_type = "InternLMDecoderLayer"

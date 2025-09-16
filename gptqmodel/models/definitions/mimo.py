@@ -21,4 +21,3 @@ from . import LlamaQModel
 # https://huggingface.co/XiaomiMiMo/MiMo-7B-RL/blob/main/modeling_mimo.py
 class MimoQModel(LlamaQModel):
     require_trust_remote_code = True
-    layer_type = "MiMoMTPLayers"

@@ -26,7 +26,6 @@ class KlearQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     layers_node = ["model.layers"]
-    layer_type = "KlearDecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

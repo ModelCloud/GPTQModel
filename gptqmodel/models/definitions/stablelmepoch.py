@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class StableLMEpochQModel(LlamaQModel):
-    layer_type = "DecoderLayer"
+    pass

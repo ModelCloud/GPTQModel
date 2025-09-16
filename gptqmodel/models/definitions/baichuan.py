@@ -24,7 +24,6 @@ class BaiChuanQModel(BaseQModel):
 
     # repeating layers
     layers_node = ["model.layers"]
-    layer_type = "DecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

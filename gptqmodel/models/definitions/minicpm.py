@@ -22,7 +22,6 @@ class MiniCPMGPTQ(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     layers_node = ["model.layers"]
-    layer_type = "MiniCPMDecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

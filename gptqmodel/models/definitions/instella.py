@@ -19,5 +19,3 @@ from . import LlamaQModel
 
 class InstellaQModel(LlamaQModel):
     require_trust_remote_code = True
-
-    layer_type = "InstellaDecoderLayer"

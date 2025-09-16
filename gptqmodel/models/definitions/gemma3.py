@@ -19,7 +19,7 @@ from . import LlamaQModel
 
 
 class Gemma3QModel(LlamaQModel):
-    layer_type = "Gemma3DecoderLayer"
+    pass
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     support_batch_quantize = False
@@ -27,7 +27,6 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     pre_lm_head_norm_module = "model.language_model.norm"
 
     layers_node = "model.language_model.layers"
-    layer_type = "Gemma3DecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

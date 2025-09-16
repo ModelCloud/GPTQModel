@@ -25,7 +25,6 @@ class DbrxConvertedQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.norm_f"
 
     layers_node = ["transformer.blocks"]
-    layer_type = "DbrxBlock"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

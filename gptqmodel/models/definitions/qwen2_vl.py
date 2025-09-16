@@ -17,4 +17,4 @@ from .base_qwen2_vl import BaseQwen2VLGPTQ
 
 
 class Qwen2VLQModel(BaseQwen2VLGPTQ):
-    layer_type = "Qwen2VLDecoderLayer"
+    pass

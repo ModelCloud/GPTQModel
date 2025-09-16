@@ -23,7 +23,6 @@ class GPTNeoXQModel(BaseQModel):
     lm_head = "embed_out"
 
     layers_node = ["gpt_neox.layers"]
-    layer_type = "GPTNeoXLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

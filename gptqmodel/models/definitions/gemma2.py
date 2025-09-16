@@ -24,8 +24,6 @@ SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly
 
 
 class Gemma2QModel(LlamaQModel):
-    layer_type = "Gemma2DecoderLayer"
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

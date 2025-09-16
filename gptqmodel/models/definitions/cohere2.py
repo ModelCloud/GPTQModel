@@ -19,4 +19,3 @@ from . import LlamaQModel
 
 class Cohere2QModel(LlamaQModel):
     require_pkgs_version = ["transformers>4.47.99"]
-    layer_type = "Cohere2DecoderLayer"

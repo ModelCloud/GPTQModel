@@ -32,7 +32,6 @@ class OptQModel(BaseQModel):
     pre_lm_head_norm_module = "model.decoder.final_layer_norm"
 
     layers_node = ["model.decoder.layers"]
-    layer_type = "OPTDecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

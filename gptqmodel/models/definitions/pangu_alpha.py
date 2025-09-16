@@ -26,8 +26,6 @@ class PanguAlphaQModel(BaseQModel):
     # Below describes all the repeating layers in this transformer model
     # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
     layers_node = ["transformer.h"]
-    # Each repeating layer in `model.layers` is of type `GPTPanguBlock`
-    layer_type = "GPTPanguBlock"
 
     # Full tree of quantizable modules
     # `#` str will match any number: useful for layers and moe indexing.

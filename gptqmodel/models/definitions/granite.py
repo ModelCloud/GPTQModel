@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class GraniteQModel(LlamaQModel):
-    layer_type = "GraniteDecoderLayer"
+    pass

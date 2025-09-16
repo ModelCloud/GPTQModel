@@ -23,7 +23,6 @@ class GptNeoQModel(BaseQModel):
     lm_head = "lm_head"
 
     layers_node = ["transformer.h"]
-    layer_type = "GPTNeoBlock"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

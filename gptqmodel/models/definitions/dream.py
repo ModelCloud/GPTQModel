@@ -22,4 +22,3 @@ class DreamQModel(LlamaQModel):
     loader = AutoModel
     # TODO: fix dream attention mask tensor size/dtype issues due to batching/padding
     support_batch_quantize = False
-    layer_type = "DreamDecoderLayer"

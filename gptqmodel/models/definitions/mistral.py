@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class MistralQModel(LlamaQModel):
-    layer_type = "MistralDecoderLayer"
+    pass

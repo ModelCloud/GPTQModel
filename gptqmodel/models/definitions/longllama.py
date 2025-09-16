@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class LongLlamaQModel(LlamaQModel):
-    layer_type = "LongLlamaDecoderLayer"
+    pass

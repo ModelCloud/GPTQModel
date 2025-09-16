@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class GemmaQModel(LlamaQModel):
-    layer_type = "GemmaDecoderLayer"
+    pass

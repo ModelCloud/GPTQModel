@@ -18,4 +18,4 @@ from . import LlamaQModel
 
 
 class Qwen3QModel(LlamaQModel):
-    layer_type = "Qwen3DecoderLayer"
+    pass

@@ -21,7 +21,6 @@ class FalconH1QModel(BaseQModel):
     base_modules = ["model.embed_tokens"]
 
     layers_node = "model.layers"
-    layer_type = "FalconH1DecoderLayer"
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
