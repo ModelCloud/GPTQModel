@@ -218,14 +218,6 @@ class BaseGPTQModel(nn.Module):
     def simple_layer_modules(cls, model_config = None):
         layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
 
-        simple = [
-            [name for name in block if not name.endswith(":!")]
-            for block in layer_modules
-            if any(not name.endswith(":!") for name in block)
-        ]
-
-        print(f"simple layer_modules: {simple}")
-
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             if hasattr(model_config, "text_config"):
@@ -234,13 +226,35 @@ class BaseGPTQModel(nn.Module):
                 num_experts = getattr(model_config, cls.dynamic_expert_index)
 
             moe_simple = []
-            for names in simple:
-                moe_simple.append([])
-                for n in names:
-                    if EXPERT_INDEX_PLACEHOLDER in n:
-                        for index in range(num_experts):
-                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-                    else:
+            for names in layer_modules:
+                # Check if this group contains expert modules
+                has_expert_modules = any(EXPERT_INDEX_PLACEHOLDER in n for n in names)
+                
+                if has_expert_modules:
+                    # For expert modules, create separate groups for each expert
+                    expert_groups = {}  # expert_index -> list of modules
+                    non_expert_modules = []
+                    
+                    for n in names:
+                        if EXPERT_INDEX_PLACEHOLDER in n:
+                            for index in range(num_experts):
+                                if index not in expert_groups:
+                                    expert_groups[index] = []
+                                expert_groups[index].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                        else:
+                            non_expert_modules.append(n)
+                    
+                    # Add non-expert modules first (if any)
+                    if non_expert_modules:
+                        moe_simple.append(non_expert_modules)
+                    
+                    # Add each expert as a separate group
+                    for index in sorted(expert_groups.keys()):
+                        moe_simple.append(expert_groups[index])
+                else:
+                    # For non-expert modules, keep original grouping
+                    moe_simple.append([])
+                    for n in names:
                         moe_simple[-1].append(n)
 
             print(f"moe layer_modules: {moe_simple}")
