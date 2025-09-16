@@ -37,10 +37,11 @@ from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
-from ..quantization.config import (FORMAT, META_FIELD_DAMP_AUTO_INCREMENT, META_FIELD_DAMP_PERCENT, META_FIELD_MSE,
-                                   META_FIELD_QUANTIZER, META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL,
-                                   META_FIELD_URI, META_FIELD_V2_ALPHA, META_FIELD_V2_ENABLED,
-                                   META_QUANTIZER_GPTQMODEL, META_VALUE_URI, MIN_VERSION_WITH_V2)
+from ..quantization.config import (FORMAT, META_FIELD_ACT_GROUP_AWARE, META_FIELD_DAMP_AUTO_INCREMENT,
+                                   META_FIELD_DAMP_PERCENT, META_FIELD_MSE, META_FIELD_QUANTIZER,
+                                   META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL, META_FIELD_URI,
+                                   META_FIELD_V2_ALPHA, META_FIELD_V2_ENABLED, META_QUANTIZER_GPTQMODEL,
+                                   META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules,
@@ -157,11 +158,13 @@ def ModelWriter(cls):
             value=quantizers
         )
 
+
         self.quantize_config.meta_set(
             key=META_FIELD_URI,
             value=META_VALUE_URI,
         )
 
+        # meta: write config fields to meta if they doe not participate in inference
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
             value=self.quantize_config.damp_percent
@@ -195,6 +198,11 @@ def ModelWriter(cls):
         self.quantize_config.meta_set(
             key=META_FIELD_V2_ALPHA,
             value=self.quantize_config.v2_alpha
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_ACT_GROUP_AWARE,
+            value=self.quantize_config.act_group_aware
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.

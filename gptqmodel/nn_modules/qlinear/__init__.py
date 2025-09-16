@@ -429,10 +429,12 @@ class PackableQuantLinear(BaseQuantLinear):
         super().post_init(**kwargs)
 
     def list_buffers(self):
-        return super().list_buffers() + [
-            self.wf_unsqueeze_zero,
-            self.wf_unsqueeze_neg_one,
-        ]
+        buf = super().list_buffers()
+        if hasattr(self, "wf_unsqueeze_zero") and self.wf_unsqueeze_zero is not None:
+            buf.append(self.wf_unsqueeze_zero)
+        if hasattr(self, "wf_unsqueeze_neg_one") and self.wf_unsqueeze_neg_one is not None:
+            buf.append(self.wf_unsqueeze_neg_one)
+        return buf
 
     def dequantize_weight(self, num_itr: int = 1):
         if self.bits in [2, 4, 8]:

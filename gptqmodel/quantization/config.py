@@ -56,6 +56,7 @@ META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
 META_FIELD_MSE = "mse"
+META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
 META_FIELD_V2_ENABLED = "v2"
 META_FIELD_V2_ALPHA = "v2_alpha"
@@ -297,7 +298,7 @@ class QuantizeConfig():
 
         # validate hybrid act order
         if self.act_group_aware and self.desc_act:
-            raise ValueError("QuantizeConfig:: `group_aware_reordering` == `True` requires `desc_act` == `False`.")
+            raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
 
         # validate meta
         if self.meta is not None:
@@ -485,7 +486,6 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
-            "group_aware_reordering": self.act_group_aware,
             "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
