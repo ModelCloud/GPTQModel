@@ -71,8 +71,6 @@ from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bloom import BloomQModel  # noqa: E402
 from .definitions.chatglm import ChatGLMQModel  # noqa: E402
 from .definitions.codegen import CodeGenQModel  # noqa: E402
-from .definitions.cohere import CohereQModel  # noqa: E402
-from .definitions.cohere2 import Cohere2QModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
@@ -83,7 +81,6 @@ from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
-from .definitions.gemma import GemmaQModel  # noqa: E402
 from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
@@ -94,30 +91,25 @@ from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
-from .definitions.granite import GraniteQModel  # noqa: E402
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
-from .definitions.kimi_k2 import KimiK2QModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
-from .definitions.longllama import LongLlamaQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
-from .definitions.mistral import MistralQModel  # noqa: E402
 from .definitions.mixtral import MixtralQModel  # noqa: E402
 from .definitions.mllama import MLlamaQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
-from .definitions.olmo2 import Olmo2QModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.pangu_alpha import PanguAlphaQModel  # noqa: E402
@@ -125,7 +117,6 @@ from .definitions.phi import PhiQModel  # noqa: E402
 from .definitions.phi3 import Phi3QModel, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenQModel  # noqa: E402
-from .definitions.qwen2 import Qwen2QModel  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_5_vl import Qwen2_5_VLQModel  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeQModel  # noqa: E402
@@ -134,12 +125,9 @@ from .definitions.qwen3 import Qwen3QModel  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
-from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
-from .definitions.stablelmepoch import StableLMEpochQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
-from .definitions.yi import YiQModel  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -151,7 +139,7 @@ MODEL_MAP = {
     "dream": DreamQModel,
     "bloom": BloomQModel,
     "gpt_neo": GptNeoQModel,
-    "kimi_k2": KimiK2QModel,
+    "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "klear": KlearQModel,
     "gpt_neox": GPTNeoXQModel,
     "gptj": GptJQModel,
@@ -166,8 +154,8 @@ MODEL_MAP = {
     "glm4_moe": GLM4MoEGPTQ,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,
-    "cohere": CohereQModel,
-    "cohere2": Cohere2QModel,
+    "cohere": LlamaQModel, # 100% llama clone
+    "cohere2": LlamaQModel, # 100% llama clone
     "refinedWebModel": RwgQModel,
     "refinedWeb": RwgQModel,
     "falcon": RwgQModel,
@@ -175,19 +163,19 @@ MODEL_MAP = {
     "internlm": InternLMQModel,
     "internlm2": InternLM2QModel,
     "qwen": QwenQModel,
-    "mistral": MistralQModel,
-    "yi": YiQModel,
+    "mistral": LlamaQModel, # 100% llama clone
+    "yi": LlamaQModel, # 100% llama clone
     "xverse": XverseQModel,
     "deci": DeciLMQModel,
     "nemotron-nas": DeciLMQModel,
-    "stablelm_epoch": StableLMEpochQModel,
-    "stablelm": StableLMEpochQModel,
+    "stablelm_epoch": LlamaQModel, # 100% llama clone
+    "stablelm": LlamaQModel, # 100% llama clone
     "starcoder2": Starcoder2QModel,
     "mixtral": MixtralQModel,
-    "qwen2": Qwen2QModel,
+    "qwen2": LlamaQModel, # 100% llama clone
     "qwen3": Qwen3QModel,
-    "longllama": LongLlamaQModel,
-    "gemma": GemmaQModel,
+    "longllama": LlamaQModel,  # 100% llama clone
+    "gemma": LlamaQModel, # 100% llama clone
     "gemma2": Gemma2QModel,
     "gemma3_text": Gemma3QModel,
     "gemma3": Gemma3ForConditionalGenerationGPTQ,
@@ -211,10 +199,10 @@ MODEL_MAP = {
     "exaone": ExaOneQModel,
     "grinmoe": GrinMoeQModel,
     "mllama": MLlamaQModel,
-    "granite": GraniteQModel,
+    "granite": LlamaQModel, # 100% llama clone
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
-    "olmo2": Olmo2QModel,
+    "olmo2": LlamaQModel, # 100% llama clone
     "ovis": OvisQModel,
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
@@ -223,7 +211,7 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaQModel,
     "ernie4_5": Ernie4_5QModel,
     "ernie4_5_moe": Ernie4_5_MoeQModel,
-    "seed_oss": SeedOSSGPTQ,
+    "seed_oss": LlamaQModel, # 100% llama clone
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
