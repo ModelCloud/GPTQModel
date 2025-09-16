@@ -22,8 +22,8 @@ class LlamaQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
-    # here the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
-    shape_must_match_previous = ["self_attn.o_proj"]
+    # the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
+    awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
     _layers_modules_tree = [
         "model",

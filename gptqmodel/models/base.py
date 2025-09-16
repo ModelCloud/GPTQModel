@@ -115,7 +115,7 @@ class BaseQModel(nn.Module):
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # list modules where they must match the shape of previous module in execution to consider for scaling optimization
-    shape_must_match_previous: List[str] = None
+    awq_scale_optimize_shape_dependent_modules: List[str] = None
 
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
@@ -875,8 +875,8 @@ class BaseQModel(nn.Module):
                     m, _ = get_module_by_name_prefix(module, name)
                     # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                     # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
-                    if (self.shape_must_match_previous is not None
-                            and name in self.shape_must_match_previous
+                    if (self.awq_scale_optimize_shape_dependent_modules is not None
+                            and name in self.awq_scale_optimize_shape_dependent_modules
                             and isinstance(last_module, nn.Linear)
                             and last_module.weight.shape != m.weight.shape):
                         log.debug(f'"{name}" attention out skipped.')
