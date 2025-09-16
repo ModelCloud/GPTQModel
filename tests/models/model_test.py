@@ -168,7 +168,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, torch_dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
             bits=self.QUANTIZE_CONFIG_BITS,
             group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
@@ -196,7 +196,7 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
             **args,
         )
@@ -370,10 +370,10 @@ class ModelTest(unittest.TestCase):
         self.model = None
         # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
         #if self.QUANT_SAVE_PATH:
-        #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+        #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         if not self.model:
-            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, torch_dtype=self.TORCH_DTYPE)
+            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 

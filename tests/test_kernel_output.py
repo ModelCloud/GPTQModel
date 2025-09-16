@@ -89,7 +89,7 @@ class TestKernelOutput(unittest.TestCase):
 
 
     def forward(self, backend: BACKEND, dtype: torch.dtype, adapter: Adapter = None):
-        model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter, torch_dtype=dtype)
+        model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter, dtype=dtype)
 
         target_qlinear_cls = self.target_qliner_map[backend]
 

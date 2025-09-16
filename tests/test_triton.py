@@ -82,7 +82,7 @@ def get_model_and_tokenizer(
 
     model = GPTQModel.load(
         model_id,
-        torch_dtype=dtype,
+        dtype=dtype,
         **model_kwargs,
     )
 
