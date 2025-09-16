@@ -222,8 +222,9 @@ def get_version_tag() -> str:
 
 TORCH_VERSION = _read_env("TORCH_VERSION")
 RELEASE_MODE = _read_env("RELEASE_MODE")
-CUDA_VERSION = _read_env("TORCH_VERSION")
+CUDA_VERSION = _read_env("CUDA_VERSION")
 ROCM_VERSION = _read_env("ROCM_VERSION")
+TORCH_CUDA_ARCH_LIST = _read_env("TORCH_CUDA_ARCH_LIST")
 
 
 # respect user env then detect
@@ -257,7 +258,7 @@ if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
 # Handle CUDA_ARCH_LIST (public) and set TORCH_CUDA_ARCH_LIST for build toolchains
 CUDA_ARCH_LIST = _detect_cuda_arch_list() if (BUILD_CUDA_EXT == "1" and not ROCM_VERSION) else None
 
-if CUDA_ARCH_LIST:
+if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
     archs = _parse_arch_list(CUDA_ARCH_LIST)
     kept = []
     for arch in archs:
