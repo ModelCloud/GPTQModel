@@ -91,18 +91,8 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 log = setup_logger()
 
 class BaseQModel(nn.Module):
-    # these modules are non-repeating and at the root level
-    # does not include the node which holds all the repeating layers
-    base_modules: List[str] = None
-
     # name of lm_head
     lm_head: str = "lm_head"
-
-    # repeating layers
-    # node holding all the repeating layers
-    layers_node: str = None
-    # repeating layer type
-    layer_type: Union[List[str], str] = None
 
     # a tree node of all the roots that contain quantizable modules
     _layers_modules_tree: List[str] = None
