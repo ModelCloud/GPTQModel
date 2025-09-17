@@ -235,7 +235,6 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
-        print("layer_modules",layer_modules)
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             if hasattr(model_config, "text_config"):
@@ -875,6 +874,10 @@ class BaseQModel(nn.Module):
             skip = False
             for name in block:
                 if NOT_QUANTIZE_FLAG not in name:
+                    if name == "mlp.gate":
+                        log.debug(f'"{name}" skipped.')
+                        skip = True
+
                     m, _ = get_module_by_name_prefix(module, name)
                     # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                     # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
@@ -884,7 +887,7 @@ class BaseQModel(nn.Module):
                             and last_module.weight.shape != m.weight.shape):
                         log.debug(f'"{name}" attention out skipped.')
                         skip = True
-                        break
+
                     subset.append(m)
 
             if skip:
