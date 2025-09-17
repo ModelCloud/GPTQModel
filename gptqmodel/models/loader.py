@@ -492,7 +492,7 @@ def ModelLoader(cls):
                     continue
 
                 if not any(name.startswith(prefix) for prefix in cls.extract_layers_node()) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in cls.simple_layer_modules() for ignore_module in sublist
+                        not name.endswith(ignore_module) for sublist in cls.simple_layer_modules(config) for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:

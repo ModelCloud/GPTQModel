@@ -272,7 +272,7 @@ class BaseQModel(nn.Module):
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
+    def simple_layer_modules(cls, model_config, is_awq_quantize: bool = False):
         layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
