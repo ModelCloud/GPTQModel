@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import os
 import time
@@ -1299,6 +1300,8 @@ class BaseGPTQModel(nn.Module):
         model_init_kwargs = self.turtle_model._model_init_kwargs
         self.turtle_model = self.loader.from_pretrained(self.model_local_path, config=self.turtle_model.config, low_cpu_mem_usage=True, **model_init_kwargs)
         self.turtle_model._model_init_kwargs = model_init_kwargs
+
+        gc.collect()
         return module
     ## overrides nn.module.train()
     # def train(self, mode=True):
