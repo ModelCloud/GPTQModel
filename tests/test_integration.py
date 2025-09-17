@@ -76,19 +76,19 @@ class TestIntegration(unittest.TestCase):
             del model
             torch_empty_cache()
 
-    def test_load_quantized_model_gptq_v1_ipex(self):
+    def test_load_quantized_model_gptq_v1_torch_fused(self):
         self._test_load_quantized_model_gptq_v1(device_map="cpu")
 
     def test_load_quantized_model_gptq_v1_cuda(self):
         self._test_load_quantized_model_gptq_v1(device_map="cuda")
 
-    def test_load_quantized_model_gptq_v2_ipex(self):
+    def test_load_quantized_model_gptq_v2_torch_fused(self):
         self._test_load_quantized_model_gptq_v2(device_map="cpu")
 
     def test_load_quantized_model_gptq_v2_cuda(self):
         self._test_load_quantized_model_gptq_v2(device_map="cuda")
 
-    def test_quantize_ipex(self):
+    def test_quantize_torch_fused(self):
         self._test_quantize(device_map="cpu")
 
     def test_quantize_cuda(self):

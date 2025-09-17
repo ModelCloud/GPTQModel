@@ -27,25 +27,25 @@ from gptqmodel.models._const import DEVICE  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
 
-class TestsIPEX(ModelTest):
+class TestsTorchFused(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
 
     def test(self):
         origin_model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=QuantizeConfig(),
-            backend=BACKEND.IPEX,
+            backend=BACKEND.TORCH_FUSED,
             device=DEVICE.XPU,
         )
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
         calibration_dataset = self.load_dataset(tokenizer)
-        origin_model.quantize(calibration_dataset, backend=BACKEND.IPEX)
+        origin_model.quantize(calibration_dataset, backend=BACKEND.TORCH_FUSED)
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)
 
           model = GPTQModel.load(
               tmpdir,
-              backend=BACKEND.IPEX,
+              backend=BACKEND.TORCH_FUSED,
               device=DEVICE.XPU,
           )
 

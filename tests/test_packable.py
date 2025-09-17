@@ -4,13 +4,12 @@ from typing import Dict
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format, find_modules
 from logbar import LogBar
@@ -26,10 +25,10 @@ class TestPackable(unittest.TestCase):
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.BITBLAS: BitBLASQuantLinear,
-        BACKEND.IPEX: IPEXQuantLinear,
+        BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
         BACKEND.MARLIN_FP16: MarlinQuantLinear,
+        # BACKEND.BITBLAS: BitBLASQuantLinear,
     }
 
     model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
@@ -52,15 +51,13 @@ class TestPackable(unittest.TestCase):
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.IPEX, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
             (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
         ]
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
-        if backend == BACKEND.IPEX and not HAS_IPEX:
-            self.skipTest("IPEX is not available")
         model = GPTQModel.load(self.model_id, backend=backend, device_map="auto")
         model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
 

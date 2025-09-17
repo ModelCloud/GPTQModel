@@ -197,7 +197,7 @@ class ModelTest(unittest.TestCase):
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             dtype=dtype,
-            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
             **args,
         )
 
@@ -270,7 +270,7 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             backend=self.LOAD_BACKEND,
-            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.IPEX else "auto",
+            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
             **kargs
         )
 

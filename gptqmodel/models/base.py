@@ -366,9 +366,6 @@ class BaseGPTQModel(nn.Module):
             log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if backend == BACKEND.IPEX:
-            self.quantize_config.format = FORMAT.IPEX
-
         if self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
@@ -586,9 +583,6 @@ class BaseGPTQModel(nn.Module):
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
             )
-
-        if backend == BACKEND.IPEX:
-            self.quantize_config.format = FORMAT.IPEX
 
         if self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(

@@ -25,11 +25,11 @@ from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 
-class TestInferenceSpeedIpex(InferenceSpeed):
+class TestInferenceSpeedTorchFused(InferenceSpeed):
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 12),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH_FUSED, 12),
         ]
     )
-    def test_inference_speed_ipex(self, model_path, backend, tokens_per_second):
+    def test_inference_speed_torch_fused(self, model_path, backend, tokens_per_second):
         self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second)

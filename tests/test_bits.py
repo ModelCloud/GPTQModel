@@ -29,7 +29,6 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
@@ -52,8 +51,6 @@ class TestBits(unittest.TestCase):
         BACKEND.MARLIN: MarlinQuantLinear,
         BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
     }
-    if HAS_IPEX:
-        QLINEAR_DICT[BACKEND.IPEX] = IPEXQuantLinear
 
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.2
