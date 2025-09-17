@@ -284,7 +284,7 @@ jobs:
             pyenv activate $env_name
           fi
           
-          // fix unknown error, torch lib's folder was empty
+
           bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
 
           echo "== pyenv =="
