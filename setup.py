@@ -375,7 +375,7 @@ else:
 if RELEASE_MODE == "1":
     gptqmodel_version = f"{gptqmodel_version}+{get_version_for_release()}"
 
-include_dirs = ["gptqmodel_cuda"]
+include_dirs = ["gptqmodel_ext"]
 
 extensions = []
 additional_setup_kwargs = {}
