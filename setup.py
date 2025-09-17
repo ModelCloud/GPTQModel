@@ -641,7 +641,6 @@ setup(
         "mlx": ["mlx_lm>=0.24.0"],
     },
     include_dirs=include_dirs,
-    python_requires=">=3.11",
     cmdclass=(
         {"bdist_wheel": CachedWheelsCommand, "build_ext": additional_setup_kwargs.get("cmdclass", {}).get("build_ext")}
         if (BUILD_CUDA_EXT == "1" and additional_setup_kwargs)
