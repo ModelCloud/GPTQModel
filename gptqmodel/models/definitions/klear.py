@@ -33,9 +33,25 @@ class KlearQModel(BaseQModel):
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
 
-        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj", "mlp.shared_experts.down_proj"],
+        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
+        ["mlp.shared_experts.down_proj"],
 
         # uses dynamic_expert_index
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
+    ]
+
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "mlp": {
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                }
+            }
+        }
     ]

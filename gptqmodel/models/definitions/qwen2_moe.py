@@ -43,7 +43,7 @@ class Qwen2MoeQModel(BaseQModel):
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
     ]
 
-    layers_modules_tree = [
+    _layers_modules_tree = [
         "model",
         "layers",
         "#",

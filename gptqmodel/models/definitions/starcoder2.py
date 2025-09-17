@@ -31,3 +31,12 @@ class Starcoder2QModel(BaseQModel):
         ["mlp.c_fc"],
         ["mlp.c_proj"],
     ]
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "mlp": ("c_fc:0", "c_proj:1"),
+        }
+    ]

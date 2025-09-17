@@ -32,6 +32,16 @@ class Phi3QModel(BaseQModel):
         ["mlp.down_proj"],
     ]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("qkv_proj:0", "o_proj:1"),
+            "mlp": ("gate_up_proj:0", "down_proj:1"),
+        }
+    ]
+
 class PhiMoEGPTQForCausalLM(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 

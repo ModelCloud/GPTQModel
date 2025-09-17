@@ -45,3 +45,14 @@ class MLlamaQModel(BaseQModel):
         ["mlp.up_proj", "mlp.gate_proj"],
         ["mlp.down_proj"],
     ]
+
+    _layers_modules_tree = [
+        "language_model",
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+        }
+    ]

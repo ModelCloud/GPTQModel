@@ -33,7 +33,7 @@ class OvisQModel(BaseQModel):
 
     layers_node = ["llm.model.layers"] #, "visual_tokenizer.backbone.trunk.blocks"]
 
-    layers_modules_tree = {
+    _layers_modules_tree = {
         # "visual_tokenizer": [
         #     "backbone",
         #     "trunk",

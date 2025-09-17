@@ -26,4 +26,14 @@ class TeleChat2QModel(BaseQModel):
         ["mlp.down_proj"]
     ]
 
+    _layers_modules_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "self_attention": ("dense"),
+            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+        }
+    ]
+
 __all__ = ["TeleChat2QModel"]

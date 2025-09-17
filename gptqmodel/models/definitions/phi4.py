@@ -34,6 +34,16 @@ class Phi4MMGPTQ(BaseQModel):
         ["mlp.down_proj.base_layer"],
     ]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("qkv_proj:0", "o_proj:1"),
+            "mlp": ("gate_up_proj:0", "down_proj:1"),
+        }
+    ]
+
     require_monkeypatch = True
 
     def monkey_patch(self):

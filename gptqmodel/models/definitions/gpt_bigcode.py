@@ -31,3 +31,13 @@ class GptBigCodeQModel(BaseQModel):
         ["mlp.c_fc"],
         ["mlp.c_proj"],
     ]
+
+    _layers_modules_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "attn": ("c_attn:0", "c_proj:1"),
+            "mlp": ("c_fc:0", "c_proj:1"),
+        }
+    ]

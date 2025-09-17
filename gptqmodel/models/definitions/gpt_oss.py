@@ -156,6 +156,20 @@ class GPTOSSGPTQ(BaseQModel):
         [f"mlp.experts.down.{EXPERT_INDEX_PLACEHOLDER}"],
     ]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "mlp": {
+                "experts": {
+                    "#": ("gate_up:0", "down:1"),
+                }
+            }
+        }
+    ]
+
     def before_model_load(self, load_quantized_model=False):
         if load_quantized_model:
             import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling

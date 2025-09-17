@@ -44,6 +44,22 @@ class Llama4QModel(BaseQModel):
         ["feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj", "feed_forward.shared_expert.down_proj"],
     ]
 
+    _layers_modules_tree = [
+        "language_model",
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "feed_forward": {
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        }
+    ]
+
     def before_model_load(self, load_quantized_model=False):
         if load_quantized_model:
             import torch

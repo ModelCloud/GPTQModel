@@ -39,3 +39,17 @@ class GrinMoeQModel(BaseQModel):
         [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w1", f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w3"],
         [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w2"],
     ]
+
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "block_sparse_moe": {
+                "experts": {
+                    "#": ("w1:0", "w3:0", "w2:1"),
+                }
+            }
+        }
+    ]

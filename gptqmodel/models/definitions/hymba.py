@@ -46,6 +46,20 @@ class HymbaQModel(BaseQModel):
         ["moe.experts.0.down_proj"],
     ]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "mamba": ("in_proj:0", "out_proj:1"),
+            "moe": {
+                "experts": {
+                    "#": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+                }
+            }
+        }
+    ]
+
     def monkey_patch(self):
         if hasattr(self.config, 'conv_dim'):
             new_conv_dim = {}

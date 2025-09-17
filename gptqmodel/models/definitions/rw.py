@@ -31,3 +31,13 @@ class RwgQModel(BaseQModel):
         ["mlp.dense_h_to_4h"],
         ["mlp.dense_4h_to_h"],
     ]
+
+    _layers_modules_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "self_attention": ("query_key_value:0", "dense:1"),
+            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+        }
+    ]

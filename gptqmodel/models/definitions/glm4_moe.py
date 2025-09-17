@@ -61,12 +61,12 @@ class GLM4MoEGPTQ(BaseQModel):
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "mlp": {
-                "shared_experts": ("up_proj", "gate_proj", "down_proj"),
+                "shared_experts": ("up_proj:0", "gate_proj:0", "down_proj:1"),
                 "gate": ("gate",),
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("up_proj:0", "gate_proj:0", "down_proj:1"),
                 },
                 # Standard MLP components for layer 0 (no experts)
                 "down_proj": ("down_proj",),
