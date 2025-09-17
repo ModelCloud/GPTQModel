@@ -610,9 +610,8 @@ print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
 print(f"SETUP_KWARGS {additional_setup_kwargs}")
 
 setup(
+    version = gptqmodel_version,
     packages=find_packages(),
-    # setup_requires=["setuptools>=80.9.0", "torch>=2.7.1"],
-    install_requires=requirements,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.13.0", "isort==6.0.1"],
