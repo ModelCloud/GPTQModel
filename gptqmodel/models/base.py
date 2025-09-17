@@ -1302,7 +1302,7 @@ class BaseGPTQModel(nn.Module):
                 _ = disk_offload(
                     sub,
                     # device_map={ "" : "disk" },  # only touch this subtree
-                    offload_dir="offload",
+                    offload_dir=f"offload/{name}",
                     offload_buffers=True,  # needed for buffers
                     execution_device=CPU,
                 )
@@ -1318,7 +1318,7 @@ class BaseGPTQModel(nn.Module):
             module = disk_offload(
                 module,
                 # device_map={ "" : "disk" },  # only touch this subtree
-                offload_dir=".",
+                offload_dir="offload",
                 offload_buffers=True,  # needed for buffers
                 execution_device=CPU,
             )
